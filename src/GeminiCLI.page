@@ -16,8 +16,8 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
-/* Kill outer scrollbars completely for this page */
-body {
+/* Kill all outer scrollbars */
+body, #displaybox, #sb-body, .gemini-cli-ui {
     overflow: hidden !important;
 }
 
@@ -28,29 +28,21 @@ body {
 
 #gemini-cli-root {
     width: 100%;
-    /* Standard Unraid header/footer/tabs total roughly 160px */
-    height: calc(100vh - 160px);
+    /* 170px is safer to avoid that final 5px overflow scrollbar */
+    height: calc(100vh - 170px);
     display: flex;
     flex-direction: column;
     margin: 0;
     padding: 0;
 }
 
-/* Ensure the React app fills the container */
 .gemini-cli-ui {
     height: 100%;
-    width: 100%;
 }
 </style>
 
 <script>
 $(function(){
-    // Ensure ttyd is active
     $.get('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
-    
-    // Force a resize calculation on load
-    setTimeout(function(){
-        window.dispatchEvent(new Event('resize'));
-    }, 500);
 });
 </script>

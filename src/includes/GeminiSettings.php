@@ -15,21 +15,23 @@ function startGeminiTerminal() {
     
     if (file_exists($shell)) chmod($shell, 0755);
 
-    // AGGRESSIVE CLEANUP: Always kill anything on this socket before starting
-    // This ensures we never have zombie processes fighting for the terminal
-    exec("pgrep -f '$sock' | xargs kill -9 > /dev/null 2>&1");
-    if (file_exists($sock)) @unlink($sock);
-    if (file_exists($pidFile)) @unlink($pidFile);
+    // If already running, just return
+    if (isGeminiRunning()) {
+        return;
+    }
 
-    file_put_contents($log, date('Y-m-d H:i:s') . " - Starting fresh ttyd instance\n", FILE_APPEND);
+    // Cleanup stale socket
+    if (file_exists($sock)) @unlink($sock);
+
+    file_put_contents($log, date('Y-m-d H:i:s') . " - Starting ttyd on $sock\n", FILE_APPEND);
     
     // Unraid 7.2 ttyd flags
-    // Added explicit -t rows=50 to help with height issue if client resize fails
+    // REMOVED closeOnDisconnect=true so the server stays alive
+    // Added explicit rows/cols to help with initial render
     $cmd = "ttyd -i '$sock' -W -d0 " .
            "-t fontSize=14 " .
            "-t fontFamily='monospace' " .
            "-t disableLeaveAlert=true " .
-           "-t closeOnDisconnect=true " .
            "'$shell'";
     
     exec("nohup $cmd >> $log 2>&1 & echo $!", $output);
@@ -43,7 +45,9 @@ function stopGeminiTerminal($killTmux = false) {
     $pidFile = getGeminiPidFile();
     $sock = "/var/run/geminiterm.sock";
     
+    // Kill all ttyd processes matching our socket
     exec("pgrep -f '$sock' | xargs kill -9 > /dev/null 2>&1");
+    
     if (file_exists($pidFile)) @unlink($pidFile);
     if (file_exists($sock)) @unlink($sock);
 
@@ -62,9 +66,7 @@ function isGeminiRunning() {
 if (isset($_GET['action'])) {
     header('Content-Type: application/json');
     if ($_GET['action'] === 'start') {
-        if (!isGeminiRunning()) {
-            startGeminiTerminal();
-        }
+        startGeminiTerminal();
         echo json_encode(['status' => 'ok', 'running' => true]);
     } elseif ($_GET['action'] === 'stop') {
         stopGeminiTerminal(isset($_GET['hard']));
