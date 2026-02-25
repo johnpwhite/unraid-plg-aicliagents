@@ -48,12 +48,12 @@ export const GeminiTerminal: React.FC = () => {
     };
 
     const themeParams = encodeURIComponent(THEMES[themeName]);
-    // ttyd built-in client supports these via query params
+    // ttyd supports theme and fontSize via query params
     const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}&fontFamily=monospace&disableLeaveAlert=true&v=${key}`;
 
     return (
         <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-sm border border-[#333] overflow-hidden shadow-2xl h-full">
-            {/* Toolbar - Standard Unraid Look */}
+            {/* Toolbar - Standard Unraid Style */}
             <div className="flex items-center justify-between px-4 py-2 bg-[#2a2a2a] border-b border-[#333] select-none min-h-[52px]">
                 <div className="flex items-center gap-3">
                     <i className="fa fa-terminal text-orange-500 text-lg"></i>
@@ -64,7 +64,7 @@ export const GeminiTerminal: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-4">
-                    {/* Font Size Group - Centered Label */}
+                    {/* Font Size Group */}
                     <div className="flex items-center bg-[#1e1e1e] rounded-sm border border-[#444] p-0.5 shadow-inner">
                         <button 
                             onClick={() => handleFontSize(-1)} 
@@ -87,7 +87,7 @@ export const GeminiTerminal: React.FC = () => {
                         </button>
                     </div>
                     
-                    {/* Theme Selector - Custom appearance */}
+                    {/* Theme Selector */}
                     <div className="relative">
                         <select 
                             value={themeName} 
@@ -118,7 +118,7 @@ export const GeminiTerminal: React.FC = () => {
                             onClick={() => syncSession(true)}
                             disabled={isSyncing}
                             className="h-9 flex items-center gap-2 px-4 bg-orange-600 hover:bg-orange-500 text-white text-[10px] rounded-sm transition-all font-black tracking-widest shadow-lg active:scale-95 uppercase"
-                            title="Kill and start fresh session"
+                            title="Hard Reset"
                         >
                             Hard Reset
                         </button>
@@ -126,14 +126,14 @@ export const GeminiTerminal: React.FC = () => {
                 </div>
             </div>
 
-            {/* Terminal Container - Absolute sizing inside flex parent */}
-            <div className="flex-1 w-full bg-[#1e1e1e] relative overflow-hidden">
+            {/* Terminal Container */}
+            <div className="flex-1 w-full bg-[#1e1e1e] relative overflow-hidden h-full">
                 <iframe 
                     key={`${themeName}-${fontSize}-${key}`}
                     src={terminalUrl}
                     className="absolute inset-0 w-full h-full border-none"
                     title="Gemini Terminal"
-                    style={{ height: '100%', width: '100%' }}
+                    style={{ height: '100%', width: '100%', border: 'none' }}
                 />
             </div>
         </div>

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Gemini CLI Persistent Shell Wrapper
+# Gemini CLI Restricted Shell Wrapper
 SESSION="gemini-cli"
 LOG="/tmp/gemini-shell.log"
 
@@ -10,23 +10,19 @@ export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
 
 echo "$(date) - Attaching to session $SESSION" >> "$LOG"
 
-# 1. Check if tmux exists
+# 1. Check for tmux
 if ! command -v tmux >/dev/null 2>&1; then
     exec /bin/bash --restricted
 fi
 
-# 2. Global tmux settings for better resizing
-# window-size largest: ensure we don't get stuck in a tiny view
-tmux set-option -g window-size largest 2>/dev/null
-
-# 3. Create or Attach
+# 2. Ensure session exists
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    # Create new session
-    # We use sh -c to ensure environment variables are set inside the session
-    tmux new-session -d -s "$SESSION" "sh -c 'export HOME=$HOME; export PATH=$PATH; exec /bin/bash --restricted'"
+    # Create session and run restricted bash
+    # We use sh -c to ensure environment variables are exported correctly inside the session
+    tmux new-session -d -s "$SESSION" "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; exec /bin/bash --restricted'"
 fi
 
-# Attach and detach others (-d) to force local window resizing
-# -A: attach to existing session
-# -D: detach other clients
+# 3. Aggressive attachment logic
+# -d: Detach other clients (CRITICAL for forcing resize to current client window height)
+# -A: Attach if exists
 exec tmux attach-session -t "$SESSION" -d

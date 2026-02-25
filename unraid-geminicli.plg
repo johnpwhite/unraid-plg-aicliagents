@@ -2,89 +2,48 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.09">
+<!ENTITY version   "2026.02.26.11">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.09" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.11" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
-## 2026.02.26.09
-- Fix: Full overhaul of terminal scaling and session persistence
-- Using PID files for robust process tracking
-- Added 'Hard Reset' for clean tmux/ttyd restart
-- Optimized height calculation to fit viewport perfectly.
-## 2026.02.26.08
-- Fix: Persistent terminal scaling fix
-- Added aggressive tmux attachment (-d) to force window resizing
-- Improved ttyd process tracking and iframe onload resize trigger.
-## 2026.02.26.07
-- Fix: Stability and UX polish
-- Disabled 'leave page' alert
-- Forced monospace font
-- Fixed double scrollbars and refined full-height layout.
-## 2026.02.26.06
-- Fix: Session management overhaul using PID files
-- Fixed terminal height calculation to eliminate double scrollbars
-- Polished UI toolbar with centered controls and fixed theme selector.
-## 2026.02.26.05
-- Feat: Persistence fix
-- Mapped HOME to flash drive (/boot/config/...) to preserve Gemini settings and auth across reboots.
-## 2026.02.26.04
-- Fix: UI/UX polished
-- Added standard Unraid button styles
-- Fixed terminal height with window resizing
-- Enhanced session persistence with clean restart capability.
-## 2026.02.26.03
-- Feat: UI/UX overhaul
-- Persistent sessions with tmux
-- Full-height responsive terminal with professional toolbar and FontAwesome icons.
-## 2026.02.26.02
-- Fix: Renamed gemini
-- js to
-- mjs to support ES modules
-- Height scaling fix for full-window terminal display.
-## 2026.02.26.01
-- Fix: Removed hardcoded installer filename to prevent Unraid from skipping script updates
-- Improved installer cleanup and robustness.
-## 2026.02.25.15
-- Fix: Removed hardcoded installer filename to prevent Unraid from skipping script updates.
-- Added explicit cleanup of old installer artifacts.
-- Improved error handling and logging in the installation process.
-## 2026.02.25.14
-- Fix: Implemented more robust Node.js extraction logic.
-- Manually finding binary within tarball to ensure compatibility.
+## 2026.02.26.11
+- Fix: Aggressive cache-busting for all assets
+- Architectural fix for process tracking and zombie cleanup
+- Optimized height and session persistence logic.
+## 2026.02.26.10
+- Fix: Aggressive cache-busting for all plugin assets.
+- Fix: Architectural fix for process tracking and zombie cleanup.
+- Improved installer reliability with set -e and explicit entity expansion.
 </CHANGES>
 
 <!-- 1. INSTALLER SCRIPT -->
 <FILE Run="/bin/bash">
 <INLINE>
-<![CDATA[
 #!/bin/bash
-# Remove stale installer if it exists from previous failed attempts
-rm -f /tmp/unraid-geminicli-installer
-
+set -e
 NAME="unraid-geminicli"
-GIT_URL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master"
+VERSION="&version;"
+GIT_URL="&gitURL;"
 GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.30.0-preview.5/gemini.js"
 EMHTTP_DEST="/usr/local/emhttp/plugins/$NAME"
 CONFIG_DIR="/boot/config/plugins/$NAME"
 
 echo "--- INSTALL START ---"
+# Aggressive cleanup of ALL previous assets to ensure fresh load
 rm -rf "$EMHTTP_DEST"
 mkdir -p "$EMHTTP_DEST/bin"
 mkdir -p "$EMHTTP_DEST/scripts"
 mkdir -p "$CONFIG_DIR"
 
 # 1. Download gemini.js to /boot (persistence)
-echo "Downloading gemini.js v0.30.0-preview.5..."
-if ! wget -q -O "$CONFIG_DIR/gemini.mjs" "$GEMINI_JS_URL"; then
-    echo "ERROR: Failed to download gemini.js"
-    exit 1
-fi
+echo "Downloading gemini.mjs..."
+wget -q -O "$CONFIG_DIR/gemini.mjs" "$GEMINI_JS_URL?v=$VERSION"
 # Copy to RAM for execution
 cp "$CONFIG_DIR/gemini.mjs" "$EMHTTP_DEST/bin/gemini.mjs"
 
@@ -94,36 +53,22 @@ NODE_URL="https://nodejs.org/dist/v20.11.0/$NODE_TAR"
 
 if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
     echo "Downloading portable Node.js (v20.11.0)..."
-    if ! wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"; then
-        echo "ERROR: Failed to download Node.js tarball"
-        exit 1
-    fi
+    wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
 fi
 
 echo "Extracting Node.js binary..."
 TMP_EXTRACT="/tmp/node-extract-$$"
 mkdir -p "$TMP_EXTRACT"
-if ! tar -xf "$CONFIG_DIR/$NODE_TAR" -C "$TMP_EXTRACT"; then
-    echo "ERROR: Tar extraction failed"
-    rm -rf "$TMP_EXTRACT"
-    exit 1
-fi
+tar -xf "$CONFIG_DIR/$NODE_TAR" -C "$TMP_EXTRACT"
 
 NODE_BIN=$(find "$TMP_EXTRACT" -name node -type f -executable | head -n 1)
-if [ -z "$NODE_BIN" ]; then
-    echo "ERROR: Could not find node binary in tarball"
-    rm -rf "$TMP_EXTRACT"
-    exit 1
-fi
-
 mv "$NODE_BIN" "$EMHTTP_DEST/bin/node"
 chmod +x "$EMHTTP_DEST/bin/node"
 rm -rf "$TMP_EXTRACT"
 
 # 3. Create gemini wrapper in /usr/local/bin
-cat << 'EOF' > /usr/local/bin/gemini
+cat &lt;&lt; 'EOF' &gt; /usr/local/bin/gemini
 #!/bin/bash
-# Ensure we use our portable node from RAM
 "/usr/local/emhttp/plugins/unraid-geminicli/bin/node" "/usr/local/emhttp/plugins/unraid-geminicli/bin/gemini.mjs" "$@"
 EOF
 chmod +x /usr/local/bin/gemini
@@ -135,44 +80,39 @@ download_file() {
     local dir=$(dirname "$EMHTTP_DEST/$dest")
     mkdir -p "$dir"
     echo "Downloading $dest..."
-    if ! wget -q -O "$EMHTTP_DEST/$dest" "$GIT_URL/$src"; then
-        echo "ERROR: Failed to download $src"
-        return 1
-    fi
+    # Bypass caching
+    wget -q -O "$EMHTTP_DEST/$dest" "$GIT_URL/$src?v=$VERSION"
     if [[ "$dest" == *.sh || "$dest" == *.php || "$dest" == *.page ]]; then
         sed -i 's/\r$//' "$EMHTTP_DEST/$dest"
     fi
 }
 
-download_file "src/scripts/gemini-shell.sh" "scripts/gemini-shell.sh" || exit 1
+download_file "src/scripts/gemini-shell.sh" "scripts/gemini-shell.sh"
 chmod +x "$EMHTTP_DEST/scripts/gemini-shell.sh"
 
-download_file "src/GeminiCLI.page" "GeminiCLI.page" || exit 1
-download_file "src/includes/GeminiSettings.php" "includes/GeminiSettings.php" || exit 1
-download_file "src/assets/ui/index.js" "assets/ui/index.js" || exit 1
-download_file "src/assets/ui/index.css" "assets/ui/index.css" || exit 1
-download_file "src/gemini-cli.png" "gemini-cli.png" || exit 1
-download_file "src/README.md" "README.md" || exit 1
+download_file "src/GeminiCLI.page" "GeminiCLI.page"
+download_file "src/includes/GeminiSettings.php" "includes/GeminiSettings.php"
+download_file "src/assets/ui/index.js" "assets/ui/index.js"
+download_file "src/assets/ui/index.css" "assets/ui/index.css"
+download_file "src/gemini-cli.png" "gemini-cli.png"
+download_file "src/README.md" "README.md"
 
 echo "--- INSTALL COMPLETE ---"
-]]>
 </INLINE>
 </FILE>
 
 <!-- 2. REMOVE -->
 <FILE Run="/bin/bash" Method="remove">
 <INLINE>
-<![CDATA[
 #!/bin/bash
 NAME="unraid-geminicli"
 PLUGIN_DIR="/usr/local/emhttp/plugins/$NAME"
 echo "Removing $NAME..."
 rm -rf "$PLUGIN_DIR"
 rm -f /usr/local/bin/gemini
-removepkg "$NAME" > /dev/null 2>&amp;1
+removepkg "$NAME" &gt; /dev/null 2&gt;&amp;1
 echo "Uninstall of $NAME complete."
 exit 0
-]]>
 </INLINE>
 </FILE>
 
