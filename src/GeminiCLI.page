@@ -3,12 +3,24 @@ Title="Gemini CLI"
 Icon="gemini-cli.png"
 ---
 <?php
-/*
-  Gemini CLI Settings Page
-*/
+require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
+startGeminiTerminal();
+
+// Get plugin version for cache busting
+$version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg")['version'] ?? time();
 ?>
 
-<div class="gemini-cli-container">
-    <h2>Gemini CLI Integration</h2>
-    <p>Configure your Gemini CLI settings here.</p>
-</div>
+<div id="gemini-cli-root"></div>
+
+<link rel="stylesheet" href="/plugins/unraid-geminicli/assets/ui/index.css?v=<?= $version ?>">
+<script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
+
+<style>
+#gemini-cli-root {
+    width: 100%;
+    height: calc(100vh - 160px);
+    min-height: 600px;
+    display: flex;
+    flex-direction: column;
+}
+</style>
