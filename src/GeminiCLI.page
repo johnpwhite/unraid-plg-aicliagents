@@ -16,41 +16,41 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
-/* Force Unraid body to not scroll for this page */
+/* Kill outer scrollbars completely for this page */
 body {
     overflow: hidden !important;
 }
 
-/* Remove padding and extra height from Unraid's layout containers */
 #displaybox {
     padding-bottom: 0 !important;
-    display: flex;
-    flex-direction: column;
+    margin-bottom: 0 !important;
 }
 
 #gemini-cli-root {
     width: 100%;
-    /* 150px accounts for header, tabs, and footer. Precise for 7.2 */
-    height: calc(100vh - 150px);
+    /* Standard Unraid header/footer/tabs total roughly 160px */
+    height: calc(100vh - 160px);
     display: flex;
     flex-direction: column;
     margin: 0;
     padding: 0;
-    overflow: hidden;
 }
 
-/* Fix for internal padding that creates double scroll */
+/* Ensure the React app fills the container */
 .gemini-cli-ui {
     height: 100%;
     width: 100%;
-    display: flex;
-    flex-direction: column;
 }
 </style>
 
 <script>
 $(function(){
-    // Ensure ttyd is running, if not start it
+    // Ensure ttyd is active
     $.get('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
+    
+    // Force a resize calculation on load
+    setTimeout(function(){
+        window.dispatchEvent(new Event('resize'));
+    }, 500);
 });
 </script>

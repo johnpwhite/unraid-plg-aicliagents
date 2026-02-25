@@ -10,8 +10,9 @@ function getGeminiPidFile() {
 function isGeminiRunning() {
     $pidFile = getGeminiPidFile();
     if (!file_exists($pidFile)) return false;
-    $pid = trim(file_get_contents($pidFile));
-    return $pid && posix_getpgid($pid) !== false;
+    $pid = trim(@file_get_contents($pidFile));
+    if (!$pid) return false;
+    return posix_getpgid($pid) !== false;
 }
 
 function startGeminiTerminal() {
@@ -20,53 +21,68 @@ function startGeminiTerminal() {
     $log = "/tmp/ttyd-gemini.log";
     $pidFile = getGeminiPidFile();
     
-    // Always ensure shell is executable
     if (file_exists($shell)) chmod($shell, 0755);
 
     if (!isGeminiRunning()) {
-        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting ttyd on $sock\n", FILE_APPEND);
+        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting fresh ttyd instance\n", FILE_APPEND);
         
-        if (file_exists($sock)) unlink($sock);
+        // Cleanup socket if exists
+        if (file_exists($sock)) @unlink($sock);
         
-        // Unraid 7.2 ttyd often needs explicit sizing or it defaults to 80x24 (or worse)
-        // We use -W for writable and -t for terminal settings
-        // disableLeaveAlert=true prevents the popup
-        $cmd = "ttyd -i '$sock' -W -d0 -t fontSize=14 -t fontFamily='monospace' -t disableLeaveAlert=true -t closeOnDisconnect=true '$shell'";
+        // Unraid 7.2 ttyd flags:
+        // -W: writable
+        // -d0: debug level 0
+        // -t: client terminal options
+        // We use JetBrains Mono if available, else monospace
+        $cmd = "ttyd -i '$sock' -W -d0 " .
+               "-t fontSize=14 " .
+               "-t fontFamily='\"JetBrains Mono\",monospace' " .
+               "-t disableLeaveAlert=true " .
+               "-t closeOnDisconnect=true " .
+               "'$shell'";
         
-        exec("$cmd >> $log 2>&1 & echo $!", $output);
-        $pid = trim($output[0]);
-        file_put_contents($pidFile, $pid);
+        // Use nohup and background execution
+        exec("nohup $cmd >> $log 2>&1 & echo $!", $output);
+        $pid = trim($output[0] ?? '');
+        if ($pid) file_put_contents($pidFile, $pid);
         
-        usleep(300000);
+        usleep(500000); // Wait half a second for socket to initialize
     }
 }
 
-function stopGeminiTerminal() {
+function stopGeminiTerminal($killTmux = false) {
     $pidFile = getGeminiPidFile();
     $sock = "/var/run/geminiterm.sock";
     
+    // Kill ttyd process
     if (file_exists($pidFile)) {
-        $pid = trim(file_get_contents($pidFile));
-        exec("kill $pid > /dev/null 2>&1");
-        unlink($pidFile);
+        $pid = trim(@file_get_contents($pidFile));
+        if ($pid) exec("kill $pid > /dev/null 2>&1");
+        @unlink($pidFile);
     }
     
-    // Kill any remaining ttyd processes using this socket
+    // Cleanup any other ttyd instances on this socket
     exec("pgrep -f '$sock' | xargs kill -9 > /dev/null 2>&1");
     
-    if (file_exists($sock)) unlink($sock);
+    if (file_exists($sock)) @unlink($sock);
+
+    if ($killTmux) {
+        exec("tmux kill-session -t gemini-cli > /dev/null 2>&1");
+    }
 }
 
 if (isset($_GET['action'])) {
+    header('Content-Type: application/json');
     if ($_GET['action'] === 'start') {
         startGeminiTerminal();
-        header('Content-Type: application/json');
         echo json_encode(['status' => 'ok', 'running' => isGeminiRunning()]);
-        exit;
     } elseif ($_GET['action'] === 'stop') {
-        stopGeminiTerminal();
-        header('Content-Type: application/json');
+        stopGeminiTerminal(isset($_GET['hard']));
         echo json_encode(['status' => 'ok']);
-        exit;
+    } elseif ($_GET['action'] === 'restart') {
+        stopGeminiTerminal(true);
+        startGeminiTerminal();
+        echo json_encode(['status' => 'ok', 'running' => isGeminiRunning()]);
     }
+    exit;
 }

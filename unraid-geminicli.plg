@@ -2,16 +2,21 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.08">
+<!ENTITY version   "2026.02.26.09">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.08" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.09" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.09
+- Fix: Full overhaul of terminal scaling and session persistence
+- Using PID files for robust process tracking
+- Added 'Hard Reset' for clean tmux/ttyd restart
+- Optimized height calculation to fit viewport perfectly.
 ## 2026.02.26.08
 - Fix: Persistent terminal scaling fix
 - Added aggressive tmux attachment (-d) to force window resizing
