@@ -11,29 +11,20 @@ export const GeminiTerminal: React.FC = () => {
     const [themeName, setThemeName] = useState<'dark' | 'light' | 'solarized'>('dark');
     const [key, setKey] = useState(Date.now());
     const [isSyncing, setIsSyncing] = useState(false);
-    const [containerHeight, setContainerHeight] = useState('calc(100vh - 120px)');
 
     const handleFontSize = (delta: number) => {
         const next = Math.min(Math.max(fontSize + delta, 8), 32);
         setFontSize(next);
     };
 
-    // Load saved preferences
+    // Load preferences
     useEffect(() => {
         const savedSize = localStorage.getItem('gemini_terminal_font_size');
         const savedTheme = localStorage.getItem('gemini_terminal_theme');
         if (savedSize) setFontSize(parseInt(savedSize));
-        if (savedTheme && (savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'solarized')) {
-            setThemeName(savedTheme);
+        if (savedTheme && THEMES[savedTheme as keyof typeof THEMES]) {
+            setThemeName(savedTheme as any);
         }
-
-        const updateHeight = () => {
-            const h = window.innerHeight - 140;
-            setContainerHeight(`${h}px`);
-        };
-        window.addEventListener('resize', updateHeight);
-        updateHeight();
-        return () => window.removeEventListener('resize', updateHeight);
     }, []);
 
     // Save preferences
@@ -45,92 +36,87 @@ export const GeminiTerminal: React.FC = () => {
     const syncSession = async () => {
         setIsSyncing(true);
         try {
-            // Force stop and restart ttyd
             await fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=stop');
             await fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
             setKey(Date.now());
         } catch (e) {
             console.error("Sync failed", e);
         } finally {
-            setTimeout(() => setIsSyncing(false), 500);
+            setTimeout(() => setIsSyncing(false), 800);
         }
     };
 
     const themeParams = encodeURIComponent(THEMES[themeName]);
-    // Standard ttyd URL structure
     const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}&v=${key}`;
 
     return (
-        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-md border border-[#333] overflow-hidden shadow-2xl" style={{ height: '100%' }}>
-            {/* Standard Unraid Style Toolbar */}
-            <div className="flex items-center justify-between px-4 py-2 bg-[#2a2a2a] border-b border-[#333] select-none min-h-[50px]">
+        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-md border border-[#333] overflow-hidden shadow-xl h-full">
+            {/* Toolbar - Polished UX */}
+            <div className="flex items-center justify-between px-4 py-3 bg-[#2a2a2a] border-b border-[#333] select-none">
                 <div className="flex items-center gap-3">
                     <i className="fa fa-terminal text-orange-500 text-lg"></i>
                     <div className="flex flex-col">
-                        <span className="text-white font-bold text-[11px] tracking-widest uppercase">GEMINI CLI</span>
-                        <span className="text-gray-500 text-[9px] font-mono leading-none">RESTRICTED /mnt</span>
+                        <span className="text-white font-black text-[10px] tracking-widest uppercase">GEMINI CLI</span>
+                        <span className="text-gray-500 text-[9px] font-mono leading-tight">SESSION: /mnt (RESTRICTED)</span>
                     </div>
                 </div>
 
-                <div className="flex items-center gap-4">
-                    {/* Font Scaling Group */}
-                    <div className="flex items-center gap-1">
+                <div className="flex items-center gap-6">
+                    {/* Font Size Control - Centered Box Style */}
+                    <div className="flex items-center">
                         <button 
                             onClick={() => handleFontSize(-1)} 
-                            className="w-8 h-8 flex items-center justify-center bg-[#1e1e1e] hover:bg-orange-600 text-white rounded border border-[#444] transition-all active:scale-90"
-                            title="Smaller Font"
+                            className="w-8 h-8 flex items-center justify-center bg-[#1e1e1e] hover:bg-orange-600 text-white rounded-l border border-[#444] border-r-0 transition-all active:scale-95"
                         >
                             <i className="fa fa-minus text-[10px]"></i>
                         </button>
                         
-                        <div className="w-10 h-8 flex items-center justify-center bg-[#1e1e1e] border border-[#444] rounded text-white font-mono text-xs shadow-inner">
+                        <div className="w-12 h-8 flex items-center justify-center bg-[#1e1e1e] border border-[#444] text-white font-mono text-xs font-bold shadow-inner">
                             {fontSize}
                         </div>
 
                         <button 
                             onClick={() => handleFontSize(1)} 
-                            className="w-8 h-8 flex items-center justify-center bg-[#1e1e1e] hover:bg-orange-600 text-white rounded border border-[#444] transition-all active:scale-90"
-                            title="Larger Font"
+                            className="w-8 h-8 flex items-center justify-center bg-[#1e1e1e] hover:bg-orange-600 text-white rounded-r border border-[#444] border-l-0 transition-all active:scale-95"
                         >
                             <i className="fa fa-plus text-[10px]"></i>
                         </button>
                     </div>
                     
-                    {/* Theme Selector - Custom Unraid Styled */}
-                    <div className="relative group">
+                    {/* Theme Selector - Clean Standard Style */}
+                    <div className="relative">
                         <select 
                             value={themeName} 
                             onChange={(e) => setThemeName(e.target.value as any)}
-                            className="bg-[#1e1e1e] text-white text-[10px] pl-3 pr-8 h-8 rounded border border-[#444] outline-none cursor-pointer hover:border-orange-500 transition-all appearance-none uppercase font-bold tracking-tight shadow-inner"
+                            className="bg-[#1e1e1e] text-white text-[10px] pl-3 pr-8 h-8 rounded border border-[#444] outline-none cursor-pointer hover:border-orange-500 transition-all appearance-none uppercase font-bold tracking-tight shadow-inner min-w-[120px]"
                         >
-                            <option value="dark">Dark</option>
-                            <option value="light">Light</option>
+                            <option value="dark">Dark Theme</option>
+                            <option value="light">Light Theme</option>
                             <option value="solarized">Solarized</option>
                         </select>
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500 group-hover:text-orange-500 transition-colors">
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
                             <i className="fa fa-caret-down text-[10px]"></i>
                         </div>
                     </div>
 
-                    {/* Sync Button - Unraid Primary Style */}
+                    {/* Sync Button */}
                     <button 
                         onClick={syncSession}
                         disabled={isSyncing}
-                        className={`h-8 flex items-center gap-2 px-4 bg-orange-600 hover:bg-orange-500 disabled:bg-gray-700 text-white text-[10px] rounded transition-all font-black tracking-widest shadow-lg active:scale-95 uppercase ${isSyncing ? 'opacity-50' : ''}`}
+                        className={`h-8 flex items-center gap-2 px-5 bg-orange-600 hover:bg-orange-500 disabled:bg-gray-700 text-white text-[10px] rounded transition-all font-black tracking-widest shadow-lg active:scale-95 uppercase ${isSyncing ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
                     >
                         <i className={`fa fa-refresh ${isSyncing ? 'fa-spin' : ''}`}></i>
-                        {isSyncing ? 'Syncing...' : 'Sync Session'}
+                        {isSyncing ? 'SYNCING' : 'SYNC SESSION'}
                     </button>
                 </div>
             </div>
 
-            {/* Terminal Iframe Wrapper - FORCED HEIGHT */}
-            <div className="flex-1 w-full bg-[#1e1e1e] relative" style={{ height: containerHeight }}>
+            {/* Terminal Container - Stretching to visible height */}
+            <div className="flex-1 w-full bg-[#1e1e1e] relative min-h-0">
                 <iframe 
                     key={`${themeName}-${fontSize}-${key}`}
                     src={terminalUrl}
                     className="absolute inset-0 w-full h-full border-none"
-                    style={{ minHeight: '100%' }}
                     title="Gemini Terminal"
                 />
             </div>
