@@ -5,7 +5,11 @@ SESSION="gemini-cli"
 
 echo "$(date) - Connection attempt" >> "$LOG"
 
-export HOME=/mnt
+# PERSISTENCE FIX: Map HOME to the flash drive config folder
+# This ensures ~/.gemini/ (settings, oauth, etc) persists across reboots
+export HOME="/boot/config/plugins/unraid-geminicli/home"
+mkdir -p "$HOME"
+
 cd /mnt || exit 1
 export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
 
@@ -21,13 +25,11 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 # Try to attach, or create if missing
-# -A: attach to session, or create if not exists
-# -D: detach other clients (optional, but good for single user view)
-# We use a simple logic to ensure we don't loop
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Attaching to existing session" >> "$LOG"
     exec tmux attach-session -t "$SESSION"
 else
     echo "Creating new session" >> "$LOG"
-    exec tmux new-session -s "$SESSION" '/bin/bash --restricted'
+    # Ensure HOME is preserved inside tmux
+    exec tmux new-session -s "$SESSION" "export HOME=$HOME; /bin/bash --restricted"
 fi
