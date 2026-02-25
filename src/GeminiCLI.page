@@ -18,8 +18,8 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <style>
 #gemini-cli-root {
     width: 100%;
-    height: calc(100vh - 120px);
-    min-height: 500px;
+    height: calc(100vh - 100px);
+    min-height: 600px;
     display: flex;
     flex-direction: column;
 }

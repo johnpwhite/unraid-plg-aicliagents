@@ -29,7 +29,7 @@ export const GeminiTerminal: React.FC = () => {
     const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}`;
 
     return (
-        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-lg border border-[#333] overflow-hidden">
+        <div className="flex-1 h-full flex flex-col bg-[#1e1e1e] rounded-lg border border-[#333] overflow-hidden">
             {/* Toolbar */}
             <div className="flex items-center justify-between px-3 py-2 bg-[#2a2a2a] border-bottom border-[#333] gap-4 select-none">
                 <div className="flex items-center gap-4 text-xs font-mono text-gray-400">

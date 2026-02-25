@@ -2,16 +2,21 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.01">
+<!ENTITY version   "2026.02.26.02">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.01" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.02" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.02
+- Fix: Renamed gemini
+- js to
+- mjs to support ES modules
+- Height scaling fix for full-window terminal display.
 ## 2026.02.26.01
 - Fix: Removed hardcoded installer filename to prevent Unraid from skipping script updates
 - Improved installer cleanup and robustness.
@@ -46,12 +51,12 @@ mkdir -p "$CONFIG_DIR"
 
 # 1. Download gemini.js to /boot (persistence)
 echo "Downloading gemini.js v0.30.0-preview.5..."
-if ! wget -q -O "$CONFIG_DIR/gemini.js" "$GEMINI_JS_URL"; then
+if ! wget -q -O "$CONFIG_DIR/gemini.mjs" "$GEMINI_JS_URL"; then
     echo "ERROR: Failed to download gemini.js"
     exit 1
 fi
 # Copy to RAM for execution
-cp "$CONFIG_DIR/gemini.js" "$EMHTTP_DEST/bin/gemini.js"
+cp "$CONFIG_DIR/gemini.mjs" "$EMHTTP_DEST/bin/gemini.mjs"
 
 # 2. Download/Extract Portable Node.js (v20.11.0)
 NODE_TAR="node-v20.11.0-linux-x64.tar.xz"
@@ -89,7 +94,7 @@ rm -rf "$TMP_EXTRACT"
 cat << 'EOF' > /usr/local/bin/gemini
 #!/bin/bash
 # Ensure we use our portable node from RAM
-"/usr/local/emhttp/plugins/unraid-geminicli/bin/node" "/usr/local/emhttp/plugins/unraid-geminicli/bin/gemini.js" "$@"
+"/usr/local/emhttp/plugins/unraid-geminicli/bin/node" "/usr/local/emhttp/plugins/unraid-geminicli/bin/gemini.mjs" "$@"
 EOF
 chmod +x /usr/local/bin/gemini
 
