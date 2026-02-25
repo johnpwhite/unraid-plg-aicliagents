@@ -16,11 +16,21 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
+/* Remove padding from Unraid's main content area for this page only */
+#displaybox {
+    padding-bottom: 0 !important;
+}
+
 #gemini-cli-root {
     width: 100%;
-    height: calc(100vh - 100px);
+    height: calc(100vh - 110px);
     min-height: 600px;
     display: flex;
     flex-direction: column;
+}
+
+/* Ensure the iframe stretches correctly */
+#gemini-cli-root .gemini-cli-ui {
+    height: 100%;
 }
 </style>
