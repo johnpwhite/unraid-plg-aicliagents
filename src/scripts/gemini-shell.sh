@@ -1,33 +1,33 @@
 #!/bin/bash
-# Gemini CLI Restricted Shell Wrapper with robust TMUX persistence
+# Gemini CLI Restricted Shell Wrapper
 LOG="/tmp/gemini-shell.log"
-echo "$(date) - Shell session requested" >> "$LOG"
-
-export HOME=/mnt
-cd /mnt || { echo "Failed to cd to /mnt" >> "$LOG"; exit 1; }
-
-# Ensure Node and Gemini are in PATH
-export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
-
 SESSION="gemini-cli"
 
-# Check if tmux is available
-if ! command -v tmux >/dev/null 2>&1; then
-    echo "tmux not found, falling back to direct bash" >> "$LOG"
+echo "$(date) - Connection attempt" >> "$LOG"
+
+export HOME=/mnt
+cd /mnt || exit 1
+export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
+
+# Function to start restricted bash
+run_shell() {
     exec /bin/bash --restricted
+}
+
+# Check for tmux
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "No tmux found, running direct shell" >> "$LOG"
+    run_shell
 fi
 
-# Ensure session exists
-tmux has-session -t "$SESSION" 2>/dev/null
-
-if [ $? != 0 ]; then
-    echo "Creating new tmux session: $SESSION" >> "$LOG"
-    # Create session and run restricted bash
-    tmux new-session -d -s "$SESSION" '/bin/bash --restricted'
+# Try to attach, or create if missing
+# -A: attach to session, or create if not exists
+# -D: detach other clients (optional, but good for single user view)
+# We use a simple logic to ensure we don't loop
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "Attaching to existing session" >> "$LOG"
+    exec tmux attach-session -t "$SESSION"
+else
+    echo "Creating new session" >> "$LOG"
+    exec tmux new-session -s "$SESSION" '/bin/bash --restricted'
 fi
-
-# Attach to the session
-# -A: attach to existing if it exists
-# -D: detach any other clients (ensures single active view)
-echo "Attaching to tmux session: $SESSION" >> "$LOG"
-exec tmux attach-session -t "$SESSION"
