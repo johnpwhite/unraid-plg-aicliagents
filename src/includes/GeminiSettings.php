@@ -12,15 +12,18 @@ function startGeminiTerminal() {
     exec("pgrep -f '$sock'", $pids);
     
     if (empty($pids)) {
-        // Log to /tmp directly to avoid folder issues
         file_put_contents($log, date('Y-m-d H:i:s') . " - Starting ttyd\n", FILE_APPEND);
-        
-        // Ensure scripts are executable
         chmod($shell, 0755);
         
-        // Use raw ttyd if ttyd-exec fails/missing
+        // Unraid's ttyd expects to be behind nginx proxy. 
+        // We use -i to bind to a socket that nginx matches in rc.nginx:
+        // location ~ /webterminal/(.*)/(.*)$ { proxy_pass http://unix:/var/run/$1.sock:/$2; }
+        // So for 'geminiterm', the socket MUST be /var/run/geminiterm.sock
         $cmd = "ttyd -i '$sock' -W '$shell'";
         exec("$cmd >> $log 2>&1 &");
+        
+        // Give it a moment to create the socket
+        usleep(200000);
     }
 }
 

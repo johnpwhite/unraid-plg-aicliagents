@@ -1,131 +1,32 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { WebLinksAddon } from '@xterm/addon-web-links';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
+import React, { useState } from 'react';
 
 const THEMES = {
-    dark: { background: '#1e1e1e', foreground: '#ffffff' },
-    light: { background: '#ffffff', foreground: '#1e1e1e' },
-    solarized: { background: '#002b36', foreground: '#839496' }
+    dark: '{"background":"#1e1e1e","foreground":"#ffffff"}',
+    light: '{"background":"#ffffff","foreground":"#1e1e1e"}',
+    solarized: '{"background":"#002b36","foreground":"#839496"}'
 };
 
 export const GeminiTerminal: React.FC = () => {
-    const terminalRef = useRef<HTMLDivElement>(null);
-    const xtermRef = useRef<Terminal | null>(null);
-    const fitAddonRef = useRef<FitAddon | null>(null);
-    const socketRef = useRef<WebSocket | null>(null);
-
     const [fontSize, setFontSize] = useState(14);
     const [themeName, setThemeName] = useState<'dark' | 'light' | 'solarized'>('dark');
+    const [key, setKey] = useState(0); // For forcing iframe reload
 
     const handleFontSize = (delta: number) => {
         const next = Math.min(Math.max(fontSize + delta, 8), 32);
         setFontSize(next);
+        setKey(prev => prev + 1);
     };
 
-    const clearTerminal = () => {
-        xtermRef.current?.clear();
-        xtermRef.current?.focus();
+    const handleThemeChange = (newTheme: 'dark' | 'light' | 'solarized') => {
+        setThemeName(newTheme);
+        setKey(prev => prev + 1);
     };
 
-    useEffect(() => {
-        if (!xtermRef.current) return;
-        xtermRef.current.options.fontSize = fontSize;
-        fitAddonRef.current?.fit();
-    }, [fontSize]);
-
-    useEffect(() => {
-        if (!xtermRef.current) return;
-        xtermRef.current.options.theme = THEMES[themeName];
-    }, [themeName]);
-
-    useEffect(() => {
-        if (!terminalRef.current) return;
-
-        const term = new Terminal({
-            cursorBlink: true,
-            fontSize: fontSize,
-            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-            theme: THEMES[themeName],
-            allowProposedApi: true,
-            scrollback: 1000,
-        });
-
-        const fitAddon = new FitAddon();
-        term.loadAddon(fitAddon);
-        term.loadAddon(new WebLinksAddon((_event, url) => {
-            window.open(url, '_blank');
-        }));
-
-        term.open(terminalRef.current);
-        fitAddon.fit();
-        
-        xtermRef.current = term;
-        fitAddonRef.current = fitAddon;
-
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const socketUrl = `${protocol}//${window.location.host}/webterminal/geminiterm/ws`;
-        
-        term.writeln('\x1b[1;33mConnecting to Gemini CLI Terminal...\x1b[0m');
-        
-        const socket = new WebSocket(socketUrl);
-        socketRef.current = socket;
-        
-        socket.onopen = () => {
-            term.writeln('\x1b[1;32mConnected.\x1b[0m');
-            // Protocol 1.7+ : type '1' + JSON for resize
-            socket.send('1' + JSON.stringify({ cols: term.cols, rows: term.rows }));
-            term.focus();
-        };
-
-        socket.onmessage = async (event) => {
-            let data: string | ArrayBuffer;
-            if (event.data instanceof Blob) {
-                data = await event.data.text();
-            } else {
-                data = event.data;
-            }
-
-            if (typeof data === 'string') {
-                // Some ttyd versions send data with '0' prefix, others raw
-                if (data.startsWith('0')) {
-                    term.write(data.substring(1));
-                } else {
-                    term.write(data);
-                }
-            }
-        };
-
-        socket.onclose = () => {
-            term.writeln('\r\n\x1b[1;31mConnection closed.\x1b[0m');
-        };
-
-        term.onData((data) => {
-            if (socket.readyState === WebSocket.OPEN) {
-                // Prepend '0' for data per standard ttyd protocol
-                socket.send('0' + data);
-            }
-        });
-
-        const handleResize = () => {
-            fitAddon.fit();
-            if (socket.readyState === WebSocket.OPEN) {
-                socket.send('1' + JSON.stringify({ cols: term.cols, rows: term.rows }));
-            }
-        };
-
-        window.addEventListener('resize', handleResize);
-        
-        // Focus terminal on click anywhere in container
-        terminalRef.current.addEventListener('click', () => term.focus());
-
-        return () => {
-            window.removeEventListener('resize', handleResize);
-            term.dispose();
-            socket.close();
-        };
-    }, []);
+    // Construct ttyd URL
+    // Unraid Nginx proxy matches /webterminal/tag/ -> unix:/var/run/tag.sock
+    // We pass theme and fontSize as query params (ttyd supports these)
+    const themeParams = encodeURIComponent(THEMES[themeName]);
+    const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}`;
 
     return (
         <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-lg border border-[#333] overflow-hidden">
@@ -144,7 +45,7 @@ export const GeminiTerminal: React.FC = () => {
                     
                     <select 
                         value={themeName} 
-                        onChange={(e) => setThemeName(e.target.value as any)}
+                        onChange={(e) => handleThemeChange(e.target.value as any)}
                         className="bg-[#1e1e1e] text-white text-xs px-2 py-1 rounded border border-[#333] outline-none cursor-pointer hover:border-orange-500 transition-all"
                     >
                         <option value="dark">Dark</option>
@@ -152,28 +53,21 @@ export const GeminiTerminal: React.FC = () => {
                         <option value="solarized">Solarized</option>
                     </select>
 
-                    <div className="flex gap-1">
-                        <button 
-                            onClick={clearTerminal}
-                            className="p-1 px-3 bg-[#333] hover:bg-[#444] text-white text-xs rounded transition-colors"
-                        >
-                            Clear
-                        </button>
-                        <button 
-                            onClick={() => window.dispatchEvent(new Event('resize'))}
-                            className="p-1 px-3 bg-orange-600 hover:bg-orange-500 text-white text-xs rounded transition-colors font-bold"
-                        >
-                            Fit
-                        </button>
-                    </div>
+                    <button 
+                        onClick={() => setKey(prev => prev + 1)}
+                        className="p-1 px-3 bg-orange-600 hover:bg-orange-500 text-white text-xs rounded transition-colors font-bold"
+                    >
+                        Reconnect
+                    </button>
                 </div>
             </div>
 
-            {/* Terminal Container */}
-            <div 
-                ref={terminalRef} 
-                className="flex-1 w-full h-full p-2 cursor-text"
-                style={{ backgroundColor: THEMES[themeName].background }}
+            {/* Terminal Iframe */}
+            <iframe 
+                key={key}
+                src={terminalUrl}
+                className="flex-1 w-full border-none"
+                title="Gemini Terminal"
             />
         </div>
     );

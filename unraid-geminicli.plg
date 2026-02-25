@@ -2,32 +2,35 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.06">
+<!ENTITY version   "2026.02.25.09">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.06" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.09" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.25.09
+- Fix: Standardized terminal using standard Unraid Nginx proxy and iframe for better compatibility.
+## 2026.02.25.08
+- Fix: Switched to standard Unraid Nginx proxy (/webterminal/geminiterm/) using &lt;iframe&gt;.
+- Optimized UI assets and fixed ttyd startup parameters.
+## 2026.02.25.07
+- Fix: Manual version alignment for XML safety.
 ## 2026.02.25.06
-- Fix: Simplify shell script (remove tmux) and ttyd startup logic to troubleshoot silent terminal failure
-- Unified logging to /tmp/ttyd-gemini
-- log and /tmp/gemini-shell
-- log.
+- Fix: Simplify shell script (remove tmux) and ttyd startup logic to troubleshoot silent terminal failure.
+- Unified logging to /tmp/ttyd-gemini.log and /tmp/gemini-shell.log.
 ## 2026.02.25.05
-- Fix: Enhanced terminal logging and permission management for shell and ttyd
-- Redirecting shell logs to /tmp/gemini-shell
-- log for debugging.
+- Fix: Enhanced terminal logging and permission management for shell and ttyd.
+- Redirecting shell logs to /tmp/gemini-shell.log for debugging.
 ## 2026.02.25.04
-- Feat: Integrated portable Node
-- js v20.11.0
-- Improved ttyd protocol handling (input fix)
+- Feat: Integrated portable Node.js v20.11.0.
+- Improved ttyd protocol handling (input fix).
 - Added robust shell logging and tmux fallback.
 ## 2026.02.25.03
-- Feat: Terminal UI overhaul
+- Feat: Terminal UI overhaul.
 - Added toolbar (font size, themes), FitAddon scaling, and ttyd protocol fix for interactive input.
 ## 2026.02.25.02
 - Fix: Wrap shell scripts in CDATA to resolve XML parse errors during installation.
