@@ -1,22 +1,31 @@
 #!/bin/bash
-export HOME=/mnt
-cd /mnt
-export PATH=$PATH:/usr/local/bin
+# Gemini CLI Restricted Shell Wrapper
+LOG="/tmp/unraid-geminicli/shell.log"
+mkdir -p /tmp/unraid-geminicli
+echo "$(date) - Shell started" >> "$LOG"
 
-# Use tmux to provide persistence
-# Session name: gemini-cli
+export HOME=/mnt
+cd /mnt || { echo "Failed to cd to /mnt" >> "$LOG"; exit 1; }
+
+# Ensure Node and Gemini are in PATH
+export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
+
+# Debug environment
+echo "PATH: $PATH" >> "$LOG"
+echo "USER: $(whoami)" >> "$LOG"
+
+# Session name for tmux persistence
 SESSION="gemini-cli"
 
-# Check if session exists
-tmux has-session -t "$SESSION" 2>/dev/null
-
-if [ $? != 0 ]; then
-    # Create session and launch restricted bash
-    # -d: start detached
-    # -s: session name
-    tmux new-session -d -s "$SESSION" '/bin/bash --restricted'
+if command -v tmux >/dev/null 2>&1; then
+    echo "Using tmux for session $SESSION" >> "$LOG"
+    tmux has-session -t "$SESSION" 2>/dev/null
+    if [ $? != 0 ]; then
+        tmux new-session -d -s "$SESSION" '/bin/bash --restricted'
+        echo "Created new tmux session" >> "$LOG"
+    fi
+    exec tmux attach-session -t "$SESSION"
+else
+    echo "tmux not found, falling back to direct restricted bash" >> "$LOG"
+    exec /bin/bash --restricted
 fi
-
-# Attach to the session
-# -u: force UTF-8
-exec tmux attach-session -t "$SESSION"

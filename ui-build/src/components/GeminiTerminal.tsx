@@ -19,10 +19,14 @@ export const GeminiTerminal: React.FC = () => {
     const [fontSize, setFontSize] = useState(14);
     const [themeName, setThemeName] = useState<'dark' | 'light' | 'solarized'>('dark');
 
-    // Terminal Settings Toolbar
     const handleFontSize = (delta: number) => {
         const next = Math.min(Math.max(fontSize + delta, 8), 32);
         setFontSize(next);
+    };
+
+    const clearTerminal = () => {
+        xtermRef.current?.clear();
+        xtermRef.current?.focus();
     };
 
     useEffect(() => {
@@ -44,6 +48,8 @@ export const GeminiTerminal: React.FC = () => {
             fontSize: fontSize,
             fontFamily: 'Menlo, Monaco, "Courier New", monospace',
             theme: THEMES[themeName],
+            allowProposedApi: true,
+            scrollback: 1000,
         });
 
         const fitAddon = new FitAddon();
@@ -68,23 +74,26 @@ export const GeminiTerminal: React.FC = () => {
         
         socket.onopen = () => {
             term.writeln('\x1b[1;32mConnected.\x1b[0m');
-            // Send initial resize
-            const dims = { cols: term.cols, rows: term.rows };
-            socket.send('1' + JSON.stringify(dims));
+            // Protocol 1.7+ : type '1' + JSON for resize
+            socket.send('1' + JSON.stringify({ cols: term.cols, rows: term.rows }));
+            term.focus();
         };
 
-        socket.onmessage = (event) => {
-            // ttyd sends data directly (first byte 0 in some versions, or raw in others)
-            // If it's a blob, read it. If it's a string, write it.
+        socket.onmessage = async (event) => {
+            let data: string | ArrayBuffer;
             if (event.data instanceof Blob) {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    const data = reader.result as string;
+                data = await event.data.text();
+            } else {
+                data = event.data;
+            }
+
+            if (typeof data === 'string') {
+                // Some ttyd versions send data with '0' prefix, others raw
+                if (data.startsWith('0')) {
+                    term.write(data.substring(1));
+                } else {
                     term.write(data);
-                };
-                reader.readAsText(event.data);
-            } else if (typeof event.data === 'string') {
-                term.write(event.data);
+                }
             }
         };
 
@@ -94,7 +103,7 @@ export const GeminiTerminal: React.FC = () => {
 
         term.onData((data) => {
             if (socket.readyState === WebSocket.OPEN) {
-                // Prepend '0' for data per ttyd protocol
+                // Prepend '0' for data per standard ttyd protocol
                 socket.send('0' + data);
             }
         });
@@ -107,6 +116,9 @@ export const GeminiTerminal: React.FC = () => {
         };
 
         window.addEventListener('resize', handleResize);
+        
+        // Focus terminal on click anywhere in container
+        terminalRef.current.addEventListener('click', () => term.focus());
 
         return () => {
             window.removeEventListener('resize', handleResize);
@@ -118,39 +130,51 @@ export const GeminiTerminal: React.FC = () => {
     return (
         <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-lg border border-[#333] overflow-hidden">
             {/* Toolbar */}
-            <div className="flex items-center justify-between px-3 py-2 bg-[#2a2a2a] border-bottom border-[#333] gap-4">
+            <div className="flex items-center justify-between px-3 py-2 bg-[#2a2a2a] border-bottom border-[#333] gap-4 select-none">
                 <div className="flex items-center gap-4 text-xs font-mono text-gray-400">
                     <span className="text-orange-500 font-bold uppercase">GEMINI CLI</span>
-                    <span>/mnt restricted</span>
+                    <span className="opacity-60">/mnt restricted</span>
                 </div>
                 <div className="flex items-center gap-3">
                     <div className="flex items-center bg-[#1e1e1e] rounded border border-[#333] overflow-hidden">
-                        <button onClick={() => handleFontSize(-1)} className="px-2 py-1 hover:bg-[#333] text-white">A-</button>
-                        <span className="px-2 py-1 text-xs text-gray-400 border-x border-[#333] min-w-[30px] text-center">{fontSize}</span>
-                        <button onClick={() => handleFontSize(1)} className="px-2 py-1 hover:bg-[#333] text-white">A+</button>
+                        <button onClick={() => handleFontSize(-1)} className="px-2 py-1 hover:bg-[#333] text-white transition-colors" title="Decrease Font">A-</button>
+                        <span className="px-2 py-1 text-xs text-gray-400 border-x border-[#333] min-w-[30px] text-center font-mono">{fontSize}</span>
+                        <button onClick={() => handleFontSize(1)} className="px-2 py-1 hover:bg-[#333] text-white transition-colors" title="Increase Font">A+</button>
                     </div>
                     
                     <select 
                         value={themeName} 
                         onChange={(e) => setThemeName(e.target.value as any)}
-                        className="bg-[#1e1e1e] text-white text-xs px-2 py-1 rounded border border-[#333] outline-none"
+                        className="bg-[#1e1e1e] text-white text-xs px-2 py-1 rounded border border-[#333] outline-none cursor-pointer hover:border-orange-500 transition-all"
                     >
                         <option value="dark">Dark</option>
                         <option value="light">Light</option>
                         <option value="solarized">Solarized</option>
                     </select>
 
-                    <button 
-                        onClick={() => window.dispatchEvent(new Event('resize'))}
-                        className="p-1 px-2 bg-orange-600 hover:bg-orange-500 text-white text-xs rounded transition-colors"
-                    >
-                        Fit
-                    </button>
+                    <div className="flex gap-1">
+                        <button 
+                            onClick={clearTerminal}
+                            className="p-1 px-3 bg-[#333] hover:bg-[#444] text-white text-xs rounded transition-colors"
+                        >
+                            Clear
+                        </button>
+                        <button 
+                            onClick={() => window.dispatchEvent(new Event('resize'))}
+                            className="p-1 px-3 bg-orange-600 hover:bg-orange-500 text-white text-xs rounded transition-colors font-bold"
+                        >
+                            Fit
+                        </button>
+                    </div>
                 </div>
             </div>
 
             {/* Terminal Container */}
-            <div ref={terminalRef} className="flex-1 w-full h-full p-2" />
+            <div 
+                ref={terminalRef} 
+                className="flex-1 w-full h-full p-2 cursor-text"
+                style={{ backgroundColor: THEMES[themeName].background }}
+            />
         </div>
     );
 };

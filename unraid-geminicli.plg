@@ -2,16 +2,21 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.03">
+<!ENTITY version   "2026.02.25.04">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.03" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.04" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.25.04
+- Feat: Integrated portable Node
+- js v20.11.0
+- Improved ttyd protocol handling (input fix)
+- Added robust shell logging and tmux fallback.
 ## 2026.02.25.03
 - Feat: Terminal UI overhaul
 - Added toolbar (font size, themes), FitAddon scaling, and ttyd protocol fix for interactive input.
@@ -43,14 +48,31 @@ mkdir -p "$CONFIG_DIR/bin"
 echo "Downloading gemini.js v0.30.0-preview.5..."
 wget -q -O "$CONFIG_DIR/bin/gemini.js" "$GEMINI_JS_URL"
 
-# 2. Create gemini wrapper
+# 2. Download Portable Node.js (v20.11.0)
+if [ ! -x "$CONFIG_DIR/bin/node" ]; then
+    echo "Downloading portable Node.js (v20.11.0)..."
+    NODE_TAR="node-v20.11.0-linux-x64.tar.xz"
+    NODE_URL="https://nodejs.org/dist/v20.11.0/$NODE_TAR"
+    wget -q -O "/tmp/$NODE_TAR" "$NODE_URL"
+    if [ $? -eq 0 ]; then
+        echo "Extracting Node.js..."
+        tar -xJf "/tmp/$NODE_TAR" -C "$CONFIG_DIR/bin" --strip-components=2 "node-v20.11.0-linux-x64/bin/node"
+        rm "/tmp/$NODE_TAR"
+    else
+        echo "ERROR: Failed to download Node.js"
+    fi
+fi
+
+# 3. Create gemini wrapper
 cat << 'EOF' > /usr/local/bin/gemini
 #!/bin/bash
-node /boot/config/plugins/unraid-geminicli/bin/gemini.js "$@"
+BIN_DIR="/boot/config/plugins/unraid-geminicli/bin"
+# Ensure we use our portable node
+"$BIN_DIR/node" "$BIN_DIR/gemini.js" "$@"
 EOF
 chmod +x /usr/local/bin/gemini
 
-# 3. Setup Directories
+# 4. Setup Directories
 mkdir -p "$EMHTTP_DEST/scripts"
 
 # 4. Download/Install Plugin Files
