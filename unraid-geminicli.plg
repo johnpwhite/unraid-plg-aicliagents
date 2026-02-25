@@ -2,16 +2,19 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.09">
+<!ENTITY version   "2026.02.25.10">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.09" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.10" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.25.10
+- Fix: Standardized terminal using standard Unraid Nginx proxy and iframe for better compatibility
+- Fixed shell script syntax error and improved automation safety.
 ## 2026.02.25.09
 - Fix: Standardized terminal using standard Unraid Nginx proxy and iframe for better compatibility.
 ## 2026.02.25.08
@@ -96,7 +99,7 @@ download_file() {
     wget -q -O "$EMHTTP_DEST/$dest" "$GIT_URL/$src"
     # Force LF line endings for all scripts and .page files
     if [[ "$dest" == *.sh || "$dest" == *.php || "$dest" == *.page ]]; then
-        tr -d '\r' < "$EMHTTP_DEST/$dest" > "$EMHTTP_DEST/$dest.tmp" &amp;&amp; mv "$EMHTTP_DEST/$dest.tmp" "$EMHTTP_DEST/$dest"
+        tr -d '\r' < "$EMHTTP_DEST/$dest" > "$EMHTTP_DEST/$dest.tmp" && mv "$EMHTTP_DEST/$dest.tmp" "$EMHTTP_DEST/$dest"
     fi
 }
 
