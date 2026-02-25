@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.01">
+<!ENTITY version   "2026.02.25.02">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.01" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.02" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.25.02
+- Fix: Wrap shell scripts in CDATA to resolve XML parse errors during installation.
 ## 2026.02.25.01
 - Initial release of Unraid Gemini CLI plugin structure.
 - Integrated gemini-cli v0.30.0-preview.5.
@@ -21,6 +23,7 @@
 <!-- 1. INSTALLER SCRIPT -->
 <FILE Run="/bin/bash" Name="/tmp/unraid-geminicli-installer">
 <INLINE>
+<![CDATA[
 #!/bin/bash
 NAME="unraid-geminicli"
 GIT_URL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master"
@@ -68,12 +71,14 @@ download_file "src/README.md" "README.md"
 
 echo "--- INSTALL COMPLETE ---"
 rm /tmp/unraid-geminicli-installer
+]]>
 </INLINE>
 </FILE>
 
 <!-- 2. REMOVE -->
 <FILE Run="/bin/bash" Method="remove">
 <INLINE>
+<![CDATA[
 #!/bin/bash
 NAME="unraid-geminicli"
 PLUGIN_DIR="/usr/local/emhttp/plugins/$NAME"
@@ -84,6 +89,7 @@ rm -rf "$CONFIG_DIR"
 removepkg "$NAME" > /dev/null 2>&amp;1
 echo "Uninstall of $NAME complete."
 exit 0
+]]>
 </INLINE>
 </FILE>
 
