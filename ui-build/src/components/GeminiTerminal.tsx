@@ -47,22 +47,24 @@ export const GeminiTerminal: React.FC = () => {
     };
 
     const themeParams = encodeURIComponent(THEMES[themeName]);
-    const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}&v=${key}`;
+    // Standard ttyd URL structure with explicit sizing and leave alert disabled
+    // -t disableLeaveAlert=true: Prevents the "Are you sure you want to leave" popup
+    // -t fontFamily: Ensures monospaced font
+    const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}&fontFamily=monospace&disableLeaveAlert=true&v=${key}`;
 
     return (
         <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-md border border-[#333] overflow-hidden shadow-xl h-full">
-            {/* Toolbar - Polished UX */}
+            {/* Toolbar */}
             <div className="flex items-center justify-between px-4 py-3 bg-[#2a2a2a] border-b border-[#333] select-none">
                 <div className="flex items-center gap-3">
                     <i className="fa fa-terminal text-orange-500 text-lg"></i>
                     <div className="flex flex-col">
                         <span className="text-white font-black text-[10px] tracking-widest uppercase">GEMINI CLI</span>
-                        <span className="text-gray-500 text-[9px] font-mono leading-tight">SESSION: /mnt (RESTRICTED)</span>
+                        <span className="text-gray-500 text-[9px] font-mono leading-tight uppercase opacity-60">Persistent Session (/mnt)</span>
                     </div>
                 </div>
 
                 <div className="flex items-center gap-6">
-                    {/* Font Size Control - Centered Box Style */}
                     <div className="flex items-center">
                         <button 
                             onClick={() => handleFontSize(-1)} 
@@ -83,7 +85,6 @@ export const GeminiTerminal: React.FC = () => {
                         </button>
                     </div>
                     
-                    {/* Theme Selector - Clean Standard Style */}
                     <div className="relative">
                         <select 
                             value={themeName} 
@@ -99,7 +100,6 @@ export const GeminiTerminal: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Sync Button */}
                     <button 
                         onClick={syncSession}
                         disabled={isSyncing}
@@ -111,7 +111,7 @@ export const GeminiTerminal: React.FC = () => {
                 </div>
             </div>
 
-            {/* Terminal Container - Stretching to visible height */}
+            {/* Terminal Container */}
             <div className="flex-1 w-full bg-[#1e1e1e] relative min-h-0">
                 <iframe 
                     key={`${themeName}-${fontSize}-${key}`}

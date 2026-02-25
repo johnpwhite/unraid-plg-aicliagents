@@ -29,10 +29,9 @@ function startGeminiTerminal() {
         
         // -i: interface (socket)
         // -W: writable
-        // -p: port (not used with socket but good to be explicit)
         // -d: debug level
-        // -t: client terminal settings (Unraid 7.2 ttyd often prefers these defaults)
-        $cmd = "ttyd -i '$sock' -W -d0 -t fontSize=14 -t fontFamily='\"JetBrains Mono\", monospace' '$shell'";
+        // -t: client terminal settings
+        $cmd = "ttyd -i '$sock' -W -d0 -t fontSize=14 -t fontFamily='\"JetBrains Mono\", monospace' -t disableLeaveAlert=true -t closeOnDisconnect=true '$shell'";
         exec("$cmd >> $log 2>&1 & echo $!", $output);
         
         $pid = trim($output[0]);

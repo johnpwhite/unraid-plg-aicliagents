@@ -16,6 +16,11 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
+/* Force Unraid body to not scroll for this page */
+body {
+    overflow: hidden !important;
+}
+
 /* Remove padding and extra height from Unraid's layout containers */
 #displaybox {
     padding-bottom: 0 !important;
@@ -25,8 +30,8 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 
 #gemini-cli-root {
     width: 100%;
-    /* 165px accounts for header, subheader, and footer height exactly */
-    height: calc(100vh - 165px);
+    /* 150px accounts for header, tabs, and footer. Precise for 7.2 */
+    height: calc(100vh - 150px);
     display: flex;
     flex-direction: column;
     margin: 0;
@@ -34,7 +39,7 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
     overflow: hidden;
 }
 
-/* Fix for Unraid internal padding that creates double scroll */
+/* Fix for internal padding that creates double scroll */
 .gemini-cli-ui {
     height: 100%;
     width: 100%;
@@ -44,8 +49,8 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 </style>
 
 <script>
-// Trigger terminal start immediately on page load via AJAX to ensure socket is ready
 $(function(){
+    // Ensure ttyd is running, if not start it
     $.get('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
 });
 </script>
