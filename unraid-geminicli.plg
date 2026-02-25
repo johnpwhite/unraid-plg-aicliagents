@@ -2,34 +2,36 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.14">
+<!ENTITY version   "2026.02.26.01">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.14" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.01" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.01
+- Fix: Removed hardcoded installer filename to prevent Unraid from skipping script updates
+- Improved installer cleanup and robustness.
+## 2026.02.25.15
+- Fix: Removed hardcoded installer filename to prevent Unraid from skipping script updates.
+- Added explicit cleanup of old installer artifacts.
+- Improved error handling and logging in the installation process.
 ## 2026.02.25.14
-- Fix: Implemented more robust Node
-- js extraction logic
+- Fix: Implemented more robust Node.js extraction logic.
 - Manually finding binary within tarball to ensure compatibility.
-## 2026.02.25.13
-- Fix: Robust extraction logic for Node.js.
-- Added detailed error logging during extraction.
-- Using temp directory for extraction to avoid flag compatibility issues.
-## 2026.02.25.12
-- Fix: Installer robustness and architectural fix for Node.js execution.
-- Extracted Node.js to RAM-based plugin directory instead of /boot (FAT32 no-exec).
 </CHANGES>
 
 <!-- 1. INSTALLER SCRIPT -->
-<FILE Run="/bin/bash" Name="/tmp/unraid-geminicli-installer">
+<FILE Run="/bin/bash">
 <INLINE>
 <![CDATA[
 #!/bin/bash
+# Remove stale installer if it exists from previous failed attempts
+rm -f /tmp/unraid-geminicli-installer
+
 NAME="unraid-geminicli"
 GIT_URL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master"
 GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.30.0-preview.5/gemini.js"
@@ -118,7 +120,6 @@ download_file "src/gemini-cli.png" "gemini-cli.png" || exit 1
 download_file "src/README.md" "README.md" || exit 1
 
 echo "--- INSTALL COMPLETE ---"
-rm -f /tmp/unraid-geminicli-installer
 ]]>
 </INLINE>
 </FILE>
