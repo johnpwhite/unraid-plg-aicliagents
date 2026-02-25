@@ -16,10 +16,10 @@ function startGeminiTerminal() {
         // -d: debug level
         // we use the unraid-standard ttyd-exec if available
         if (file_exists("/usr/local/sbin/ttyd-exec")) {
-            exec("/usr/local/sbin/ttyd-exec -i '$sock' '$shell' > /dev/null 2>&1 &");
+            exec("/usr/local/sbin/ttyd-exec -i '$sock' -W '$shell' > /dev/null 2>&1 &");
         } else {
             // Fallback for systems where ttyd-exec isn't standard
-            exec("ttyd -i '$sock' '$shell' > /dev/null 2>&1 &");
+            exec("ttyd -i '$sock' -W '$shell' > /dev/null 2>&1 &");
         }
     }
 }
