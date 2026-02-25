@@ -20,24 +20,23 @@ function startGeminiTerminal() {
     $log = "/tmp/ttyd-gemini.log";
     $pidFile = getGeminiPidFile();
     
+    // Always ensure shell is executable
+    if (file_exists($shell)) chmod($shell, 0755);
+
     if (!isGeminiRunning()) {
         file_put_contents($log, date('Y-m-d H:i:s') . " - Starting ttyd on $sock\n", FILE_APPEND);
-        chmod($shell, 0755);
         
-        // Remove stale socket
         if (file_exists($sock)) unlink($sock);
         
-        // -i: interface (socket)
-        // -W: writable
-        // -d: debug level
-        // -t: client terminal settings
-        $cmd = "ttyd -i '$sock' -W -d0 -t fontSize=14 -t fontFamily='\"JetBrains Mono\", monospace' -t disableLeaveAlert=true -t closeOnDisconnect=true '$shell'";
-        exec("$cmd >> $log 2>&1 & echo $!", $output);
+        // Unraid 7.2 ttyd often needs explicit sizing or it defaults to 80x24 (or worse)
+        // We use -W for writable and -t for terminal settings
+        // disableLeaveAlert=true prevents the popup
+        $cmd = "ttyd -i '$sock' -W -d0 -t fontSize=14 -t fontFamily='monospace' -t disableLeaveAlert=true -t closeOnDisconnect=true '$shell'";
         
+        exec("$cmd >> $log 2>&1 & echo $!", $output);
         $pid = trim($output[0]);
         file_put_contents($pidFile, $pid);
         
-        // Give it a moment to create the socket
         usleep(300000);
     }
 }
@@ -49,17 +48,15 @@ function stopGeminiTerminal() {
     if (file_exists($pidFile)) {
         $pid = trim(file_get_contents($pidFile));
         exec("kill $pid > /dev/null 2>&1");
-        // Kill any stragglers on the same socket
-        exec("pgrep -f '$sock' | xargs kill -9 > /dev/null 2>&1");
         unlink($pidFile);
     }
     
-    if (file_exists($sock)) {
-        unlink($sock);
-    }
+    // Kill any remaining ttyd processes using this socket
+    exec("pgrep -f '$sock' | xargs kill -9 > /dev/null 2>&1");
+    
+    if (file_exists($sock)) unlink($sock);
 }
 
-// If called via AJAX/direct include
 if (isset($_GET['action'])) {
     if ($_GET['action'] === 'start') {
         startGeminiTerminal();

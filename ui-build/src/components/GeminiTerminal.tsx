@@ -17,7 +17,6 @@ export const GeminiTerminal: React.FC = () => {
         setFontSize(next);
     };
 
-    // Load preferences
     useEffect(() => {
         const savedSize = localStorage.getItem('gemini_terminal_font_size');
         const savedTheme = localStorage.getItem('gemini_terminal_theme');
@@ -27,7 +26,6 @@ export const GeminiTerminal: React.FC = () => {
         }
     }, []);
 
-    // Save preferences
     useEffect(() => {
         localStorage.setItem('gemini_terminal_font_size', fontSize.toString());
         localStorage.setItem('gemini_terminal_theme', themeName);
@@ -47,13 +45,10 @@ export const GeminiTerminal: React.FC = () => {
     };
 
     const themeParams = encodeURIComponent(THEMES[themeName]);
-    // Standard ttyd URL structure with explicit sizing and leave alert disabled
-    // -t disableLeaveAlert=true: Prevents the "Are you sure you want to leave" popup
-    // -t fontFamily: Ensures monospaced font
     const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}&fontFamily=monospace&disableLeaveAlert=true&v=${key}`;
 
     return (
-        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-md border border-[#333] overflow-hidden shadow-xl h-full">
+        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-md border border-[#333] overflow-hidden shadow-xl" style={{ height: '100%', minHeight: '600px' }}>
             {/* Toolbar */}
             <div className="flex items-center justify-between px-4 py-3 bg-[#2a2a2a] border-b border-[#333] select-none">
                 <div className="flex items-center gap-3">
@@ -118,6 +113,15 @@ export const GeminiTerminal: React.FC = () => {
                     src={terminalUrl}
                     className="absolute inset-0 w-full h-full border-none"
                     title="Gemini Terminal"
+                    onLoad={(e) => {
+                        // Attempt to trigger internal resize of ttyd when iframe finishes loading
+                        try {
+                            const win = (e.target as HTMLIFrameElement).contentWindow;
+                            if (win) win.dispatchEvent(new Event('resize'));
+                        } catch (err) {
+                            // Likely cross-origin if domain differs, but /webterminal/ should be same-origin
+                        }
+                    }}
                 />
             </div>
         </div>
