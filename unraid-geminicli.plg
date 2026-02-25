@@ -2,28 +2,27 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.12">
+<!ENTITY version   "2026.02.25.14">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.12" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.14" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.25.14
+- Fix: Implemented more robust Node
+- js extraction logic
+- Manually finding binary within tarball to ensure compatibility.
+## 2026.02.25.13
+- Fix: Robust extraction logic for Node.js.
+- Added detailed error logging during extraction.
+- Using temp directory for extraction to avoid flag compatibility issues.
 ## 2026.02.25.12
-- Fix: Installer robustness and architectural fix for Node
-- js execution
-- Extracted Node
-- js to RAM-based plugin directory instead of /boot (FAT32 no-exec).
-## 2026.02.25.11
 - Fix: Installer robustness and architectural fix for Node.js execution.
 - Extracted Node.js to RAM-based plugin directory instead of /boot (FAT32 no-exec).
-- Added set -e to installer for better error visibility.
-## 2026.02.25.10
-- Fix: Standardized terminal using standard Unraid Nginx proxy and iframe for better compatibility.
-- Fixed shell script syntax error and improved automation safety.
 </CHANGES>
 
 <!-- 1. INSTALLER SCRIPT -->
@@ -31,7 +30,6 @@
 <INLINE>
 <![CDATA[
 #!/bin/bash
-set -e
 NAME="unraid-geminicli"
 GIT_URL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master"
 GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.30.0-preview.5/gemini.js"
@@ -46,22 +44,44 @@ mkdir -p "$CONFIG_DIR"
 
 # 1. Download gemini.js to /boot (persistence)
 echo "Downloading gemini.js v0.30.0-preview.5..."
-wget -q -O "$CONFIG_DIR/gemini.js" "$GEMINI_JS_URL"
+if ! wget -q -O "$CONFIG_DIR/gemini.js" "$GEMINI_JS_URL"; then
+    echo "ERROR: Failed to download gemini.js"
+    exit 1
+fi
 # Copy to RAM for execution
 cp "$CONFIG_DIR/gemini.js" "$EMHTTP_DEST/bin/gemini.js"
 
-# 2. Download Portable Node.js (v20.11.0)
+# 2. Download/Extract Portable Node.js (v20.11.0)
 NODE_TAR="node-v20.11.0-linux-x64.tar.xz"
 NODE_URL="https://nodejs.org/dist/v20.11.0/$NODE_TAR"
 
 if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
     echo "Downloading portable Node.js (v20.11.0)..."
-    wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
+    if ! wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"; then
+        echo "ERROR: Failed to download Node.js tarball"
+        exit 1
+    fi
 fi
 
-echo "Extracting Node.js to RAM..."
-tar -xJf "$CONFIG_DIR/$NODE_TAR" -C "$EMHTTP_DEST/bin" --strip-components=2 "node-v20.11.0-linux-x64/bin/node"
+echo "Extracting Node.js binary..."
+TMP_EXTRACT="/tmp/node-extract-$$"
+mkdir -p "$TMP_EXTRACT"
+if ! tar -xf "$CONFIG_DIR/$NODE_TAR" -C "$TMP_EXTRACT"; then
+    echo "ERROR: Tar extraction failed"
+    rm -rf "$TMP_EXTRACT"
+    exit 1
+fi
+
+NODE_BIN=$(find "$TMP_EXTRACT" -name node -type f -executable | head -n 1)
+if [ -z "$NODE_BIN" ]; then
+    echo "ERROR: Could not find node binary in tarball"
+    rm -rf "$TMP_EXTRACT"
+    exit 1
+fi
+
+mv "$NODE_BIN" "$EMHTTP_DEST/bin/node"
 chmod +x "$EMHTTP_DEST/bin/node"
+rm -rf "$TMP_EXTRACT"
 
 # 3. Create gemini wrapper in /usr/local/bin
 cat << 'EOF' > /usr/local/bin/gemini
@@ -78,26 +98,27 @@ download_file() {
     local dir=$(dirname "$EMHTTP_DEST/$dest")
     mkdir -p "$dir"
     echo "Downloading $dest..."
-    wget -q -O "$EMHTTP_DEST/$dest" "$GIT_URL/$src"
-    # Force LF line endings for all scripts and .page files
+    if ! wget -q -O "$EMHTTP_DEST/$dest" "$GIT_URL/$src"; then
+        echo "ERROR: Failed to download $src"
+        return 1
+    fi
     if [[ "$dest" == *.sh || "$dest" == *.php || "$dest" == *.page ]]; then
-        # Use a more robust way to fix line endings that doesn't involve complex piping
         sed -i 's/\r$//' "$EMHTTP_DEST/$dest"
     fi
 }
 
-download_file "src/scripts/gemini-shell.sh" "scripts/gemini-shell.sh"
+download_file "src/scripts/gemini-shell.sh" "scripts/gemini-shell.sh" || exit 1
 chmod +x "$EMHTTP_DEST/scripts/gemini-shell.sh"
 
-download_file "src/GeminiCLI.page" "GeminiCLI.page"
-download_file "src/includes/GeminiSettings.php" "includes/GeminiSettings.php"
-download_file "src/assets/ui/index.js" "assets/ui/index.js"
-download_file "src/assets/ui/index.css" "assets/ui/index.css"
-download_file "src/gemini-cli.png" "gemini-cli.png"
-download_file "src/README.md" "README.md"
+download_file "src/GeminiCLI.page" "GeminiCLI.page" || exit 1
+download_file "src/includes/GeminiSettings.php" "includes/GeminiSettings.php" || exit 1
+download_file "src/assets/ui/index.js" "assets/ui/index.js" || exit 1
+download_file "src/assets/ui/index.css" "assets/ui/index.css" || exit 1
+download_file "src/gemini-cli.png" "gemini-cli.png" || exit 1
+download_file "src/README.md" "README.md" || exit 1
 
 echo "--- INSTALL COMPLETE ---"
-rm /tmp/unraid-geminicli-installer
+rm -f /tmp/unraid-geminicli-installer
 ]]>
 </INLINE>
 </FILE>
@@ -109,11 +130,8 @@ rm /tmp/unraid-geminicli-installer
 #!/bin/bash
 NAME="unraid-geminicli"
 PLUGIN_DIR="/usr/local/emhttp/plugins/$NAME"
-CONFIG_DIR="/boot/config/plugins/$NAME"
 echo "Removing $NAME..."
 rm -rf "$PLUGIN_DIR"
-# Note: we keep CONFIG_DIR for persistence of downloads, unless requested
-# rm -rf "$CONFIG_DIR" 
 rm -f /usr/local/bin/gemini
 removepkg "$NAME" > /dev/null 2>&amp;1
 echo "Uninstall of $NAME complete."
