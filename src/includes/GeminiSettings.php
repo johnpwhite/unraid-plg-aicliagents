@@ -6,24 +6,20 @@
 function startGeminiTerminal() {
     $sock = "/var/run/geminiterm.sock";
     $shell = "/usr/local/emhttp/plugins/unraid-geminicli/scripts/gemini-shell.sh";
-    $log = "/tmp/unraid-geminicli/ttyd.log";
+    $log = "/tmp/ttyd-gemini.log";
     
-    if (!is_dir("/tmp/unraid-geminicli")) {
-        mkdir("/tmp/unraid-geminicli", 0777, true);
-    }
-    
-    // Check if ttyd is already running for this socket
-    exec("pgrep -f 'ttyd.*$sock'", $pids);
+    // Check if ttyd is already running
+    exec("pgrep -f '$sock'", $pids);
     
     if (empty($pids)) {
+        // Log to /tmp directly to avoid folder issues
         file_put_contents($log, date('Y-m-d H:i:s') . " - Starting ttyd\n", FILE_APPEND);
-        // Ensure shell is executable
+        
+        // Ensure scripts are executable
         chmod($shell, 0755);
         
-        $cmd = file_exists("/usr/local/sbin/ttyd-exec") 
-            ? "/usr/local/sbin/ttyd-exec -i '$sock' -W '$shell'" 
-            : "ttyd -i '$sock' -W '$shell'";
-            
+        // Use raw ttyd if ttyd-exec fails/missing
+        $cmd = "ttyd -i '$sock' -W '$shell'";
         exec("$cmd >> $log 2>&1 &");
     }
 }
