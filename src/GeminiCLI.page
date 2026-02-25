@@ -1,0 +1,14 @@
+Menu="Utilities"
+Title="Gemini CLI"
+Icon="gemini-cli.png"
+---
+<?php
+/*
+  Gemini CLI Settings Page
+*/
+?>
+
+<div class="gemini-cli-container">
+    <h2>Gemini CLI Integration</h2>
+    <p>Configure your Gemini CLI settings here.</p>
+</div>
