@@ -2,45 +2,28 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.25.10">
+<!ENTITY version   "2026.02.25.12">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.10" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.25.12" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.25.12
+- Fix: Installer robustness and architectural fix for Node
+- js execution
+- Extracted Node
+- js to RAM-based plugin directory instead of /boot (FAT32 no-exec).
+## 2026.02.25.11
+- Fix: Installer robustness and architectural fix for Node.js execution.
+- Extracted Node.js to RAM-based plugin directory instead of /boot (FAT32 no-exec).
+- Added set -e to installer for better error visibility.
 ## 2026.02.25.10
-- Fix: Standardized terminal using standard Unraid Nginx proxy and iframe for better compatibility
-- Fixed shell script syntax error and improved automation safety.
-## 2026.02.25.09
 - Fix: Standardized terminal using standard Unraid Nginx proxy and iframe for better compatibility.
-## 2026.02.25.08
-- Fix: Switched to standard Unraid Nginx proxy (/webterminal/geminiterm/) using &lt;iframe&gt;.
-- Optimized UI assets and fixed ttyd startup parameters.
-## 2026.02.25.07
-- Fix: Manual version alignment for XML safety.
-## 2026.02.25.06
-- Fix: Simplify shell script (remove tmux) and ttyd startup logic to troubleshoot silent terminal failure.
-- Unified logging to /tmp/ttyd-gemini.log and /tmp/gemini-shell.log.
-## 2026.02.25.05
-- Fix: Enhanced terminal logging and permission management for shell and ttyd.
-- Redirecting shell logs to /tmp/gemini-shell.log for debugging.
-## 2026.02.25.04
-- Feat: Integrated portable Node.js v20.11.0.
-- Improved ttyd protocol handling (input fix).
-- Added robust shell logging and tmux fallback.
-## 2026.02.25.03
-- Feat: Terminal UI overhaul.
-- Added toolbar (font size, themes), FitAddon scaling, and ttyd protocol fix for interactive input.
-## 2026.02.25.02
-- Fix: Wrap shell scripts in CDATA to resolve XML parse errors during installation.
-## 2026.02.25.01
-- Initial release of Unraid Gemini CLI plugin structure.
-- Integrated gemini-cli v0.30.0-preview.5.
-- Restricted terminal environment in /mnt.
+- Fixed shell script syntax error and improved automation safety.
 </CHANGES>
 
 <!-- 1. INSTALLER SCRIPT -->
@@ -48,6 +31,7 @@
 <INLINE>
 <![CDATA[
 #!/bin/bash
+set -e
 NAME="unraid-geminicli"
 GIT_URL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master"
 GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.30.0-preview.5/gemini.js"
@@ -56,39 +40,36 @@ CONFIG_DIR="/boot/config/plugins/$NAME"
 
 echo "--- INSTALL START ---"
 rm -rf "$EMHTTP_DEST"
-mkdir -p "$EMHTTP_DEST"
-mkdir -p "$CONFIG_DIR/bin"
+mkdir -p "$EMHTTP_DEST/bin"
+mkdir -p "$EMHTTP_DEST/scripts"
+mkdir -p "$CONFIG_DIR"
 
-# 1. Download gemini.js
+# 1. Download gemini.js to /boot (persistence)
 echo "Downloading gemini.js v0.30.0-preview.5..."
-wget -q -O "$CONFIG_DIR/bin/gemini.js" "$GEMINI_JS_URL"
+wget -q -O "$CONFIG_DIR/gemini.js" "$GEMINI_JS_URL"
+# Copy to RAM for execution
+cp "$CONFIG_DIR/gemini.js" "$EMHTTP_DEST/bin/gemini.js"
 
 # 2. Download Portable Node.js (v20.11.0)
-if [ ! -x "$CONFIG_DIR/bin/node" ]; then
+NODE_TAR="node-v20.11.0-linux-x64.tar.xz"
+NODE_URL="https://nodejs.org/dist/v20.11.0/$NODE_TAR"
+
+if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
     echo "Downloading portable Node.js (v20.11.0)..."
-    NODE_TAR="node-v20.11.0-linux-x64.tar.xz"
-    NODE_URL="https://nodejs.org/dist/v20.11.0/$NODE_TAR"
-    wget -q -O "/tmp/$NODE_TAR" "$NODE_URL"
-    if [ $? -eq 0 ]; then
-        echo "Extracting Node.js..."
-        tar -xJf "/tmp/$NODE_TAR" -C "$CONFIG_DIR/bin" --strip-components=2 "node-v20.11.0-linux-x64/bin/node"
-        rm "/tmp/$NODE_TAR"
-    else
-        echo "ERROR: Failed to download Node.js"
-    fi
+    wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
 fi
 
-# 3. Create gemini wrapper
+echo "Extracting Node.js to RAM..."
+tar -xJf "$CONFIG_DIR/$NODE_TAR" -C "$EMHTTP_DEST/bin" --strip-components=2 "node-v20.11.0-linux-x64/bin/node"
+chmod +x "$EMHTTP_DEST/bin/node"
+
+# 3. Create gemini wrapper in /usr/local/bin
 cat << 'EOF' > /usr/local/bin/gemini
 #!/bin/bash
-BIN_DIR="/boot/config/plugins/unraid-geminicli/bin"
-# Ensure we use our portable node
-"$BIN_DIR/node" "$BIN_DIR/gemini.js" "$@"
+# Ensure we use our portable node from RAM
+"/usr/local/emhttp/plugins/unraid-geminicli/bin/node" "/usr/local/emhttp/plugins/unraid-geminicli/bin/gemini.js" "$@"
 EOF
 chmod +x /usr/local/bin/gemini
-
-# 4. Setup Directories
-mkdir -p "$EMHTTP_DEST/scripts"
 
 # 4. Download/Install Plugin Files
 download_file() {
@@ -96,10 +77,12 @@ download_file() {
     local dest=$2
     local dir=$(dirname "$EMHTTP_DEST/$dest")
     mkdir -p "$dir"
+    echo "Downloading $dest..."
     wget -q -O "$EMHTTP_DEST/$dest" "$GIT_URL/$src"
     # Force LF line endings for all scripts and .page files
     if [[ "$dest" == *.sh || "$dest" == *.php || "$dest" == *.page ]]; then
-        tr -d '\r' < "$EMHTTP_DEST/$dest" > "$EMHTTP_DEST/$dest.tmp" && mv "$EMHTTP_DEST/$dest.tmp" "$EMHTTP_DEST/$dest"
+        # Use a more robust way to fix line endings that doesn't involve complex piping
+        sed -i 's/\r$//' "$EMHTTP_DEST/$dest"
     fi
 }
 
@@ -129,7 +112,9 @@ PLUGIN_DIR="/usr/local/emhttp/plugins/$NAME"
 CONFIG_DIR="/boot/config/plugins/$NAME"
 echo "Removing $NAME..."
 rm -rf "$PLUGIN_DIR"
-rm -rf "$CONFIG_DIR"
+# Note: we keep CONFIG_DIR for persistence of downloads, unless requested
+# rm -rf "$CONFIG_DIR" 
+rm -f /usr/local/bin/gemini
 removepkg "$NAME" > /dev/null 2>&amp;1
 echo "Uninstall of $NAME complete."
 exit 0
