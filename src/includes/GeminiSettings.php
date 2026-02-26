@@ -67,28 +67,52 @@ function updateGeminiMenuVisibility($enabled) {
     file_put_contents($pageFile, $content);
 }
 
-function getGeminiPidFile() {
-    return "/var/run/unraid-geminicli.pid";
+function getGeminiConfig() {
+    $configFile = "/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg";
+    $defaults = [
+        'enable_tab' => '1',
+        'theme' => 'dark',
+        'font_size' => '14',
+        'history' => '4096',
+        'home_path' => '/boot/config/plugins/unraid-geminicli/home',
+        'user' => 'root',
+        'root_path' => '/mnt',
+        'sessions' => json_encode([['id' => 'default', 'name' => 'Main', 'path' => '/mnt']])
+    ];
+    
+    if (file_exists($configFile)) {
+        $config = @parse_ini_file($configFile);
+        if (is_array($config)) {
+            return array_merge($defaults, $config);
+        }
+    }
+    
+    return $defaults;
 }
 
-function getGeminiLockFile() {
-    return "/var/run/unraid-geminicli.lock";
+function getGeminiPidFile($id = 'default') {
+    return "/var/run/unraid-geminicli-$id.pid";
 }
 
-function isGeminiRunning() {
-    $sock = "/var/run/geminiterm.sock";
+function getGeminiLockFile($id = 'default') {
+    return "/var/run/unraid-geminicli-$id.lock";
+}
+
+function getGeminiSock($id = 'default') {
+    return "/var/run/geminiterm-$id.sock";
+}
+
+function isGeminiRunning($id = 'default') {
+    $sock = getGeminiSock($id);
     $pids = [];
-    // -x ensures we only match the 'ttyd' executable name exactly
-    // -f is still used to verify it's the instance using OUR socket
     exec("pgrep -x ttyd | xargs -I {} ps -p {} -o args= | grep -v grep | grep '$sock'", $pids);
     return !empty($pids);
 }
 
-function stopGeminiTerminal($killTmux = false) {
-    $sock = "/var/run/geminiterm.sock";
-    $pidFile = getGeminiPidFile();
+function stopGeminiTerminal($id = 'default', $killTmux = false) {
+    $sock = getGeminiSock($id);
+    $pidFile = getGeminiPidFile($id);
     
-    // Find only the parent ttyd process for this socket
     $pids = [];
     exec("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep '$sock' | awk '{print $1}'", $pids);
     
@@ -100,52 +124,42 @@ function stopGeminiTerminal($killTmux = false) {
     if (file_exists($pidFile)) @unlink($pidFile);
 
     if ($killTmux) {
-        exec("tmux kill-session -t gemini-cli > /dev/null 2>&1");
+        $sessionName = "gemini-cli-$id";
+        exec("tmux kill-session -t $sessionName > /dev/null 2>&1");
     }
 }
 
-function startGeminiTerminal() {
-    $sock = "/var/run/geminiterm.sock";
+function startGeminiTerminal($id = 'default', $workingDir = null) {
+    $sock = getGeminiSock($id);
     $shell = "/usr/local/emhttp/plugins/unraid-geminicli/scripts/gemini-shell.sh";
-    $log = "/tmp/ttyd-gemini.log";
-    $pidFile = getGeminiPidFile();
-    $lockFile = getGeminiLockFile();
+    $log = "/tmp/ttyd-gemini-$id.log";
+    $pidFile = getGeminiPidFile($id);
+    $lockFile = getGeminiLockFile($id);
     
-    // Load config
     $config = getGeminiConfig();
+    $workingDir = $workingDir ?: $config['root_path'];
     
-    // Prevent race conditions
     $fp = fopen($lockFile, "w+");
     if (!flock($fp, LOCK_EX | LOCK_NB)) {
         fclose($fp);
         return; 
     }
 
-    $isRunning = isGeminiRunning();
-    $sockExists = file_exists($sock);
-
-    // If already running and healthy, we are done
-    if ($isRunning && $sockExists) {
+    if (isGeminiRunning($id) && file_exists($sock)) {
         flock($fp, LOCK_UN);
         fclose($fp);
         return;
     }
 
-    // If we get here, we are either not running or in an unhealthy state
-    file_put_contents($log, date('Y-m-d H:i:s') . " - [INFO] Session state: isRunning=" . ($isRunning?'yes':'no') . " sockExists=" . ($sockExists?'yes':'no') . ". Starting fresh with config: " . json_encode($config) . "\n", FILE_APPEND);
-    
-    // Use the surgical stop call
-    stopGeminiTerminal(false);
-
+    stopGeminiTerminal($id, false);
     if (file_exists($shell)) chmod($shell, 0755);
 
-    // Pass environment variables to the shell script
     $env = "export GEMINI_HOME='{$config['home_path']}'; " .
            "export GEMINI_USER='{$config['user']}'; " .
-           "export GEMINI_ROOT='{$config['root_path']}'; " .
-           "export GEMINI_HISTORY='{$config['history']}'; ";
+           "export GEMINI_ROOT='$workingDir'; " .
+           "export GEMINI_HISTORY='{$config['history']}'; " .
+           "export GEMINI_SESSION_ID='$id'; ";
 
-    // Standard ttyd integration
     $cmd = "ttyd -i '$sock' -W -d0 " .
            "-t fontSize={$config['font_size']} " .
            "-t fontFamily='monospace' " .
@@ -156,7 +170,6 @@ function startGeminiTerminal() {
     $pid = trim($output[0] ?? '');
     if ($pid) file_put_contents($pidFile, $pid);
     
-    // Wait for socket to appear
     for ($i=0; $i<15; $i++) {
         if (file_exists($sock)) break;
         usleep(100000);
@@ -168,7 +181,7 @@ function startGeminiTerminal() {
 
 if (isset($_GET['action'])) {
     // CSRF Validation for state-changing actions
-    if (in_array($_GET['action'], ['save', 'restart', 'stop'])) {
+    if (in_array($_GET['action'], ['save', 'restart', 'stop', 'create_dir'])) {
         $var = @parse_ini_file("/var/local/emhttp/var.ini");
         $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '';
         if (empty($var['csrf_token']) || $token !== $var['csrf_token']) {
@@ -179,19 +192,52 @@ if (isset($_GET['action'])) {
     }
 
     header('Content-Type: application/json');
+    $id = $_GET['id'] ?? 'default';
+
     if ($_GET['action'] === 'start') {
-        startGeminiTerminal();
-        echo json_encode(['status' => 'ok']);
+        $path = $_GET['path'] ?? null;
+        startGeminiTerminal($id, $path);
+        echo json_encode(['status' => 'ok', 'sock' => "/webterminal/geminiterm-$id/"]);
     } elseif ($_GET['action'] === 'stop') {
-        stopGeminiTerminal(isset($_GET['hard']));
+        stopGeminiTerminal($id, isset($_GET['hard']));
         echo json_encode(['status' => 'ok']);
     } elseif ($_GET['action'] === 'restart') {
-        stopGeminiTerminal(true);
-        startGeminiTerminal();
+        $path = $_GET['path'] ?? null;
+        stopGeminiTerminal($id, true);
+        startGeminiTerminal($id, $path);
         echo json_encode(['status' => 'ok']);
     } elseif ($_GET['action'] === 'save') {
         saveGeminiConfig($_POST);
         echo json_encode(['status' => 'ok']);
+    } elseif ($_GET['action'] === 'list_dir') {
+        $root = getGeminiConfig()['root_path'];
+        $path = realpath($_GET['path'] ?? $root);
+        if (strpos($path, realpath($root)) !== 0) $path = realpath($root);
+        
+        $items = [];
+        if ($path !== realpath($root)) {
+            $items[] = ['name' => '..', 'path' => dirname($path), 'type' => 'dir'];
+        }
+        
+        $files = scandir($path);
+        foreach ($files as $f) {
+            if ($f === '.' || $f === '..') continue;
+            $full = "$path/$f";
+            if (is_dir($full)) {
+                $items[] = ['name' => $f, 'path' => $full, 'type' => 'dir'];
+            }
+        }
+        echo json_encode(['path' => $path, 'items' => $items]);
+    } elseif ($_GET['action'] === 'create_dir') {
+        $parent = realpath($_POST['parent']);
+        $name = preg_replace('/[^a-zA-Z0-9_\-]/', '', $_POST['name']);
+        $root = getGeminiConfig()['root_path'];
+        if (strpos($parent, realpath($root)) === 0 && !empty($name)) {
+            mkdir("$parent/$name", 0777, true);
+            echo json_encode(['status' => 'ok']);
+        } else {
+            echo json_encode(['status' => 'error', 'message' => 'Invalid path or name']);
+        }
     } elseif ($_GET['action'] === 'debug') {
         $debug = [
             'config' => getGeminiConfig(),

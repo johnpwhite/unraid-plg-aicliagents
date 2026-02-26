@@ -1,7 +1,8 @@
 #!/bin/bash
 # Gemini CLI Restricted Shell Wrapper
-SESSION="gemini-cli"
-LOG="/tmp/gemini-shell.log"
+ID="${GEMINI_SESSION_ID:-default}"
+SESSION="gemini-cli-$ID"
+LOG="/tmp/gemini-shell-$ID.log"
 
 # Load config from environment or use defaults
 HOME_DIR="${GEMINI_HOME:-/boot/config/plugins/unraid-geminicli/home}"
@@ -24,18 +25,21 @@ echo "$(date) - Attaching as $TARGET_USER to session $SESSION (History: $HISTORY
 # 1. Fallback if no tmux
 if ! command -v tmux >/dev/null 2>&1; then
     echo "$(date) - ERROR: tmux not found in PATH ($PATH)" >> "$LOG"
-    echo "------------------------------------------------"
-    echo " WARNING: tmux not found. Session sync disabled."
-    echo " Please install tmux or ensure it is in your PATH."
-    echo "------------------------------------------------"
-    exec /bin/bash --restricted
+    # Auto-load gemini even in fallback
+    while true; do
+        gemini
+        echo "Gemini exited. Press ENTER to reload..."
+        read -r
+    done
 fi
 
 # 2. Ensure session exists
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Creating new session $SESSION" >> "$LOG"
     # Create session with -u for UTF-8 and set TERM
-    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; export TERM=xterm-256color; exec /bin/bash --restricted'"
+    # We run gemini in a loop inside the tmux session
+    LAUNCH_CMD="while true; do gemini; echo 'Gemini exited. Reloading in 3s...'; sleep 3; done"
+    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; export TERM=xterm-256color; $LAUNCH_CMD'"
     # Apply history limit
     tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
 fi

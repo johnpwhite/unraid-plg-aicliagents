@@ -18,10 +18,17 @@ startGeminiTerminal();
 
 // Get version for cache busting
 $version = $config['version'] ?? time();
+
+// Get CSRF token
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
 ?>
 
-
 <div id="gemini-cli-root"></div>
+
+<script>
+    window.csrf_token = '<?=$csrf_token?>';
+</script>
 
 <link rel="stylesheet" href="/plugins/unraid-geminicli/assets/ui/index.css?v=<?= $version ?>">
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>

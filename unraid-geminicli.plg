@@ -2,16 +2,27 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.46">
+<!ENTITY version   "2026.02.26.48">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.46" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.48" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.48
+- Feat: Multi-Workspace support with tabbed terminal interface
+- Feat: Integrated directory browser for workspace selection
+- Feat: Auto-loading Gemini with persistence loop
+- Fix: CSRF security for folder creation
+## 2026.02.26.47
+- Feat: Multi-Workspace support with a new tabbed terminal interface.
+- Feat: "Change Workspace" feature with an integrated directory browser modal.
+- Feat: Auto-loading Gemini on terminal start with an automatic persistence loop.
+- Added: Ability to create new folders directly from the workspace selector.
+- Improved: Tab-specific ttyd and tmux session management.
 ## 2026.02.26.46
 - Fix: CSRF token validation for Apply &amp; Save button
 - Fix: Perfect left-alignment for all settings fields
