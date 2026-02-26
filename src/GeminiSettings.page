@@ -1,84 +1,188 @@
 Menu="Utilities"
 Title="Gemini CLI"
-Icon="fa-sparkles"
+Icon="gemini-cli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
 $config = getGeminiConfig();
 ?>
 
-<form markdown="1" method="POST" action="/plugins/unraid-geminicli/includes/GeminiSettings.php?action=save" onsubmit="saveSettings(this); return false;">
+<style>
+    .gemini-layout { display: flex; gap: 20px; align-items: flex-start; width: 100%; margin-top: 10px; }
+    .gemini-cards { flex: 0 0 450px; display: flex; flex-direction: column; }
 
-_(Enable Gemini CLI Tab)_:
-: <select name="enable_tab" size="1">
-    <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
-    <?=mk_option($config['enable_tab'], "0", _('No'))?>
-  </select>
+    .gemini-card {
+        background: var(--background-color, #1e1e1e);
+        border-radius: 8px;
+        border: 1px solid var(--border-color, #333);
+        margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        overflow: hidden;
+    }
+    .gemini-card-header {
+        background: var(--title-header-background-color, #2a2a2a);
+        padding: 10px 15px;
+        border-bottom: 1px solid var(--border-color, #333);
+        font-weight: bold;
+        font-size: 1.1em;
+        color: var(--text-color, #eee);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .gemini-card-body { padding: 15px; color: var(--text-color, #ccc); }
 
-:help:
-Show the Gemini CLI terminal as a top-level tab in the Unraid main menu.
+    .gemini-card-body dl { display: grid; grid-template-columns: 160px 1fr; gap: 8px 15px; margin: 0; }
+    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.2; text-align: right; }
+    .gemini-card-body dl dd { margin: 0; color: var(--text-color); align-self: center; display: flex; align-items: center; gap: 8px; }
+    
+    .gemini-card-body input, .gemini-card-body select {
+        background: var(--background-color, #111) !important;
+        border: 1px solid var(--border-color, #444) !important;
+        color: var(--text-color, #eee) !important;
+        border-radius: 3px;
+        font-size: 0.95em;
+        padding: 4px 8px !important;
+        width: 100%;
+    }
+    .gemini-card-body input[type="number"] { width: 80px; }
+    
+    .gemini-btn {
+        padding: 8px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: bold;
+        font-size: 0.9em;
+        transition: all 0.2s ease;
+        background: transparent !important;
+        border: 1px solid #ff8c00 !important;
+        color: #ff8c00 !important;
+        text-transform: uppercase;
+        width: 100%;
+        margin-top: 15px;
+    }
+    .gemini-btn:hover { background: #ff8c00 !important; color: #fff !important; }
+    
+    .help-text { font-size: 0.8em; opacity: 0.5; margin-top: 4px; display: block; line-height: 1.4; }
+</style>
 
-_(Terminal Theme)_:
-: <select name="theme" size="1">
-    <?=mk_option($config['theme'], "dark", _('Dark'))?>
-    <?=mk_option($config['theme'], "light", _('Light'))?>
-    <?=mk_option($config['theme'], "solarized", _('Solarized'))?>
-  </select>
+<div class="gemini-layout">
+    <div class="gemini-cards">
+        <!-- CARD: GLOBAL SETTINGS -->
+        <div class="gemini-card">
+            <div class="gemini-card-header">
+                <i class="fa fa-globe text-orange-500"></i>
+                <span>Global Settings</span>
+            </div>
+            <div class="gemini-card-body">
+                <form onsubmit="saveGeminiSettings(this); return false;">
+                    <dl>
+                        <dt>Enable Main Tab:</dt>
+                        <dd>
+                            <select name="enable_tab">
+                                <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
+                                <?=mk_option($config['enable_tab'], "0", _('No'))?>
+                            </select>
+                        </dd>
+                        <dt>History Limit:</dt>
+                        <dd>
+                            <input type="number" name="history" value="<?=$config['history']?>" min="100">
+                        </dd>
+                    </dl>
+                    <span class="help-text">History limit sets the number of scrollback rows in the terminal session.</span>
+                    <button type="submit" class="gemini-btn">Apply Global Changes</button>
+                </form>
+            </div>
+        </div>
 
-:help:
-Choose the default visual theme for the terminal interface.
-
-_(Font Size)_:
-: <input type="number" name="font_size" value="<?=$config['font_size']?>" min="8" max="32">
-
-:help:
-Set the font size (in pixels) for the terminal text.
-
-_(History Limit (Rows))_:
-: <input type="number" name="history" value="<?=$config['history']?>" min="100">
-
-:help:
-The number of scrollback rows to keep in the terminal session (default: 4096).
-
-_(Home Directory)_:
-: <input type="text" name="home_path" value="<?=$config['home_path']?>" class="narrow">
-
-:help:
-The directory to use as $HOME within the Gemini CLI session.
-
-_(Terminal User)_:
-: <input type="text" name="user" value="<?=$config['user']?>" class="narrow">
-
-:help:
-The user identity to run the shell as (default: root).
-
-_(Root Directory)_:
-: <input type="text" name="root_path" value="<?=$config['root_path']?>" class="narrow">
-
-:help:
-The initial working directory when the terminal opens (default: /mnt).
-
-&nbsp;
-: <input type="submit" value="_(Apply)_">
-  <input type="button" value="_(Done)_" onclick="done()">
-</form>
+        <!-- CARD: SESSION PROFILE -->
+        <div class="gemini-card">
+            <div class="gemini-card-header">
+                <i class="fa fa-user-circle text-orange-500"></i>
+                <span>Session Profile</span>
+            </div>
+            <div class="gemini-card-body">
+                <form onsubmit="saveGeminiSettings(this); return false;">
+                    <dl>
+                        <dt>Terminal Theme:</dt>
+                        <dd>
+                            <select name="theme">
+                                <?=mk_option($config['theme'], "dark", _('Dark'))?>
+                                <?=mk_option($config['theme'], "light", _('Light'))?>
+                                <?=mk_option($config['theme'], "solarized", _('Solarized'))?>
+                            </select>
+                        </dd>
+                        <dt>Font Size:</dt>
+                        <dd>
+                            <input type="number" name="font_size" value="<?=$config['font_size']?>" min="8" max="32">
+                        </dd>
+                        <dt>Terminal User:</dt>
+                        <dd>
+                            <input type="text" name="user" value="<?=$config['user']?>">
+                        </dd>
+                        <dt>Home Directory:</dt>
+                        <dd>
+                            <input type="text" name="home_path" value="<?=$config['home_path']?>">
+                        </dd>
+                        <dt>Root Directory:</dt>
+                        <dd>
+                            <input type="text" name="root_path" value="<?=$config['root_path']?>">
+                        </dd>
+                    </dl>
+                    <span class="help-text">These settings define the environment and appearance for each new terminal session.</span>
+                    <button type="submit" class="gemini-btn">Update Profile</button>
+                </form>
+            </div>
+        </div>
+        
+        <div style="text-align: center; margin-top: 10px;">
+            <input type="button" value="_(Done)_" onclick="done()" style="width: 120px;">
+        </div>
+    </div>
+</div>
 
 <script>
-function saveSettings(form) {
+function saveGeminiSettings(form) {
     const formData = new FormData(form);
-    fetch(form.action, {
+    // Add all current config values to the form data to ensure we don't lose them
+    // as we have split the UI into two cards/forms
+    const currentConfig = <?=json_encode($config)?>;
+    for (const [key, value] of Object.entries(currentConfig)) {
+        if (!formData.has(key)) {
+            formData.append(key, value);
+        }
+    }
+
+    fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=save', {
         method: 'POST',
         body: formData
     })
     .then(r => r.json())
     .then(data => {
         if (data.status === 'ok') {
-            // Reload page or navigate to reflect changes
-            if (confirm("Settings saved. Some changes may require a terminal restart. Restart terminal now?")) {
-                fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart')
-                .then(() => window.location.reload());
+            if (typeof swal === 'function') {
+                swal({
+                    title: "Settings Saved",
+                    text: "Terminal profile updated. Some changes require a session restart. Restart now?",
+                    type: "success",
+                    showCancelButton: true,
+                    confirmButtonText: "Restart Terminal",
+                    cancelButtonText: "Later"
+                }, function(confirmed) {
+                    if (confirmed) {
+                        fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart')
+                        .then(() => window.location.reload());
+                    } else {
+                        window.location.reload();
+                    }
+                });
             } else {
-                window.location.reload();
+                if (confirm("Settings saved. Restart terminal now?")) {
+                    fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart')
+                    .then(() => window.location.reload());
+                } else {
+                    window.location.reload();
+                }
             }
         }
     });

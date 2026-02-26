@@ -2,16 +2,26 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.38">
+<!ENTITY version   "2026.02.26.40">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.38" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.40" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.40
+- Feat: Complete overhaul of Settings UI using modern card-based layout
+- Fix: Settings icon and User Utilities integration
+- Fix: Apply button and save logic
+## 2026.02.26.39
+- Feat: Complete overhaul of Settings UI using a modern card-based layout.
+- Added: Global Settings card (Main Tab, History Limit).
+- Added: Session Profile card (Theme, Font, User, Paths).
+- Fix: Corrected settings icon (gemini-cli.png) and User Utilities integration.
+- Fix: Resolved Settings "Apply" button not submitting correctly.
 ## 2026.02.26.38
 - Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement
 - Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category

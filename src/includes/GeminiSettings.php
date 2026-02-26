@@ -28,11 +28,19 @@ function getGeminiConfig() {
 function saveGeminiConfig($newConfig) {
     $configFile = "/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg";
     $current = getGeminiConfig();
-    $config = array_merge($current, $newConfig);
+    
+    // Whitelist allowed keys for security and to prevent pollution
+    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version'];
+    
+    foreach ($newConfig as $key => $value) {
+        if (in_array($key, $allowed)) {
+            $current[$key] = $value;
+        }
+    }
     
     // Build the INI string
     $ini = "";
-    foreach ($config as $key => $value) {
+    foreach ($current as $key => $value) {
         $ini .= "$key=\"$value\"\n";
     }
     
@@ -42,8 +50,8 @@ function saveGeminiConfig($newConfig) {
     
     file_put_contents($configFile, $ini);
     
-    // Update the .page file to show/hide the tab
-    updateGeminiMenuVisibility($config['enable_tab']);
+    // Update the .page file metadata to show/hide the tab immediately
+    updateGeminiMenuVisibility($current['enable_tab']);
 }
 
 function updateGeminiMenuVisibility($enabled) {
