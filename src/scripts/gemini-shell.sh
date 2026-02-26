@@ -1,5 +1,5 @@
 #!/bin/bash
-# Gemini CLI Persistent Shell Wrapper
+# Gemini CLI Restricted Shell Wrapper
 SESSION="gemini-cli"
 LOG="/tmp/gemini-shell.log"
 
@@ -8,20 +8,23 @@ mkdir -p "$HOME"
 cd /mnt || exit 1
 export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
 
-echo "$(date) - Requesting session $SESSION" >> "$LOG"
+echo "$(date) - Attaching to session $SESSION" >> "$LOG"
 
-# Check for tmux
+# 1. Fallback if no tmux
 if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux not found" >> "$LOG"
     exec /bin/bash --restricted
 fi
 
-# Ensure session exists with a LARGE default size
+# 2. Ensure session exists
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "Creating new session with 200x80 size" >> "$LOG"
-    # -x 200 -y 80: Forces a large initial buffer to avoid tiny height bug
+    echo "Creating new session $SESSION" >> "$LOG"
+    # Create session with a large buffer
     tmux new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; exec /bin/bash --restricted'"
 fi
 
-# Attach and force resize
-# -d: detach other clients (CRITICAL for resizing to CURRENT iframe size)
+# 3. Aggressive resize and attach
+# window-size largest: prevents shrinking to smallest client
+tmux set-option -g window-size largest 2>/dev/null
+# Attach and detach others to force resize to CURRENT window
 exec tmux attach-session -t "$SESSION" -d

@@ -4,7 +4,7 @@ Icon="gemini-cli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
-// Start only via PHP to ensure it's ready before React mounts
+// Always ensure started
 startGeminiTerminal();
 
 // Get plugin version for cache busting
@@ -25,14 +25,15 @@ body, #displaybox, #sb-body, .gemini-cli-ui {
 #displaybox {
     padding-bottom: 0 !important;
     margin-bottom: 0 !important;
-    display: flex;
-    flex-direction: column;
+    display: flex !important;
+    flex-direction: column !important;
 }
 
 #gemini-cli-root {
     width: 100%;
-    /* Sitting comfortably above the footer */
-    height: calc(100vh - 230px);
+    /* 240px offset should clear footer and headers perfectly */
+    height: calc(100vh - 240px);
+    min-height: 500px;
     display: flex;
     flex-direction: column;
     margin: 0;
@@ -45,11 +46,15 @@ body, #displaybox, #sb-body, .gemini-cli-ui {
 </style>
 
 <script>
-// No redundant AJAX start call here to prevent double-process logic
 $(function(){
-    // Just force a resize sync
-    setTimeout(function(){
+    // Ensure ttyd is active
+    $.get('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
+    
+    // Continuous resize sync for the first 2 seconds to fix 8-line bug
+    let count = 0;
+    const interval = setInterval(function(){
         window.dispatchEvent(new Event('resize'));
-    }, 1000);
+        if (++count > 4) clearInterval(interval);
+    }, 500);
 });
 </script>
