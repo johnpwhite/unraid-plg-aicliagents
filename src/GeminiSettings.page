@@ -33,8 +33,8 @@ $config = getGeminiConfig();
     .gemini-card-body { padding: 15px; color: var(--text-color, #ccc); }
 
     .gemini-card-body dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 15px; margin: 0; }
-    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.2; text-align: left; }
-    .gemini-card-body dl dd { margin: 0; color: var(--text-color); align-self: center; display: flex; align-items: center; gap: 8px; }
+    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.4; text-align: left; }
+    .gemini-card-body dl dd { margin: 0; color: var(--text-color); display: flex; align-items: center; justify-content: flex-start; }
     
     .gemini-card-body input, .gemini-card-body select {
         background: var(--background-color, #111) !important;
@@ -43,10 +43,12 @@ $config = getGeminiConfig();
         border-radius: 3px;
         font-size: 0.95em;
         padding: 4px 8px !important;
-        width: 100%;
+        height: 28px !important;
+        line-height: 20px !important;
         box-sizing: border-box;
     }
-    .gemini-card-body input[type="number"] { width: 100px; flex: 0 0 100px; }
+    .gemini-card-body input[type="number"] { width: 100px !important; }
+    .gemini-card-body input[type="text"], .gemini-card-body select { width: 100%; }
     
     .gemini-btn {
         padding: 10px 20px;
