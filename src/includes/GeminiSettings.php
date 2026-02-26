@@ -167,6 +167,17 @@ function startGeminiTerminal() {
 }
 
 if (isset($_GET['action'])) {
+    // CSRF Validation for state-changing actions
+    if (in_array($_GET['action'], ['save', 'restart', 'stop'])) {
+        $var = @parse_ini_file("/var/local/emhttp/var.ini");
+        $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '';
+        if (empty($var['csrf_token']) || $token !== $var['csrf_token']) {
+            header('HTTP/1.1 403 Forbidden');
+            echo json_encode(['error' => 'Invalid CSRF token']);
+            exit;
+        }
+    }
+
     header('Content-Type: application/json');
     if ($_GET['action'] === 'start') {
         startGeminiTerminal();
