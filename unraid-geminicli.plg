@@ -2,18 +2,26 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.27.08">
+<!ENTITY version   "2026.02.27.11">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.27.08" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.27.11" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.02.27.11
+- UI Polish, Theme Integration, and 502 Fix
+## 2026.02.27.10
+- Fix: Critical UI theme integration (honors Unraid light/dark mode via system variables)
+- Fix: Standardized font sizes to Unraid native 13px for better readability
+- Fix: Final 502 Bad Gateway resolution (shorter IDs for NGINX compatibility)
+- Fix: Workshop Overlay alignment and Create Folder button functionality
+- Added: Improved modal UX and button styling
 ## 2026.02.27.08
-- Critical CSS scoping fix
+- Fix: Critical CSS scoping fix (resolved issue where UI styles appeared as simple/unformatted)
 ## 2026.02.27.07
 - Fix: Critical CSS scoping mismatch (resolved issue where UI styles appeared as simple/unformatted)
 - Fix: Corrected Tailwind utility mapping from .copilot-ui to .gemini-cli-ui
