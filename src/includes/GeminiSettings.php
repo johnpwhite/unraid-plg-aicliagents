@@ -113,13 +113,13 @@ if (isset($_GET['action'])) {
             'user' => exec("whoami"),
             'sock' => file_exists("/var/run/geminiterm.sock"),
             'running' => isGeminiRunning(),
-            'log' => file_exists("/tmp/gemini-shell.log") ? tail("/tmp/gemini-shell.log", 20) : "No log found"
+            'log' => file_exists("/tmp/gemini-shell.log") ? gemini_tail("/tmp/gemini-shell.log", 20) : "No log found"
         ];
         echo json_encode($debug);
     }
     exit;
 }
 
-function tail($file, $lines) {
+function gemini_tail($file, $lines) {
     return explode("\n", shell_exec("tail -n $lines " . escapeshellarg($file)));
 }
