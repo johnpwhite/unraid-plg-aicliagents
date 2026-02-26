@@ -1,0 +1,86 @@
+Menu="Settings"
+Title="Gemini CLI"
+Icon="gemini-cli.png"
+---
+<?php
+require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
+$config = getGeminiConfig();
+?>
+
+<form markdown="1" method="POST" action="/plugins/unraid-geminicli/includes/GeminiSettings.php?action=save" onsubmit="saveSettings(this); return false;">
+
+_(Enable Gemini CLI Tab)_:
+: <select name="enable_tab" size="1">
+    <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
+    <?=mk_option($config['enable_tab'], "0", _('No'))?>
+  </select>
+
+:help:
+Show the Gemini CLI terminal as a top-level tab in the Unraid main menu.
+
+_(Terminal Theme)_:
+: <select name="theme" size="1">
+    <?=mk_option($config['theme'], "dark", _('Dark'))?>
+    <?=mk_option($config['theme'], "light", _('Light'))?>
+    <?=mk_option($config['theme'], "solarized", _('Solarized'))?>
+  </select>
+
+:help:
+Choose the default visual theme for the terminal interface.
+
+_(Font Size)_:
+: <input type="number" name="font_size" value="<?=$config['font_size']?>" min="8" max="32">
+
+:help:
+Set the font size (in pixels) for the terminal text.
+
+_(History Limit (Rows))_:
+: <input type="number" name="history" value="<?=$config['history']?>" min="100">
+
+:help:
+The number of scrollback rows to keep in the terminal session (default: 4096).
+
+_(Home Directory)_:
+: <input type="text" name="home_path" value="<?=$config['home_path']?>" class="narrow">
+
+:help:
+The directory to use as $HOME within the Gemini CLI session.
+
+_(Terminal User)_:
+: <input type="text" name="user" value="<?=$config['user']?>" class="narrow">
+
+:help:
+The user identity to run the shell as (default: root).
+
+_(Root Directory)_:
+: <input type="text" name="root_path" value="<?=$config['root_path']?>" class="narrow">
+
+:help:
+The initial working directory when the terminal opens (default: /mnt).
+
+&nbsp;
+: <input type="submit" value="_(Apply)_">
+  <input type="button" value="_(Done)_" onclick="done()">
+</form>
+
+<script>
+function saveSettings(form) {
+    const formData = new FormData(form);
+    fetch(form.action, {
+        method: 'POST',
+        body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.status === 'ok') {
+            // Reload page or navigate to reflect changes
+            if (confirm("Settings saved. Some changes may require a terminal restart. Restart terminal now?")) {
+                fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart')
+                .then(() => window.location.reload());
+            } else {
+                window.location.reload();
+            }
+        }
+    });
+}
+</script>

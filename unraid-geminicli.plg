@@ -2,16 +2,25 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.32">
-<!ENTITY launch    "Settings/GeminiCLI">
+<!ENTITY version   "2026.02.26.34">
+<!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.32" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.34" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.34
+- Feat: Refactored UI into a dedicated top-level tab and separate settings page
+- Added: Global configuration for theme, font size, history limit, and custom paths
+- Added: Dynamic tab visibility control
+- Improved: Clean terminal interface without internal toolbar
+## 2026.02.26.33
+- Feat: Refactored UI into a dedicated top-level tab and a separate settings page.
+- Added: Configurable theme, font size, history limit, and custom home/root paths.
+- Added: Dynamic tab visibility control.
 ## 2026.02.26.32
 - Fix: Resolved PHP fatal error due to function name collision (tail) with Unraid core
 - Verified: Portable tmux integration and debug endpoint
@@ -187,11 +196,15 @@ download_file "src/scripts/gemini-shell.sh" "scripts/gemini-shell.sh"
 chmod +x "$EMHTTP_DEST/scripts/gemini-shell.sh"
 
 download_file "src/GeminiCLI.page" "GeminiCLI.page"
+download_file "src/GeminiSettings.page" "GeminiSettings.page"
 download_file "src/includes/GeminiSettings.php" "includes/GeminiSettings.php"
 download_file "src/assets/ui/index.js" "assets/ui/index.js"
 download_file "src/assets/ui/index.css" "assets/ui/index.css"
 download_file "src/gemini-cli.png" "gemini-cli.png"
 download_file "src/README.md" "README.md"
+
+# Sync menu visibility after install
+php -r "require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php'; \$config = getGeminiConfig(); updateGeminiMenuVisibility(\$config['enable_tab']);"
 
 echo "--- INSTALL COMPLETE ---"
 </INLINE>

@@ -1,14 +1,23 @@
-Menu="Utilities"
+Menu="Tabs:10"
 Title="Gemini CLI"
 Icon="gemini-cli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
+
+$config = getGeminiConfig();
+// If disabled, just redirect or show message
+if ($config['enable_tab'] !== '1') {
+    echo "Gemini CLI Tab is disabled in settings.";
+    return;
+}
+
 startGeminiTerminal();
 
 // Get version for cache busting
-$version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg")['version'] ?? time();
+$version = $config['version'] ?? time();
 ?>
+
 
 <div id="gemini-cli-root"></div>
 

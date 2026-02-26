@@ -3,12 +3,18 @@
 SESSION="gemini-cli"
 LOG="/tmp/gemini-shell.log"
 
-export HOME="/boot/config/plugins/unraid-geminicli/home"
+# Load config from environment or use defaults
+HOME_DIR="${GEMINI_HOME:-/boot/config/plugins/unraid-geminicli/home}"
+TARGET_USER="${GEMINI_USER:-root}"
+ROOT_DIR="${GEMINI_ROOT:-/mnt}"
+HISTORY_LIMIT="${GEMINI_HISTORY:-4096}"
+
+export HOME="$HOME_DIR"
 mkdir -p "$HOME"
-cd /mnt || exit 1
+cd "$ROOT_DIR" || cd /mnt || exit 1
 export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
 
-echo "$(date) - Attaching to session $SESSION" >> "$LOG"
+echo "$(date) - Attaching as $TARGET_USER to session $SESSION (History: $HISTORY_LIMIT, Root: $ROOT_DIR)" >> "$LOG"
 
 # 1. Fallback if no tmux
 if ! command -v tmux >/dev/null 2>&1; then
@@ -23,8 +29,10 @@ fi
 # 2. Ensure session exists
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Creating new session $SESSION" >> "$LOG"
-    # Create session with a large buffer
+    # Create session with a custom buffer size from config
     tmux new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; exec /bin/bash --restricted'"
+    # Apply history limit
+    tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
 fi
 
 # 3. Aggressive resize and attach
