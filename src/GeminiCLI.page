@@ -24,12 +24,15 @@ body, #displaybox, #sb-body, .gemini-cli-ui {
 #displaybox {
     padding-bottom: 0 !important;
     margin-bottom: 0 !important;
+    display: flex;
+    flex-direction: column;
 }
 
 #gemini-cli-root {
     width: 100%;
-    /* 170px is safer to avoid that final 5px overflow scrollbar */
-    height: calc(100vh - 170px);
+    /* 200px accounts for large header, footer, and subheaders. 
+       Adjusted from 170 to avoid footer overlap. */
+    height: calc(100vh - 200px);
     display: flex;
     flex-direction: column;
     margin: 0;
@@ -43,6 +46,12 @@ body, #displaybox, #sb-body, .gemini-cli-ui {
 
 <script>
 $(function(){
+    // Ensure ttyd is active
     $.get('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
+    
+    // Periodically sync resize to ensure scale is correct
+    setTimeout(function(){
+        window.dispatchEvent(new Event('resize'));
+    }, 1000);
 });
 </script>
