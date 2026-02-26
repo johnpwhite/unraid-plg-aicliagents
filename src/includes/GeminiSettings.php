@@ -3,28 +3,6 @@
  * Gemini CLI Terminal Management
  */
 
-function getGeminiConfig() {
-    $configFile = "/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg";
-    $defaults = [
-        'enable_tab' => '1',
-        'theme' => 'dark',
-        'font_size' => '14',
-        'history' => '4096',
-        'home_path' => '/boot/config/plugins/unraid-geminicli/home',
-        'user' => 'root',
-        'root_path' => '/mnt'
-    ];
-    
-    if (file_exists($configFile)) {
-        $config = @parse_ini_file($configFile);
-        if (is_array($config)) {
-            return array_merge($defaults, $config);
-        }
-    }
-    
-    return $defaults;
-}
-
 function saveGeminiConfig($newConfig) {
     $configFile = "/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg";
     $current = getGeminiConfig();
