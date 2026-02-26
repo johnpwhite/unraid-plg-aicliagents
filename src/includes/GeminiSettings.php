@@ -23,7 +23,7 @@ function stopGeminiTerminal($killTmux = false) {
     $sock = "/var/run/geminiterm.sock";
     $pidFile = getGeminiPidFile();
     
-    // Kill all ttyd instances bound to our socket
+    // Surgical kill
     exec("ps -ef | grep 'ttyd' | grep '$sock' | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&1");
     
     if (file_exists($sock)) @unlink($sock);
@@ -41,7 +41,7 @@ function startGeminiTerminal() {
     $pidFile = getGeminiPidFile();
     $lockFile = getGeminiLockFile();
     
-    // 1. Atomic lock to prevent double-start from PHP/AJAX race
+    // Prevent race conditions
     $fp = fopen($lockFile, "w+");
     if (!flock($fp, LOCK_EX | LOCK_NB)) {
         fclose($fp);
@@ -49,13 +49,12 @@ function startGeminiTerminal() {
     }
 
     if (!isGeminiRunning()) {
-        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting clean ttyd session\n", FILE_APPEND);
+        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting fresh ttyd session\n", FILE_APPEND);
         
         if (file_exists($shell)) chmod($shell, 0755);
         if (file_exists($sock)) @unlink($sock);
 
-        // Standard Unraid 7.2 ttyd integration
-        // -t columns/rows: provides a healthy default before client resize
+        // Standard ttyd integration
         $cmd = "ttyd -i '$sock' -W -d0 " .
                "-t fontSize=14 " .
                "-t fontFamily='monospace' " .

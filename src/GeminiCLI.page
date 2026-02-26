@@ -4,10 +4,9 @@ Icon="gemini-cli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
-// Guaranteed single entry point for process management
 startGeminiTerminal();
 
-// Cache busting versioning
+// Get version for cache busting
 $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg")['version'] ?? time();
 ?>
 
@@ -17,8 +16,16 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
-/* Reset Unraid internal layouts to prevent double scrollbars */
-body, #displaybox, #sb-body {
+/* 
+   SCORCHED EARTH on scrollbars. 
+   We force hidden on EVERY potential parent wrapper.
+*/
+body, 
+#displaybox, 
+#sb-body, 
+.gemini-cli-ui, 
+main, 
+#main-content {
     overflow: hidden !important;
 }
 
@@ -29,13 +36,12 @@ body, #displaybox, #sb-body {
 
 #gemini-cli-root {
     width: 100%;
-    /* Reverted to 230px as requested for prior stable sizing */
-    height: calc(100vh - 230px);
+    /* 245px offset to give breathing room above the footer */
+    height: calc(100vh - 245px);
     display: flex;
     flex-direction: column;
     margin: 0;
     padding: 0;
-    overflow-x: hidden; /* Kill horizontal scroll */
 }
 
 .gemini-cli-ui {
@@ -46,9 +52,9 @@ body, #displaybox, #sb-body {
 
 <script>
 $(function(){
-    // Force a resize re-calculation after React mounts to fix height issues
+    // Force a resize re-calculation after React mounts
     setTimeout(function(){
         window.dispatchEvent(new Event('resize'));
-    }, 1500);
+    }, 1000);
 });
 </script>
