@@ -1,7 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-
-// Let TypeScript know swal is a global function provided by Unraid
-declare const swal: any;
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 const THEMES = {
     dark: '{"background":"#1e1e1e","foreground":"#ffffff"}',
@@ -25,30 +23,6 @@ export const GeminiTerminal: React.FC = () => {
     const [dirItems, setDirItems] = useState<any[]>([]);
     const [newDirName, setNewDirName] = useState('');
     const [isStarting, setIsStarting] = useState(false);
-    const browserRef = useRef<HTMLDivElement>(null);
-
-    // Effect to handle showing/hiding the swal modal
-    useEffect(() => {
-        if (browserOpen) {
-            const session = sessions.find(s => s.id === activeId);
-            browseTo(session?.path || config?.root_path || '/mnt');
-            
-            if (browserRef.current) {
-                swal({
-                    title: 'Select Workspace',
-                    html: true,
-                    text: browserRef.current,
-                    showConfirmButton: false,
-                    showCancelButton: false,
-                    customClass: 'gemini-swal', // For custom styling if needed
-                    onClose: () => setBrowserOpen(false),
-                });
-            }
-        } else {
-            swal.close();
-        }
-    }, [browserOpen]);
-
 
     // Initial Load
     useEffect(() => {
@@ -98,13 +72,19 @@ export const GeminiTerminal: React.FC = () => {
             });
     };
 
+    const openBrowser = () => {
+        const session = sessions.find(s => s.id === activeId);
+        browseTo(session?.path || config?.root_path || '/mnt');
+        setBrowserOpen(true);
+    };
+
     const confirmWorkspace = () => {
         const name = currentPath.split('/').pop() || 'Workspace';
         const newId = 'sess_' + Date.now();
         const newSessions = [...sessions, { id: newId, name, path: currentPath, lastActive: Date.now() }];
         setSessions(newSessions);
         setActiveId(newId);
-        setBrowserOpen(false); // This will trigger swal.close() via useEffect
+        setBrowserOpen(false);
     };
 
     const createFolder = () => {
@@ -145,26 +125,95 @@ export const GeminiTerminal: React.FC = () => {
     const themeParams = encodeURIComponent(themeJson);
     const terminalUrl = `/webterminal/geminiterm-${activeId}/?theme=${themeParams}&fontSize=${config.font_size}&fontFamily=monospace&disableLeaveAlert=true&v=${activeSession?.lastActive || Date.now()}`;
 
+    // The modal overlay, rendered via Portal
+    const modalContent = browserOpen ? createPortal(
+        <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-md">
+            <div className="w-[500px] bg-[#2a2a2a] rounded-lg shadow-2xl border border-[#444] overflow-hidden animate-in fade-in zoom-in duration-200">
+                <div className="px-4 py-3 bg-[#333] border-b border-[#444] flex items-center justify-between">
+                    <h3 className="text-white font-bold text-xs uppercase tracking-wider flex items-center gap-2">
+                        <i className="fa fa-folder-open text-orange-500"></i>
+                        Select Workspace
+                    </h3>
+                    <button onClick={() => setBrowserOpen(false)} className="text-gray-500 hover:text-white transition-colors">
+                        <i className="fa fa-times"></i>
+                    </button>
+                </div>
+                
+                <div className="p-4">
+                    <div className="mb-3 flex items-center gap-2 px-2 py-1.5 bg-[#1e1e1e] rounded border border-[#444] text-[10px] font-mono text-gray-400">
+                        <i className="fa fa-hdd-o"></i>
+                        {currentPath}
+                    </div>
+
+                    <div className="h-[250px] overflow-y-auto bg-[#1e1e1e] rounded border border-[#444] mb-4 custom-scrollbar">
+                        {dirItems.map((item, i) => (
+                            <div 
+                                key={i}
+                                onClick={() => browseTo(item.path)}
+                                className="flex items-center gap-3 px-3 py-2 hover:bg-[#333] cursor-pointer group transition-colors border-b border-[#222] last:border-0"
+                            >
+                                <i className={`fa ${item.name === '..' ? 'fa-level-up' : 'fa-folder'} ${item.name === '..' ? 'text-gray-500' : 'text-orange-500'} opacity-60 group-hover:opacity-100`}></i>
+                                <span className="text-gray-300 text-[11px] group-hover:text-white">{item.name}</span>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="flex gap-2">
+                        <input 
+                            type="text" 
+                            placeholder="New Folder Name..."
+                            value={newDirName}
+                            onChange={(e) => setNewDirName(e.target.value)}
+                            className="flex-1 bg-[#1e1e1e] border border-[#444] text-white text-[11px] px-3 py-2 rounded outline-none focus:border-orange-500 transition-colors"
+                        />
+                        <button 
+                            onClick={createFolder}
+                            className="px-4 bg-[#333] hover:bg-[#444] text-white text-[10px] font-bold uppercase rounded transition-colors border border-[#444]"
+                        >
+                            Create
+                        </button>
+                    </div>
+                </div>
+
+                <div className="px-4 py-3 bg-[#333] border-t border-[#444] flex justify-end gap-2">
+                    <button 
+                        onClick={() => setBrowserOpen(false)}
+                        className="px-4 py-2 text-gray-400 hover:text-white text-[10px] font-bold uppercase transition-colors"
+                    >
+                        Cancel
+                    </button>
+                    <button 
+                        onClick={confirmWorkspace}
+                        className="px-6 py-2 bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black uppercase rounded shadow-lg transition-all active:scale-95"
+                    >
+                        Open Workspace
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
+    ) : null;
+
     return (
         <div className="flex-1 flex flex-col bg-[#1e1e1e] overflow-hidden h-full">
             {/* Session Header */}
-            <div className="flex items-center justify-between px-4 py-2 bg-[#2d2d2d] border-b border-[#333] select-none min-h-[48px]">
-                <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-[70%]">
+            <div className="flex items-end justify-between px-4 pt-2 bg-[#2d2d2d] border-b border-[#444] select-none min-h-[48px]">
+                <div className="flex items-end gap-1 overflow-x-auto no-scrollbar max-w-[70%]">
                     {sessions.map(s => (
                         <div 
                             key={s.id}
                             onClick={() => setActiveId(s.id)}
-                            className={`flex items-center gap-2 px-3 py-1.5 rounded-t-sm cursor-pointer transition-all border-b-2 text-xs font-bold uppercase tracking-tight whitespace-nowrap ${
+                            className={`flex items-center gap-2 px-4 py-2 rounded-t-md cursor-pointer transition-all border-t border-x text-xs font-bold uppercase tracking-tight whitespace-nowrap mb-[-1px] ${
                                 activeId === s.id 
-                                ? 'bg-[#1e1e1e] text-orange-400 border-orange-400' 
-                                : 'text-gray-500 border-transparent hover:bg-[#3f3f3f] hover:text-gray-300'
+                                ? 'bg-[#1e1e1e] border-[#444] text-orange-400 z-10' 
+                                : 'bg-[#333] border-transparent text-gray-500 hover:bg-[#3a3a3a] hover:text-gray-300'
                             }`}
                         >
                             <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'} ${activeId === s.id ? 'opacity-100' : 'opacity-60'}`}></i>
                             {s.name}
                             {s.id !== 'default' && (
                                 <i 
-                                    className="fa fa-times ml-1 hover:text-white opacity-40 hover:opacity-100 transition-opacity" 
+                                    className="fa fa-times ml-2 hover:text-white opacity-40 hover:opacity-100 transition-opacity" 
                                     onClick={(e) => closeTab(e, s.id)}
                                 ></i>
                             )}
@@ -172,10 +221,10 @@ export const GeminiTerminal: React.FC = () => {
                     ))}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 pb-2">
                     <button 
-                        onClick={() => setBrowserOpen(true)}
-                        className="flex items-center gap-2 px-3 py-1.5 bg-[#3a3a3a] hover:bg-[#4a4a4a] text-white text-xs font-bold uppercase rounded-sm transition-all border border-[#444] active:scale-95"
+                        onClick={openBrowser}
+                        className="flex items-center justify-center gap-2 px-3 h-8 bg-[#3a3a3a] hover:bg-[#4a4a4a] text-white text-xs font-bold uppercase rounded-sm transition-all border border-[#444] active:scale-95"
                     >
                         <i className="fa fa-plus-circle text-orange-400"></i>
                         New Workspace
@@ -186,7 +235,7 @@ export const GeminiTerminal: React.FC = () => {
                             setSessions(newSessions);
                             fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
                         }}
-                        className="px-2.5 py-1.5 flex items-center justify-center bg-[#3a3a3a] hover:bg-orange-600 text-white rounded-sm transition-all border border-[#444]"
+                        className="w-10 h-8 flex items-center justify-center bg-[#3a3a3a] hover:bg-orange-600 text-white rounded-sm transition-all border border-[#444]"
                         title="Restart Session"
                     >
                         <i className="fa fa-refresh"></i>
@@ -213,62 +262,8 @@ export const GeminiTerminal: React.FC = () => {
                 />
             </div>
 
-            {/* Hidden container for the swal content */}
-            <div style={{ display: 'none' }}>
-                <div ref={browserRef} className="w-[500px] bg-[#2a2a2a] rounded-lg shadow-2xl border border-[#444] overflow-hidden">
-                    {/* This content is now rendered by swal */}
-                    <div className="p-4">
-                        <div className="mb-3 flex items-center gap-2 px-2 py-1.5 bg-[#1e1e1e] rounded border border-[#444] text-[10px] font-mono text-gray-400">
-                            <i className="fa fa-hdd-o"></i>
-                            {currentPath}
-                        </div>
-
-                        <div className="h-[250px] overflow-y-auto bg-[#1e1e1e] rounded border border-[#444] mb-4 custom-scrollbar">
-                            {dirItems.map((item, i) => (
-                                <div 
-                                    key={i}
-                                    onClick={() => browseTo(item.path)}
-                                    className="flex items-center gap-3 px-3 py-2 hover:bg-[#333] cursor-pointer group transition-colors border-b border-[#222] last:border-0"
-                                >
-                                    <i className={`fa ${item.name === '..' ? 'fa-level-up' : 'fa-folder'} ${item.name === '..' ? 'text-gray-500' : 'text-orange-500'} opacity-60 group-hover:opacity-100`}></i>
-                                    <span className="text-gray-300 text-[11px] group-hover:text-white">{item.name}</span>
-                                </div>
-                            ))}
-                        </div>
-
-                        <div className="flex gap-2">
-                            <input 
-                                type="text" 
-                                placeholder="New Folder Name..."
-                                value={newDirName}
-                                onChange={(e) => setNewDirName(e.target.value)}
-                                className="flex-1 bg-[#1e1e1e] border border-[#444] text-white text-[11px] px-3 py-2 rounded outline-none focus:border-orange-500 transition-colors"
-                            />
-                            <button 
-                                onClick={createFolder}
-                                className="px-4 bg-[#333] hover:bg-[#444] text-white text-[10px] font-bold uppercase rounded transition-colors border border-[#444]"
-                            >
-                                Create
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="px-4 py-3 bg-[#333] border-t border-[#444] flex justify-end gap-2">
-                        <button 
-                            onClick={() => setBrowserOpen(false)}
-                            className="px-4 py-2 text-gray-400 hover:text-white text-[10px] font-bold uppercase transition-colors"
-                        >
-                            Cancel
-                        </button>
-                        <button 
-                            onClick={confirmWorkspace}
-                            className="px-6 py-2 bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black uppercase rounded shadow-lg transition-all active:scale-95"
-                        >
-                            Open Workspace
-                        </button>
-                    </div>
-                </div>
-            </div>
+            {/* Render Modal Portal */}
+            {modalContent}
         </div>
     );
 };

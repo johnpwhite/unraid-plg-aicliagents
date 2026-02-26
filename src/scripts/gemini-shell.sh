@@ -36,10 +36,24 @@ fi
 # 2. Ensure session exists
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Creating new session $SESSION" >> "$LOG"
+    
+    # Create a dedicated run script to ensure perfect TTY inheritance for Node.js
+    RUN_SCRIPT="/tmp/gemini-run-$ID.sh"
+    cat << 'EOF' > "$RUN_SCRIPT"
+#!/bin/bash
+export HOME="$GEMINI_HOME"
+export PATH="$PATH"
+export TERM=xterm-256color
+while true; do
+    gemini
+    echo -e "\n\033[1;33m[Gemini CLI Exited]\033[0m Press ENTER to reload, or wait 3 seconds..."
+    read -t 3 -r
+done
+EOF
+    chmod +x "$RUN_SCRIPT"
+
     # Create session with -u for UTF-8 and set TERM
-    # We run gemini in a loop inside the tmux session
-    LAUNCH_CMD="/bin/bash -i"
-    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$LAUNCH_CMD"
+    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$RUN_SCRIPT"
     # Apply history limit
     tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
 fi
