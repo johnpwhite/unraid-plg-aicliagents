@@ -2,16 +2,24 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.34">
+<!ENTITY version   "2026.02.26.36">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.34" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.36" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.36
+- Fix: Terminal tab now appears correctly in the Main header menu
+- Fix: Settings icon correctly categorized under User Utilities
+- Improved: Robust menu visibility toggle logic
+## 2026.02.26.35
+- Fix: Navigation tab now correctly appears in the "Main" header menu when enabled.
+- Fix: Settings icon correctly categorized under "User Utilities" for better integration.
+- Improved: Menu visibility toggle logic is now more robust.
 ## 2026.02.26.34
 - Feat: Refactored UI into a dedicated top-level tab and separate settings page
 - Added: Global configuration for theme, font size, history limit, and custom paths

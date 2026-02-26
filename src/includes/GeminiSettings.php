@@ -51,10 +51,11 @@ function updateGeminiMenuVisibility($enabled) {
     if (!file_exists($pageFile)) return;
     
     $content = file_get_contents($pageFile);
-    $newMenu = $enabled ? "Menu=\"Tabs:10\"" : "Menu=\"\"";
+    // Use Menu="Main" for top-level navigation tabs
+    $newMenu = $enabled ? "Menu=\"Main:10\"" : "Menu=\"\"";
     
-    // Replace Menu="..." with new menu
-    $content = preg_replace('/Menu="[^"]*"/', $newMenu, $content);
+    // Replace Menu="..." line precisely, maintaining start of line
+    $content = preg_replace('/^Menu=".*"$/m', $newMenu, $content);
     file_put_contents($pageFile, $content);
 }
 
