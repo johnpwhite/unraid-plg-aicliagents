@@ -2,7 +2,7 @@ Menu="Tasks:10"
 Type="xmenu"
 Tabs="false"
 Title="Gemini CLI"
-Icon="fa-sparkles"
+Icon="unraid-geminicli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';

@@ -1,6 +1,6 @@
 Menu="Utilities"
 Title="Gemini CLI"
-Icon="gemini-cli.png"
+Icon="unraid-geminicli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
