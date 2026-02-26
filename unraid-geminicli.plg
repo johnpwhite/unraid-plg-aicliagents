@@ -2,19 +2,23 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.27.04">
+<!ENTITY version   "2026.02.27.06">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.27.04" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.27.06" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.02.27.06
+- Reliable UI cache-busting fix
 ## 2026.02.27.04
 - UI/UX improvements, tmux optimization, and NGINX 502 fix for new tabs
-## 2026.02.27.03
+## 2026.02.27.05
+- Fix: Hardened UI cache-busting by persisting version to configuration file during installation.
+## 2026.02.27.04
 - Fix: Resolved 502 Bad Gateway when opening new tabs (NGINX session ID compatibility)
 - Fix: Converted workspace browser to fixed overlay and standardized button sizes
 - Fix: Dynamic tab names based on path and removed tmux status bar for more space
@@ -307,7 +311,7 @@ download_file "src/unraid-geminicli.png" "unraid-geminicli.png"
 download_file "src/README.md" "README.md"
 
 # Sync menu visibility after install
-php -r "require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php'; \$config = getGeminiConfig(); updateGeminiMenuVisibility(\$config['enable_tab']);"
+php -r "require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php'; \$config = getGeminiConfig(); updateGeminiMenuVisibility(\$config['enable_tab']); saveGeminiConfig(['version' => '&version;']);"
 
 echo "--- INSTALL COMPLETE ---"
 </INLINE>
