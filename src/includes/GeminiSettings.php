@@ -7,11 +7,23 @@ function getGeminiPidFile() {
     return "/var/run/unraid-geminicli.pid";
 }
 
+function getGeminiLockFile() {
+    return "/var/run/unraid-geminicli.lock";
+}
+
+function isGeminiRunning() {
+    $sock = "/var/run/geminiterm.sock";
+    $pids = [];
+    // Check for any ttyd process listening on our specific socket
+    exec("ps -ef | grep 'ttyd' | grep '$sock' | grep -v grep | awk '{print $2}'", $pids);
+    return !empty($pids);
+}
+
 function stopGeminiTerminal($killTmux = false) {
     $sock = "/var/run/geminiterm.sock";
     $pidFile = getGeminiPidFile();
     
-    // Surgical kill: only ttyd processes using OUR specific socket
+    // Kill all ttyd instances bound to our socket
     exec("ps -ef | grep 'ttyd' | grep '$sock' | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&1");
     
     if (file_exists($sock)) @unlink($sock);
@@ -27,24 +39,23 @@ function startGeminiTerminal() {
     $shell = "/usr/local/emhttp/plugins/unraid-geminicli/scripts/gemini-shell.sh";
     $log = "/tmp/ttyd-gemini.log";
     $pidFile = getGeminiPidFile();
+    $lockFile = getGeminiLockFile();
     
-    if (file_exists($shell)) chmod($shell, 0755);
+    // 1. Atomic lock to prevent double-start from PHP/AJAX race
+    $fp = fopen($lockFile, "w+");
+    if (!flock($fp, LOCK_EX | LOCK_NB)) {
+        fclose($fp);
+        return; 
+    }
 
-    // Check if truly running
-    $pids = [];
-    exec("ps -ef | grep 'ttyd' | grep '$sock' | grep -v grep | awk '{print $2}'", $pids);
-    
-    if (empty($pids)) {
-        // Clean start
+    if (!isGeminiRunning()) {
+        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting clean ttyd session\n", FILE_APPEND);
+        
+        if (file_exists($shell)) chmod($shell, 0755);
         if (file_exists($sock)) @unlink($sock);
-        
-        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting ttyd\n", FILE_APPEND);
-        
-        // ttyd configuration:
-        // -i: socket
-        // -W: writable
-        // -t: options
-        // We set high rows/cols to avoid the "8 lines" bug on start
+
+        // Standard Unraid 7.2 ttyd integration
+        // -t columns/rows: provides a healthy default before client resize
         $cmd = "ttyd -i '$sock' -W -d0 " .
                "-t fontSize=14 " .
                "-t fontFamily='monospace' " .
@@ -59,6 +70,9 @@ function startGeminiTerminal() {
         
         usleep(500000);
     }
+    
+    flock($fp, LOCK_UN);
+    fclose($fp);
 }
 
 if (isset($_GET['action'])) {

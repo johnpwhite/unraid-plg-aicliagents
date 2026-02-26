@@ -4,10 +4,10 @@ Icon="gemini-cli.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
-// Always ensure started
+// Guaranteed single entry point for process management
 startGeminiTerminal();
 
-// Get plugin version for cache busting
+// Cache busting versioning
 $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg")['version'] ?? time();
 ?>
 
@@ -17,23 +17,20 @@ $version = parse_ini_file("/boot/config/plugins/unraid-geminicli/unraid-geminicl
 <script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
-/* Kill all outer scrollbars */
-body, #displaybox, #sb-body, .gemini-cli-ui {
+/* Reset Unraid internal layouts to prevent double scrollbars */
+body, #displaybox, #sb-body {
     overflow: hidden !important;
 }
 
 #displaybox {
     padding-bottom: 0 !important;
     margin-bottom: 0 !important;
-    display: flex !important;
-    flex-direction: column !important;
 }
 
 #gemini-cli-root {
     width: 100%;
-    /* 240px offset should clear footer and headers perfectly */
-    height: calc(100vh - 240px);
-    min-height: 500px;
+    /* Increased offset to 260px to clear the footer and give room for subheaders */
+    height: calc(100vh - 260px);
     display: flex;
     flex-direction: column;
     margin: 0;
@@ -42,19 +39,15 @@ body, #displaybox, #sb-body, .gemini-cli-ui {
 
 .gemini-cli-ui {
     height: 100%;
+    width: 100%;
 }
 </style>
 
 <script>
 $(function(){
-    // Ensure ttyd is active
-    $.get('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start');
-    
-    // Continuous resize sync for the first 2 seconds to fix 8-line bug
-    let count = 0;
-    const interval = setInterval(function(){
+    // Force a resize re-calculation after React mounts to fix height issues
+    setTimeout(function(){
         window.dispatchEvent(new Event('resize'));
-        if (++count > 4) clearInterval(interval);
-    }, 500);
+    }, 1500);
 });
 </script>
