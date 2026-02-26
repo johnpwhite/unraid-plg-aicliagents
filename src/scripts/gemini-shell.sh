@@ -38,8 +38,8 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Creating new session $SESSION" >> "$LOG"
     # Create session with -u for UTF-8 and set TERM
     # We run gemini in a loop inside the tmux session
-    LAUNCH_CMD="while true; do gemini; echo 'Gemini exited. Reloading in 3s...'; sleep 3; done"
-    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; export TERM=xterm-256color; $LAUNCH_CMD'"
+    LAUNCH_CMD="/bin/bash -i"
+    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$LAUNCH_CMD"
     # Apply history limit
     tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
 fi
