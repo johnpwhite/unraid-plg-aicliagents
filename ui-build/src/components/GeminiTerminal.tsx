@@ -39,10 +39,12 @@ export const GeminiTerminal: React.FC = () => {
             // Reconnect just refreshes the view. Hard Reset kills the backend processes.
             if (hard) {
                 await fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart`);
+                setKey(Date.now());
             } else {
                 await fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start`);
+                // Soft Sync does not reload the iframe unless explicitly needed.
+                // If it was already connected, it stays connected.
             }
-            setKey(Date.now());
         } catch (e) {
             console.error("Sync failed", e);
         } finally {

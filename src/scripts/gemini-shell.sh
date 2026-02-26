@@ -24,7 +24,7 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 # 3. Aggressive resize and attach
-# window-size largest: prevents shrinking to smallest client
-tmux set-option -g window-size largest 2>/dev/null
-# Attach and detach others to force resize to CURRENT window
-exec tmux attach-session -t "$SESSION" -d
+# Ensure the session has the correct global settings
+tmux set-option -g -t "$SESSION" window-size largest 2>/dev/null
+# Attach without -d to allow multiple clients to share the view (standard Unraid terminal behavior)
+exec tmux attach-session -t "$SESSION"

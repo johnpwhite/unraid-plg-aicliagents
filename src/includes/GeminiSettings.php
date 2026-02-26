@@ -14,8 +14,8 @@ function getGeminiLockFile() {
 function isGeminiRunning() {
     $sock = "/var/run/geminiterm.sock";
     $pids = [];
-    // Check for any ttyd process listening on our specific socket
-    exec("ps -ef | grep 'ttyd' | grep '$sock' | grep -v grep | awk '{print $2}'", $pids);
+    // Use pgrep -f for more robust detection of the process matching the socket
+    exec("pgrep -f 'ttyd.*$sock'", $pids);
     return !empty($pids);
 }
 
@@ -23,8 +23,8 @@ function stopGeminiTerminal($killTmux = false) {
     $sock = "/var/run/geminiterm.sock";
     $pidFile = getGeminiPidFile();
     
-    // Surgical kill
-    exec("ps -ef | grep 'ttyd' | grep '$sock' | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&1");
+    // Surgical kill using pkill -f
+    exec("pkill -9 -f 'ttyd.*$sock' > /dev/null 2>&1");
     
     if (file_exists($sock)) @unlink($sock);
     if (file_exists($pidFile)) @unlink($pidFile);
@@ -48,26 +48,35 @@ function startGeminiTerminal() {
         return; 
     }
 
-    if (!isGeminiRunning()) {
-        file_put_contents($log, date('Y-m-d H:i:s') . " - Starting fresh ttyd session\n", FILE_APPEND);
+    // Only start if not already running AND the socket exists
+    // If the socket is missing but process is running, we have a problem (likely orphan)
+    if (!isGeminiRunning() || !file_exists($sock)) {
+        file_put_contents($log, date('Y-m-d H:i:s') . " - [INFO] Starting ttyd session for $sock\n", FILE_APPEND);
         
-        if (file_exists($shell)) chmod($shell, 0755);
-        if (file_exists($sock)) @unlink($sock);
+        // Clean up any stale state if not running
+        if (!isGeminiRunning()) {
+            exec("pkill -9 -f 'ttyd.*$sock' > /dev/null 2>&1");
+            if (file_exists($sock)) @unlink($sock);
+        }
 
-        // Standard ttyd integration
+        if (file_exists($shell)) chmod($shell, 0755);
+
+        // Standard ttyd integration with flexible options
         $cmd = "ttyd -i '$sock' -W -d0 " .
                "-t fontSize=14 " .
                "-t fontFamily='monospace' " .
                "-t disableLeaveAlert=true " .
-               "-t columns=160 " .
-               "-t rows=60 " .
                "'$shell'";
         
         exec("nohup $cmd >> $log 2>&1 & echo $!", $output);
         $pid = trim($output[0] ?? '');
         if ($pid) file_put_contents($pidFile, $pid);
         
-        usleep(500000);
+        // Give it a moment to bind to the socket
+        for ($i=0; $i<10; $i++) {
+            if (file_exists($sock)) break;
+            usleep(100000);
+        }
     }
     
     flock($fp, LOCK_UN);
