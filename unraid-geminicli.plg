@@ -2,16 +2,24 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.28">
+<!ENTITY version   "2026.02.26.30">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.28" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.30" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.30
+- Fix: Resolved PHP crash on systems missing POSIX extension
+- Added: Bundled portable tmux binary for session sync
+- Improved: Installer robustness
+## 2026.02.26.29
+- Fix: Resolved PHP crash on systems missing POSIX extension.
+- Added: Bundled portable tmux binary to ensure session sync works on all Unraid versions.
+- Improved: Installer robustness and dependency management.
 ## 2026.02.26.28
 - Fix: Improved session sync diagnostics
 - Added debug action to GeminiSettings
@@ -136,14 +144,27 @@ mv "$NODE_BIN" "$EMHTTP_DEST/bin/node"
 chmod +x "$EMHTTP_DEST/bin/node"
 rm -rf "$TMP_EXTRACT"
 
-# 3. Create gemini wrapper in /usr/local/bin
+# 3. Download/Install Portable tmux (v3.5a)
+TMUX_URL="https://github.com/pythops/tmux-linux-binary/releases/download/v3.5a/tmux-linux-x86_64"
+if [ ! -f "$CONFIG_DIR/tmux" ]; then
+    echo "Downloading portable tmux (v3.5a)..."
+    wget -q -O "$CONFIG_DIR/tmux" "$TMUX_URL"
+fi
+cp "$CONFIG_DIR/tmux" "$EMHTTP_DEST/bin/tmux"
+chmod +x "$EMHTTP_DEST/bin/tmux"
+
+# 4. Create wrappers in /usr/local/bin
 cat &lt;&lt; 'EOF' &gt; /usr/local/bin/gemini
 #!/bin/bash
 "/usr/local/emhttp/plugins/unraid-geminicli/bin/node" "/usr/local/emhttp/plugins/unraid-geminicli/bin/gemini.mjs" "$@"
 EOF
 chmod +x /usr/local/bin/gemini
 
-# 4. Download/Install Plugin Files
+if [ ! -f /usr/local/bin/tmux ]; then
+    ln -sf "$EMHTTP_DEST/bin/tmux" /usr/local/bin/tmux
+fi
+
+# 5. Download/Install Plugin Files
 download_file() {
     local src=$1
     local dest=$2

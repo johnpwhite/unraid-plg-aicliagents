@@ -110,7 +110,7 @@ if (isset($_GET['action'])) {
             'ttyd' => exec("which ttyd 2>&1"),
             'tmux' => exec("which tmux 2>&1"),
             'path' => getenv('PATH'),
-            'user' => posix_getpwuid(posix_geteuid())['name'],
+            'user' => exec("whoami"),
             'sock' => file_exists("/var/run/geminiterm.sock"),
             'running' => isGeminiRunning(),
             'log' => file_exists("/tmp/gemini-shell.log") ? tail("/tmp/gemini-shell.log", 20) : "No log found"
