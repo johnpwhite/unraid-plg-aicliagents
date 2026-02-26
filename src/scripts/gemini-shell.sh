@@ -14,6 +14,11 @@ mkdir -p "$HOME"
 cd "$ROOT_DIR" || cd /mnt || exit 1
 export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
 
+# Force UTF-8 and 256 colors for modern terminal apps (Gemini, diffs, etc)
+export TERM=xterm-256color
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
 echo "$(date) - Attaching as $TARGET_USER to session $SESSION (History: $HISTORY_LIMIT, Root: $ROOT_DIR)" >> "$LOG"
 
 # 1. Fallback if no tmux
@@ -29,8 +34,8 @@ fi
 # 2. Ensure session exists
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Creating new session $SESSION" >> "$LOG"
-    # Create session with a custom buffer size from config
-    tmux new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; exec /bin/bash --restricted'"
+    # Create session with -u for UTF-8 and set TERM
+    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; export TERM=xterm-256color; exec /bin/bash --restricted'"
     # Apply history limit
     tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
 fi
@@ -38,5 +43,5 @@ fi
 # 3. Aggressive resize and attach
 # Ensure the session has the correct global settings
 tmux set-option -g -t "$SESSION" window-size largest 2>/dev/null
-# Attach without -d to allow multiple clients to share the view (standard Unraid terminal behavior)
-exec tmux attach-session -t "$SESSION"
+# Attach with -u for UTF-8
+exec tmux -u attach-session -t "$SESSION"

@@ -9,7 +9,7 @@ $config = getGeminiConfig();
 
 <style>
     .gemini-layout { display: flex; gap: 20px; align-items: flex-start; width: 100%; margin-top: 10px; }
-    .gemini-cards { flex: 0 0 450px; display: flex; flex-direction: column; }
+    .gemini-cards { flex: 0 0 500px; display: flex; flex-direction: column; }
 
     .gemini-card {
         background: var(--background-color, #1e1e1e);
@@ -32,8 +32,8 @@ $config = getGeminiConfig();
     }
     .gemini-card-body { padding: 15px; color: var(--text-color, #ccc); }
 
-    .gemini-card-body dl { display: grid; grid-template-columns: 160px 1fr; gap: 8px 15px; margin: 0; }
-    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.2; text-align: right; }
+    .gemini-card-body dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 15px; margin: 0; }
+    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.2; text-align: left; }
     .gemini-card-body dl dd { margin: 0; color: var(--text-color); align-self: center; display: flex; align-items: center; gap: 8px; }
     
     .gemini-card-body input, .gemini-card-body select {
@@ -44,11 +44,12 @@ $config = getGeminiConfig();
         font-size: 0.95em;
         padding: 4px 8px !important;
         width: 100%;
+        box-sizing: border-box;
     }
-    .gemini-card-body input[type="number"] { width: 80px; }
+    .gemini-card-body input[type="number"] { width: 100px; flex: 0 0 100px; }
     
     .gemini-btn {
-        padding: 8px 20px;
+        padding: 10px 20px;
         border-radius: 4px;
         cursor: pointer;
         font-weight: bold;
@@ -59,23 +60,23 @@ $config = getGeminiConfig();
         color: #ff8c00 !important;
         text-transform: uppercase;
         width: 100%;
-        margin-top: 15px;
+        margin-top: 10px;
     }
     .gemini-btn:hover { background: #ff8c00 !important; color: #fff !important; }
     
-    .help-text { font-size: 0.8em; opacity: 0.5; margin-top: 4px; display: block; line-height: 1.4; }
+    .help-text { font-size: 0.8em; opacity: 0.5; margin-top: 4px; display: block; line-height: 1.4; padding-left: 5px; border-left: 2px solid #ff8c00; margin-left: 2px; }
 </style>
 
 <div class="gemini-layout">
     <div class="gemini-cards">
-        <!-- CARD: GLOBAL SETTINGS -->
-        <div class="gemini-card">
-            <div class="gemini-card-header">
-                <i class="fa fa-globe text-orange-500"></i>
-                <span>Global Settings</span>
-            </div>
-            <div class="gemini-card-body">
-                <form onsubmit="saveGeminiSettings(this); return false;">
+        <form onsubmit="saveGeminiSettings(this); return false;" id="gemini-settings-form">
+            <!-- CARD: GLOBAL SETTINGS -->
+            <div class="gemini-card">
+                <div class="gemini-card-header">
+                    <i class="fa fa-globe text-orange-500"></i>
+                    <span>Global Settings</span>
+                </div>
+                <div class="gemini-card-body">
                     <dl>
                         <dt>Enable Main Tab:</dt>
                         <dd>
@@ -90,19 +91,16 @@ $config = getGeminiConfig();
                         </dd>
                     </dl>
                     <span class="help-text">History limit sets the number of scrollback rows in the terminal session.</span>
-                    <button type="submit" class="gemini-btn">Apply Global Changes</button>
-                </form>
+                </div>
             </div>
-        </div>
 
-        <!-- CARD: SESSION PROFILE -->
-        <div class="gemini-card">
-            <div class="gemini-card-header">
-                <i class="fa fa-user-circle text-orange-500"></i>
-                <span>Session Profile</span>
-            </div>
-            <div class="gemini-card-body">
-                <form onsubmit="saveGeminiSettings(this); return false;">
+            <!-- CARD: SESSION PROFILE -->
+            <div class="gemini-card">
+                <div class="gemini-card-header">
+                    <i class="fa fa-user-circle text-orange-500"></i>
+                    <span>Session Profile</span>
+                </div>
+                <div class="gemini-card-body">
                     <dl>
                         <dt>Terminal Theme:</dt>
                         <dd>
@@ -130,28 +128,17 @@ $config = getGeminiConfig();
                         </dd>
                     </dl>
                     <span class="help-text">These settings define the environment and appearance for each new terminal session.</span>
-                    <button type="submit" class="gemini-btn">Update Profile</button>
-                </form>
+                </div>
             </div>
-        </div>
-        
-        <div style="text-align: center; margin-top: 10px;">
-            <input type="button" value="_(Done)_" onclick="done()" style="width: 120px;">
-        </div>
+            
+            <button type="submit" class="gemini-btn">Apply & Save Settings</button>
+        </form>
     </div>
 </div>
 
 <script>
 function saveGeminiSettings(form) {
     const formData = new FormData(form);
-    // Add all current config values to the form data to ensure we don't lose them
-    // as we have split the UI into two cards/forms
-    const currentConfig = <?=json_encode($config)?>;
-    for (const [key, value] of Object.entries(currentConfig)) {
-        if (!formData.has(key)) {
-            formData.append(key, value);
-        }
-    }
 
     fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=save', {
         method: 'POST',
@@ -163,7 +150,7 @@ function saveGeminiSettings(form) {
             if (typeof swal === 'function') {
                 swal({
                     title: "Settings Saved",
-                    text: "Terminal profile updated. Some changes require a session restart. Restart now?",
+                    text: "Changes applied. Some settings may require a terminal restart. Restart now?",
                     type: "success",
                     showCancelButton: true,
                     confirmButtonText: "Restart Terminal",
