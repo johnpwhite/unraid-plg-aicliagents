@@ -8,15 +8,20 @@ mkdir -p "$HOME"
 cd /mnt || exit 1
 export PATH=$PATH:/usr/local/bin:/boot/config/plugins/unraid-geminicli/bin
 
-echo "$(date) - Attaching to session $SESSION" >> "$LOG"
+echo "$(date) - Requesting session $SESSION" >> "$LOG"
 
-# 1. Check if tmux exists
+# Check for tmux
 if ! command -v tmux >/dev/null 2>&1; then
     exec /bin/bash --restricted
 fi
 
-# 2. Aggressive session setup
-# Use -A to attach if exists, or create if missing
-# Use -D to detach others and force resize
-# We wrap in sh -c to ensure the environment is rock solid
-exec tmux new-session -A -D -s "$SESSION" "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; exec /bin/bash --restricted'"
+# Ensure session exists with a LARGE default size
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "Creating new session with 200x80 size" >> "$LOG"
+    # -x 200 -y 80: Forces a large initial buffer to avoid tiny height bug
+    tmux new-session -d -s "$SESSION" -x 200 -y 80 "sh -c 'export HOME=\"$HOME\"; export PATH=\"$PATH\"; exec /bin/bash --restricted'"
+fi
+
+# Attach and force resize
+# -d: detach other clients (CRITICAL for resizing to CURRENT iframe size)
+exec tmux attach-session -t "$SESSION" -d
