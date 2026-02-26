@@ -2,12 +2,12 @@
 @tailwind utilities;
 
 /* 
- * IMPORTANT: All CSS variables are scoped under .copilot-ui 
+ * IMPORTANT: All CSS variables are scoped under .gemini-cli-ui 
  * to prevent leaking into Unraid's global styles.
- * The Drawer page loads on EVERY Unraid page, so any :root 
+ * The Gemini CLI page loads on EVERY Unraid page, so any :root 
  * styles here would override Unraid's own CSS variables.
  */
-.copilot-ui {
+.gemini-cli-ui {
   --background: 0 0% 100%;
   --foreground: 0 0% 3.9%;
   --card: 0 0% 100%;
@@ -39,8 +39,8 @@
 }
 
 /* Unraid dark mode detection */
-.copilot-ui.dark,
-body[class*="dark"] .copilot-ui {
+.gemini-cli-ui.dark,
+body[class*="dark"] .gemini-cli-ui {
   --background: 0 0% 3.9%;
   --foreground: 0 0% 98%;
   --card: 0 0% 3.9%;
@@ -67,61 +67,61 @@ body[class*="dark"] .copilot-ui {
 }
 
 /* Smooth scrolling for thread viewport */
-.copilot-ui .aui-thread-viewport {
+.gemini-cli-ui .aui-thread-viewport {
   scroll-behavior: smooth;
 }
 
 /* Native assistant-ui markdown styling (MarkdownTextPrimitive uses .aui-md) */
-.copilot-ui .aui-md {
+.gemini-cli-ui .aui-md {
   color: inherit;
   word-break: break-word;
   overflow-wrap: break-word;
 }
 
-.copilot-ui .aui-md p {
+.gemini-cli-ui .aui-md p {
   margin-top: 0;
   margin-bottom: 0.5rem;
 }
 
-.copilot-ui .aui-md ul,
-.copilot-ui .aui-md ol {
+.gemini-cli-ui .aui-md ul,
+.gemini-cli-ui .aui-md ol {
   margin-top: 0.5rem;
   margin-bottom: 0.5rem;
   padding-left: 1.5rem;
 }
 
-.copilot-ui .aui-md ul {
+.gemini-cli-ui .aui-md ul {
   list-style-type: disc;
 }
 
-.copilot-ui .aui-md ol {
+.gemini-cli-ui .aui-md ol {
   list-style-type: decimal;
 }
 
-.copilot-ui .aui-md li {
+.gemini-cli-ui .aui-md li {
   margin-top: 0.25rem;
   margin-bottom: 0.25rem;
 }
 
-.copilot-ui .aui-md h1 {
+.gemini-cli-ui .aui-md h1 {
   font-size: 1.5rem;
   font-weight: bold;
   margin: 0.75rem 0;
 }
 
-.copilot-ui .aui-md h2 {
+.gemini-cli-ui .aui-md h2 {
   font-size: 1.25rem;
   font-weight: bold;
   margin: 0.5rem 0;
 }
 
-.copilot-ui .aui-md h3 {
+.gemini-cli-ui .aui-md h3 {
   font-size: 1.125rem;
   font-weight: bold;
   margin: 0.5rem 0;
 }
 
-.copilot-ui .aui-md code {
+.gemini-cli-ui .aui-md code {
   background: rgba(0, 0, 0, 0.1);
   padding: 0.125rem 0.25rem;
   border-radius: 0.25rem;
@@ -129,7 +129,7 @@ body[class*="dark"] .copilot-ui {
   font-family: monospace;
 }
 
-.copilot-ui .aui-md pre {
+.gemini-cli-ui .aui-md pre {
   background: rgba(0, 0, 0, 0.05);
   padding: 0.75rem;
   border-radius: 0.375rem;
@@ -137,22 +137,22 @@ body[class*="dark"] .copilot-ui {
   margin: 0.5rem 0;
 }
 
-.copilot-ui .aui-md pre code {
+.gemini-cli-ui .aui-md pre code {
   background: transparent;
   padding: 0;
 }
 
 /* Unraid accent color for links and blockquotes */
-.copilot-ui .aui-md a {
+.gemini-cli-ui .aui-md a {
   color: #ff8c00;
   text-decoration: underline;
 }
 
-.copilot-ui .aui-md a:hover {
+.gemini-cli-ui .aui-md a:hover {
   text-decoration: none;
 }
 
-.copilot-ui .aui-md blockquote {
+.gemini-cli-ui .aui-md blockquote {
   border-left: 4px solid #ff8c00;
   padding-left: 1rem;
   margin: 0.5rem 0;
@@ -160,13 +160,13 @@ body[class*="dark"] .copilot-ui {
 }
 
 /* Tables */
-.copilot-ui .aui-md table {
+.gemini-cli-ui .aui-md table {
   min-width: 100%;
   border-collapse: collapse;
   margin: 0.5rem 0;
 }
 
-.copilot-ui .aui-md th {
+.gemini-cli-ui .aui-md th {
   border: 1px solid var(--border-color);
   padding: 0.5rem 0.75rem;
   text-align: left;
@@ -174,13 +174,13 @@ body[class*="dark"] .copilot-ui {
   background: rgba(0, 0, 0, 0.05);
 }
 
-.copilot-ui .aui-md td {
+.gemini-cli-ui .aui-md td {
   border: 1px solid var(--border-color);
   padding: 0.5rem 0.75rem;
 }
 
 /* Suggestion chip hover effect */
-.copilot-ui [data-suggestion]:hover {
+.gemini-cli-ui [data-suggestion]:hover {
   background: rgba(255, 140, 0, 0.1) !important;
   border-color: #ff8c00 !important;
   color: #ff8c00 !important;

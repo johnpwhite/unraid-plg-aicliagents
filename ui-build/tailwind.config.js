@@ -1,7 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 export default {
 	darkMode: ["class"],
-	important: '.copilot-ui',
+	important: '.gemini-cli-ui',
 	content: [
 		"./index.html",
 		"./src/**/*.{js,ts,jsx,tsx}",
