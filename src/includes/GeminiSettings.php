@@ -105,6 +105,21 @@ if (isset($_GET['action'])) {
         stopGeminiTerminal(true);
         startGeminiTerminal();
         echo json_encode(['status' => 'ok']);
+    } elseif ($_GET['action'] === 'debug') {
+        $debug = [
+            'ttyd' => exec("which ttyd 2>&1"),
+            'tmux' => exec("which tmux 2>&1"),
+            'path' => getenv('PATH'),
+            'user' => posix_getpwuid(posix_geteuid())['name'],
+            'sock' => file_exists("/var/run/geminiterm.sock"),
+            'running' => isGeminiRunning(),
+            'log' => file_exists("/tmp/gemini-shell.log") ? tail("/tmp/gemini-shell.log", 20) : "No log found"
+        ];
+        echo json_encode($debug);
     }
     exit;
+}
+
+function tail($file, $lines) {
+    return explode("\n", shell_exec("tail -n $lines " . escapeshellarg($file)));
 }

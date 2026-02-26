@@ -12,7 +12,11 @@ echo "$(date) - Attaching to session $SESSION" >> "$LOG"
 
 # 1. Fallback if no tmux
 if ! command -v tmux >/dev/null 2>&1; then
-    echo "tmux not found" >> "$LOG"
+    echo "$(date) - ERROR: tmux not found in PATH ($PATH)" >> "$LOG"
+    echo "------------------------------------------------"
+    echo " WARNING: tmux not found. Session sync disabled."
+    echo " Please install tmux or ensure it is in your PATH."
+    echo "------------------------------------------------"
     exec /bin/bash --restricted
 fi
 
