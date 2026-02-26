@@ -30,9 +30,9 @@ body, #displaybox, #sb-body, .gemini-cli-ui {
 
 #gemini-cli-root {
     width: 100%;
-    /* 200px accounts for large header, footer, and subheaders. 
-       Adjusted from 170 to avoid footer overlap. */
-    height: calc(100vh - 200px);
+    /* 230px accounts for large header, footer, and subheaders. 
+       Adjusted to ensure full visibility above footer. */
+    height: calc(100vh - 230px);
     display: flex;
     flex-direction: column;
     margin: 0;

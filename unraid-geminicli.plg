@@ -2,16 +2,19 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.13">
+<!ENTITY version   "2026.02.26.14">
 <!ENTITY launch    "Settings/GeminiCLI">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.13" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.14" launch="Settings/GeminiCLI" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.14
+- Fix: Added aggressive process cleanup to installer to resolve session sync
+- Adjusted height offset to 230px to clear footer completely.
 ## 2026.02.26.13
 - Fix: Aggressive process management
 - Always kill and restart ttyd on socket access to ensure correct flags (removed closeOnDisconnect)
@@ -42,6 +45,13 @@ EMHTTP_DEST="/usr/local/emhttp/plugins/$NAME"
 CONFIG_DIR="/boot/config/plugins/$NAME"
 
 echo "--- INSTALL START ---"
+# Force cleanup of any old processes during install to ensure clean state
+echo "Cleaning up existing processes..."
+ps -ef | grep geminiterm.sock | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&amp;1 || true
+tmux kill-session -t gemini-cli > /dev/null 2>&amp;1 || true
+rm -f /var/run/geminiterm.sock
+rm -f /var/run/unraid-geminicli.pid
+
 # Aggressive cleanup of ALL previous assets to ensure fresh load
 rm -rf "$EMHTTP_DEST"
 mkdir -p "$EMHTTP_DEST/bin"
