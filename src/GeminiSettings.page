@@ -37,7 +37,7 @@ $csrf_token = $var['csrf_token'] ?? '';
 
     .gemini-card-body dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 15px; margin: 0; }
     .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.4; text-align: left; }
-    .gemini-card-body dl dd { margin: 0; color: var(--text-color); }
+    .gemini-card-body dl dd { margin: 0; color: var(--text-color); display: flex; justify-content: flex-start; }
     
     .gemini-card-body input, .gemini-card-body select {
         background: var(--background-color, #111) !important;
@@ -50,7 +50,6 @@ $csrf_token = $var['csrf_token'] ?? '';
         line-height: 20px !important;
         box-sizing: border-box;
         margin: 0 !important;
-        display: block;
     }
     .gemini-card-body input[type="number"] { width: 100px !important; text-align: left !important; }
     .gemini-card-body input[type="text"], .gemini-card-body select { width: 100%; }
@@ -148,10 +147,7 @@ $csrf_token = $var['csrf_token'] ?? '';
 <script>
 function saveGeminiSettings(form) {
     const formData = new FormData(form);
-    const params = new URLSearchParams();
-    for (const pair of formData.entries()) {
-        params.append(pair[0], pair[1]);
-    }
+    const params = new URLSearchParams(formData);
 
     fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=save', {
         method: 'POST',

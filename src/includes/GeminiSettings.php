@@ -142,6 +142,8 @@ function startGeminiTerminal($id = 'default', $workingDir = null) {
            "-t fontSize={$config['font_size']} " .
            "-t fontFamily='monospace' " .
            "-t disableLeaveAlert=true " .
+           "-t enable-utf8=true " .
+           "-t titleFixed='Gemini CLI - $id' " .
            "bash -c \"$env $shell\"";
     
     exec("nohup $cmd >> $log 2>&1 & echo $!", $output);

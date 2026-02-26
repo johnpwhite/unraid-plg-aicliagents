@@ -2,16 +2,26 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.50">
+<!ENTITY version   "2026.02.26.52">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.50" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.52" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.52
+- Fix: Perfect field alignment in settings
+- Fix: Apply &amp; Save button submission
+- Fix: Terminal rendering improvements (UTF-8)
+## 2026.02.26.51
+- Fix: Perfectly left-aligned all settings fields (Number, Text, Select) within cards.
+- Fix: Resolved "Apply &amp; Save" submission by ensuring CSRF and URLSearchParams are correctly handled.
+- Fix: Improved terminal rendering (Gemini logo, diffs) by forcing UTF-8 mode in ttyd.
+- Improved: Enhanced terminal stability with fixed titles and improved persistence loops.
+- Removed: "Done" button from settings page for a cleaner look.
 ## 2026.02.26.50
 - Fix: PHP fatal error (duplicate function definition)
 - Verified: Clean GeminiSettings
