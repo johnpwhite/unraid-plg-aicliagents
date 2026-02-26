@@ -54,16 +54,16 @@ done
 EOF
     chmod +x "$RUN_SCRIPT"
 
-    # Set global history limit BEFORE creating the session so the first pane inherits it
-    tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
-    # Hide status bar to maximize space for Gemini CLI
-    tmux set-option -g status off 2>/dev/null
-
     # Create session with -u for UTF-8 and set TERM
     tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$RUN_SCRIPT"
 fi
 
-# 3. Aggressive resize and attach
+# 3. Apply settings EVERY time (not just on creation) so config changes take effect
+tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
+tmux set-option -g status off 2>/dev/null
+echo "$(date) - Applied history-limit=$HISTORY_LIMIT, status=off" >> "$LOG"
+
+# 4. Aggressive resize and attach
 # Ensure the session has the correct global settings
 tmux set-option -g -t "$SESSION" window-size largest 2>/dev/null
 # Attach with -u for UTF-8

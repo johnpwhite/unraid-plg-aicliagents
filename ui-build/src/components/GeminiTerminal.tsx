@@ -90,7 +90,7 @@ export const GeminiTerminal: React.FC = () => {
 
     const confirmWorkspace = () => {
         const name = currentPath.split('/').pop() || 'Workspace';
-        // Shorter, very safe alphanumeric ID for NGINX compatibility
+        // Short safe alphanumeric ID for NGINX compatibility
         const newId = 's' + Math.random().toString(36).substring(2, 7);
         const newSessions = [...sessions, { id: newId, name: name, path: currentPath, lastActive: Date.now() }];
         setSessions(newSessions);
@@ -132,7 +132,7 @@ export const GeminiTerminal: React.FC = () => {
 
     if (!config) {
         return (
-            <div className="flex-1 flex items-center justify-center bg-[#1e1e1e] font-mono text-sm text-gray-500 uppercase tracking-[0.2em] animate-pulse">
+            <div style={styles.loading}>
                 Initializing Gemini Session...
             </div>
         );
@@ -144,28 +144,30 @@ export const GeminiTerminal: React.FC = () => {
     const terminalUrl = `/webterminal/geminiterm-${activeId}/?theme=${themeParams}&fontSize=${config.font_size}&fontFamily=monospace&disableLeaveAlert=true&v=${activeSession?.lastActive || Date.now()}`;
 
     return (
-        <div className="flex-1 flex flex-col bg-[var(--background-color)] text-[var(--text-color)] overflow-hidden h-full relative">
+        <div style={styles.root}>
             {/* Session Header */}
-            <div className="flex items-end justify-between px-4 pt-2 bg-[var(--header-background,#2d2d2d)] border-b border-[var(--border-color,#444)] select-none min-h-[48px] z-10">
-                <div className="flex items-end gap-1 overflow-x-auto no-scrollbar max-w-[70%]">
+            <div style={styles.header}>
+                <div style={styles.tabStrip}>
                     {sessions.map(s => {
                         const displayName = s.id === 'default'
                             ? (s.path === config?.root_path ? 'Main' : s.path.split('/').pop() || 'Main')
                             : s.name;
+                        const isActive = activeId === s.id;
                         return (
                             <div
                                 key={s.id}
                                 onClick={() => setActiveId(s.id)}
-                                className={`flex items-center gap-2 px-4 py-2 rounded-t-md cursor-pointer transition-all border-t border-x text-[13px] font-bold uppercase tracking-tight whitespace-nowrap mb-[-1px] ${activeId === s.id
-                                    ? 'bg-[var(--background-color)] border-[var(--border-color,#444)] text-orange-400 z-10'
-                                    : 'bg-[rgba(0,0,0,0.05)] border-transparent text-[var(--text-color)] opacity-50 hover:bg-[rgba(0,0,0,0.1)] hover:opacity-80'
-                                    }`}
+                                style={{
+                                    ...styles.tab,
+                                    ...(isActive ? styles.tabActive : styles.tabInactive),
+                                }}
                             >
-                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'} ${activeId === s.id ? 'opacity-100' : 'opacity-60'}`}></i>
+                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6 }}></i>
                                 {displayName}
                                 {s.id !== 'default' && (
                                     <i
-                                        className="fa fa-times ml-2 hover:text-white opacity-40 hover:opacity-100 transition-opacity"
+                                        className="fa fa-times"
+                                        style={styles.tabClose}
                                         onClick={(e) => closeTab(e, s.id)}
                                     ></i>
                                 )}
@@ -174,12 +176,9 @@ export const GeminiTerminal: React.FC = () => {
                     })}
                 </div>
 
-                <div className="flex items-center gap-2 pb-2">
-                    <button
-                        onClick={openBrowser}
-                        className="flex items-center justify-center gap-2 px-4 h-9 bg-[var(--button-bg,#3a3a3a)] hover:bg-[var(--button-hover,#4a4a4a)] text-[var(--button-text,#fff)] text-[13px] font-bold uppercase rounded-sm transition-all border border-[var(--border-color,#444)] active:scale-95"
-                    >
-                        <i className="fa fa-plus-circle text-orange-400"></i>
+                <div style={styles.headerActions}>
+                    <button onClick={openBrowser} style={styles.headerBtn}>
+                        <i className="fa fa-plus-circle" style={{ color: 'var(--orange, #e68a00)' }}></i>
                         New Workspace
                     </button>
                     <button
@@ -188,7 +187,7 @@ export const GeminiTerminal: React.FC = () => {
                             setSessions(newSessions);
                             fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
                         }}
-                        className="w-11 h-9 flex items-center justify-center bg-[var(--button-bg,#3a3a3a)] hover:bg-orange-600 text-[var(--button-text,#fff)] rounded-sm transition-all border border-[var(--border-color,#444)]"
+                        style={{ ...styles.headerBtn, width: 36, paddingLeft: 0, paddingRight: 0 }}
                         title="Restart Session"
                     >
                         <i className="fa fa-refresh"></i>
@@ -197,85 +196,80 @@ export const GeminiTerminal: React.FC = () => {
             </div>
 
             {/* Terminal Viewport */}
-            <div className="flex-1 w-full bg-[var(--background-color)] relative overflow-hidden h-full z-0">
+            <div style={styles.viewport}>
                 {isStarting && (
-                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--background-color)] bg-opacity-80 backdrop-blur-sm">
-                        <div className="flex flex-col items-center gap-3">
-                            <i className="fa fa-circle-o-notch fa-spin text-orange-500 text-2xl"></i>
-                            <span className="text-xs font-mono text-gray-400 uppercase tracking-widest">Waking Gemini...</span>
+                    <div style={styles.startingOverlay}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                            <i className="fa fa-circle-o-notch fa-spin" style={{ fontSize: 24, color: 'var(--orange, #e68a00)' }}></i>
+                            <span style={{ fontSize: 12, fontFamily: 'monospace', opacity: 0.6, textTransform: 'uppercase' as const, letterSpacing: '0.1em' }}>Waking Gemini...</span>
                         </div>
                     </div>
                 )}
                 <iframe
                     key={activeId + (activeSession?.lastActive || '')}
                     src={terminalUrl}
-                    className="absolute inset-0 w-full h-full border-none"
+                    style={styles.iframe}
                     title="Gemini Terminal"
-                    style={{ height: '100%', width: '100%' }}
                 />
             </div>
 
-            {/* Absolute Overlay Modal */}
+            {/* Workspace Browser Modal */}
             {browserOpen && (
-                <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-md">
-                    <div className="w-[500px] bg-[var(--background-color)] rounded-lg shadow-2xl border border-[var(--border-color,#444)] overflow-hidden animate-in fade-in zoom-in duration-200">
-                        <div className="px-4 py-3 bg-[var(--header-background,#333)] border-b border-[var(--border-color,#444)] flex items-center justify-between font-sans">
-                            <h3 className="text-[var(--text-color)] font-bold text-sm uppercase tracking-wider flex items-center gap-2">
-                                <i className="fa fa-folder-open text-orange-500"></i>
-                                Select Workspace
-                            </h3>
-                            <button onClick={() => setBrowserOpen(false)} className="text-[var(--text-color)] opacity-50 hover:opacity-100 transition-opacity">
+                <div style={styles.modalBackdrop}>
+                    <div style={styles.modalBox}>
+                        {/* Modal Header */}
+                        <div style={styles.modalHeader}>
+                            <span style={styles.modalTitle}>
+                                <i className="fa fa-folder-open" style={{ color: 'var(--orange, #e68a00)' }}></i>
+                                {' '}Select Workspace
+                            </span>
+                            <button onClick={() => setBrowserOpen(false)} style={styles.modalCloseX}>
                                 <i className="fa fa-times"></i>
                             </button>
                         </div>
 
-                        <div className="p-4">
-                            <div className="mb-3 flex items-center gap-2 px-2 py-1.5 bg-[rgba(0,0,0,0.05)] rounded border border-[var(--border-color,#444)] text-xs font-mono text-[var(--text-color)] opacity-70">
+                        {/* Modal Body */}
+                        <div style={styles.modalBody}>
+                            <div style={styles.pathBar}>
                                 <i className="fa fa-hdd-o"></i>
                                 {currentPath}
                             </div>
 
-                            <div className="h-[250px] overflow-y-auto bg-[rgba(0,0,0,0.05)] rounded border border-[var(--border-color,#444)] mb-4 custom-scrollbar">
+                            <div style={styles.dirList}>
                                 {dirItems.map((item, i) => (
                                     <div
                                         key={i}
                                         onClick={() => browseTo(item.path)}
-                                        className="flex items-center gap-3 px-3 py-2 hover:bg-[#333] cursor-pointer group transition-colors border-b border-[#222] last:border-0"
+                                        style={styles.dirItem}
+                                        onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--title-header-background-color, rgba(0,0,0,0.08))')}
+                                        onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
                                     >
-                                        <i className={`fa ${item.name === '..' ? 'fa-level-up' : 'fa-folder'} ${item.name === '..' ? 'text-gray-500' : 'text-orange-500'} opacity-60 group-hover:opacity-100`}></i>
-                                        <span className="text-[var(--text-color)] text-[13px] group-hover:opacity-100 opacity-80">{item.name}</span>
+                                        <i className={`fa ${item.name === '..' ? 'fa-level-up' : 'fa-folder'}`} style={{ color: item.name === '..' ? 'inherit' : 'var(--orange, #e68a00)', opacity: 0.7 }}></i>
+                                        <span>{item.name}</span>
                                     </div>
                                 ))}
                             </div>
 
-                            <div className="flex gap-2">
+                            <div style={styles.createRow}>
                                 <input
                                     type="text"
                                     placeholder="New Folder..."
                                     value={newDirName}
                                     onChange={(e) => setNewDirName(e.target.value)}
-                                    className="flex-1 h-9 bg-[var(--background-color)] border border-[var(--border-color,#444)] text-[var(--text-color)] text-[13px] px-3 py-2 rounded outline-none focus:border-orange-500 transition-colors"
+                                    style={styles.createInput}
                                 />
-                                <button
-                                    onClick={createFolder}
-                                    className="px-4 h-9 bg-[var(--button-bg,#3a3a3a)] hover:bg-[var(--button-hover,#4a4a4a)] text-[var(--button-text,#fff)] text-xs font-bold uppercase rounded transition-colors border border-[var(--border-color,#444)]"
-                                >
+                                <button onClick={createFolder} style={styles.createBtn}>
                                     Create
                                 </button>
                             </div>
                         </div>
 
-                        <div className="px-4 py-3 bg-[var(--header-background,#3a3a3a)] border-t border-[var(--border-color,#444)] flex justify-end gap-2">
-                            <button
-                                onClick={() => setBrowserOpen(false)}
-                                className="px-4 py-1.5 text-[var(--text-color)] opacity-60 hover:opacity-100 text-xs font-bold uppercase transition-colors"
-                            >
+                        {/* Modal Footer */}
+                        <div style={styles.modalFooter}>
+                            <button onClick={() => setBrowserOpen(false)} style={styles.cancelBtn}>
                                 Cancel
                             </button>
-                            <button
-                                onClick={confirmWorkspace}
-                                className="px-6 py-1.5 bg-orange-600 hover:bg-orange-500 text-white text-xs font-black uppercase rounded shadow-lg transition-all active:scale-95"
-                            >
+                            <button onClick={confirmWorkspace} style={styles.openBtn}>
                                 Open Workspace
                             </button>
                         </div>
@@ -284,4 +278,278 @@ export const GeminiTerminal: React.FC = () => {
             )}
         </div>
     );
+};
+
+/* ─── Inline styles using Unraid CSS variables ─── */
+const styles: Record<string, React.CSSProperties> = {
+    root: {
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        height: '100%',
+        position: 'relative',
+        fontFamily: 'inherit',
+        fontSize: 13,
+        color: 'var(--text-color, inherit)',
+        backgroundColor: 'var(--content-background-color, var(--body-background, #f5f5f5))',
+    },
+    loading: {
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: 'monospace',
+        fontSize: 14,
+        opacity: 0.5,
+        textTransform: 'uppercase' as const,
+        letterSpacing: '0.2em',
+    },
+
+    /* ── Header ── */
+    header: {
+        display: 'flex',
+        alignItems: 'flex-end',
+        justifyContent: 'space-between',
+        padding: '6px 12px 0',
+        backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
+        borderBottom: '1px solid var(--border-color, #ccc)',
+        userSelect: 'none',
+        minHeight: 44,
+        zIndex: 10,
+    },
+    tabStrip: {
+        display: 'flex',
+        alignItems: 'flex-end',
+        gap: 2,
+        overflowX: 'auto',
+        maxWidth: '70%',
+    },
+    tab: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '7px 14px',
+        borderRadius: '6px 6px 0 0',
+        cursor: 'pointer',
+        fontSize: 13,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        letterSpacing: '-0.02em',
+        whiteSpace: 'nowrap',
+        marginBottom: -1,
+        transition: 'all 0.15s',
+        borderTop: '1px solid transparent',
+        borderLeft: '1px solid transparent',
+        borderRight: '1px solid transparent',
+    },
+    tabActive: {
+        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        borderColor: 'var(--border-color, #ccc)',
+        color: 'var(--orange, #e68a00)',
+    },
+    tabInactive: {
+        backgroundColor: 'transparent',
+        color: 'inherit',
+        opacity: 0.55,
+    },
+    tabClose: {
+        marginLeft: 6,
+        opacity: 0.4,
+        cursor: 'pointer',
+        transition: 'opacity 0.15s',
+    },
+    headerActions: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        paddingBottom: 6,
+    },
+    headerBtn: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        padding: '0 14px',
+        height: 32,
+        fontSize: 12,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        border: '1px solid var(--button-border, var(--border-color, #bbb))',
+        borderRadius: 4,
+        backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
+        color: 'var(--button-text-color, inherit)',
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+    },
+
+    /* ── Terminal ── */
+    viewport: {
+        flex: 1,
+        width: '100%',
+        position: 'relative',
+        overflow: 'hidden',
+        height: '100%',
+        zIndex: 0,
+    },
+    startingOverlay: {
+        position: 'absolute',
+        inset: 0,
+        zIndex: 10,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'var(--content-background-color, rgba(255,255,255,0.85))',
+        backdropFilter: 'blur(4px)',
+    },
+    iframe: {
+        position: 'absolute',
+        inset: 0,
+        width: '100%',
+        height: '100%',
+        border: 'none',
+    },
+
+    /* ── Modal ── */
+    modalBackdrop: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 99999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        backdropFilter: 'blur(6px)',
+    },
+    modalBox: {
+        width: 500,
+        borderRadius: 8,
+        overflow: 'hidden',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+        border: '1px solid var(--border-color, #ccc)',
+        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        color: 'var(--text-color, inherit)',
+    },
+    modalHeader: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '10px 16px',
+        backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
+        borderBottom: '1px solid var(--border-color, #ccc)',
+    },
+    modalTitle: {
+        fontWeight: 700,
+        fontSize: 14,
+        textTransform: 'uppercase' as const,
+        letterSpacing: '0.05em',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+    },
+    modalCloseX: {
+        background: 'none',
+        border: 'none',
+        fontSize: 16,
+        cursor: 'pointer',
+        opacity: 0.5,
+        color: 'inherit',
+        padding: 4,
+        transition: 'opacity 0.15s',
+    },
+    modalBody: {
+        padding: 16,
+    },
+    pathBar: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '6px 10px',
+        marginBottom: 12,
+        fontSize: 12,
+        fontFamily: 'monospace',
+        opacity: 0.65,
+        borderRadius: 4,
+        border: '1px solid var(--border-color, #ccc)',
+        backgroundColor: 'var(--mild-background-color, rgba(0,0,0,0.03))',
+    },
+    dirList: {
+        height: 250,
+        overflowY: 'auto',
+        borderRadius: 4,
+        border: '1px solid var(--border-color, #ccc)',
+        marginBottom: 12,
+    },
+    dirItem: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 12px',
+        cursor: 'pointer',
+        fontSize: 13,
+        transition: 'background-color 0.15s',
+        borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.06))',
+    },
+    createRow: {
+        display: 'flex',
+        gap: 8,
+    },
+    createInput: {
+        flex: 1,
+        height: 32,
+        padding: '0 10px',
+        fontSize: 13,
+        border: '1px solid var(--border-color, #ccc)',
+        borderRadius: 4,
+        backgroundColor: 'var(--input-bg-color, var(--mild-background-color, #fff))',
+        color: 'inherit',
+        outline: 'none',
+    },
+    createBtn: {
+        height: 32,
+        padding: '0 14px',
+        fontSize: 12,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        border: '1px solid var(--button-border, var(--border-color, #bbb))',
+        borderRadius: 4,
+        backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
+        color: 'var(--button-text-color, inherit)',
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+    },
+    modalFooter: {
+        display: 'flex',
+        justifyContent: 'flex-end',
+        gap: 8,
+        padding: '10px 16px',
+        backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
+        borderTop: '1px solid var(--border-color, #ccc)',
+    },
+    cancelBtn: {
+        padding: '6px 14px',
+        fontSize: 12,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        backgroundColor: 'transparent',
+        border: '1px solid var(--border-color, #ccc)',
+        borderRadius: 4,
+        color: 'inherit',
+        cursor: 'pointer',
+        opacity: 0.7,
+        transition: 'all 0.15s',
+    },
+    openBtn: {
+        padding: '6px 20px',
+        fontSize: 12,
+        fontWeight: 900,
+        textTransform: 'uppercase' as const,
+        backgroundColor: 'var(--orange, #e68a00)',
+        border: 'none',
+        borderRadius: 4,
+        color: '#fff',
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+    },
 };
