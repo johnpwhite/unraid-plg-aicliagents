@@ -29,8 +29,8 @@ body, #displaybox, #sb-body {
 
 #gemini-cli-root {
     width: 100%;
-    /* Increased offset to 260px to clear the footer and give room for subheaders */
-    height: calc(100vh - 260px);
+    /* Reverted to 230px as it was the best balance for footer clearance */
+    height: calc(100vh - 230px);
     display: flex;
     flex-direction: column;
     margin: 0;
