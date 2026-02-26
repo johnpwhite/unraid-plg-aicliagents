@@ -90,7 +90,7 @@ export const GeminiTerminal: React.FC = () => {
 
     const confirmWorkspace = () => {
         const name = currentPath.split('/').pop() || 'Workspace';
-        const newId = 'sess_' + Date.now();
+        const newId = 'sess' + Date.now(); // Removed underscore for NGINX regex compatibility
         const newSessions = [...sessions, { id: newId, name, path: currentPath, lastActive: Date.now() }];
         setSessions(newSessions);
         setActiveId(newId);
@@ -140,32 +140,37 @@ export const GeminiTerminal: React.FC = () => {
             {/* Session Header */}
             <div className="flex items-end justify-between px-4 pt-2 bg-[#2d2d2d] border-b border-[#444] select-none min-h-[48px] z-10">
                 <div className="flex items-end gap-1 overflow-x-auto no-scrollbar max-w-[70%]">
-                    {sessions.map(s => (
-                        <div 
-                            key={s.id}
-                            onClick={() => setActiveId(s.id)}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-t-md cursor-pointer transition-all border-t border-x text-xs font-bold uppercase tracking-tight whitespace-nowrap mb-[-1px] ${
-                                activeId === s.id 
-                                ? 'bg-[#1e1e1e] border-[#444] text-orange-400 z-10' 
-                                : 'bg-[#333] border-transparent text-gray-500 hover:bg-[#3a3a3a] hover:text-gray-300'
-                            }`}
-                        >
-                            <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'} ${activeId === s.id ? 'opacity-100' : 'opacity-60'}`}></i>
-                            {s.name}
-                            {s.id !== 'default' && (
-                                <i 
-                                    className="fa fa-times ml-2 hover:text-white opacity-40 hover:opacity-100 transition-opacity" 
-                                    onClick={(e) => closeTab(e, s.id)}
-                                ></i>
-                            )}
-                        </div>
-                    ))}
+                    {sessions.map(s => {
+                        const displayName = s.id === 'default' 
+                            ? (s.path === config?.root_path ? 'Main' : s.path.split('/').pop() || 'Main') 
+                            : s.name;
+                        return (
+                            <div 
+                                key={s.id}
+                                onClick={() => setActiveId(s.id)}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-t-md cursor-pointer transition-all border-t border-x text-xs font-bold uppercase tracking-tight whitespace-nowrap mb-[-1px] ${
+                                    activeId === s.id 
+                                    ? 'bg-[#1e1e1e] border-[#444] text-orange-400 z-10' 
+                                    : 'bg-[#333] border-transparent text-gray-500 hover:bg-[#3a3a3a] hover:text-gray-300'
+                                }`}
+                            >
+                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'} ${activeId === s.id ? 'opacity-100' : 'opacity-60'}`}></i>
+                                {displayName}
+                                {s.id !== 'default' && (
+                                    <i 
+                                        className="fa fa-times ml-2 hover:text-white opacity-40 hover:opacity-100 transition-opacity" 
+                                        onClick={(e) => closeTab(e, s.id)}
+                                    ></i>
+                                )}
+                            </div>
+                        );
+                    })}
                 </div>
 
                 <div className="flex items-center gap-2 pb-2">
                     <button 
                         onClick={openBrowser}
-                        className="flex items-center justify-center gap-2 px-3 h-8 bg-[#3a3a3a] hover:bg-[#4a4a4a] text-white text-xs font-bold uppercase rounded-sm transition-all border border-[#444] active:scale-95"
+                        className="flex items-center justify-center gap-2 px-4 h-9 bg-[#3a3a3a] hover:bg-[#4a4a4a] text-white text-xs font-bold uppercase rounded-sm transition-all border border-[#444] active:scale-95"
                     >
                         <i className="fa fa-plus-circle text-orange-400"></i>
                         New Workspace
@@ -176,7 +181,7 @@ export const GeminiTerminal: React.FC = () => {
                             setSessions(newSessions);
                             fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
                         }}
-                        className="w-10 h-8 flex items-center justify-center bg-[#3a3a3a] hover:bg-orange-600 text-white rounded-sm transition-all border border-[#444]"
+                        className="w-11 h-9 flex items-center justify-center bg-[#3a3a3a] hover:bg-orange-600 text-white rounded-sm transition-all border border-[#444]"
                         title="Restart Session"
                     >
                         <i className="fa fa-refresh"></i>
@@ -205,7 +210,7 @@ export const GeminiTerminal: React.FC = () => {
 
             {/* Absolute Overlay Modal */}
             {browserOpen && (
-                <div className="absolute inset-0 z-[99999] flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-md">
+                <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-md">
                     <div className="w-[500px] bg-[#2a2a2a] rounded-lg shadow-2xl border border-[#444] overflow-hidden animate-in fade-in zoom-in duration-200">
                         <div className="px-4 py-3 bg-[#333] border-b border-[#444] flex items-center justify-between">
                             <h3 className="text-white font-bold text-xs uppercase tracking-wider flex items-center gap-2">

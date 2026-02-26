@@ -45,6 +45,8 @@ export HOME="$GEMINI_HOME"
 export PATH="$PATH"
 export TERM=xterm-256color
 while true; do
+    clear
+    echo -e "\n\033[1;36mPlease wait, Gemini CLI loading...\033[0m\n"
     gemini
     echo -e "\n\033[1;33m[Gemini CLI Exited]\033[0m Press ENTER to reload, or wait 3 seconds..."
     read -t 3 -r
@@ -54,6 +56,8 @@ EOF
 
     # Set global history limit BEFORE creating the session so the first pane inherits it
     tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
+    # Hide status bar to maximize space for Gemini CLI
+    tmux set-option -g status off 2>/dev/null
 
     # Create session with -u for UTF-8 and set TERM
     tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$RUN_SCRIPT"
