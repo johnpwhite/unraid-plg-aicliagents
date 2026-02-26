@@ -29,12 +29,13 @@ body, #displaybox, #sb-body {
 
 #gemini-cli-root {
     width: 100%;
-    /* Reverted to 230px as it was the best balance for footer clearance */
+    /* Reverted to 230px as requested for prior stable sizing */
     height: calc(100vh - 230px);
     display: flex;
     flex-direction: column;
     margin: 0;
     padding: 0;
+    overflow-x: hidden; /* Kill horizontal scroll */
 }
 
 .gemini-cli-ui {

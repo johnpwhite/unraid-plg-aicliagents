@@ -36,7 +36,6 @@ export const GeminiTerminal: React.FC = () => {
     const syncSession = async (hard: boolean = false) => {
         setIsSyncing(true);
         try {
-            // Restart forces a cleanup of both ttyd and the tmux session
             const action = hard ? 'restart' : 'start';
             await fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=${action}`);
             setKey(Date.now());
@@ -48,37 +47,38 @@ export const GeminiTerminal: React.FC = () => {
     };
 
     const themeParams = encodeURIComponent(THEMES[themeName]);
+    // ttyd supports theme and fontSize via query params
     const terminalUrl = `/webterminal/geminiterm/?theme=${themeParams}&fontSize=${fontSize}&fontFamily=monospace&disableLeaveAlert=true&v=${key}`;
 
     return (
-        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-sm border border-[#333] overflow-hidden shadow-2xl h-full">
-            {/* Toolbar - Senior UX Refinement */}
+        <div className="flex-1 flex flex-col bg-[#1e1e1e] rounded-sm border border-[#333] overflow-hidden h-full">
+            {/* Toolbar - Standard Unraid Look */}
             <div className="flex items-center justify-between px-4 py-2 bg-[#2a2a2a] border-b border-[#333] select-none min-h-[52px]">
                 <div className="flex items-center gap-3">
                     <i className="fa fa-terminal text-orange-500 text-lg"></i>
                     <div className="flex flex-col">
                         <span className="text-white font-bold text-[11px] tracking-wider uppercase">GEMINI CLI</span>
-                        <span className="text-gray-500 text-[9px] font-mono uppercase tracking-tighter opacity-80">Connected: /mnt</span>
+                        <span className="text-gray-500 text-[9px] font-mono uppercase tracking-tighter opacity-80">Restricted Access /mnt</span>
                     </div>
                 </div>
 
                 <div className="flex items-center gap-4">
-                    {/* Font Scaling - Centered and Boxed */}
-                    <div className="flex items-center bg-[#1e1e1e] rounded-sm border border-[#444] p-0.5 shadow-inner overflow-hidden">
+                    {/* Font Size Group - Centered Label */}
+                    <div className="flex items-center bg-[#1e1e1e] rounded-sm border border-[#444] p-0.5 shadow-inner">
                         <button 
                             onClick={() => handleFontSize(-1)} 
-                            className="w-8 h-8 flex items-center justify-center hover:bg-orange-600 text-gray-400 hover:text-white transition-all active:scale-90"
+                            className="w-8 h-8 flex items-center justify-center hover:bg-orange-600 text-gray-400 hover:text-white transition-all"
                         >
                             <i className="fa fa-minus text-[10px]"></i>
                         </button>
                         
-                        <div className="w-10 text-center text-[11px] font-black text-white font-mono border-x border-[#333]">
+                        <div className="w-10 text-center text-xs font-bold text-white font-mono border-x border-[#333]">
                             {fontSize}
                         </div>
 
                         <button 
                             onClick={() => handleFontSize(1)} 
-                            className="w-8 h-8 flex items-center justify-center hover:bg-orange-600 text-gray-400 hover:text-white transition-all active:scale-90"
+                            className="w-8 h-8 flex items-center justify-center hover:bg-orange-600 text-gray-400 hover:text-white transition-all"
                         >
                             <i className="fa fa-plus text-[10px]"></i>
                         </button>
@@ -92,8 +92,8 @@ export const GeminiTerminal: React.FC = () => {
                             className="bg-[#1e1e1e] text-white text-[10px] pl-3 pr-8 h-9 rounded-sm border border-[#444] outline-none cursor-pointer hover:border-orange-500 transition-all appearance-none uppercase font-bold tracking-tight shadow-inner min-w-[120px]"
                             style={{ WebkitAppearance: 'none', MozAppearance: 'none' }}
                         >
-                            <option value="dark">Dark Theme</option>
-                            <option value="light">Light Theme</option>
+                            <option value="dark">Dark</option>
+                            <option value="light">Light</option>
                             <option value="solarized">Solarized</option>
                         </select>
                         <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
@@ -106,7 +106,7 @@ export const GeminiTerminal: React.FC = () => {
                         <button 
                             onClick={() => syncSession(false)}
                             disabled={isSyncing}
-                            className="h-9 flex items-center gap-2 px-4 bg-[#333] hover:bg-[#444] text-white text-[10px] rounded-sm transition-all font-bold uppercase border border-[#444] active:scale-95 shadow-md"
+                            className="h-9 flex items-center gap-2 px-4 bg-[#333] hover:bg-[#444] text-white text-[10px] rounded-sm transition-all font-bold uppercase border border-[#444]"
                         >
                             <i className={`fa fa-refresh ${isSyncing ? 'fa-spin' : ''}`}></i>
                             Reconnect
@@ -122,7 +122,7 @@ export const GeminiTerminal: React.FC = () => {
                 </div>
             </div>
 
-            {/* Terminal Viewport */}
+            {/* Terminal Container */}
             <div className="flex-1 w-full bg-[#1e1e1e] relative overflow-hidden h-full">
                 <iframe 
                     key={`${themeName}-${fontSize}-${key}`}
@@ -130,6 +130,13 @@ export const GeminiTerminal: React.FC = () => {
                     className="absolute inset-0 w-full h-full border-none"
                     title="Gemini Terminal"
                     style={{ height: '100%', width: '100%' }}
+                    onLoad={(e) => {
+                        // Force internal resize trigger
+                        try {
+                            const win = (e.target as HTMLIFrameElement).contentWindow;
+                            if (win) win.dispatchEvent(new Event('resize'));
+                        } catch (err) {}
+                    }}
                 />
             </div>
         </div>
