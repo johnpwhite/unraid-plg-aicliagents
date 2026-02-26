@@ -48,35 +48,41 @@ function startGeminiTerminal() {
         return; 
     }
 
-    // Only start if not already running AND the socket exists
-    // If the socket is missing but process is running, we have a problem (likely orphan)
-    if (!isGeminiRunning() || !file_exists($sock)) {
-        file_put_contents($log, date('Y-m-d H:i:s') . " - [INFO] Starting ttyd session for $sock\n", FILE_APPEND);
-        
-        // Clean up any stale state if not running
-        if (!isGeminiRunning()) {
-            exec("pkill -9 -f 'ttyd.*$sock' > /dev/null 2>&1");
-            if (file_exists($sock)) @unlink($sock);
-        }
+    $isRunning = isGeminiRunning();
+    $sockExists = file_exists($sock);
 
-        if (file_exists($shell)) chmod($shell, 0755);
+    // If already running and healthy, we are done
+    if ($isRunning && $sockExists) {
+        flock($fp, LOCK_UN);
+        fclose($fp);
+        return;
+    }
 
-        // Standard ttyd integration with flexible options
-        $cmd = "ttyd -i '$sock' -W -d0 " .
-               "-t fontSize=14 " .
-               "-t fontFamily='monospace' " .
-               "-t disableLeaveAlert=true " .
-               "'$shell'";
-        
-        exec("nohup $cmd >> $log 2>&1 & echo $!", $output);
-        $pid = trim($output[0] ?? '');
-        if ($pid) file_put_contents($pidFile, $pid);
-        
-        // Give it a moment to bind to the socket
-        for ($i=0; $i<10; $i++) {
-            if (file_exists($sock)) break;
-            usleep(100000);
-        }
+    // If we get here, we are either not running or in an unhealthy state
+    file_put_contents($log, date('Y-m-d H:i:s') . " - [INFO] Session state: isRunning=" . ($isRunning?'yes':'no') . " sockExists=" . ($sockExists?'yes':'no') . ". Starting fresh.\n", FILE_APPEND);
+    
+    // Surgical cleanup of ALL processes matching this socket before starting
+    exec("pkill -9 -f 'ttyd.*$sock' > /dev/null 2>&1");
+    if (file_exists($sock)) @unlink($sock);
+    if (file_exists($pidFile)) @unlink($pidFile);
+
+    if (file_exists($shell)) chmod($shell, 0755);
+
+    // Standard ttyd integration
+    $cmd = "ttyd -i '$sock' -W -d0 " .
+           "-t fontSize=14 " .
+           "-t fontFamily='monospace' " .
+           "-t disableLeaveAlert=true " .
+           "'$shell'";
+    
+    exec("nohup $cmd >> $log 2>&1 & echo $!", $output);
+    $pid = trim($output[0] ?? '');
+    if ($pid) file_put_contents($pidFile, $pid);
+    
+    // Wait for socket to appear
+    for ($i=0; $i<15; $i++) {
+        if (file_exists($sock)) break;
+        usleep(100000);
     }
     
     flock($fp, LOCK_UN);
