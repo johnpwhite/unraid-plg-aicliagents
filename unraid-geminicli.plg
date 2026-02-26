@@ -2,16 +2,24 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version   "2026.02.26.36">
+<!ENTITY version   "2026.02.26.38">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.36" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.26.38" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0">
 
 <CHANGES>
+## 2026.02.26.38
+- Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement
+- Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category
+- Improved: Menu visibility toggle now correctly manages tab metadata
+## 2026.02.26.37
+- Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement.
+- Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category.
+- Improved: Menu visibility toggle now correctly manages tab metadata.
 ## 2026.02.26.36
 - Fix: Terminal tab now appears correctly in the Main header menu
 - Fix: Settings icon correctly categorized under User Utilities
