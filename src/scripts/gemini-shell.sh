@@ -52,10 +52,11 @@ done
 EOF
     chmod +x "$RUN_SCRIPT"
 
+    # Set global history limit BEFORE creating the session so the first pane inherits it
+    tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
+
     # Create session with -u for UTF-8 and set TERM
     tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$RUN_SCRIPT"
-    # Apply history limit
-    tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
 fi
 
 # 3. Aggressive resize and attach
