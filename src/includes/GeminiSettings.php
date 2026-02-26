@@ -14,8 +14,9 @@ function getGeminiLockFile() {
 function isGeminiRunning() {
     $sock = "/var/run/geminiterm.sock";
     $pids = [];
-    // Use pgrep -f for more robust detection of the process matching the socket
-    exec("pgrep -f 'ttyd.*$sock'", $pids);
+    // -x ensures we only match the 'ttyd' executable name exactly
+    // -f is still used to verify it's the instance using OUR socket
+    exec("pgrep -x ttyd | xargs -I {} ps -p {} -o args= | grep -v grep | grep '$sock'", $pids);
     return !empty($pids);
 }
 
@@ -23,8 +24,13 @@ function stopGeminiTerminal($killTmux = false) {
     $sock = "/var/run/geminiterm.sock";
     $pidFile = getGeminiPidFile();
     
-    // Surgical kill using pkill -f
-    exec("pkill -9 -f 'ttyd.*$sock' > /dev/null 2>&1");
+    // Find only the parent ttyd process for this socket
+    $pids = [];
+    exec("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep '$sock' | awk '{print $1}'", $pids);
+    
+    foreach ($pids as $pid) {
+        if (!empty($pid)) exec("kill -9 $pid > /dev/null 2>&1");
+    }
     
     if (file_exists($sock)) @unlink($sock);
     if (file_exists($pidFile)) @unlink($pidFile);
@@ -61,10 +67,8 @@ function startGeminiTerminal() {
     // If we get here, we are either not running or in an unhealthy state
     file_put_contents($log, date('Y-m-d H:i:s') . " - [INFO] Session state: isRunning=" . ($isRunning?'yes':'no') . " sockExists=" . ($sockExists?'yes':'no') . ". Starting fresh.\n", FILE_APPEND);
     
-    // Surgical cleanup of ALL processes matching this socket before starting
-    exec("pkill -9 -f 'ttyd.*$sock' > /dev/null 2>&1");
-    if (file_exists($sock)) @unlink($sock);
-    if (file_exists($pidFile)) @unlink($pidFile);
+    // Use the surgical stop call
+    stopGeminiTerminal(false);
 
     if (file_exists($shell)) chmod($shell, 0755);
 
