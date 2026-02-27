@@ -11,6 +11,7 @@ interface Session {
     name: string;
     path: string;
     lastActive: number;
+    title?: string;
 }
 
 export const GeminiTerminal: React.FC = () => {
@@ -34,7 +35,7 @@ export const GeminiTerminal: React.FC = () => {
                     if (savedSessions) {
                         setSessions(JSON.parse(savedSessions));
                     } else {
-                        const initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now() }];
+                        const initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '' }];
                         setSessions(initial);
                         localStorage.setItem('gemini_sessions', JSON.stringify(initial));
                     }
@@ -49,6 +50,30 @@ export const GeminiTerminal: React.FC = () => {
             localStorage.setItem('gemini_sessions', JSON.stringify(sessions));
         }
     }, [sessions]);
+
+    // Dynamic Title Polling
+    useEffect(() => {
+        if (!sessions.length) return;
+        
+        const poll = () => {
+            sessions.forEach(s => {
+                fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_title&id=${s.id}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'ok' && data.title && data.title !== s.title) {
+                            setSessions(prev => prev.map(ps => 
+                                ps.id === s.id ? { ...ps, title: data.title } : ps
+                            ));
+                        }
+                    })
+                    .catch(() => {}); // Silent fail for polling
+            });
+        };
+
+        const timer = setInterval(poll, 4000);
+        poll(); // Initial check
+        return () => clearInterval(timer);
+    }, [sessions.length]); // Re-run if session count changes
 
     // Ensure active session is running
     useEffect(() => {
@@ -200,9 +225,11 @@ export const GeminiTerminal: React.FC = () => {
             <div style={styles.header}>
                 <div style={styles.tabStrip}>
                     {sessions.map(s => {
-                        const displayName = s.id === 'default'
+                        const baseName = s.id === 'default'
                             ? (s.path === config?.root_path ? 'Main' : s.path.split('/').pop() || 'Main')
                             : s.name;
+                        // Use dynamic title (tmux) if available, otherwise folder name
+                        const displayName = s.title || baseName;
                         const isActive = activeId === s.id;
                         return (
                             <div
@@ -212,7 +239,7 @@ export const GeminiTerminal: React.FC = () => {
                                     ...styles.tab,
                                     ...(isActive ? styles.tabActive : styles.tabInactive),
                                 }}
-                                title={s.path}
+                                title={`${s.title ? s.title + ' | ' : ''}${s.path}`}
                             >
                                 <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6, fontSize: 11, flexShrink: 0 }}></i>
                                 <span style={styles.tabLabel}>{displayName}</span>

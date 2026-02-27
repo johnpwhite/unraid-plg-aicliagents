@@ -218,6 +218,19 @@ if (isset($_GET['action'])) {
         } else {
             echo json_encode(['status' => 'error', 'message' => 'Invalid path or name']);
         }
+    } elseif ($_GET['action'] === 'get_title') {
+        $id = preg_replace('/[^a-z0-9\-]/', '', $_GET['id'] ?? '');
+        $session = "gemini-$id";
+        $title = '';
+        if (!empty($id)) {
+            // Get the window name (#W) or title (#T) from tmux
+            $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
+            // Fallback to window name if title is empty or just the hostname/shell
+            if (empty($title) || $title === 'unraid' || $title === 'sh' || $title === 'bash') {
+                $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
+            }
+        }
+        echo json_encode(['status' => 'ok', 'title' => $title]);
     } elseif ($_GET['action'] === 'debug') {
         $debug = [
             'config' => getGeminiConfig(),
