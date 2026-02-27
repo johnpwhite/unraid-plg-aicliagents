@@ -54,8 +54,6 @@ main,
 
 #gemini-cli-root {
     width: 100%;
-    /* Reduced offset to prevent scrollbar */
-    height: calc(100vh - 200px);
     display: flex;
     flex-direction: column;
     margin: 0;
@@ -71,9 +69,20 @@ main,
 
 <script>
 $(function(){
-    // Force a resize re-calculation after React mounts
-    setTimeout(function(){
-        window.dispatchEvent(new Event('resize'));
-    }, 1000);
+    // Dynamically size the root to fill from its top edge to 6px above the footer
+    function resizeRoot() {
+        var el = document.getElementById('gemini-cli-root');
+        if (!el) return;
+        var rect = el.getBoundingClientRect();
+        var footerHeight = 30; // Unraid footer bar approx height
+        var padding = 6;       // Small gap above footer
+        var available = window.innerHeight - rect.top - footerHeight - padding;
+        el.style.height = Math.max(200, available) + 'px';
+    }
+    // Run on load, on resize, and after React mounts
+    resizeRoot();
+    window.addEventListener('resize', resizeRoot);
+    setTimeout(resizeRoot, 500);
+    setTimeout(resizeRoot, 1500);
 });
 </script>

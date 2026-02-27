@@ -344,7 +344,7 @@ const styles: Record<string, React.CSSProperties> = {
         justifyContent: 'flex-end',
         alignItems: 'center',
         gap: 4,
-        padding: '4px 8px',
+        padding: '1px 8px',
     },
     toolbarBtn: {
         display: 'flex',
