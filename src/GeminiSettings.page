@@ -35,9 +35,20 @@ $csrf_token = $var['csrf_token'] ?? '';
     }
     .gemini-card-body { padding: 15px; color: var(--text-color, #ccc); }
 
-    .gemini-card-body dl { display: grid; grid-template-columns: 140px 1fr; gap: 8px 10px; margin: 0; }
+    /* Force DL/DD to stay as a tight horizontal row */
+    .gemini-card-body dl { display: grid; grid-template-columns: 120px 1fr; gap: 8px 10px; margin: 0; }
     .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.4; text-align: left; }
-    .gemini-card-body dl dd { margin: 0; color: var(--text-color); display: flex; align-items: center; justify-content: flex-start; gap: 5px; }
+    #gemini-settings-form dl dd { 
+        margin: 0; 
+        color: var(--text-color); 
+        display: flex !important; 
+        flex-direction: row !important; 
+        align-items: center !important; 
+        justify-content: flex-start !important; 
+        gap: 6px !important;
+        flex-wrap: nowrap !important;
+        overflow: visible !important;
+    }
     
     .gemini-card-body input, .gemini-card-body select {
         background: var(--background-color, #111) !important;
@@ -52,14 +63,14 @@ $csrf_token = $var['csrf_token'] ?? '';
         margin: 0 !important;
     }
     .gemini-card-body input[type="number"] { width: 80px !important; text-align: left !important; }
-    .gemini-card-body input[type="text"], .gemini-card-body select { width: 220px; }
+    .gemini-card-body input[type="text"], .gemini-card-body select { width: 220px !important; }
     
-    /* Path fields grow to fill space */
-    .gemini-card-body input[id="home_path"], 
-    .gemini-card-body input[id="root_path"] { 
-        width: auto !important;
+    /* Path fields grow to fill space - use width: 0 to let flex-grow take control */
+    #home_path, #root_path { 
+        width: 0 !important;
+        min-width: 0 !important;
         max-width: none !important;
-        flex: 1;
+        flex: 1 1 auto !important;
     }
     
     .gemini-btn {
@@ -78,20 +89,22 @@ $csrf_token = $var['csrf_token'] ?? '';
     }
     .gemini-btn:hover { background: #ff8c00 !important; color: #fff !important; }
     
-    .gemini-btn-slim {
-        height: 28px;
-        width: 28px;
-        padding: 0;
+    #gemini-settings-form .gemini-btn-slim {
+        height: 26px !important;
+        width: 26px !important;
+        padding: 0 !important;
         border-radius: 4px;
         cursor: pointer;
         background: transparent !important;
         border: 1px solid #ff8c00 !important;
         color: #ff8c00 !important;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex: 0 0 auto;
-        box-sizing: border-box;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        flex: 0 0 26px !important;
+        box-sizing: border-box !important;
+        font-size: 14px !important;
+        margin: 0 !important;
     }
     .gemini-btn-slim:hover { background: #ff8c00 !important; color: #fff !important; }
 
