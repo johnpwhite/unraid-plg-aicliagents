@@ -12,6 +12,8 @@
 <PLUGIN name="unraid-geminicli" author="John White" version="2026.02.27.25" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.02.27.26
+
 ## 2026.02.27.25
 - UI Force Fix: Guaranteed side-by-side layout for path fields and browse buttons
 - Narrower label column (120px) and forced flex behavior with !important overrides.

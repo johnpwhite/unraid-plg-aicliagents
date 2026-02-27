@@ -48,13 +48,19 @@ main,
 }
 
 #displaybox {
-    padding: 0 1rem 0 !important;
+    padding: 0 !important;
     margin-bottom: 0 !important;
 }
 
-/* Remove bottom margin from the "Gemini CLI" page title bar */
-div.title {
+/* Remove bottom margin from the "Gemini CLI" page title bar and title row */
+div.title, .title {
     margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+
+/* Force the main content area to take full width and no padding */
+#main-content {
+    padding: 0 !important;
 }
 
 #gemini-cli-root {

@@ -188,6 +188,8 @@ export const GeminiTerminal: React.FC = () => {
         fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=stop&id=${id}&hard=1`);
     };
 
+    const [drawerOpen, setDrawerOpen] = useState(false);
+
     if (!config) {
         return (
             <div style={styles.loading}>
@@ -203,68 +205,88 @@ export const GeminiTerminal: React.FC = () => {
 
     return (
         <div style={styles.root}>
-            {/* Action Toolbar — sits in whitespace above tabs */}
-            <div style={styles.toolbar}>
-                <button onClick={openBrowser} style={styles.toolbarBtn}>
-                    <i className="fa fa-plus-circle" style={{ color: 'var(--orange, #e68a00)' }}></i>
-                    New Workspace
-                </button>
-                <button
-                    onClick={() => {
-                        const newSessions = sessions.map(s => s.id === activeId ? { ...s, lastActive: Date.now() } : s);
-                        setSessions(newSessions);
-                        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
-                    }}
-                    style={{ ...styles.toolbarBtn, width: 28, paddingLeft: 0, paddingRight: 0 }}
-                    title="Restart Session"
-                >
-                    <i className="fa fa-refresh"></i>
-                </button>
-                <button
-                    onClick={() => window.location.href = '/Settings/GeminiSettings'}
-                    style={{ ...styles.toolbarBtn, width: 28, paddingLeft: 0, paddingRight: 0 }}
-                    title="Plugin Settings"
-                >
-                    <i className="fa fa-cog"></i>
-                </button>
-            </div>
+            {/* Horizontal Drawer (Left) */}
+            <div style={{
+                ...styles.drawer,
+                transform: drawerOpen ? 'translateX(0)' : 'translateX(-100%)',
+            }}>
+                <div style={styles.drawerContent}>
+                    {/* Top Section: New Workspace */}
+                    <div style={styles.drawerTop}>
+                        <button onClick={() => { openBrowser(); setDrawerOpen(false); }} style={styles.drawerBtnPrimary}>
+                            <i className="fa fa-plus-circle"></i>
+                            New Workspace
+                        </button>
+                    </div>
 
-            {/* Slim Tab Strip */}
-            <div style={styles.header}>
-                <div style={styles.tabStrip}>
-                    {sessions.map(s => {
-                        const baseName = s.id === 'default'
-                            ? (s.path === config?.root_path ? 'Main' : s.path.split('/').pop() || 'Main')
-                            : s.name;
-                        // Use dynamic title (tmux) if available, otherwise folder name
-                        const displayName = s.title || baseName;
-                        const isActive = activeId === s.id;
-                        return (
-                            <div
-                                key={s.id}
-                                onClick={() => setActiveId(s.id)}
-                                style={{
-                                    ...styles.tab,
-                                    ...(isActive ? styles.tabActive : styles.tabInactive),
-                                }}
-                                title={`${s.title ? s.title + ' | ' : ''}${s.path}`}
-                            >
-                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6, fontSize: 11, flexShrink: 0 }}></i>
-                                <span style={styles.tabLabel}>{displayName}</span>
-                                {s.id !== 'default' && (
-                                    <i
-                                        className="fa fa-times"
-                                        style={styles.tabClose}
-                                        onClick={(e) => closeTab(e, s.id)}
-                                    ></i>
-                                )}
-                            </div>
-                        );
-                    })}
+                    {/* Middle Section: Tabs (Scrollable) */}
+                    <div style={styles.drawerTabs}>
+                        {sessions.map(s => {
+                            const baseName = s.id === 'default'
+                                ? (s.path === config?.root_path ? 'Main' : s.path.split('/').pop() || 'Main')
+                                : s.name;
+                            const displayName = s.title || baseName;
+                            const isActive = activeId === s.id;
+                            return (
+                                <div
+                                    key={s.id}
+                                    onClick={() => { setActiveId(s.id); setDrawerOpen(false); }}
+                                    style={{
+                                        ...styles.drawerTab,
+                                        ...(isActive ? styles.drawerTabActive : {}),
+                                    }}
+                                    title={`${s.title ? s.title + ' | ' : ''}${s.path}`}
+                                >
+                                    <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ fontSize: 14, opacity: isActive ? 1 : 0.6 }}></i>
+                                    <span style={styles.drawerTabLabel}>{displayName}</span>
+                                    {s.id !== 'default' && (
+                                        <i
+                                            className="fa fa-times"
+                                            style={styles.drawerTabClose}
+                                            onClick={(e) => closeTab(e, s.id)}
+                                        ></i>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    {/* Bottom Section: Sync & Settings */}
+                    <div style={styles.drawerBottom}>
+                        <button
+                            onClick={() => {
+                                const newSessions = sessions.map(s => s.id === activeId ? { ...s, lastActive: Date.now() } : s);
+                                setSessions(newSessions);
+                                fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
+                                setDrawerOpen(false);
+                            }}
+                            style={styles.drawerBtn}
+                            title="Restart Session"
+                        >
+                            <i className="fa fa-refresh"></i>
+                            Sync / Restart
+                        </button>
+                        <button
+                            onClick={() => window.location.href = '/Settings/GeminiSettings'}
+                            style={styles.drawerBtn}
+                            title="Plugin Settings"
+                        >
+                            <i className="fa fa-cog"></i>
+                            Settings
+                        </button>
+                    </div>
+                </div>
+
+                {/* Sticking out Tab Bottom Left */}
+                <div 
+                    onClick={() => setDrawerOpen(!drawerOpen)}
+                    style={styles.drawerToggle}
+                >
+                    <i className={`fa ${drawerOpen ? 'fa-chevron-left' : 'fa-bars'}`} style={{ fontSize: 14 }}></i>
                 </div>
             </div>
 
-            {/* Terminal Viewport */}
+            {/* Terminal Viewport - Stretched to fill */}
             <div style={styles.viewport}>
                 {isStarting && (
                     <div style={styles.startingOverlay}>
@@ -374,94 +396,123 @@ const styles: Record<string, React.CSSProperties> = {
         letterSpacing: '0.2em',
     },
 
-    /* ── Toolbar (above tabs, in whitespace) ── */
-    toolbar: {
+    /* ── Drawer (Left) ── */
+    drawer: {
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        bottom: 0,
+        width: 240,
+        zIndex: 1000,
+        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        borderRight: '1px solid var(--border-color, #ccc)',
+        transition: 'transform 0.3s ease-in-out',
         display: 'flex',
-        justifyContent: 'flex-end',
-        alignItems: 'center',
-        gap: 4,
-        padding: '1px 8px',
+        flexDirection: 'column',
+        boxShadow: '10px 0 30px rgba(0,0,0,0.1)',
     },
-    toolbarBtn: {
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 5,
-        padding: '0 10px',
-        height: 24,
-        fontSize: 11,
-        fontWeight: 700,
-        textTransform: 'uppercase' as const,
-        border: '1px solid var(--button-border, var(--border-color, #bbb))',
-        borderRadius: 3,
-        backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
-        color: 'var(--button-text-color, inherit)',
-        cursor: 'pointer',
-        transition: 'all 0.15s',
-    },
-
-    /* ── Tab Header (slim) ── */
-    header: {
-        display: 'flex',
-        alignItems: 'flex-end',
-        padding: '3px 8px 0',
-        backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
-        borderBottom: '1px solid var(--border-color, #ccc)',
-        userSelect: 'none',
-        overflow: 'hidden',
-    },
-    tabStrip: {
-        display: 'flex',
-        alignItems: 'flex-end',
-        gap: 2,
-        overflow: 'hidden',
+    drawerContent: {
         flex: 1,
-        minWidth: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        overflow: 'hidden',
     },
-    tab: {
+    drawerTop: {
+        padding: '20px 16px 10px',
+        borderBottom: '1px solid var(--border-color, #eee)',
+    },
+    drawerBottom: {
+        padding: '10px 16px 20px',
+        borderTop: '1px solid var(--border-color, #eee)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+    },
+    drawerTabs: {
+        flex: 1,
+        overflowY: 'auto',
+        padding: '10px 0',
+    },
+    drawerTab: {
         display: 'flex',
         alignItems: 'center',
-        gap: 4,
-        padding: '4px 10px',
-        borderRadius: '4px 4px 0 0',
+        gap: 12,
+        padding: '12px 20px',
         cursor: 'pointer',
-        fontSize: 12,
-        fontWeight: 700,
-        textTransform: 'uppercase' as const,
-        letterSpacing: '-0.02em',
-        maxWidth: 180,
-        flexShrink: 1,
-        minWidth: 0,
-        marginBottom: -1,
-        transition: 'all 0.15s',
-        borderTop: '1px solid transparent',
-        borderLeft: '1px solid transparent',
-        borderRight: '1px solid transparent',
+        fontSize: 13,
+        fontWeight: 500,
+        transition: 'all 0.2s',
+        color: 'var(--text-color, inherit)',
+        opacity: 0.8,
+        borderLeft: '4px solid transparent',
     },
-    tabLabel: {
+    drawerTabActive: {
+        backgroundColor: 'var(--mild-background-color, rgba(0,0,0,0.03))',
+        color: 'var(--orange, #e68a00)',
+        opacity: 1,
+        borderLeftColor: 'var(--orange, #e68a00)',
+        fontWeight: 700,
+    },
+    drawerTabLabel: {
+        flex: 1,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
-        flex: 1,
-        minWidth: 0,
     },
-    tabActive: {
-        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
-        borderColor: 'var(--border-color, #ccc)',
-        color: 'var(--orange, #e68a00)',
+    drawerTabClose: {
+        opacity: 0.3,
+        padding: 4,
+        fontSize: 12,
     },
-    tabInactive: {
-        backgroundColor: 'transparent',
-        color: 'inherit',
-        opacity: 0.55,
-        borderColor: 'var(--border-color, #ccc)',
-    },
-    tabClose: {
-        marginLeft: 4,
-        opacity: 0.4,
+    drawerBtnPrimary: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        width: '100%',
+        height: 40,
+        fontSize: 12,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        border: 'none',
+        borderRadius: 6,
+        backgroundColor: 'var(--orange, #e68a00)',
+        color: '#fff',
         cursor: 'pointer',
-        transition: 'opacity 0.15s',
-        flexShrink: 0,
+        boxShadow: '0 4px 12px rgba(230, 138, 0, 0.2)',
+    },
+    drawerBtn: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        padding: '10px 12px',
+        fontSize: 12,
+        fontWeight: 600,
+        border: '1px solid var(--border-color, #ccc)',
+        borderRadius: 4,
+        backgroundColor: 'var(--button-background, transparent)',
+        color: 'var(--text-color, inherit)',
+        cursor: 'pointer',
+    },
+    drawerToggle: {
+        position: 'absolute',
+        left: '100%',
+        bottom: 20,
+        width: 32,
+        height: 48,
+        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        border: '1px solid var(--border-color, #ccc)',
+        borderLeft: 'none',
+        borderRadius: '0 8px 8px 0',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        boxShadow: '4px 0 12px rgba(0,0,0,0.05)',
+        color: 'var(--orange, #e68a00)',
+        zIndex: 1001,
     },
 
     /* ── Terminal ── */
@@ -472,6 +523,7 @@ const styles: Record<string, React.CSSProperties> = {
         overflow: 'hidden',
         height: '100%',
         zIndex: 0,
+        backgroundColor: '#000',
     },
     startingOverlay: {
         position: 'absolute',
