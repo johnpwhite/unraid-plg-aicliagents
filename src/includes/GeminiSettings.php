@@ -163,7 +163,7 @@ if (isset($_GET['action'])) {
     // CSRF Validation for state-changing actions
     if (in_array($_GET['action'], ['save', 'create_dir'])) {
         $var = @parse_ini_file("/var/local/emhttp/var.ini");
-        $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '';
+        $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_REQUEST['csrf_token'] ?? '';
         if (empty($var['csrf_token']) || $token !== $var['csrf_token']) {
             header('HTTP/1.1 403 Forbidden');
             echo json_encode(['error' => 'Invalid CSRF token']);
@@ -209,8 +209,8 @@ if (isset($_GET['action'])) {
         }
         echo json_encode(['path' => $path, 'items' => $items]);
     } elseif ($_GET['action'] === 'create_dir') {
-        $parent = realpath($_POST['parent']);
-        $name = preg_replace('/[^a-zA-Z0-9_\-]/', '', $_POST['name']);
+        $parent = realpath($_GET['parent'] ?? '');
+        $name = preg_replace('/[^a-zA-Z0-9_\-]/', '', $_GET['name'] ?? '');
         $root = getGeminiConfig()['root_path'];
         if (strpos($parent, realpath($root)) === 0 && !empty($name)) {
             mkdir("$parent/$name", 0777, true);

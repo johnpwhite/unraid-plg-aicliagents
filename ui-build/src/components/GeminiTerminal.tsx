@@ -119,42 +119,38 @@ export const GeminiTerminal: React.FC = () => {
             return;
         }
         console.log('[Gemini] CreateFolder: creating "' + newDirName + '" in ' + currentPath);
-        const formData = new FormData();
-        formData.append('parent', currentPath);
-        formData.append('name', newDirName);
-        // Send CSRF token in the body (PHP checks $_POST['csrf_token'] as fallback)
         const csrfToken = (window as any).csrf_token || '';
-        formData.append('csrf_token', csrfToken);
         console.log('[Gemini] CreateFolder: CSRF token length:', csrfToken.length, 'present:', !!csrfToken);
 
-        const createUrl = '/plugins/unraid-geminicli/GeminiAjax.php?action=create_dir';
+        // Use GET — Unraid NGINX does not handle POST to .php files
+        const createUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=create_dir&parent=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(newDirName)}&csrf_token=${encodeURIComponent(csrfToken)}`;
         console.log('[Gemini] CreateFolder: fetching', createUrl);
-        fetch(createUrl, {
-            method: 'POST',
-            body: formData,
-        }).then(r => {
-            console.log('[Gemini] CreateFolder: response status:', r.status, r.statusText);
-            return r.text();
-        }).then(text => {
-            console.log('[Gemini] CreateFolder: response body:', text);
-            try {
-                const data = JSON.parse(text);
-                if (data.status === 'ok') {
-                    console.log('[Gemini] CreateFolder: SUCCESS');
-                    setNewDirName('');
-                    browseTo(currentPath);
-                } else {
-                    console.error('[Gemini] CreateFolder: ERROR response:', data);
-                    alert('Error creating folder: ' + (data.message || data.error || 'unknown error'));
+        fetch(createUrl)
+            .then(r => {
+                console.log('[Gemini] CreateFolder: response status:', r.status, r.statusText);
+                return r.text();
+            })
+            .then(text => {
+                console.log('[Gemini] CreateFolder: response body:', text);
+                try {
+                    const data = JSON.parse(text);
+                    if (data.status === 'ok') {
+                        console.log('[Gemini] CreateFolder: SUCCESS');
+                        setNewDirName('');
+                        browseTo(currentPath);
+                    } else {
+                        console.error('[Gemini] CreateFolder: ERROR response:', data);
+                        alert('Error creating folder: ' + (data.message || data.error || 'unknown error'));
+                    }
+                } catch (parseErr) {
+                    console.error('[Gemini] CreateFolder: JSON parse failed on:', text.substring(0, 500));
+                    alert('Server returned invalid response. Check browser console for details.');
                 }
-            } catch (parseErr) {
-                console.error('[Gemini] CreateFolder: JSON parse failed on:', text.substring(0, 500));
-                alert('Server returned invalid response. Check browser console for details.');
-            }
-        }).catch(e => {
-            console.error('[Gemini] CreateFolder: fetch error:', e);
-            alert('Network error creating folder: ' + e.message);
-        });
+            })
+            .catch(e => {
+                console.error('[Gemini] CreateFolder: fetch error:', e);
+                alert('Network error creating folder: ' + e.message);
+            });
     };
 
     const closeTab = (e: React.MouseEvent, id: string) => {
@@ -358,14 +354,15 @@ const styles: Record<string, React.CSSProperties> = {
         display: 'flex',
         alignItems: 'flex-end',
         gap: 2,
-        overflowX: 'hidden',
-        maxWidth: '70%',
+        overflow: 'hidden',
+        flex: 1,
+        minWidth: 0,
     },
     tab: {
         display: 'flex',
         alignItems: 'center',
-        gap: 5,
-        padding: '5px 12px',
+        gap: 4,
+        padding: '4px 10px',
         borderRadius: '4px 4px 0 0',
         cursor: 'pointer',
         fontSize: 12,
@@ -373,6 +370,11 @@ const styles: Record<string, React.CSSProperties> = {
         textTransform: 'uppercase' as const,
         letterSpacing: '-0.02em',
         whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        maxWidth: 160,
+        flexShrink: 1,
+        minWidth: 0,
         marginBottom: -1,
         transition: 'all 0.15s',
         borderTop: '1px solid transparent',
