@@ -54,12 +54,13 @@ main,
 
 #gemini-cli-root {
     width: 100%;
-    /* 245px offset to give breathing room above the footer */
-    height: calc(100vh - 245px);
+    /* Reduced offset to prevent scrollbar */
+    height: calc(100vh - 200px);
     display: flex;
     flex-direction: column;
     margin: 0;
     padding: 0;
+    overflow: hidden;
 }
 
 .gemini-cli-ui {

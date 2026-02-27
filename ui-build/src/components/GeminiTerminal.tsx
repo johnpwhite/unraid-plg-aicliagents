@@ -103,13 +103,12 @@ export const GeminiTerminal: React.FC = () => {
         const formData = new FormData();
         formData.append('parent', currentPath);
         formData.append('name', newDirName);
+        // Send CSRF token in the body (PHP checks $_POST['csrf_token'] as fallback)
+        formData.append('csrf_token', (window as any).csrf_token || '');
 
         fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=create_dir', {
             method: 'POST',
             body: formData,
-            headers: {
-                'X-CSRF-Token': (window as any).csrf_token || ''
-            }
         }).then(r => r.json())
             .then(data => {
                 if (data.status === 'ok') {
@@ -145,7 +144,7 @@ export const GeminiTerminal: React.FC = () => {
 
     return (
         <div style={styles.root}>
-            {/* Session Header */}
+            {/* Compact Session Header - tabs & actions on same row */}
             <div style={styles.header}>
                 <div style={styles.tabStrip}>
                     {sessions.map(s => {
@@ -162,7 +161,7 @@ export const GeminiTerminal: React.FC = () => {
                                     ...(isActive ? styles.tabActive : styles.tabInactive),
                                 }}
                             >
-                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6 }}></i>
+                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6, fontSize: 11 }}></i>
                                 {displayName}
                                 {s.id !== 'default' && (
                                     <i
@@ -187,7 +186,7 @@ export const GeminiTerminal: React.FC = () => {
                             setSessions(newSessions);
                             fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
                         }}
-                        style={{ ...styles.headerBtn, width: 36, paddingLeft: 0, paddingRight: 0 }}
+                        style={{ ...styles.headerBtn, width: 30, paddingLeft: 0, paddingRight: 0 }}
                         title="Restart Session"
                     >
                         <i className="fa fa-refresh"></i>
@@ -223,9 +222,6 @@ export const GeminiTerminal: React.FC = () => {
                                 <i className="fa fa-folder-open" style={{ color: 'var(--orange, #e68a00)' }}></i>
                                 {' '}Select Workspace
                             </span>
-                            <button onClick={() => setBrowserOpen(false)} style={styles.modalCloseX}>
-                                <i className="fa fa-times"></i>
-                            </button>
                         </div>
 
                         {/* Modal Body */}
@@ -311,11 +307,11 @@ const styles: Record<string, React.CSSProperties> = {
         display: 'flex',
         alignItems: 'flex-end',
         justifyContent: 'space-between',
-        padding: '6px 12px 0',
+        padding: '0 8px',
         backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
         borderBottom: '1px solid var(--border-color, #ccc)',
         userSelect: 'none',
-        minHeight: 44,
+        minHeight: 0,
         zIndex: 10,
     },
     tabStrip: {
@@ -328,11 +324,11 @@ const styles: Record<string, React.CSSProperties> = {
     tab: {
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '7px 14px',
-        borderRadius: '6px 6px 0 0',
+        gap: 5,
+        padding: '5px 12px',
+        borderRadius: '4px 4px 0 0',
         cursor: 'pointer',
-        fontSize: 13,
+        fontSize: 12,
         fontWeight: 700,
         textTransform: 'uppercase' as const,
         letterSpacing: '-0.02em',
@@ -352,6 +348,7 @@ const styles: Record<string, React.CSSProperties> = {
         backgroundColor: 'transparent',
         color: 'inherit',
         opacity: 0.55,
+        borderColor: 'var(--border-color, #ccc)',
     },
     tabClose: {
         marginLeft: 6,
@@ -362,21 +359,22 @@ const styles: Record<string, React.CSSProperties> = {
     headerActions: {
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
-        paddingBottom: 6,
+        gap: 4,
+        paddingBottom: 4,
+        paddingTop: 4,
     },
     headerBtn: {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 6,
-        padding: '0 14px',
-        height: 32,
-        fontSize: 12,
+        gap: 5,
+        padding: '0 10px',
+        height: 26,
+        fontSize: 11,
         fontWeight: 700,
         textTransform: 'uppercase' as const,
         border: '1px solid var(--button-border, var(--border-color, #bbb))',
-        borderRadius: 4,
+        borderRadius: 3,
         backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
         color: 'var(--button-text-color, inherit)',
         cursor: 'pointer',
@@ -434,31 +432,21 @@ const styles: Record<string, React.CSSProperties> = {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        padding: '10px 16px',
+        padding: '8px 14px',
         backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
         borderBottom: '1px solid var(--border-color, #ccc)',
     },
     modalTitle: {
         fontWeight: 700,
-        fontSize: 14,
+        fontSize: 13,
         textTransform: 'uppercase' as const,
         letterSpacing: '0.05em',
         display: 'flex',
         alignItems: 'center',
         gap: 8,
     },
-    modalCloseX: {
-        background: 'none',
-        border: 'none',
-        fontSize: 16,
-        cursor: 'pointer',
-        opacity: 0.5,
-        color: 'inherit',
-        padding: 4,
-        transition: 'opacity 0.15s',
-    },
     modalBody: {
-        padding: 16,
+        padding: '12px 14px',
     },
     pathBar: {
         display: 'flex',
@@ -492,27 +480,28 @@ const styles: Record<string, React.CSSProperties> = {
     },
     createRow: {
         display: 'flex',
-        gap: 8,
+        alignItems: 'center',
+        gap: 6,
     },
     createInput: {
         flex: 1,
-        height: 32,
-        padding: '0 10px',
-        fontSize: 13,
+        height: 28,
+        padding: '0 8px',
+        fontSize: 12,
         border: '1px solid var(--border-color, #ccc)',
-        borderRadius: 4,
+        borderRadius: 3,
         backgroundColor: 'var(--input-bg-color, var(--mild-background-color, #fff))',
         color: 'inherit',
         outline: 'none',
     },
     createBtn: {
-        height: 32,
-        padding: '0 14px',
-        fontSize: 12,
+        height: 28,
+        padding: '0 12px',
+        fontSize: 11,
         fontWeight: 700,
         textTransform: 'uppercase' as const,
         border: '1px solid var(--button-border, var(--border-color, #bbb))',
-        borderRadius: 4,
+        borderRadius: 3,
         backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
         color: 'var(--button-text-color, inherit)',
         cursor: 'pointer',
@@ -521,32 +510,32 @@ const styles: Record<string, React.CSSProperties> = {
     modalFooter: {
         display: 'flex',
         justifyContent: 'flex-end',
-        gap: 8,
-        padding: '10px 16px',
+        gap: 6,
+        padding: '8px 14px',
         backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
         borderTop: '1px solid var(--border-color, #ccc)',
     },
     cancelBtn: {
-        padding: '6px 14px',
-        fontSize: 12,
+        padding: '4px 12px',
+        fontSize: 11,
         fontWeight: 700,
         textTransform: 'uppercase' as const,
         backgroundColor: 'transparent',
         border: '1px solid var(--border-color, #ccc)',
-        borderRadius: 4,
+        borderRadius: 3,
         color: 'inherit',
         cursor: 'pointer',
         opacity: 0.7,
         transition: 'all 0.15s',
     },
     openBtn: {
-        padding: '6px 20px',
-        fontSize: 12,
+        padding: '4px 16px',
+        fontSize: 11,
         fontWeight: 900,
         textTransform: 'uppercase' as const,
         backgroundColor: 'var(--orange, #e68a00)',
         border: 'none',
-        borderRadius: 4,
+        borderRadius: 3,
         color: '#fff',
         cursor: 'pointer',
         transition: 'all 0.15s',
