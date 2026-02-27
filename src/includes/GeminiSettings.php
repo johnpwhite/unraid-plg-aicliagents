@@ -190,12 +190,12 @@ if (isset($_GET['action'])) {
         saveGeminiConfig($_POST);
         echo json_encode(['status' => 'ok']);
     } elseif ($_GET['action'] === 'list_dir') {
-        $root = getGeminiConfig()['root_path'];
-        $path = realpath($_GET['path'] ?? $root);
-        if (strpos($path, realpath($root)) !== 0) $path = realpath($root);
+        $path = $_GET['path'] ?? '/mnt';
+        if (empty($path)) $path = '/';
+        $path = realpath($path) ?: $path;
         
         $items = [];
-        if ($path !== realpath($root)) {
+        if ($path !== '/') {
             $items[] = ['name' => '..', 'path' => dirname($path), 'type' => 'dir'];
         }
         

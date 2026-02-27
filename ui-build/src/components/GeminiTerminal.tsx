@@ -129,7 +129,8 @@ export const GeminiTerminal: React.FC = () => {
     };
 
     const confirmWorkspace = () => {
-        const name = currentPath.split('/').pop() || 'Workspace';
+        let name = currentPath.split('/').pop() || 'Workspace';
+        if (currentPath === '/') name = 'Root';
         // Short safe alphanumeric ID for NGINX compatibility
         const newId = 's' + Math.random().toString(36).substring(2, 7);
         const newSessions = [...sessions, { id: newId, name: name, path: currentPath, lastActive: Date.now() }];

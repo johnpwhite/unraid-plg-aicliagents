@@ -70,6 +70,57 @@ $csrf_token = $var['csrf_token'] ?? '';
     }
     .gemini-btn:hover { background: #ff8c00 !important; color: #fff !important; }
     
+    .gemini-btn-slim {
+        padding: 0 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        background: transparent !important;
+        border: 1px solid #ff8c00 !important;
+        color: #ff8c00 !important;
+        height: 28px;
+        line-height: 26px;
+        flex: 0 0 auto;
+    }
+    .gemini-btn-slim:hover { background: #ff8c00 !important; color: #fff !important; }
+
+    /* Modal Overlay Styles (Mirroring React) */
+    .gemini-modal-backdrop {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 9999;
+    }
+    .gemini-modal-box {
+        background: var(--background-color, #1e1e1e);
+        border: 1px solid var(--border-color, #444);
+        border-radius: 12px; width: 500px; max-width: 90%;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+        display: flex; flex-direction: column; overflow: hidden;
+    }
+    .gemini-modal-header {
+        padding: 15px 20px; background: var(--title-header-background-color, #2a2a2a);
+        border-bottom: 1px solid var(--border-color, #444); font-weight: bold; font-size: 1.1em;
+    }
+    .gemini-modal-body { padding: 0; display: flex; flex-direction: column; }
+    .gemini-modal-path {
+        background: rgba(0,0,0,0.2); padding: 8px 15px; font-family: monospace; font-size: 0.9em;
+        border-bottom: 1px solid var(--border-color, #333); color: var(--text-color); opacity: 0.8;
+    }
+    .gemini-modal-list { height: 300px; overflow-y: auto; padding: 5px 0; }
+    .gemini-modal-item {
+        padding: 8px 15px; cursor: pointer; display: flex; align-items: center; gap: 10px;
+        transition: background 0.15s;
+    }
+    .gemini-modal-item:hover { background: var(--title-header-background-color, #333); }
+    .gemini-modal-item i { color: #ff8c00; opacity: 0.7; }
+    .gemini-modal-footer {
+        padding: 15px 20px; border-top: 1px solid var(--border-color, #444);
+        display: flex; justify-content: flex-end; gap: 10px;
+    }
+    .gemini-modal-btn {
+        padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; border: none;
+    }
+    .gemini-modal-btn.primary { background: #ff8c00; color: #fff; }
+    .gemini-modal-btn.secondary { background: transparent; border: 1px solid var(--border-color, #444); color: var(--text-color); }
+
     .help-text { font-size: 0.8em; opacity: 0.5; margin-top: 4px; display: block; line-height: 1.4; padding-left: 5px; border-left: 2px solid #ff8c00; margin-left: 2px; }
 </style>
 
@@ -127,12 +178,14 @@ $csrf_token = $var['csrf_token'] ?? '';
                             <input type="text" name="user" value="<?=$config['user']?>">
                         </dd>
                         <dt>Home Directory:</dt>
-                        <dd>
-                            <input type="text" name="home_path" value="<?=$config['home_path']?>">
+                        <dd style="gap: 5px;">
+                            <input type="text" name="home_path" id="home_path" value="<?=$config['home_path']?>">
+                            <button type="button" class="gemini-btn-slim" onclick="openPicker('home_path')"><i class="fa fa-folder-open"></i></button>
                         </dd>
                         <dt>Root Directory:</dt>
-                        <dd>
-                            <input type="text" name="root_path" value="<?=$config['root_path']?>">
+                        <dd style="gap: 5px;">
+                            <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>">
+                            <button type="button" class="gemini-btn-slim" onclick="openPicker('root_path')"><i class="fa fa-folder-open"></i></button>
                         </dd>
                     </dl>
                     <span class="help-text">These settings define the environment and appearance for each new terminal session.</span>
@@ -142,14 +195,87 @@ $csrf_token = $var['csrf_token'] ?? '';
             <button type="submit" class="gemini-btn">Apply & Save Settings</button>
         </form>
     </div>
+
+    <!-- Modal Picker Overlay -->
+    <div id="picker-modal" class="gemini-modal-backdrop">
+        <div class="gemini-modal-box">
+            <div class="gemini-modal-header">
+                <i class="fa fa-folder-open"></i> Select Directory
+            </div>
+            <div class="gemini-modal-body">
+                <div id="picker-path" class="gemini-modal-path">/mnt</div>
+                <div id="picker-list" class="gemini-modal-list">
+                    <!-- Items will be injected here -->
+                </div>
+            </div>
+            <div class="gemini-modal-footer">
+                <button type="button" class="gemini-modal-btn secondary" onclick="closePicker()">Cancel</button>
+                <button type="button" class="gemini-modal-btn primary" onclick="confirmSelection()">Select Directory</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
+let currentPickerTarget = null;
+let currentPickerPath = '/mnt';
+
+function openPicker(targetId) {
+    currentPickerTarget = targetId;
+    const initialPath = document.getElementById(targetId).value || '/mnt';
+    currentPickerPath = initialPath;
+    
+    document.getElementById('picker-modal').style.display = 'flex';
+    browseTo(initialPath);
+}
+
+function closePicker() {
+    document.getElementById('picker-modal').style.display = 'none';
+}
+
+function browseTo(path) {
+    currentPickerPath = path;
+    document.getElementById('picker-path').innerText = path;
+    const list = document.getElementById('picker-list');
+    list.innerHTML = '<div style="padding: 20px; text-align: center; opacity: 0.5;"><i class="fa fa-circle-o-notch fa-spin"></i> Reading...</div>';
+    
+    fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=list_dir&path=${encodeURIComponent(path)}`)
+        .then(r => r.json())
+        .then(data => {
+            list.innerHTML = '';
+            
+            // Add items
+            data.items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'gemini-modal-item';
+                div.onclick = () => browseTo(item.path);
+                
+                const icon = item.name === '..' ? 'fa-level-up' : 'fa-folder';
+                div.innerHTML = `<i class="fa ${icon}"></i> <span>${item.name}</span>`;
+                list.appendChild(div);
+            });
+            
+            if (data.items.length === 0) {
+                list.innerHTML = '<div style="padding: 20px; text-align: center; opacity: 0.3;">Empty Directory</div>';
+            }
+        })
+        .catch(err => {
+            list.innerHTML = `<div style="padding: 20px; text-align: center; color: #ff5555;">Error: ${err.message}</div>`;
+        });
+}
+
+function confirmSelection() {
+    if (currentPickerTarget) {
+        document.getElementById(currentPickerTarget).value = currentPickerPath;
+    }
+    closePicker();
+}
+
 function saveGeminiSettings(form) {
     const formData = new FormData(form);
     const params = new URLSearchParams(formData);
 
-    fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=save', {
+    fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=save', {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -170,7 +296,7 @@ function saveGeminiSettings(form) {
                     cancelButtonText: "Later"
                 }, function(confirmed) {
                     if (confirmed) {
-                        fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart')
+                        fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=restart')
                         .then(() => window.location.reload());
                     } else {
                         window.location.reload();
@@ -178,7 +304,7 @@ function saveGeminiSettings(form) {
                 });
             } else {
                 if (confirm("Settings saved. Restart terminal now?")) {
-                    fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart')
+                    fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=restart')
                     .then(() => window.location.reload());
                 } else {
                     window.location.reload();
