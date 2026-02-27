@@ -1,8 +1,11 @@
 <CHANGES>
-  <ENTRY version="2026.02.25.01">
-    <DATE>2026-02-25</DATE>
-    <RELEASENOTES>
-      Initial release of Unraid Gemini CLI plugin structure.
-    </RELEASENOTES>
-  </ENTRY>
+### v2026.02.27.20 - Initial Release: Key Features
+
+- **Native AI Integration**: Direct integration of Google Gemini into the Unraid WebUI, providing a powerful AI agent for server management and coding tasks.
+- **Multi-Workspace Terminal**: Support for multiple terminal sessions (Workspaces). Open different folders in separate tabs to manage various projects simultaneously.
+- **Dynamic Status Tracking**: Tabs poll terminal state in real-time, displaying Gemini's status icons (Ready ◇, Working ✦, Action Required ✋) and active task descriptions.
+- **Integrated File Browser**: Seamlessly navigate your server's filesystem to select and open new workspaces.
+- **Responsive Terminal Design**: A modern, high-performance terminal wrapper with dynamic resizing that automatically fills available screen space and fits perfectly above the footer.
+- **Unraid Theme Integration**: Harmonious UI design that matches your Unraid theme (Light/Dark) and respects standard system variables.
+- **Smart Session Management**: Persistent terminal sessions that remain active in the background, allowing you to switch between tasks without losing state.
 </CHANGES>
