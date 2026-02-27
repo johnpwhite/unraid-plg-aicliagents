@@ -1,0 +1,6 @@
+# Plugin-specific ignores
+src/vendor/
+ui-build/node_modules/
+ui-build/dist/
+*.log
+.DS_Store
