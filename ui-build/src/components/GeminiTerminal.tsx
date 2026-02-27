@@ -220,6 +220,13 @@ export const GeminiTerminal: React.FC = () => {
                 >
                     <i className="fa fa-refresh"></i>
                 </button>
+                <button
+                    onClick={() => window.location.href = '/Settings/GeminiSettings'}
+                    style={{ ...styles.toolbarBtn, width: 28, paddingLeft: 0, paddingRight: 0 }}
+                    title="Plugin Settings"
+                >
+                    <i className="fa fa-cog"></i>
+                </button>
             </div>
 
             {/* Slim Tab Strip */}
