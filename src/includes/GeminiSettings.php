@@ -161,7 +161,7 @@ function startGeminiTerminal($id = 'default', $workingDir = null) {
 
 if (isset($_GET['action'])) {
     // CSRF Validation for state-changing actions
-    if (in_array($_GET['action'], ['save', 'restart', 'stop', 'create_dir'])) {
+    if (in_array($_GET['action'], ['save', 'create_dir'])) {
         $var = @parse_ini_file("/var/local/emhttp/var.ini");
         $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? $_POST['csrf_token'] ?? '';
         if (empty($var['csrf_token']) || $token !== $var['csrf_token']) {

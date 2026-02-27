@@ -25,7 +25,7 @@ export const GeminiTerminal: React.FC = () => {
 
     // Initial Load
     useEffect(() => {
-        fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=debug')
+        fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=debug')
             .then(r => r.json())
             .then(data => {
                 if (data && data.config) {
@@ -57,7 +57,7 @@ export const GeminiTerminal: React.FC = () => {
         if (!session) return;
 
         setIsStarting(true);
-        fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}`)
+        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}`)
             .then(() => {
                 setTimeout(() => setIsStarting(false), 500);
             })
@@ -68,7 +68,7 @@ export const GeminiTerminal: React.FC = () => {
     }, [activeId, config]);
 
     const browseTo = (path: string) => {
-        fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=list_dir&path=${encodeURIComponent(path)}`)
+        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=list_dir&path=${encodeURIComponent(path)}`)
             .then(r => r.json())
             .then(data => {
                 if (data.error) throw new Error(data.error);
@@ -106,7 +106,7 @@ export const GeminiTerminal: React.FC = () => {
         // Send CSRF token in the body (PHP checks $_POST['csrf_token'] as fallback)
         formData.append('csrf_token', (window as any).csrf_token || '');
 
-        fetch('/plugins/unraid-geminicli/includes/GeminiSettings.php?action=create_dir', {
+        fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=create_dir', {
             method: 'POST',
             body: formData,
         }).then(r => r.json())
@@ -126,7 +126,7 @@ export const GeminiTerminal: React.FC = () => {
         const filtered = sessions.filter(s => s.id !== id);
         setSessions(filtered);
         if (activeId === id) setActiveId('default');
-        fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=stop&id=${id}&hard=1`);
+        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=stop&id=${id}&hard=1`);
     };
 
     if (!config) {
@@ -184,7 +184,7 @@ export const GeminiTerminal: React.FC = () => {
                         onClick={() => {
                             const newSessions = sessions.map(s => s.id === activeId ? { ...s, lastActive: Date.now() } : s);
                             setSessions(newSessions);
-                            fetch(`/plugins/unraid-geminicli/includes/GeminiSettings.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
+                            fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
                         }}
                         style={{ ...styles.headerBtn, width: 30, paddingLeft: 0, paddingRight: 0 }}
                         title="Restart Session"
@@ -313,12 +313,13 @@ const styles: Record<string, React.CSSProperties> = {
         userSelect: 'none',
         minHeight: 0,
         zIndex: 10,
+        overflow: 'hidden',
     },
     tabStrip: {
         display: 'flex',
         alignItems: 'flex-end',
         gap: 2,
-        overflowX: 'auto',
+        overflowX: 'hidden',
         maxWidth: '70%',
     },
     tab: {
