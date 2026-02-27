@@ -177,7 +177,26 @@ export const GeminiTerminal: React.FC = () => {
 
     return (
         <div style={styles.root}>
-            {/* Compact Session Header - tabs & actions on same row */}
+            {/* Action Toolbar — sits in whitespace above tabs */}
+            <div style={styles.toolbar}>
+                <button onClick={openBrowser} style={styles.toolbarBtn}>
+                    <i className="fa fa-plus-circle" style={{ color: 'var(--orange, #e68a00)' }}></i>
+                    New Workspace
+                </button>
+                <button
+                    onClick={() => {
+                        const newSessions = sessions.map(s => s.id === activeId ? { ...s, lastActive: Date.now() } : s);
+                        setSessions(newSessions);
+                        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
+                    }}
+                    style={{ ...styles.toolbarBtn, width: 28, paddingLeft: 0, paddingRight: 0 }}
+                    title="Restart Session"
+                >
+                    <i className="fa fa-refresh"></i>
+                </button>
+            </div>
+
+            {/* Slim Tab Strip */}
             <div style={styles.header}>
                 <div style={styles.tabStrip}>
                     {sessions.map(s => {
@@ -206,24 +225,6 @@ export const GeminiTerminal: React.FC = () => {
                             </div>
                         );
                     })}
-                </div>
-
-                <div style={styles.headerActions}>
-                    <button onClick={openBrowser} style={styles.headerBtn}>
-                        <i className="fa fa-plus-circle" style={{ color: 'var(--orange, #e68a00)' }}></i>
-                        New Workspace
-                    </button>
-                    <button
-                        onClick={() => {
-                            const newSessions = sessions.map(s => s.id === activeId ? { ...s, lastActive: Date.now() } : s);
-                            setSessions(newSessions);
-                            fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}`);
-                        }}
-                        style={{ ...styles.headerBtn, width: 30, paddingLeft: 0, paddingRight: 0 }}
-                        title="Restart Session"
-                    >
-                        <i className="fa fa-refresh"></i>
-                    </button>
                 </div>
             </div>
 
@@ -337,17 +338,40 @@ const styles: Record<string, React.CSSProperties> = {
         letterSpacing: '0.2em',
     },
 
-    /* ── Header ── */
+    /* ── Toolbar (above tabs, in whitespace) ── */
+    toolbar: {
+        display: 'flex',
+        justifyContent: 'flex-end',
+        alignItems: 'center',
+        gap: 4,
+        padding: '4px 8px',
+    },
+    toolbarBtn: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 5,
+        padding: '0 10px',
+        height: 24,
+        fontSize: 11,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        border: '1px solid var(--button-border, var(--border-color, #bbb))',
+        borderRadius: 3,
+        backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
+        color: 'var(--button-text-color, inherit)',
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+    },
+
+    /* ── Tab Header (slim) ── */
     header: {
         display: 'flex',
         alignItems: 'flex-end',
-        justifyContent: 'space-between',
-        padding: '0 8px',
+        padding: '3px 8px 0',
         backgroundColor: 'var(--title-header-background-color, var(--mild-background-color, #ededed))',
         borderBottom: '1px solid var(--border-color, #ccc)',
         userSelect: 'none',
-        minHeight: 0,
-        zIndex: 10,
         overflow: 'hidden',
     },
     tabStrip: {
@@ -397,30 +421,6 @@ const styles: Record<string, React.CSSProperties> = {
         opacity: 0.4,
         cursor: 'pointer',
         transition: 'opacity 0.15s',
-    },
-    headerActions: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        paddingBottom: 4,
-        paddingTop: 4,
-    },
-    headerBtn: {
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 5,
-        padding: '0 10px',
-        height: 26,
-        fontSize: 11,
-        fontWeight: 700,
-        textTransform: 'uppercase' as const,
-        border: '1px solid var(--button-border, var(--border-color, #bbb))',
-        borderRadius: 3,
-        backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
-        color: 'var(--button-text-color, inherit)',
-        cursor: 'pointer',
-        transition: 'all 0.15s',
     },
 
     /* ── Terminal ── */
