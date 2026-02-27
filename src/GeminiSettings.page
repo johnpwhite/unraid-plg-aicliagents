@@ -35,9 +35,9 @@ $csrf_token = $var['csrf_token'] ?? '';
     }
     .gemini-card-body { padding: 15px; color: var(--text-color, #ccc); }
 
-    .gemini-card-body dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 15px; margin: 0; }
-    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.4; text-align: left; }
-    .gemini-card-body dl dd { margin: 0; color: var(--text-color); display: flex; justify-content: flex-start; }
+    .gemini-card-body dl { display: grid; grid-template-columns: 140px 1fr; gap: 8px 10px; margin: 0; }
+    .gemini-card-body dl dt { color: var(--text-color); opacity: 0.6; font-weight: normal; font-size: 0.9em; line-height: 2.4; text-align: right; }
+    .gemini-card-body dl dd { margin: 0; color: var(--text-color); display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
     
     .gemini-card-body input, .gemini-card-body select {
         background: var(--background-color, #111) !important;
@@ -51,8 +51,16 @@ $csrf_token = $var['csrf_token'] ?? '';
         box-sizing: border-box;
         margin: 0 !important;
     }
-    .gemini-card-body input[type="number"] { width: 100px !important; text-align: left !important; }
-    .gemini-card-body input[type="text"], .gemini-card-body select { width: 100%; }
+    .gemini-card-body input[type="number"] { width: 80px !important; text-align: left !important; }
+    .gemini-card-body input[type="text"], .gemini-card-body select { width: 180px; }
+    
+    /* Path fields grow to fill space */
+    .gemini-card-body input[name="home_path"], 
+    .gemini-card-body input[name="root_path"] { 
+        width: 100% !important;
+        max-width: none !important;
+        flex: 1;
+    }
     
     .gemini-btn {
         padding: 10px 20px;
@@ -71,14 +79,17 @@ $csrf_token = $var['csrf_token'] ?? '';
     .gemini-btn:hover { background: #ff8c00 !important; color: #fff !important; }
     
     .gemini-btn-slim {
-        padding: 0 10px;
+        width: 28px;
+        height: 28px;
+        padding: 0;
         border-radius: 4px;
         cursor: pointer;
         background: transparent !important;
         border: 1px solid #ff8c00 !important;
         color: #ff8c00 !important;
-        height: 28px;
-        line-height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         flex: 0 0 auto;
     }
     .gemini-btn-slim:hover { background: #ff8c00 !important; color: #fff !important; }
@@ -178,12 +189,12 @@ $csrf_token = $var['csrf_token'] ?? '';
                             <input type="text" name="user" value="<?=$config['user']?>">
                         </dd>
                         <dt>Home Directory:</dt>
-                        <dd style="gap: 5px;">
+                        <dd>
                             <input type="text" name="home_path" id="home_path" value="<?=$config['home_path']?>">
                             <button type="button" class="gemini-btn-slim" onclick="openPicker('home_path')"><i class="fa fa-folder-open"></i></button>
                         </dd>
                         <dt>Root Directory:</dt>
-                        <dd style="gap: 5px;">
+                        <dd>
                             <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>">
                             <button type="button" class="gemini-btn-slim" onclick="openPicker('root_path')"><i class="fa fa-folder-open"></i></button>
                         </dd>
