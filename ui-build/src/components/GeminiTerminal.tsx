@@ -212,9 +212,10 @@ export const GeminiTerminal: React.FC = () => {
                                     ...styles.tab,
                                     ...(isActive ? styles.tabActive : styles.tabInactive),
                                 }}
+                                title={s.path}
                             >
-                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6, fontSize: 11 }}></i>
-                                {displayName}
+                                <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ opacity: isActive ? 1 : 0.6, fontSize: 11, flexShrink: 0 }}></i>
+                                <span style={styles.tabLabel}>{displayName}</span>
                                 {s.id !== 'default' && (
                                     <i
                                         className="fa fa-times"
@@ -393,10 +394,7 @@ const styles: Record<string, React.CSSProperties> = {
         fontWeight: 700,
         textTransform: 'uppercase' as const,
         letterSpacing: '-0.02em',
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        maxWidth: 160,
+        maxWidth: 180,
         flexShrink: 1,
         minWidth: 0,
         marginBottom: -1,
@@ -404,6 +402,13 @@ const styles: Record<string, React.CSSProperties> = {
         borderTop: '1px solid transparent',
         borderLeft: '1px solid transparent',
         borderRight: '1px solid transparent',
+    },
+    tabLabel: {
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        flex: 1,
+        minWidth: 0,
     },
     tabActive: {
         backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
@@ -417,10 +422,11 @@ const styles: Record<string, React.CSSProperties> = {
         borderColor: 'var(--border-color, #ccc)',
     },
     tabClose: {
-        marginLeft: 6,
+        marginLeft: 4,
         opacity: 0.4,
         cursor: 'pointer',
         transition: 'opacity 0.15s',
+        flexShrink: 0,
     },
 
     /* ── Terminal ── */

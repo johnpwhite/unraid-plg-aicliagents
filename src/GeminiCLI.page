@@ -48,7 +48,12 @@ main,
 }
 
 #displaybox {
-    padding-bottom: 0 !important;
+    padding: 0 1rem 0 !important;
+    margin-bottom: 0 !important;
+}
+
+/* Remove bottom margin from the "Gemini CLI" page title bar */
+div.title {
     margin-bottom: 0 !important;
 }
 
