@@ -57,25 +57,40 @@ export const GeminiTerminal: React.FC = () => {
         if (!session) return;
 
         setIsStarting(true);
-        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}`)
-            .then(() => {
-                setTimeout(() => setIsStarting(false), 500);
+        const startUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}`;
+        console.log('[Gemini] Starting session:', activeId, startUrl);
+        fetch(startUrl)
+            .then(r => {
+                console.log('[Gemini] Start response status:', r.status);
+                return r.text();
+            })
+            .then(text => {
+                console.log('[Gemini] Start response body:', text);
+                // Give ttyd time to spin up — new sessions need more time
+                setTimeout(() => setIsStarting(false), 2500);
             })
             .catch(e => {
-                console.error('Gemini Start Error:', e);
+                console.error('[Gemini] Start Error:', e);
                 setIsStarting(false);
             });
     }, [activeId, config]);
 
     const browseTo = (path: string) => {
-        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=list_dir&path=${encodeURIComponent(path)}`)
-            .then(r => r.json())
-            .then(data => {
+        const browseUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=list_dir&path=${encodeURIComponent(path)}`;
+        console.log('[Gemini] Browsing to:', browseUrl);
+        fetch(browseUrl)
+            .then(r => {
+                console.log('[Gemini] Browse response status:', r.status);
+                return r.text();
+            })
+            .then(text => {
+                console.log('[Gemini] Browse response body:', text.substring(0, 200));
+                const data = JSON.parse(text);
                 if (data.error) throw new Error(data.error);
                 setCurrentPath(data.path);
                 setDirItems(data.items);
             })
-            .catch(e => console.error('Gemini Browse Error:', e));
+            .catch(e => console.error('[Gemini] Browse Error:', e));
     };
 
     const openBrowser = () => {
@@ -99,25 +114,47 @@ export const GeminiTerminal: React.FC = () => {
     };
 
     const createFolder = () => {
-        if (!newDirName) return;
+        if (!newDirName) {
+            console.log('[Gemini] CreateFolder: empty name, returning');
+            return;
+        }
+        console.log('[Gemini] CreateFolder: creating "' + newDirName + '" in ' + currentPath);
         const formData = new FormData();
         formData.append('parent', currentPath);
         formData.append('name', newDirName);
         // Send CSRF token in the body (PHP checks $_POST['csrf_token'] as fallback)
-        formData.append('csrf_token', (window as any).csrf_token || '');
+        const csrfToken = (window as any).csrf_token || '';
+        formData.append('csrf_token', csrfToken);
+        console.log('[Gemini] CreateFolder: CSRF token length:', csrfToken.length, 'present:', !!csrfToken);
 
-        fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=create_dir', {
+        const createUrl = '/plugins/unraid-geminicli/GeminiAjax.php?action=create_dir';
+        console.log('[Gemini] CreateFolder: fetching', createUrl);
+        fetch(createUrl, {
             method: 'POST',
             body: formData,
-        }).then(r => r.json())
-            .then(data => {
+        }).then(r => {
+            console.log('[Gemini] CreateFolder: response status:', r.status, r.statusText);
+            return r.text();
+        }).then(text => {
+            console.log('[Gemini] CreateFolder: response body:', text);
+            try {
+                const data = JSON.parse(text);
                 if (data.status === 'ok') {
+                    console.log('[Gemini] CreateFolder: SUCCESS');
                     setNewDirName('');
                     browseTo(currentPath);
                 } else {
-                    alert('Error creating folder: ' + (data.message || 'unknown error'));
+                    console.error('[Gemini] CreateFolder: ERROR response:', data);
+                    alert('Error creating folder: ' + (data.message || data.error || 'unknown error'));
                 }
-            }).catch(e => console.error('Gemini CreateFolder Error:', e));
+            } catch (parseErr) {
+                console.error('[Gemini] CreateFolder: JSON parse failed on:', text.substring(0, 500));
+                alert('Server returned invalid response. Check browser console for details.');
+            }
+        }).catch(e => {
+            console.error('[Gemini] CreateFolder: fetch error:', e);
+            alert('Network error creating folder: ' + e.message);
+        });
     };
 
     const closeTab = (e: React.MouseEvent, id: string) => {
@@ -204,12 +241,14 @@ export const GeminiTerminal: React.FC = () => {
                         </div>
                     </div>
                 )}
-                <iframe
-                    key={activeId + (activeSession?.lastActive || '')}
-                    src={terminalUrl}
-                    style={styles.iframe}
-                    title="Gemini Terminal"
-                />
+                {!isStarting && (
+                    <iframe
+                        key={activeId + (activeSession?.lastActive || '')}
+                        src={terminalUrl}
+                        style={styles.iframe}
+                        title="Gemini Terminal"
+                    />
+                )}
             </div>
 
             {/* Workspace Browser Modal */}
