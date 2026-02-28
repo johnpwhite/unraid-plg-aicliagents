@@ -164,7 +164,6 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
     $cmd = "ttyd -i '$sock' -W -d0 " .
            "-t fontSize={$config['font_size']} " .
            "-t fontFamily='monospace' " .
-           "-t 'theme={\"scrollbar\":false}' " .
            "-t disableLeaveAlert=true " .
            "-t enable-utf8=true " .
            "-t closeOnDisconnect=true " .

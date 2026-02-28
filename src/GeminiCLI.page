@@ -118,6 +118,16 @@ div.title, .title, .title-row, .title-bar, .header-row {
 $(function(){
     var resizeTimer;
     
+    // Force a resize event INSIDE the iframe so ttyd/xterm recalculates its fit
+    function triggerIframeResize() {
+        try {
+            var iframe = document.querySelector('iframe[title="Gemini Terminal"]');
+            if (iframe && iframe.contentWindow) {
+                iframe.contentWindow.dispatchEvent(new Event('resize'));
+            }
+        } catch(e) {}
+    }
+
     // THE NUCLEAR OPTION: Persistently kill scrollbars and force width on the root containers
     function killScroll() {
         var targets = 'html, body, #displaybox, #sb-body, #sb-container, #main-content, .main-section';
@@ -150,21 +160,21 @@ $(function(){
                     var style = doc.createElement('style');
                     style.id = styleId;
                     style.innerHTML = `
-                        html, body, .terminal, .xterm { 
+                        html, body, .terminal, .xterm, .xterm-viewport, .xterm-screen { 
                             overflow: hidden !important; 
                             scrollbar-width: none !important; 
                             padding: 0 !important; 
                             margin: 0 !important;
                             scrollbar-gutter: none !important;
+                            width: 100% !important;
+                            max-width: 100% !important;
                         } 
                         ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
                     `;
                     doc.head.appendChild(style);
                 }
             }
-        } catch(e) {
-            // Likely cross-origin or not loaded yet - silent fail
-        }
+        } catch(e) {}
     }
 
     // Dynamically size the root to fill from its top edge to the footer
@@ -195,6 +205,8 @@ $(function(){
             
             // Force a resize event on the window to let the iframe know its container changed
             window.dispatchEvent(new Event('resize'));
+            setTimeout(triggerIframeResize, 10);
+            setTimeout(triggerIframeResize, 500);
         });
     }
     
