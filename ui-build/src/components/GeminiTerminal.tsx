@@ -17,7 +17,16 @@ interface Session {
 export const GeminiTerminal: React.FC = () => {
     const [config, setConfig] = useState<any>(null);
     const [sessions, setSessions] = useState<Session[]>([]);
-    const [activeId, setActiveId] = useState<string>('default');
+    const [activeId, setActiveId] = useState<string>(() => {
+        return localStorage.getItem('gemini_active_id') || 'default';
+    });
+
+    useEffect(() => {
+        if (activeId) {
+            localStorage.setItem('gemini_active_id', activeId);
+        }
+    }, [activeId]);
+
     const [browserOpen, setBrowserOpen] = useState(false);
     const [currentPath, setCurrentPath] = useState<string>('');
     const [dirItems, setDirItems] = useState<any[]>([]);
@@ -32,13 +41,17 @@ export const GeminiTerminal: React.FC = () => {
                 if (data && data.config) {
                     setConfig(data.config);
                     const savedSessions = localStorage.getItem('gemini_sessions');
+                    let initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '' }];
+                    
                     if (savedSessions) {
-                        setSessions(JSON.parse(savedSessions));
-                    } else {
-                        const initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '' }];
-                        setSessions(initial);
-                        localStorage.setItem('gemini_sessions', JSON.stringify(initial));
+                        const parsed = JSON.parse(savedSessions);
+                        if (parsed.length > 0) {
+                            initial = parsed;
+                        }
                     }
+                    
+                    setSessions(initial);
+                    localStorage.setItem('gemini_sessions', JSON.stringify(initial));
                 }
             })
             .catch(e => console.error('Gemini Initial Load Error:', e));

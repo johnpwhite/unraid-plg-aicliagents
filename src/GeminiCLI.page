@@ -46,6 +46,20 @@ main,
 #main-content,
 #gemini-cli-root {
     overflow: hidden !important;
+    scrollbar-width: none !important; /* Firefox */
+    -ms-overflow-style: none !important;  /* IE/Edge */
+}
+
+body::-webkit-scrollbar,
+#displaybox::-webkit-scrollbar,
+#sb-body::-webkit-scrollbar,
+.gemini-cli-ui::-webkit-scrollbar,
+main::-webkit-scrollbar,
+#main-content::-webkit-scrollbar,
+#gemini-cli-root::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
 }
 
 /* HIDE THE PAGE HEADER */
