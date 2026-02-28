@@ -37,39 +37,7 @@ export const GeminiTerminal: React.FC = () => {
     const [isStarting, setIsStarting] = useState(false);
 
     // Diagnostics for scrollbar
-    useEffect(() => {
-        const checkScroll = () => {
-            const elements = document.querySelectorAll('*');
-            elements.forEach(el => {
-                const htmlEl = el as HTMLElement;
-                const scrollHeight = htmlEl.scrollHeight;
-                const clientHeight = htmlEl.clientHeight;
-                const scrollWidth = htmlEl.scrollWidth;
-                const clientWidth = htmlEl.clientWidth;
-
-                if (scrollHeight > clientHeight + 1.5 || scrollWidth > clientWidth + 1.5) {
-                    const style = window.getComputedStyle(htmlEl);
-                    if (style.overflow !== 'hidden' && style.overflowY !== 'hidden') {
-                        // Create a simple path for identification
-                        let path = htmlEl.tagName.toLowerCase();
-                        if (htmlEl.id) path += '#' + htmlEl.id;
-                        if (htmlEl.className) path += '.' + String(htmlEl.className).split(' ').join('.');
-                        
-                        console.warn(`[Gemini ScrollCheck] ${path} is SCROLLING: ${scrollWidth}x${scrollHeight} (client: ${clientWidth}x${clientHeight}), overflow: ${style.overflow}, parent: ${htmlEl.parentElement?.tagName}${htmlEl.parentElement?.id ? '#' + htmlEl.parentElement.id : ''}`);
-                    }
-                }
-            });
-        };
-        
-        const timer = setTimeout(checkScroll, 2000);
-        window.addEventListener('resize', checkScroll);
-        return () => {
-            clearTimeout(timer);
-            window.removeEventListener('resize', checkScroll);
-        };
-    }, []);
-
-    // Initial Load
+    // Load configuration
     useEffect(() => {
         fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=debug')
             .then(r => r.json())
