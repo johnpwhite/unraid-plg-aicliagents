@@ -59,20 +59,14 @@ export const GeminiTerminal: React.FC = () => {
                         }
                     }
                     
-                    // Update initial sessions with their chat IDs from backend
-                    Promise.all(initial.map(s => 
-                        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
+                    // Update initial sessions with their chat IDs ONLY if they don't have one
+                    Promise.all(initial.map(s => {
+                        if (s.chatSessionId) return Promise.resolve(s);
+                        return fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
                             .then(r => r.json())
-                            .then(cData => {
-                                // SYNC FIX: If backend says a session is different, update it
-                                if (cData.chatId && cData.chatId !== s.chatSessionId) {
-                                    console.log(`[Gemini] Syncing session ID for ${s.name}: ${s.chatSessionId} -> ${cData.chatId}`);
-                                    return { ...s, chatSessionId: cData.chatId };
-                                }
-                                return s;
-                            })
-                            .catch(() => s)
-                    )).then(updated => {
+                            .then(cData => ({ ...s, chatSessionId: cData.chatId || '' }))
+                            .catch(() => s);
+                    })).then(updated => {
                         setSessions(updated);
                         localStorage.setItem('gemini_sessions', JSON.stringify(updated));
                     });

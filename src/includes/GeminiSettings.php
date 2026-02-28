@@ -219,7 +219,14 @@ function findGeminiChatSession($path) {
     if (!isset($data['projects'])) return null;
     
     // Exact path match to find the project ID (folder name in tmp/)
-    $projectId = $data['projects'][$path] ?? null;
+    $projectId = null;
+    foreach ($data['projects'] as $pPath => $pId) {
+        if (realpath($pPath) === realpath($path)) {
+            $projectId = $pId;
+            break;
+        }
+    }
+    
     if (!$projectId) return null;
 
     $logFile = "$home/.gemini/tmp/$projectId/logs.json";
