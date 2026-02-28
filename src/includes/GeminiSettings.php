@@ -91,11 +91,18 @@ function stopGeminiTerminal($id = 'default', $killTmux = false) {
     $sock = getGeminiSock($id);
     $pidFile = getGeminiPidFile($id);
     
+    // 1. Kill ttyd
     $pids = [];
     exec("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep '$sock' | awk '{print $1}'", $pids);
-    
     foreach ($pids as $pid) {
         if (!empty($pid)) exec("kill -9 $pid > /dev/null 2>&1");
+    }
+    
+    // 2. Kill associated node processes (even if orphaned)
+    // We look for node processes that have the GEMINI_SESSION_ID in their environment
+    exec("pgrep -f 'node.*gemini.mjs' | xargs -I {} grep -l 'GEMINI_SESSION_ID=$id' /proc/{}/environ 2>/dev/null | grep -oP '\d+'", $nodePids);
+    foreach ($nodePids as $np) {
+        if (!empty($np)) exec("kill -9 $np > /dev/null 2>&1");
     }
     
     if (file_exists($sock)) @unlink($sock);
