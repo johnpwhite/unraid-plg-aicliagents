@@ -177,8 +177,18 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
 function findGeminiChatSession($path) {
     $config = getGeminiConfig();
     $home = $config['home_path'];
-    $project = basename($path);
-    $logFile = "$home/.gemini/tmp/$project/logs.json";
+    $projectsFile = "$home/.gemini/projects.json";
+    
+    if (!file_exists($projectsFile)) return null;
+    
+    $data = json_decode(file_get_contents($projectsFile), true);
+    if (!isset($data['projects'])) return null;
+    
+    // Exact path match to find the project ID (folder name in tmp/)
+    $projectId = $data['projects'][$path] ?? null;
+    if (!$projectId) return null;
+
+    $logFile = "$home/.gemini/tmp/$projectId/logs.json";
     
     if (file_exists($logFile)) {
         $logs = json_decode(file_get_contents($logFile), true);
