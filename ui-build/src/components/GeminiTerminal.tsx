@@ -315,7 +315,10 @@ export const GeminiTerminal: React.FC = () => {
                 style.textContent = `
                     .xterm-viewport::-webkit-scrollbar { display: none !important; width: 0 !important; }
                     .xterm-viewport { scrollbar-width: none !important; -ms-overflow-style: none !important; }
-                    body { overflow: hidden !important; }
+                    body, html, .terminal, .xterm, .xterm-viewport { 
+                        overflow: hidden !important; 
+                        scrollbar-gutter: none !important;
+                    }
                 `;
                 doc.head.appendChild(style);
                 console.log('[Gemini] Injected scrollbar-killer into terminal iframe');
@@ -487,6 +490,7 @@ export const GeminiTerminal: React.FC = () => {
                         style={styles.iframe}
                         title="Gemini Terminal"
                         onLoad={injectIframeStyles}
+                        scrolling="no"
                     />
                 )}
             </div>

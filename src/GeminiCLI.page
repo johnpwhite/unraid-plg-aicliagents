@@ -139,6 +139,32 @@ $(function(){
             this.style.setProperty('margin', '0', 'important');
             this.style.setProperty('width', '100%', 'important');
         });
+
+        // Reach into the iframe to kill internal scrollbars (Same-Origin via Proxy)
+        try {
+            var iframe = document.querySelector('iframe[title="Gemini Terminal"]');
+            if (iframe && iframe.contentDocument) {
+                var doc = iframe.contentDocument;
+                var styleId = 'gemini-kill-scroll';
+                if (!doc.getElementById(styleId)) {
+                    var style = doc.createElement('style');
+                    style.id = styleId;
+                    style.innerHTML = `
+                        html, body, .terminal, .xterm { 
+                            overflow: hidden !important; 
+                            scrollbar-width: none !important; 
+                            padding: 0 !important; 
+                            margin: 0 !important;
+                            scrollbar-gutter: none !important;
+                        } 
+                        ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+                    `;
+                    doc.head.appendChild(style);
+                }
+            }
+        } catch(e) {
+            // Likely cross-origin or not loaded yet - silent fail
+        }
     }
 
     // Dynamically size the root to fill from its top edge to the footer
