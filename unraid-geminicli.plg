@@ -2,16 +2,20 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version "2026.03.01.04">
+<!ENTITY version "2026.03.01.05">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.01.04" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.01.05" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.03.01.05
+- Refactor: Remove the special 'Main' tab concept
+- - The UI now initializes with a standard workspace tab for the default path, ensuring consistent behavior across all sessions
+- - Feature: Add manual RESET button to the tab metadata overlay to clear stuck or incorrect session IDs.
 ## 2026.03.01.02
 - Fix: Resolve session ID desync between UI and terminal
 - - Fix: Implement circuit breaker to prevent infinite reload loops if a session is missing

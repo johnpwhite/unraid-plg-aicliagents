@@ -46,25 +46,45 @@ export const GeminiTerminal: React.FC = () => {
                 if (data && data.config) {
                     setConfig(data.config);
                     const savedSessions = localStorage.getItem('gemini_sessions');
-                    let initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '', chatSessionId: '' }];
+                    let initial: Session[] = [];
                     
                     if (savedSessions) {
                         try {
                             const parsed = JSON.parse(savedSessions);
-                            if (parsed.length > 0) {
+                            if (parsed && Array.isArray(parsed) && parsed.length > 0) {
                                 initial = parsed;
                             }
                         } catch (e) {
                             console.error('Gemini Session Parse Error:', e);
                         }
                     }
+
+                    // If no sessions, create the first one based on root_path
+                    if (initial.length === 0) {
+                        const name = data.config.root_path === '/' ? 'Root' : data.config.root_path.split('/').pop() || 'Workspace';
+                        const newId = 's' + Math.random().toString(36).substring(2, 7);
+                        initial = [{ 
+                            id: newId, 
+                            name: name, 
+                            path: data.config.root_path, 
+                            lastActive: Date.now(), 
+                            title: '', 
+                            chatSessionId: '' 
+                        }];
+                        setActiveId(newId);
+                    }
                     
-                    // Update initial sessions with their chat IDs ONLY if they don't have one
+                    // Update initial sessions with their chat IDs
                     Promise.all(initial.map(s => {
-                        if (s.chatSessionId) return Promise.resolve(s);
                         return fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
                             .then(r => r.json())
-                            .then(cData => ({ ...s, chatSessionId: cData.chatId || '' }))
+                            .then(cData => {
+                                // Only sync if we found one and it differs, OR if we had none
+                                if (cData.chatId && cData.chatId !== s.chatSessionId) {
+                                    return { ...s, chatSessionId: cData.chatId };
+                                }
+                                return s;
+                            })
                             .catch(() => s);
                     })).then(updated => {
                         setSessions(updated);
@@ -257,16 +277,18 @@ export const GeminiTerminal: React.FC = () => {
                 const nextIndex = Math.min(index, filtered.length - 1);
                 nextId = filtered[nextIndex].id;
             } else {
-                // Last tab closed, create new default
-                const newDefault = { 
-                    id: 'default', 
-                    name: 'Main', 
+                // Last tab closed, create new standard workspace based on config
+                const name = config.root_path === '/' ? 'Root' : config.root_path.split('/').pop() || 'Workspace';
+                const newId = 's' + Math.random().toString(36).substring(2, 7);
+                filtered.push({ 
+                    id: newId, 
+                    name: name, 
                     path: config.root_path, 
                     lastActive: Date.now(), 
-                    title: '' 
-                };
-                filtered.push(newDefault);
-                nextId = 'default';
+                    title: '', 
+                    chatSessionId: '' 
+                });
+                nextId = newId;
             }
         }
 
@@ -329,6 +351,12 @@ export const GeminiTerminal: React.FC = () => {
     const themeParams = encodeURIComponent(themeJson);
     const terminalUrl = `/webterminal/geminiterm-${activeId}/?theme=${themeParams}&fontSize=${config.font_size}&fontFamily=monospace&disableLeaveAlert=true&v=${activeSession?.lastActive || Date.now()}`;
 
+    const resetSession = (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        setSessions(prev => prev.map(s => s.id === id ? { ...s, chatSessionId: '', lastActive: Date.now() } : s));
+        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=restart&id=${id}&path=${encodeURIComponent(sessions.find(s => s.id === id)?.path || '')}&chatId=`);
+    };
+
     const injectIframeStyles = (e: React.SyntheticEvent<HTMLIFrameElement>) => {
         try {
             const iframe = e.currentTarget;
@@ -387,10 +415,7 @@ export const GeminiTerminal: React.FC = () => {
                     {/* Middle Section: Tabs (Scrollable) */}
                     <div style={styles.drawerTabs}>
                         {sessions.map(s => {
-                            const baseName = s.id === 'default'
-                                ? (s.path === config?.root_path ? 'Main' : s.path.split('/').pop() || 'Main')
-                                : s.name;
-                            const displayName = s.title || baseName;
+                            const displayName = s.title || s.name;
                             const isActive = activeId === s.id;
                             return (
                                 <div
@@ -412,7 +437,7 @@ export const GeminiTerminal: React.FC = () => {
                                         position: 'relative',
                                     }}
                                 >
-                                    <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ fontSize: 14, opacity: isActive ? 1 : 0.6 }}></i>
+                                    <i className="fa fa-folder-open" style={{ fontSize: 14, opacity: isActive ? 1 : 0.6 }}></i>
                                     <span style={styles.drawerTabLabel}>{displayName}</span>
                                     <i
                                         className="fa fa-times"
@@ -464,11 +489,24 @@ export const GeminiTerminal: React.FC = () => {
                                     <span style={styles.overlayText}>{sessions.find(s => s.id === hoveredId)?.path}</span>
                                 </div>
                                 {sessions.find(s => s.id === hoveredId)?.chatSessionId && (
-                                    <div style={styles.overlayRow}>
-                                        <i className="fa fa-comments" style={styles.overlayIcon}></i>
-                                        <span style={styles.overlayText}>
-                                            Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessions.find(s => s.id === hoveredId)?.chatSessionId}</span>
-                                        </span>
+                                    <div style={{ ...styles.overlayRow, marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                            <i className="fa fa-comments" style={styles.overlayIcon}></i>
+                                            <span style={styles.overlayText}>
+                                                Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessions.find(s => s.id === hoveredId)?.chatSessionId}</span>
+                                            </span>
+                                        </div>
+                                        <button 
+                                            onClick={(e) => resetSession(e, hoveredId)}
+                                            style={{ 
+                                                background: 'transparent', border: '1px solid #ff4444', color: '#ff4444', 
+                                                fontSize: 9, padding: '2px 6px', borderRadius: 4, cursor: 'pointer',
+                                                pointerEvents: 'auto'
+                                            }}
+                                            title="Forget Session"
+                                        >
+                                            <i className="fa fa-trash-o"></i> RESET
+                                        </button>
                                     </div>
                                 )}
                             </>
@@ -508,7 +546,7 @@ export const GeminiTerminal: React.FC = () => {
                 )}
                 {!isStarting && (
                     <iframe
-                        key={activeId + (activeSession?.lastActive || '')}
+                        key={activeId + (activeSession?.lastActive || '') + (activeSession?.chatSessionId || '')}
                         src={terminalUrl}
                         style={styles.iframe}
                         title="Gemini Terminal"

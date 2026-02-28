@@ -218,13 +218,17 @@ function findGeminiChatSession($path) {
     $data = json_decode(file_get_contents($projectsFile), true);
     if (!isset($data['projects'])) return null;
     
-    // Exact path match to find the project ID (folder name in tmp/)
+    // Traverse up to find the nearest project project root (matching Gemini CLI behavior)
     $projectId = null;
-    foreach ($data['projects'] as $pPath => $pId) {
-        if (realpath($pPath) === realpath($path)) {
-            $projectId = $pId;
-            break;
+    $checkPath = realpath($path);
+    while ($checkPath && $checkPath !== '/') {
+        foreach ($data['projects'] as $pPath => $pId) {
+            if (realpath($pPath) === $checkPath) {
+                $projectId = $pId;
+                break 2;
+            }
         }
+        $checkPath = dirname($checkPath);
     }
     
     if (!$projectId) return null;
