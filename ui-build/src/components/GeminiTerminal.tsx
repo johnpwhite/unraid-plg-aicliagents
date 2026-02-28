@@ -218,17 +218,30 @@ export const GeminiTerminal: React.FC = () => {
         return saved ? parseInt(saved, 10) : 20;
     });
     const [isDragging, setIsDragging] = useState(false);
+    const [dragStart, setDragStart] = useState<{ y: number, bottom: number } | null>(null);
 
     useEffect(() => {
-        if (!isDragging) return;
+        if (!dragStart) return;
         const handleMouseMove = (e: MouseEvent) => {
-            const newBottom = window.innerHeight - e.clientY - 24; // 24 is half tab height approx
-            const clamped = Math.max(10, Math.min(window.innerHeight - 60, newBottom));
-            setTabBottom(clamped);
+            const deltaY = dragStart.y - e.clientY;
+            if (!isDragging && Math.abs(deltaY) > 5) {
+                setIsDragging(true);
+            }
+            if (isDragging || Math.abs(deltaY) > 5) {
+                const newBottom = dragStart.bottom + deltaY;
+                const clamped = Math.max(10, Math.min(window.innerHeight - 60, newBottom));
+                setTabBottom(clamped);
+            }
         };
         const handleMouseUp = () => {
-            setIsDragging(false);
-            localStorage.setItem('gemini_tab_y', tabBottom.toString());
+            if (isDragging) {
+                localStorage.setItem('gemini_tab_y', tabBottom.toString());
+            }
+            // Use a small timeout to ensure onClick handler can check isDragging before it's reset
+            setTimeout(() => {
+                setIsDragging(false);
+                setDragStart(null);
+            }, 50);
         };
         window.addEventListener('mousemove', handleMouseMove);
         window.addEventListener('mouseup', handleMouseUp);
@@ -236,7 +249,7 @@ export const GeminiTerminal: React.FC = () => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
         };
-    }, [isDragging, tabBottom]);
+    }, [dragStart, isDragging, tabBottom]);
 
     if (!config) {
         return (
@@ -329,8 +342,7 @@ export const GeminiTerminal: React.FC = () => {
                         if (!isDragging) setDrawerOpen(!drawerOpen);
                     }}
                     onMouseDown={(e) => {
-                        // Only start drag if clicking the handle area (not the icon if we wanted specificity)
-                        setIsDragging(true);
+                        setDragStart({ y: e.clientY, bottom: tabBottom });
                         e.preventDefault();
                     }}
                     style={{
