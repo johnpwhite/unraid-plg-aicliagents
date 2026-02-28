@@ -92,16 +92,33 @@ function getGeminiSock($id = 'default') {
     return "/var/run/geminiterm-$id.sock";
 }
 
-function isGeminiRunning($id = 'default') {
+function getGeminiChatIdFile($id = 'default') {
+    return "/var/run/unraid-geminicli-$id.chatid";
+}
+
+function isGeminiRunning($id = 'default', $chatId = null) {
     $sock = getGeminiSock($id);
     $pids = [];
     exec("pgrep -x ttyd | xargs -I {} ps -p {} -o args= | grep -v grep | grep '$sock'", $pids);
-    return !empty($pids);
+    
+    if (empty($pids)) return false;
+
+    // If a chatId is provided, we MUST check if it matches the running ttyd's chatId
+    if ($chatId !== null) {
+        $chatIdFile = getGeminiChatIdFile($id);
+        $runningChatId = file_exists($chatIdFile) ? trim(file_get_contents($chatIdFile)) : '';
+        if ($chatId !== $runningChatId) {
+            return false; // Force a restart because the requested chat ID changed
+        }
+    }
+
+    return true;
 }
 
 function stopGeminiTerminal($id = 'default', $killTmux = false) {
     $sock = getGeminiSock($id);
     $pidFile = getGeminiPidFile($id);
+    $chatIdFile = getGeminiChatIdFile($id);
     
     // 1. Kill ttyd
     $pids = [];
@@ -119,6 +136,7 @@ function stopGeminiTerminal($id = 'default', $killTmux = false) {
     
     if (file_exists($sock)) @unlink($sock);
     if (file_exists($pidFile)) @unlink($pidFile);
+    if (file_exists($chatIdFile)) @unlink($chatIdFile);
 
     if ($killTmux) {
         $sessionName = "gemini-cli-$id";
@@ -132,6 +150,7 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
     $log = "/tmp/ttyd-gemini-$id.log";
     $pidFile = getGeminiPidFile($id);
     $lockFile = getGeminiLockFile($id);
+    $chatIdFile = getGeminiChatIdFile($id);
     
     $config = getGeminiConfig();
     $workingDir = $workingDir ?: $config['root_path'];
@@ -142,7 +161,7 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
         return; 
     }
 
-    if (isGeminiRunning($id) && file_exists($sock)) {
+    if (isGeminiRunning($id, $chatSessionId) && file_exists($sock)) {
         flock($fp, LOCK_UN);
         fclose($fp);
         return;
@@ -150,6 +169,9 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
 
     stopGeminiTerminal($id, false);
     if (file_exists($shell)) chmod($shell, 0755);
+
+    // Save the new chat ID before starting
+    file_put_contents($chatIdFile, $chatSessionId ?: '');
 
     $env = "export GEMINI_HOME='{$config['home_path']}'; " .
            "export GEMINI_USER='{$config['user']}'; " .
