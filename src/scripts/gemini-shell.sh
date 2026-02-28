@@ -20,6 +20,9 @@ export TERM=xterm-256color
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
+# ENSURE CLEANUP: Kill tmux session when ttyd exits
+trap "echo '$(date) - EXITING: Cleaning up tmux $SESSION' >> '$LOG'; tmux kill-session -t '$SESSION' 2>/dev/null" EXIT
+
 echo "$(date) - Attaching as $TARGET_USER to session $SESSION (History: $HISTORY_LIMIT, Root: $ROOT_DIR)" >> "$LOG"
 
 # 1. Fallback if no tmux

@@ -143,12 +143,16 @@ function startGeminiTerminal($id = 'default', $workingDir = null) {
            "-t fontFamily='monospace' " .
            "-t disableLeaveAlert=true " .
            "-t enable-utf8=true " .
+           "-t closeOnDisconnect=true " .
            "-t titleFixed='Gemini CLI - $id' " .
            "bash -c \"$env $shell\"";
     
     exec("nohup $cmd >> $log 2>&1 & echo $!", $output);
     $pid = trim($output[0] ?? '');
     if ($pid) file_put_contents($pidFile, $pid);
+    
+    // Perform light GC on start to keep things clean
+    gcGeminiSessions();
     
     for ($i=0; $i<15; $i++) {
         if (file_exists($sock)) break;
@@ -157,6 +161,41 @@ function startGeminiTerminal($id = 'default', $workingDir = null) {
     
     flock($fp, LOCK_UN);
     fclose($fp);
+}
+
+/**
+ * Garbage collect stale ttyd processes and sockets
+ */
+function gcGeminiSessions() {
+    $runDir = "/var/run";
+    $socks = glob("$runDir/geminiterm-*.sock");
+    $pids = glob("$runDir/unraid-geminicli-*.pid");
+
+    // 1. Cleanup PID files where the process is gone
+    foreach ($pids as $pf) {
+        $pid = trim(file_get_contents($pf));
+        if (!empty($pid) && !file_exists("/proc/$pid")) {
+            @unlink($pf);
+            // If the pid file is "unraid-geminicli-XYZ.pid", extract XYZ
+            if (preg_match('/unraid-geminicli-(.*)\.pid$/', $pf, $m)) {
+                $id = $m[1];
+                $sock = getGeminiSock($id);
+                if (file_exists($sock)) @unlink($sock);
+            }
+        }
+    }
+
+    // 2. Cleanup Sockets that have no ttyd listeners
+    foreach ($socks as $sock) {
+        if (preg_match('/geminiterm-(.*)\.sock$/', $sock, $m)) {
+            $id = $m[1];
+            if (!isGeminiRunning($id)) {
+                @unlink($sock);
+                $pidFile = getGeminiPidFile($id);
+                if (file_exists($pidFile)) @unlink($pidFile);
+            }
+        }
+    }
 }
 
 if (isset($_GET['action'])) {
@@ -180,6 +219,9 @@ if (isset($_GET['action'])) {
         echo json_encode(['status' => 'ok', 'sock' => "/webterminal/geminiterm-$id/"]);
     } elseif ($_GET['action'] === 'stop') {
         stopGeminiTerminal($id, isset($_GET['hard']));
+        echo json_encode(['status' => 'ok']);
+    } elseif ($_GET['action'] === 'gc') {
+        gcGeminiSessions();
         echo json_encode(['status' => 'ok']);
     } elseif ($_GET['action'] === 'restart') {
         $path = $_GET['path'] ?? null;
