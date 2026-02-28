@@ -181,14 +181,62 @@ export const GeminiTerminal: React.FC = () => {
 
     const closeTab = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        if (id === 'default') return;
+        
+        const index = sessions.findIndex(s => s.id === id);
         const filtered = sessions.filter(s => s.id !== id);
+        
+        let nextId = activeId;
+        if (activeId === id) {
+            if (filtered.length > 0) {
+                // Switch to the next tab, or the previous if we were at the end
+                const nextIndex = Math.min(index, filtered.length - 1);
+                nextId = filtered[nextIndex].id;
+            } else {
+                // Last tab closed, create new default
+                const newDefault = { 
+                    id: 'default', 
+                    name: 'Main', 
+                    path: config.root_path, 
+                    lastActive: Date.now(), 
+                    title: '' 
+                };
+                filtered.push(newDefault);
+                nextId = 'default';
+            }
+        }
+
         setSessions(filtered);
-        if (activeId === id) setActiveId('default');
+        setActiveId(nextId);
         fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=stop&id=${id}&hard=1`);
     };
 
     const [drawerOpen, setDrawerOpen] = useState(false);
+    
+    // DRAGGABLE TAB POSITION
+    const [tabBottom, setTabBottom] = useState(() => {
+        const saved = localStorage.getItem('gemini_tab_y');
+        return saved ? parseInt(saved, 10) : 20;
+    });
+    const [isDragging, setIsDragging] = useState(false);
+
+    useEffect(() => {
+        if (!isDragging) return;
+        const handleMouseMove = (e: MouseEvent) => {
+            const newBottom = window.innerHeight - e.clientY - 24; // 24 is half tab height approx
+            const clamped = Math.max(10, Math.min(window.innerHeight - 60, newBottom));
+            setTabBottom(clamped);
+        };
+        const handleMouseUp = () => {
+            setIsDragging(false);
+            localStorage.setItem('gemini_tab_y', tabBottom.toString());
+        };
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [isDragging, tabBottom]);
 
     if (!config) {
         return (
@@ -239,13 +287,11 @@ export const GeminiTerminal: React.FC = () => {
                                 >
                                     <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ fontSize: 14, opacity: isActive ? 1 : 0.6 }}></i>
                                     <span style={styles.drawerTabLabel}>{displayName}</span>
-                                    {s.id !== 'default' && (
-                                        <i
-                                            className="fa fa-times"
-                                            style={styles.drawerTabClose}
-                                            onClick={(e) => closeTab(e, s.id)}
-                                        ></i>
-                                    )}
+                                    <i
+                                        className="fa fa-times"
+                                        style={styles.drawerTabClose}
+                                        onClick={(e) => closeTab(e, s.id)}
+                                    ></i>
                                 </div>
                             );
                         })}
@@ -279,8 +325,20 @@ export const GeminiTerminal: React.FC = () => {
 
                 {/* Sticking out Tab Bottom Left */}
                 <div 
-                    onClick={() => setDrawerOpen(!drawerOpen)}
-                    style={styles.drawerToggle}
+                    onClick={() => {
+                        if (!isDragging) setDrawerOpen(!drawerOpen);
+                    }}
+                    onMouseDown={(e) => {
+                        // Only start drag if clicking the handle area (not the icon if we wanted specificity)
+                        setIsDragging(true);
+                        e.preventDefault();
+                    }}
+                    style={{
+                        ...styles.drawerToggle,
+                        bottom: tabBottom,
+                        cursor: isDragging ? 'grabbing' : 'grab',
+                        transition: isDragging ? 'none' : 'transform 0.3s, bottom 0.3s'
+                    }}
                 >
                     <i className={`fa ${drawerOpen ? 'fa-chevron-left' : 'fa-bars'}`} style={{ fontSize: 14 }}></i>
                 </div>
@@ -534,6 +592,7 @@ const styles: Record<string, React.CSSProperties> = {
         justifyContent: 'center',
         backgroundColor: 'var(--content-background-color, rgba(255,255,255,0.85))',
         backdropFilter: 'blur(4px)',
+        overflow: 'hidden',
     },
     iframe: {
         position: 'absolute',
@@ -541,6 +600,7 @@ const styles: Record<string, React.CSSProperties> = {
         width: '100%',
         height: '100%',
         border: 'none',
+        overflow: 'hidden',
     },
 
     /* ── Modal ── */

@@ -43,8 +43,14 @@ body,
 #sb-body, 
 .gemini-cli-ui, 
 main, 
-#main-content {
+#main-content,
+#gemini-cli-root {
     overflow: hidden !important;
+}
+
+/* HIDE THE PAGE HEADER */
+div.title, .title, .title-row, .title-bar, .header-row {
+    display: none !important;
 }
 
 #displaybox {
@@ -52,13 +58,6 @@ main,
     margin-bottom: 0 !important;
 }
 
-/* Remove bottom margin from the "Gemini CLI" page title bar and title row */
-div.title, .title {
-    margin-bottom: 0 !important;
-    padding-bottom: 0 !important;
-}
-
-/* Force the main content area to take full width and no padding */
 #main-content {
     padding: 0 !important;
 }
@@ -69,7 +68,8 @@ div.title, .title {
     flex-direction: column;
     margin: 0;
     padding: 0;
-    overflow: hidden;
+    height: 100vh;
+    max-height: 100vh;
 }
 
 .gemini-cli-ui {
