@@ -86,7 +86,7 @@ export const GeminiTerminal: React.FC = () => {
         const timer = setInterval(poll, 4000);
         poll(); // Initial check
         return () => clearInterval(timer);
-    }, [sessions.length]); // Re-run if session count changes
+    }, [sessions.map(s => s.id).join(',')]); // Re-run if session IDs change
 
     // Ensure active session is running
     useEffect(() => {
@@ -111,7 +111,7 @@ export const GeminiTerminal: React.FC = () => {
                 console.error('[Gemini] Start Error:', e);
                 setIsStarting(false);
             });
-    }, [activeId, config]);
+    }, [activeId, config, sessions.find(s => s.id === activeId)?.path, sessions.find(s => s.id === activeId)?.lastActive]);
 
     const browseTo = (path: string) => {
         const browseUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=list_dir&path=${encodeURIComponent(path)}`;

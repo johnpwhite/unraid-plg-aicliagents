@@ -14,8 +14,6 @@ if ($config['enable_tab'] !== '1') {
     return;
 }
 
-startGeminiTerminal();
-
 // Get version for cache busting
 $version = $config['version'] ?? time();
 
