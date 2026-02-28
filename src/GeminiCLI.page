@@ -108,6 +108,17 @@ div.title, .title, .title-row, .title-bar, .header-row {
 $(function(){
     var resizeTimer;
     
+    // THE NUCLEAR OPTION: Persistently kill scrollbars on the root containers
+    function killScroll() {
+        $('html, body, #displaybox, #sb-body, #main-content').css({
+            'overflow': 'hidden',
+            'height': 'auto',
+            'max-height': '100vh'
+        });
+        document.documentElement.style.setProperty('overflow', 'hidden', 'important');
+        document.body.style.setProperty('overflow', 'hidden', 'important');
+    }
+
     // Dynamically size the root to fill from its top edge to the footer
     function resizeRoot() {
         if (resizeTimer) cancelAnimationFrame(resizeTimer);
@@ -124,20 +135,15 @@ $(function(){
             var footerHeight = footer ? footer.offsetHeight : 24;
             if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
             
-            // 4px safety gap: ensure we are always shorter than the viewport
-            var padding = 4;
+            // 20px safety gap: ensure we are always shorter than the viewport
+            var padding = 20;
             var available = window.innerHeight - rect.top - footerHeight - padding;
             
             // Floor the height to avoid sub-pixel scaling causing 1px scrollbars
             var finalHeight = Math.floor(available);
             el.style.height = Math.max(400, finalHeight) + 'px';
             
-            // Also force hidden on the displaybox wrapper which Unraid often resets
-            var dbox = document.getElementById('displaybox');
-            if (dbox) {
-                dbox.style.overflow = 'hidden';
-                dbox.style.height = 'auto';
-            }
+            killScroll();
             
             // Force a resize event on the window to let the iframe know its container changed
             window.dispatchEvent(new Event('resize'));
@@ -149,7 +155,8 @@ $(function(){
     window.addEventListener('resize', resizeRoot);
     
     // Multiple intervals to catch Unraid UI shifts
-    [50, 150, 300, 600, 1200, 2500].forEach(ms => setTimeout(resizeRoot, ms));
+    [50, 150, 300, 600, 1200, 2500, 5000].forEach(ms => setTimeout(resizeRoot, ms));
+    setInterval(killScroll, 1000);
 });
 </script>
 
