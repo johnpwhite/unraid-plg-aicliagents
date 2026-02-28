@@ -306,6 +306,26 @@ export const GeminiTerminal: React.FC = () => {
     const themeParams = encodeURIComponent(themeJson);
     const terminalUrl = `/webterminal/geminiterm-${activeId}/?theme=${themeParams}&fontSize=${config.font_size}&fontFamily=monospace&disableLeaveAlert=true&v=${activeSession?.lastActive || Date.now()}`;
 
+    const injectIframeStyles = (e: React.SyntheticEvent<HTMLIFrameElement>) => {
+        try {
+            const iframe = e.currentTarget;
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (doc) {
+                const style = doc.createElement('style');
+                style.textContent = `
+                    .xterm-viewport::-webkit-scrollbar { display: none !important; width: 0 !important; }
+                    .xterm-viewport { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+                    body { overflow: hidden !important; }
+                `;
+                doc.head.appendChild(style);
+                console.log('[Gemini] Injected scrollbar-killer into terminal iframe');
+            }
+        } catch (err) {
+            // This might fail if the proxy uses a different port/protocol (cross-origin)
+            console.warn('[Gemini] Could not inject styles into iframe (cross-origin?):', err);
+        }
+    };
+
     return (
         <div style={styles.root}>
             {/* Backdrop for closing drawer when open */}
@@ -466,6 +486,7 @@ export const GeminiTerminal: React.FC = () => {
                         src={terminalUrl}
                         style={styles.iframe}
                         title="Gemini Terminal"
+                        onLoad={injectIframeStyles}
                     />
                 )}
             </div>
