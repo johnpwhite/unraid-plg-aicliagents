@@ -36,22 +36,36 @@ $csrf_token = $var['csrf_token'] ?? '';
    SCORCHED EARTH on scrollbars. 
    We force hidden on EVERY potential parent wrapper.
 */
+/* 
+   SUPER-NUCLEAR reset for scrollbars and gutters.
+   We force hidden/clip on EVERYTHING that could reserve space.
+*/
 html,
 body, 
 #displaybox, 
 #sb-body, 
+#sb-container,
 .gemini-cli-ui, 
 main, 
 #main-content,
 #gemini-cli-root,
-.main-section {
+.main-section,
+.main-row,
+#form {
     overflow: hidden !important;
-    scrollbar-width: none !important; /* Firefox */
-    -ms-overflow-style: none !important;  /* IE/Edge */
-    scrollbar-gutter: none !important;    /* Kill scrollbar gutter space */
+    overflow-y: hidden !important;
+    overflow-x: hidden !important;
+    /* Use clip if supported to prevent any scroll-container behavior */
+    overflow: clip !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+    scrollbar-gutter: none !important;
     margin: 0 !important;
     padding: 0 !important;
     box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    border: none !important;
 }
 
 body::-webkit-scrollbar,
@@ -73,40 +87,30 @@ div.title, .title, .title-row, .title-bar, .header-row {
     display: none !important;
 }
 
-#displaybox {
-    padding: 0 !important;
-    margin: 0 !important;
-    width: 100% !important;
-    max-width: 100vw !important;
-    height: auto !important;
-}
-
-#main-content {
-    padding: 0 !important;
-    margin: 0 !important;
-    width: 100% !important;
-    max-width: 100vw !important;
-    height: auto !important;
+#displaybox, #main-content {
+    position: relative !important;
+    left: 0 !important;
+    right: 0 !important;
 }
 
 #gemini-cli-root {
     width: 100% !important;
-    max-width: 100vw !important;
     display: flex;
     flex-direction: column;
     margin: 0 !important;
-    /* Small symmetrical padding to prevent text from hitting the edge */
-    padding: 0 2px !important;
-    /* Height is managed by JS to fill precisely to the footer */
+    padding: 0 !important; /* Total flush */
     min-height: 400px;
     box-sizing: border-box !important;
     overflow: hidden !important;
+    position: relative !important;
 }
 
 .gemini-cli-ui {
     height: 100%;
     width: 100%;
     overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
 }
 </style>
 
@@ -114,17 +118,27 @@ div.title, .title, .title-row, .title-bar, .header-row {
 $(function(){
     var resizeTimer;
     
-    // THE NUCLEAR OPTION: Persistently kill scrollbars on the root containers
+    // THE NUCLEAR OPTION: Persistently kill scrollbars and force width on the root containers
     function killScroll() {
-        $('html, body, #displaybox, #sb-body, #main-content').css({
+        var targets = 'html, body, #displaybox, #sb-body, #sb-container, #main-content, .main-section';
+        $(targets).css({
             'overflow': 'hidden',
-            'height': '100%',
-            'max-height': '100%',
+            'overflow-y': 'hidden',
+            'scrollbar-gutter': 'none',
+            'width': '100%',
+            'max-width': '100%',
             'margin': '0',
             'padding': '0'
         });
         document.documentElement.style.setProperty('overflow', 'hidden', 'important');
         document.body.style.setProperty('overflow', 'hidden', 'important');
+        
+        // Ensure no right padding is inherited from Unraid themes
+        $('#displaybox, #main-content').each(function() {
+            this.style.setProperty('padding', '0', 'important');
+            this.style.setProperty('margin', '0', 'important');
+            this.style.setProperty('width', '100%', 'important');
+        });
     }
 
     // Dynamically size the root to fill from its top edge to the footer
