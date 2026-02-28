@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version "2026.02.28.20">
+<!ENTITY version "2026.02.28.21">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.28.20" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.02.28.21" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.02.28.21
+- Fix: Explicitly disable ttyd internal scrollbar via theme option to eliminate the right-side gap.
 ## 2026.02.28.19
 - Fix: Eliminate scrollbar gutter and ensure symmetrical horizontal padding
 - - Refine: Ensure all Unraid root containers are strictly 100% width and kill scroll persistent logic.
