@@ -47,6 +47,17 @@ function updateGeminiMenuVisibility($enabled) {
 
 function getGeminiConfig() {
     $configFile = "/boot/config/plugins/unraid-geminicli/unraid-geminicli.cfg";
+    $plgFile = "/usr/local/emhttp/plugins/unraid-geminicli/unraid-geminicli.plg";
+    $version = 'unknown';
+    
+    if (file_exists($plgFile)) {
+        // Find version="..." in the <PLUGIN> tag
+        $plg = file_get_contents($plgFile);
+        if (preg_match('/version="(.*?)"/', $plg, $m)) {
+            $version = $m[1];
+        }
+    }
+
     $defaults = [
         'enable_tab' => '1',
         'theme' => 'dark',
@@ -55,6 +66,7 @@ function getGeminiConfig() {
         'home_path' => '/boot/config/plugins/unraid-geminicli/home',
         'user' => 'root',
         'root_path' => '/mnt',
+        'version' => $version,
         'sessions' => json_encode([['id' => 'default', 'name' => 'Main', 'path' => '/mnt']])
     ];
     

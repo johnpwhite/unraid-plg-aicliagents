@@ -55,12 +55,7 @@ export const GeminiTerminal: React.FC = () => {
                         if (htmlEl.id) path += '#' + htmlEl.id;
                         if (htmlEl.className) path += '.' + String(htmlEl.className).split(' ').join('.');
                         
-                        console.warn(`[Gemini ScrollCheck] ${path} is SCROLLING:`, {
-                            dimensions: `${scrollWidth}x${scrollHeight} (client: ${clientWidth}x${clientHeight})`,
-                            overflow: style.overflow,
-                            overflowY: style.overflowY,
-                            parent: htmlEl.parentElement?.tagName + (htmlEl.parentElement?.id ? '#' + htmlEl.parentElement.id : '')
-                        });
+                        console.warn(`[Gemini ScrollCheck] ${path} is SCROLLING: ${scrollWidth}x${scrollHeight} (client: ${clientWidth}x${clientHeight}), overflow: ${style.overflow}, parent: ${htmlEl.parentElement?.tagName}${htmlEl.parentElement?.id ? '#' + htmlEl.parentElement.id : ''}`);
                     }
                 }
             });
