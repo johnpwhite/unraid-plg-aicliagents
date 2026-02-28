@@ -36,25 +36,33 @@ $csrf_token = $var['csrf_token'] ?? '';
    SCORCHED EARTH on scrollbars. 
    We force hidden on EVERY potential parent wrapper.
 */
+html,
 body, 
 #displaybox, 
 #sb-body, 
 .gemini-cli-ui, 
 main, 
 #main-content,
-#gemini-cli-root {
+#gemini-cli-root,
+.main-section {
     overflow: hidden !important;
     scrollbar-width: none !important; /* Firefox */
     -ms-overflow-style: none !important;  /* IE/Edge */
+    margin: 0 !important;
+    padding: 0 !important;
+    max-width: 100vw !important;
+    box-sizing: border-box !important;
 }
 
 body::-webkit-scrollbar,
+html::-webkit-scrollbar,
 #displaybox::-webkit-scrollbar,
 #sb-body::-webkit-scrollbar,
 .gemini-cli-ui::-webkit-scrollbar,
 main::-webkit-scrollbar,
 #main-content::-webkit-scrollbar,
-#gemini-cli-root::-webkit-scrollbar {
+#gemini-cli-root::-webkit-scrollbar,
+.main-section::-webkit-scrollbar {
     display: none !important;
     width: 0 !important;
     height: 0 !important;
@@ -68,20 +76,24 @@ div.title, .title, .title-row, .title-bar, .header-row {
 #displaybox {
     padding: 0 !important;
     margin-bottom: 0 !important;
+    width: 100% !important;
 }
 
 #main-content {
     padding: 0 !important;
+    width: 100% !important;
 }
 
 #gemini-cli-root {
-    width: 100%;
+    width: 100% !important;
     display: flex;
     flex-direction: column;
-    margin: 0;
-    padding: 0;
+    margin: 0 !important;
+    padding: 0 !important;
     height: 100vh;
     max-height: 100vh;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
 }
 
 .gemini-cli-ui {
@@ -92,20 +104,34 @@ div.title, .title, .title-row, .title-bar, .header-row {
 
 <script>
 $(function(){
-    // Dynamically size the root to fill from its top edge to 6px above the footer
+    // Dynamically size the root to fill from its top edge to the footer
     function resizeRoot() {
         var el = document.getElementById('gemini-cli-root');
         if (!el) return;
         var rect = el.getBoundingClientRect();
-        var footerHeight = 30; // Unraid footer bar approx height
-        var padding = 6;       // Small gap above footer
+        
+        // Try to find the Unraid footer
+        var footer = document.getElementById('footer');
+        var footerHeight = footer ? footer.offsetHeight : 24;
+        if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
+        
+        var padding = 0;       // No gap above footer
         var available = window.innerHeight - rect.top - footerHeight - padding;
-        el.style.height = Math.max(200, available) + 'px';
+        
+        // Ensure we don't cause a scrollbar by being even 1px too tall
+        var finalHeight = Math.floor(available);
+        el.style.height = Math.max(200, finalHeight) + 'px';
+        
+        // Force a resize event on the window to let the iframe know its container changed
+        window.dispatchEvent(new Event('resize'));
     }
+    
     // Run on load, on resize, and after React mounts
     resizeRoot();
     window.addEventListener('resize', resizeRoot);
-    setTimeout(resizeRoot, 500);
-    setTimeout(resizeRoot, 1500);
+    
+    // Multiple intervals to catch Unraid UI shifts
+    [100, 300, 500, 1000, 2000].forEach(ms => setTimeout(resizeRoot, ms));
 });
 </script>
+
