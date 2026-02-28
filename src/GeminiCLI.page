@@ -106,26 +106,42 @@ div.title, .title, .title-row, .title-bar, .header-row {
 
 <script>
 $(function(){
+    var resizeTimer;
+    
     // Dynamically size the root to fill from its top edge to the footer
     function resizeRoot() {
-        var el = document.getElementById('gemini-cli-root');
-        if (!el) return;
-        var rect = el.getBoundingClientRect();
+        if (resizeTimer) cancelAnimationFrame(resizeTimer);
         
-        // Try to find the Unraid footer
-        var footer = document.getElementById('footer');
-        var footerHeight = footer ? footer.offsetHeight : 24;
-        if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
-        
-        var padding = 2;       // 2px safety gap to ensure no scrollbar triggers
-        var available = window.innerHeight - rect.top - footerHeight - padding;
-        
-        // Ensure we don't cause a scrollbar by being even 1px too tall
-        var finalHeight = Math.floor(available);
-        el.style.height = Math.max(400, finalHeight) + 'px';
-        
-        // Force a resize event on the window to let the iframe know its container changed
-        window.dispatchEvent(new Event('resize'));
+        resizeTimer = requestAnimationFrame(function() {
+            var el = document.getElementById('gemini-cli-root');
+            if (!el) return;
+            
+            // Re-calculate top position to account for any dynamically injected Unraid banners
+            var rect = el.getBoundingClientRect();
+            
+            // Try to find the Unraid footer
+            var footer = document.getElementById('footer');
+            var footerHeight = footer ? footer.offsetHeight : 24;
+            if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
+            
+            // 4px safety gap: ensure we are always shorter than the viewport
+            var padding = 4;
+            var available = window.innerHeight - rect.top - footerHeight - padding;
+            
+            // Floor the height to avoid sub-pixel scaling causing 1px scrollbars
+            var finalHeight = Math.floor(available);
+            el.style.height = Math.max(400, finalHeight) + 'px';
+            
+            // Also force hidden on the displaybox wrapper which Unraid often resets
+            var dbox = document.getElementById('displaybox');
+            if (dbox) {
+                dbox.style.overflow = 'hidden';
+                dbox.style.height = 'auto';
+            }
+            
+            // Force a resize event on the window to let the iframe know its container changed
+            window.dispatchEvent(new Event('resize'));
+        });
     }
     
     // Run on load, on resize, and after React mounts
@@ -133,7 +149,7 @@ $(function(){
     window.addEventListener('resize', resizeRoot);
     
     // Multiple intervals to catch Unraid UI shifts
-    [100, 300, 500, 1000, 2000].forEach(ms => setTimeout(resizeRoot, ms));
+    [50, 150, 300, 600, 1200, 2500].forEach(ms => setTimeout(resizeRoot, ms));
 });
 </script>
 

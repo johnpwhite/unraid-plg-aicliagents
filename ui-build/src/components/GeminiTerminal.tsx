@@ -42,17 +42,24 @@ export const GeminiTerminal: React.FC = () => {
             const elements = document.querySelectorAll('*');
             elements.forEach(el => {
                 const htmlEl = el as HTMLElement;
-                if (htmlEl.scrollHeight > htmlEl.clientHeight + 2 || htmlEl.scrollWidth > htmlEl.clientWidth + 2) {
+                const scrollHeight = htmlEl.scrollHeight;
+                const clientHeight = htmlEl.clientHeight;
+                const scrollWidth = htmlEl.scrollWidth;
+                const clientWidth = htmlEl.clientWidth;
+
+                if (scrollHeight > clientHeight + 1.5 || scrollWidth > clientWidth + 1.5) {
                     const style = window.getComputedStyle(htmlEl);
                     if (style.overflow !== 'hidden' && style.overflowY !== 'hidden') {
-                        console.warn('[Gemini ScrollCheck] SCROLLING DETECTED:', {
-                            tag: htmlEl.tagName,
-                            id: htmlEl.id,
-                            class: htmlEl.className,
-                            scrollHeight: htmlEl.scrollHeight,
-                            clientHeight: htmlEl.clientHeight,
+                        // Create a simple path for identification
+                        let path = htmlEl.tagName.toLowerCase();
+                        if (htmlEl.id) path += '#' + htmlEl.id;
+                        if (htmlEl.className) path += '.' + String(htmlEl.className).split(' ').join('.');
+                        
+                        console.warn(`[Gemini ScrollCheck] ${path} is SCROLLING:`, {
+                            dimensions: `${scrollWidth}x${scrollHeight} (client: ${clientWidth}x${clientHeight})`,
                             overflow: style.overflow,
-                            overflowY: style.overflowY
+                            overflowY: style.overflowY,
+                            parent: htmlEl.parentElement?.tagName + (htmlEl.parentElement?.id ? '#' + htmlEl.parentElement.id : '')
                         });
                     }
                 }
