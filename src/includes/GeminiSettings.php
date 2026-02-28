@@ -114,7 +114,7 @@ function stopGeminiTerminal($id = 'default', $killTmux = false) {
     }
 }
 
-function startGeminiTerminal($id = 'default', $workingDir = null) {
+function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId = null) {
     $sock = getGeminiSock($id);
     $shell = "/usr/local/emhttp/plugins/unraid-geminicli/scripts/gemini-shell.sh";
     $log = "/tmp/ttyd-gemini-$id.log";
@@ -144,6 +144,10 @@ function startGeminiTerminal($id = 'default', $workingDir = null) {
            "export GEMINI_ROOT='$workingDir'; " .
            "export GEMINI_HISTORY='{$config['history']}'; " .
            "export GEMINI_SESSION_ID='$id'; ";
+           
+    if (!empty($chatSessionId)) {
+        $env .= "export GEMINI_CHAT_SESSION_ID='$chatSessionId'; ";
+    }
 
     $cmd = "ttyd -i '$sock' -W -d0 " .
            "-t fontSize={$config['font_size']} " .
@@ -168,6 +172,23 @@ function startGeminiTerminal($id = 'default', $workingDir = null) {
     
     flock($fp, LOCK_UN);
     fclose($fp);
+}
+
+function findGeminiChatSession($path) {
+    $config = getGeminiConfig();
+    $home = $config['home_path'];
+    $project = basename($path);
+    $logFile = "$home/.gemini/tmp/$project/logs.json";
+    
+    if (file_exists($logFile)) {
+        $logs = json_decode(file_get_contents($logFile), true);
+        if (is_array($logs) && !empty($logs)) {
+            // Get the sessionId from the very last entry
+            $last = end($logs);
+            return $last['sessionId'] ?? null;
+        }
+    }
+    return null;
 }
 
 /**
@@ -222,7 +243,8 @@ if (isset($_GET['action'])) {
 
     if ($_GET['action'] === 'start') {
         $path = $_GET['path'] ?? null;
-        startGeminiTerminal($id, $path);
+        $chatId = $_GET['chatId'] ?? null;
+        startGeminiTerminal($id, $path, $chatId);
         echo json_encode(['status' => 'ok', 'sock' => "/webterminal/geminiterm-$id/"]);
     } elseif ($_GET['action'] === 'stop') {
         stopGeminiTerminal($id, isset($_GET['hard']));
@@ -232,9 +254,14 @@ if (isset($_GET['action'])) {
         echo json_encode(['status' => 'ok']);
     } elseif ($_GET['action'] === 'restart') {
         $path = $_GET['path'] ?? null;
+        $chatId = $_GET['chatId'] ?? null;
         stopGeminiTerminal($id, true);
-        startGeminiTerminal($id, $path);
+        startGeminiTerminal($id, $path, $chatId);
         echo json_encode(['status' => 'ok']);
+    } elseif ($_GET['action'] === 'get_chat_session') {
+        $path = $_GET['path'] ?? '';
+        $chatId = findGeminiChatSession($path);
+        echo json_encode(['status' => 'ok', 'chatId' => $chatId]);
     } elseif ($_GET['action'] === 'save') {
         saveGeminiConfig($_POST);
         echo json_encode(['status' => 'ok']);

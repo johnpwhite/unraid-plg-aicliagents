@@ -12,6 +12,7 @@ interface Session {
     path: string;
     lastActive: number;
     title?: string;
+    chatSessionId?: string;
 }
 
 export const GeminiTerminal: React.FC = () => {
@@ -20,6 +21,7 @@ export const GeminiTerminal: React.FC = () => {
     const [activeId, setActiveId] = useState<string>(() => {
         return localStorage.getItem('gemini_active_id') || 'default';
     });
+    const [hoveredId, setHoveredId] = useState<string | null>(null);
 
     useEffect(() => {
         if (activeId) {
@@ -41,7 +43,7 @@ export const GeminiTerminal: React.FC = () => {
                 if (data && data.config) {
                     setConfig(data.config);
                     const savedSessions = localStorage.getItem('gemini_sessions');
-                    let initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '' }];
+                    let initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '', chatSessionId: '' }];
                     
                     if (savedSessions) {
                         const parsed = JSON.parse(savedSessions);
@@ -50,8 +52,16 @@ export const GeminiTerminal: React.FC = () => {
                         }
                     }
                     
-                    setSessions(initial);
-                    localStorage.setItem('gemini_sessions', JSON.stringify(initial));
+                    // Update initial sessions with their chat IDs from backend
+                    Promise.all(initial.map(s => 
+                        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
+                            .then(r => r.json())
+                            .then(cData => ({ ...s, chatSessionId: cData.chatId || '' }))
+                            .catch(() => s)
+                    )).then(updated => {
+                        setSessions(updated);
+                        localStorage.setItem('gemini_sessions', JSON.stringify(updated));
+                    });
                 }
             })
             .catch(e => console.error('Gemini Initial Load Error:', e));
@@ -95,7 +105,7 @@ export const GeminiTerminal: React.FC = () => {
         if (!session) return;
 
         setIsStarting(true);
-        const startUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}`;
+        const startUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}&chatId=${encodeURIComponent(session.chatSessionId || '')}`;
         console.log('[Gemini] Starting session:', activeId, startUrl);
         fetch(startUrl)
             .then(r => {
@@ -111,7 +121,7 @@ export const GeminiTerminal: React.FC = () => {
                 console.error('[Gemini] Start Error:', e);
                 setIsStarting(false);
             });
-    }, [activeId, config, sessions.find(s => s.id === activeId)?.path, sessions.find(s => s.id === activeId)?.lastActive]);
+    }, [activeId, config, sessions.find(s => s.id === activeId)?.path, sessions.find(s => s.id === activeId)?.lastActive, sessions.find(s => s.id === activeId)?.chatSessionId]);
 
     const browseTo = (path: string) => {
         const browseUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=list_dir&path=${encodeURIComponent(path)}`;
@@ -146,10 +156,27 @@ export const GeminiTerminal: React.FC = () => {
         if (currentPath === '/') name = 'Root';
         // Short safe alphanumeric ID for NGINX compatibility
         const newId = 's' + Math.random().toString(36).substring(2, 7);
-        const newSessions = [...sessions, { id: newId, name: name, path: currentPath, lastActive: Date.now() }];
-        setSessions(newSessions);
-        setActiveId(newId);
-        setBrowserOpen(false);
+        
+        fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(currentPath)}`)
+            .then(r => r.json())
+            .then(data => {
+                const newSessions = [...sessions, { 
+                    id: newId, 
+                    name: name, 
+                    path: currentPath, 
+                    lastActive: Date.now(),
+                    chatSessionId: data.chatId || ''
+                }];
+                setSessions(newSessions);
+                setActiveId(newId);
+                setBrowserOpen(false);
+            })
+            .catch(() => {
+                const newSessions = [...sessions, { id: newId, name: name, path: currentPath, lastActive: Date.now(), chatSessionId: '' }];
+                setSessions(newSessions);
+                setActiveId(newId);
+                setBrowserOpen(false);
+            });
     };
 
     const createFolder = () => {
@@ -305,11 +332,13 @@ export const GeminiTerminal: React.FC = () => {
                                 <div
                                     key={s.id}
                                     onClick={() => { setActiveId(s.id); setDrawerOpen(false); }}
+                                    onMouseEnter={() => setHoveredId(s.id)}
+                                    onMouseLeave={() => setHoveredId(null)}
                                     style={{
                                         ...styles.drawerTab,
                                         ...(isActive ? styles.drawerTabActive : {}),
+                                        position: 'relative',
                                     }}
-                                    title={`${s.title ? s.title + ' | ' : ''}${s.path}`}
                                 >
                                     <i className={`fa ${s.id === 'default' ? 'fa-home' : 'fa-folder-open'}`} style={{ fontSize: 14, opacity: isActive ? 1 : 0.6 }}></i>
                                     <span style={styles.drawerTabLabel}>{displayName}</span>
@@ -318,6 +347,24 @@ export const GeminiTerminal: React.FC = () => {
                                         style={styles.drawerTabClose}
                                         onClick={(e) => closeTab(e, s.id)}
                                     ></i>
+
+                                    {/* Metadata Overlay Card */}
+                                    {hoveredId === s.id && (
+                                        <div style={styles.tabOverlay}>
+                                            <div style={styles.overlayRow}>
+                                                <i className="fa fa-folder" style={styles.overlayIcon}></i>
+                                                <span style={styles.overlayText}>{s.path}</span>
+                                            </div>
+                                            {s.chatSessionId && (
+                                                <div style={styles.overlayRow}>
+                                                    <i className="fa fa-comments" style={styles.overlayIcon}></i>
+                                                    <span style={styles.overlayText}>
+                                                        Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{s.chatSessionId}</span>
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             );
                         })}
@@ -529,6 +576,44 @@ const styles: Record<string, React.CSSProperties> = {
         color: 'var(--text-color, inherit)',
         opacity: 0.8,
         borderLeft: '4px solid transparent',
+        position: 'relative' as const,
+    },
+    tabOverlay: {
+        position: 'absolute' as const,
+        left: '100%',
+        top: '50%',
+        transform: 'translateY(-50%)',
+        marginLeft: 12,
+        width: 320,
+        padding: '12px 14px',
+        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        border: '1px solid var(--border-color, #ccc)',
+        borderRadius: 8,
+        boxShadow: '0 10px 30px rgba(0,0,0,0.15)',
+        zIndex: 2000,
+        pointerEvents: 'none' as const,
+        display: 'flex',
+        flexDirection: 'column' as const,
+        gap: 8,
+    },
+    overlayRow: {
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 10,
+        fontSize: 11,
+        lineHeight: '1.4em',
+    },
+    overlayIcon: {
+        fontSize: 12,
+        color: 'var(--orange, #e68a00)',
+        width: 14,
+        textAlign: 'center' as const,
+        marginTop: 2,
+    },
+    overlayText: {
+        flex: 1,
+        wordBreak: 'break-all' as const,
+        opacity: 0.9,
     },
     drawerTabActive: {
         backgroundColor: 'var(--mild-background-color, rgba(0,0,0,0.03))',

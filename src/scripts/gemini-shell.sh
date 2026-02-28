@@ -50,7 +50,12 @@ export TERM=xterm-256color
 while true; do
     clear
     echo -e "\n\033[1;36mPlease wait, Gemini CLI loading...\033[0m\n"
-    gemini
+    if [ -n "$GEMINI_CHAT_SESSION_ID" ]; then
+        echo -e "\033[1;32mResuming chat session: $GEMINI_CHAT_SESSION_ID\033[0m\n"
+        gemini --resume "$GEMINI_CHAT_SESSION_ID"
+    else
+        gemini
+    fi
     echo -e "\n\033[1;33m[Gemini CLI Exited]\033[0m Press ENTER to reload, or wait 3 seconds..."
     read -t 3 -r
 done
