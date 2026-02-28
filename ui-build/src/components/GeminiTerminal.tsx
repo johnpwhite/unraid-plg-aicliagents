@@ -36,6 +36,37 @@ export const GeminiTerminal: React.FC = () => {
     const [newDirName, setNewDirName] = useState('');
     const [isStarting, setIsStarting] = useState(false);
 
+    // Diagnostics for scrollbar
+    useEffect(() => {
+        const checkScroll = () => {
+            const elements = document.querySelectorAll('*');
+            elements.forEach(el => {
+                const htmlEl = el as HTMLElement;
+                if (htmlEl.scrollHeight > htmlEl.clientHeight + 2 || htmlEl.scrollWidth > htmlEl.clientWidth + 2) {
+                    const style = window.getComputedStyle(htmlEl);
+                    if (style.overflow !== 'hidden' && style.overflowY !== 'hidden') {
+                        console.warn('[Gemini ScrollCheck] SCROLLING DETECTED:', {
+                            tag: htmlEl.tagName,
+                            id: htmlEl.id,
+                            class: htmlEl.className,
+                            scrollHeight: htmlEl.scrollHeight,
+                            clientHeight: htmlEl.clientHeight,
+                            overflow: style.overflow,
+                            overflowY: style.overflowY
+                        });
+                    }
+                }
+            });
+        };
+        
+        const timer = setTimeout(checkScroll, 2000);
+        window.addEventListener('resize', checkScroll);
+        return () => {
+            clearTimeout(timer);
+            window.removeEventListener('resize', checkScroll);
+        };
+    }, []);
+
     // Initial Load
     useEffect(() => {
         fetch('/plugins/unraid-geminicli/GeminiAjax.php?action=debug')

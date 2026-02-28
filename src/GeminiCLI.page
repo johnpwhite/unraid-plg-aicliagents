@@ -50,7 +50,6 @@ main,
     -ms-overflow-style: none !important;  /* IE/Edge */
     margin: 0 !important;
     padding: 0 !important;
-    max-width: 100vw !important;
     box-sizing: border-box !important;
 }
 
@@ -77,11 +76,13 @@ div.title, .title, .title-row, .title-bar, .header-row {
     padding: 0 !important;
     margin-bottom: 0 !important;
     width: 100% !important;
+    height: auto !important;
 }
 
 #main-content {
     padding: 0 !important;
     width: 100% !important;
+    height: auto !important;
 }
 
 #gemini-cli-root {
@@ -90,8 +91,8 @@ div.title, .title, .title-row, .title-bar, .header-row {
     flex-direction: column;
     margin: 0 !important;
     padding: 0 !important;
-    height: 100vh;
-    max-height: 100vh;
+    /* Height is managed by JS to fill precisely to the footer */
+    min-height: 400px;
     box-sizing: border-box !important;
     overflow: hidden !important;
 }
@@ -99,6 +100,7 @@ div.title, .title, .title-row, .title-bar, .header-row {
 .gemini-cli-ui {
     height: 100%;
     width: 100%;
+    overflow: hidden !important;
 }
 </style>
 
@@ -115,12 +117,12 @@ $(function(){
         var footerHeight = footer ? footer.offsetHeight : 24;
         if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
         
-        var padding = 0;       // No gap above footer
+        var padding = 2;       // 2px safety gap to ensure no scrollbar triggers
         var available = window.innerHeight - rect.top - footerHeight - padding;
         
         // Ensure we don't cause a scrollbar by being even 1px too tall
         var finalHeight = Math.floor(available);
-        el.style.height = Math.max(200, finalHeight) + 'px';
+        el.style.height = Math.max(400, finalHeight) + 'px';
         
         // Force a resize event on the window to let the iframe know its container changed
         window.dispatchEvent(new Event('resize'));
