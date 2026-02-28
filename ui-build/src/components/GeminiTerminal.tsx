@@ -22,6 +22,7 @@ export const GeminiTerminal: React.FC = () => {
         return localStorage.getItem('gemini_active_id') || 'default';
     });
     const [hoveredId, setHoveredId] = useState<string | null>(null);
+    const [hoveredY, setHoveredY] = useState<number>(0);
 
     useEffect(() => {
         if (activeId) {
@@ -56,7 +57,7 @@ export const GeminiTerminal: React.FC = () => {
                     Promise.all(initial.map(s => 
                         fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
                             .then(r => r.json())
-                            .then(cData => ({ ...s, chatSessionId: cData.chatId || '' }))
+                            .then(cData => ({ ...s, chatSessionId: cData.chatId || s.chatSessionId || '' }))
                             .catch(() => s)
                     )).then(updated => {
                         setSessions(updated);
@@ -306,11 +307,27 @@ export const GeminiTerminal: React.FC = () => {
 
     return (
         <div style={styles.root}>
+            {/* Backdrop for closing drawer when open */}
+            {drawerOpen && (
+                <div 
+                    onClick={() => setDrawerOpen(false)}
+                    style={{
+                        position: 'absolute',
+                        inset: 0,
+                        zIndex: 999,
+                        backgroundColor: 'transparent',
+                    }}
+                />
+            )}
+
             {/* Horizontal Drawer (Left) */}
-            <div style={{
-                ...styles.drawer,
-                transform: drawerOpen ? 'translateX(0)' : 'translateX(-100%)',
-            }}>
+            <div 
+                data-drawer="true"
+                style={{
+                    ...styles.drawer,
+                    transform: drawerOpen ? 'translateX(0)' : 'translateX(-100%)',
+                }}
+            >
                 <div style={styles.drawerContent}>
                     {/* Top Section: New Workspace */}
                     <div style={styles.drawerTop}>
@@ -332,7 +349,15 @@ export const GeminiTerminal: React.FC = () => {
                                 <div
                                     key={s.id}
                                     onClick={() => { setActiveId(s.id); setDrawerOpen(false); }}
-                                    onMouseEnter={() => setHoveredId(s.id)}
+                                    onMouseEnter={(e) => {
+                                        setHoveredId(s.id);
+                                        const rect = e.currentTarget.getBoundingClientRect();
+                                        const drawerEl = e.currentTarget.closest('[data-drawer="true"]');
+                                        const drawerRect = drawerEl?.getBoundingClientRect();
+                                        if (drawerRect) {
+                                            setHoveredY(rect.top - drawerRect.top);
+                                        }
+                                    }}
                                     onMouseLeave={() => setHoveredId(null)}
                                     style={{
                                         ...styles.drawerTab,
@@ -347,24 +372,6 @@ export const GeminiTerminal: React.FC = () => {
                                         style={styles.drawerTabClose}
                                         onClick={(e) => closeTab(e, s.id)}
                                     ></i>
-
-                                    {/* Metadata Overlay Card */}
-                                    {hoveredId === s.id && (
-                                        <div style={styles.tabOverlay}>
-                                            <div style={styles.overlayRow}>
-                                                <i className="fa fa-folder" style={styles.overlayIcon}></i>
-                                                <span style={styles.overlayText}>{s.path}</span>
-                                            </div>
-                                            {s.chatSessionId && (
-                                                <div style={styles.overlayRow}>
-                                                    <i className="fa fa-comments" style={styles.overlayIcon}></i>
-                                                    <span style={styles.overlayText}>
-                                                        Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{s.chatSessionId}</span>
-                                                    </span>
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
                                 </div>
                             );
                         })}
@@ -395,6 +402,32 @@ export const GeminiTerminal: React.FC = () => {
                         </button>
                     </div>
                 </div>
+
+                {/* Metadata Overlay Card - Moved out of drawerTabs to prevent clipping */}
+                {hoveredId && (
+                    <div style={{
+                        ...styles.tabOverlay,
+                        top: hoveredY + 22, // Center on the ~44px tall tab
+                        transform: 'translateY(-50%)',
+                    }}>
+                        {sessions.find(s => s.id === hoveredId) && (
+                            <>
+                                <div style={styles.overlayRow}>
+                                    <i className="fa fa-folder" style={styles.overlayIcon}></i>
+                                    <span style={styles.overlayText}>{sessions.find(s => s.id === hoveredId)?.path}</span>
+                                </div>
+                                {sessions.find(s => s.id === hoveredId)?.chatSessionId && (
+                                    <div style={styles.overlayRow}>
+                                        <i className="fa fa-comments" style={styles.overlayIcon}></i>
+                                        <span style={styles.overlayText}>
+                                            Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessions.find(s => s.id === hoveredId)?.chatSessionId}</span>
+                                        </span>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                )}
 
                 {/* Sticking out Tab Bottom Left */}
                 <div 
