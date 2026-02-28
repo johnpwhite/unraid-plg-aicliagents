@@ -35,6 +35,7 @@ export const GeminiTerminal: React.FC = () => {
     const [dirItems, setDirItems] = useState<any[]>([]);
     const [newDirName, setNewDirName] = useState('');
     const [isStarting, setIsStarting] = useState(false);
+    const [startAttempts, setStartAttempts] = useState<Record<string, number>>({});
 
     // Diagnostics for scrollbar
     // Load configuration
@@ -48,9 +49,13 @@ export const GeminiTerminal: React.FC = () => {
                     let initial = [{ id: 'default', name: 'Main', path: data.config.root_path, lastActive: Date.now(), title: '', chatSessionId: '' }];
                     
                     if (savedSessions) {
-                        const parsed = JSON.parse(savedSessions);
-                        if (parsed.length > 0) {
-                            initial = parsed;
+                        try {
+                            const parsed = JSON.parse(savedSessions);
+                            if (parsed.length > 0) {
+                                initial = parsed;
+                            }
+                        } catch (e) {
+                            console.error('Gemini Session Parse Error:', e);
                         }
                     }
                     
@@ -58,7 +63,14 @@ export const GeminiTerminal: React.FC = () => {
                     Promise.all(initial.map(s => 
                         fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
                             .then(r => r.json())
-                            .then(cData => ({ ...s, chatSessionId: cData.chatId || s.chatSessionId || '' }))
+                            .then(cData => {
+                                // SYNC FIX: If backend says a session is different, update it
+                                if (cData.chatId && cData.chatId !== s.chatSessionId) {
+                                    console.log(`[Gemini] Syncing session ID for ${s.name}: ${s.chatSessionId} -> ${cData.chatId}`);
+                                    return { ...s, chatSessionId: cData.chatId };
+                                }
+                                return s;
+                            })
                             .catch(() => s)
                     )).then(updated => {
                         setSessions(updated);
@@ -106,21 +118,38 @@ export const GeminiTerminal: React.FC = () => {
         const session = sessions.find(s => s.id === activeId);
         if (!session) return;
 
+        // CIRCUIT BREAKER: If we've tried too many times for this specific chatSessionId, stop
+        const attemptKey = `${activeId}-${session.chatSessionId || 'none'}`;
+        const attempts = startAttempts[attemptKey] || 0;
+        if (attempts > 3) {
+            console.error(`[Gemini] Giving up on session ${session.chatSessionId} after ${attempts} failed attempts.`);
+            // If it was a resumed session, clear it and try starting a fresh one
+            if (session.chatSessionId) {
+                console.log('[Gemini] Attempting fresh session fallback...');
+                setSessions(prev => prev.map(s => s.id === activeId ? { ...s, chatSessionId: '' } : s));
+                // We'll try the fresh session in the next effect run
+            }
+            setIsStarting(false);
+            return;
+        }
+
         setIsStarting(true);
         const startUrl = `/plugins/unraid-geminicli/GeminiAjax.php?action=start&id=${activeId}&path=${encodeURIComponent(session.path)}&chatId=${encodeURIComponent(session.chatSessionId || '')}`;
         console.log('[Gemini] Starting session:', activeId, startUrl);
+        
         fetch(startUrl)
-            .then(r => {
-                console.log('[Gemini] Start response status:', r.status);
-                return r.text();
-            })
-            .then(text => {
-                console.log('[Gemini] Start response body:', text);
-                // Give ttyd time to spin up — new sessions need more time
-                setTimeout(() => setIsStarting(false), 2500);
+            .then(r => r.text())
+            .then(() => {
+                // Successful start signal
+                setTimeout(() => {
+                    setIsStarting(false);
+                    // Reset attempts on successful "start" signal (which just means backend launched ttyd)
+                    setStartAttempts(prev => ({ ...prev, [attemptKey]: 0 }));
+                }, 2500);
             })
             .catch(e => {
                 console.error('[Gemini] Start Error:', e);
+                setStartAttempts(prev => ({ ...prev, [attemptKey]: (prev[attemptKey] || 0) + 1 }));
                 setIsStarting(false);
             });
     }, [activeId, config, sessions.find(s => s.id === activeId)?.path, sessions.find(s => s.id === activeId)?.lastActive, sessions.find(s => s.id === activeId)?.chatSessionId]);
