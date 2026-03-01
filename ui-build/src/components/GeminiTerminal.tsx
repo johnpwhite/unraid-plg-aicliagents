@@ -79,11 +79,8 @@ export const GeminiTerminal: React.FC = () => {
                         return fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
                             .then(r => r.json())
                             .then(cData => {
-                                // Only sync if we found one and it differs, OR if we had none
-                                if (cData.chatId && cData.chatId !== s.chatSessionId) {
-                                    return { ...s, chatSessionId: cData.chatId };
-                                }
-                                return s;
+                                // SYNC: Always update the UI with what's actually on disk (upward discovery)
+                                return { ...s, chatSessionId: cData.chatId || '' };
                             })
                             .catch(() => s);
                     })).then(updated => {
@@ -430,7 +427,15 @@ export const GeminiTerminal: React.FC = () => {
                                             setHoveredY(rect.top - drawerRect.top);
                                         }
                                     }}
-                                    onMouseLeave={() => setHoveredId(null)}
+                                    onMouseLeave={(e) => {
+                                        // Only hide if we aren't moving into the overlay itself
+                                        const relatedTarget = e.relatedTarget as HTMLElement;
+                                        if (relatedTarget && (relatedTarget.closest('[data-overlay="true"]') || relatedTarget.closest('[data-drawer="true"]'))) {
+                                            // Keep it open
+                                            return;
+                                        }
+                                        setHoveredId(null);
+                                    }}
                                     style={{
                                         ...styles.drawerTab,
                                         ...(isActive ? styles.drawerTabActive : {}),
@@ -477,40 +482,58 @@ export const GeminiTerminal: React.FC = () => {
 
                 {/* Metadata Overlay Card - Moved out of drawerTabs to prevent clipping */}
                 {hoveredId && (
-                    <div style={{
-                        ...styles.tabOverlay,
-                        top: hoveredY + 22, // Center on the ~44px tall tab
-                        transform: 'translateY(-50%)',
-                    }}>
-                        {sessions.find(s => s.id === hoveredId) && (
-                            <>
-                                <div style={styles.overlayRow}>
-                                    <i className="fa fa-folder" style={styles.overlayIcon}></i>
-                                    <span style={styles.overlayText}>{sessions.find(s => s.id === hoveredId)?.path}</span>
-                                </div>
-                                {sessions.find(s => s.id === hoveredId)?.chatSessionId && (
-                                    <div style={{ ...styles.overlayRow, marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                            <i className="fa fa-comments" style={styles.overlayIcon}></i>
-                                            <span style={styles.overlayText}>
-                                                Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessions.find(s => s.id === hoveredId)?.chatSessionId}</span>
-                                            </span>
-                                        </div>
-                                        <button 
-                                            onClick={(e) => resetSession(e, hoveredId)}
-                                            style={{ 
-                                                background: 'transparent', border: '1px solid #ff4444', color: '#ff4444', 
-                                                fontSize: 9, padding: '2px 6px', borderRadius: 4, cursor: 'pointer',
-                                                pointerEvents: 'auto'
-                                            }}
-                                            title="Forget Session"
-                                        >
-                                            <i className="fa fa-trash-o"></i> RESET
-                                        </button>
+                    <div 
+                        data-overlay="true"
+                        onMouseLeave={() => setHoveredId(null)}
+                        style={{
+                            ...styles.tabOverlay,
+                            top: hoveredY + 22, // Center on the ~44px tall tab
+                            transform: 'translateY(-50%)',
+                            pointerEvents: 'auto', // Enable clicking the RESET button
+                            paddingLeft: 40, // Create a small invisible bridge area
+                            marginLeft: 0,   // Remove original margin
+                        }}
+                    >
+                        <div style={{
+                            backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+                            border: '1px solid var(--border-color, #ccc)',
+                            borderRadius: 8,
+                            boxShadow: '0 10px 30px rgba(0,0,0,0.15)',
+                            padding: '12px 14px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                        }}>
+                            {sessions.find(s => s.id === hoveredId) && (
+                                <>
+                                    <div style={styles.overlayRow}>
+                                        <i className="fa fa-folder" style={styles.overlayIcon}></i>
+                                        <span style={styles.overlayText}>{sessions.find(s => s.id === hoveredId)?.path}</span>
                                     </div>
-                                )}
-                            </>
-                        )}
+                                    {sessions.find(s => s.id === hoveredId)?.chatSessionId && (
+                                        <div style={{ ...styles.overlayRow, marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                <i className="fa fa-comments" style={styles.overlayIcon}></i>
+                                                <span style={styles.overlayText}>
+                                                    Gemini: <span style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessions.find(s => s.id === hoveredId)?.chatSessionId}</span>
+                                                </span>
+                                            </div>
+                                            <button 
+                                                onClick={(e) => resetSession(e, hoveredId)}
+                                                style={{ 
+                                                    background: 'transparent', border: '1px solid #ff4444', color: '#ff4444', 
+                                                    fontSize: 9, padding: '2px 6px', borderRadius: 4, cursor: 'pointer',
+                                                    pointerEvents: 'auto'
+                                                }}
+                                                title="Forget Session"
+                                            >
+                                                <i className="fa fa-trash-o"></i> RESET
+                                            </button>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
                     </div>
                 )}
 
@@ -701,20 +724,11 @@ const styles: Record<string, React.CSSProperties> = {
     tabOverlay: {
         position: 'absolute' as const,
         left: '100%',
-        top: '50%',
-        transform: 'translateY(-50%)',
-        marginLeft: 12,
-        width: 320,
-        padding: '12px 14px',
-        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
-        border: '1px solid var(--border-color, #ccc)',
-        borderRadius: 8,
-        boxShadow: '0 10px 30px rgba(0,0,0,0.15)',
+        width: 360, // Slightly wider to accommodate bridge
         zIndex: 2000,
         pointerEvents: 'none' as const,
         display: 'flex',
         flexDirection: 'column' as const,
-        gap: 8,
     },
     overlayRow: {
         display: 'flex',
