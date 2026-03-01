@@ -188,7 +188,6 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
            "-t fontFamily='monospace' " .
            "-t disableLeaveAlert=true " .
            "-t enable-utf8=true " .
-           "-t closeOnDisconnect=true " .
            "-t titleFixed='Gemini CLI - $id' " .
            "bash -c \"$env $shell\"";
     

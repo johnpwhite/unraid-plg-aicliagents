@@ -346,7 +346,7 @@ export const GeminiTerminal: React.FC = () => {
     const activeSession = sessions.find(s => s.id === activeId);
     const themeJson = THEMES[config.theme as keyof typeof THEMES] || THEMES.dark;
     const themeParams = encodeURIComponent(themeJson);
-    const terminalUrl = `/webterminal/geminiterm-${activeId}/?theme=${themeParams}&fontSize=${config.font_size}&fontFamily=monospace&disableLeaveAlert=true&v=${activeSession?.lastActive || Date.now()}`;
+    const terminalUrl = `/webterminal/geminiterm-${activeId}/?theme=${themeParams}&fontSize=${config.font_size}&fontFamily=monospace&v=${activeSession?.lastActive || 'stable'}`;
 
     const resetSession = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
