@@ -301,6 +301,11 @@ export const GeminiTerminal: React.FC = () => {
 
     const [drawerOpen, setDrawerOpen] = useState(false);
     
+    // Clear overlay when drawer closes
+    useEffect(() => {
+        if (!drawerOpen) setHoveredId(null);
+    }, [drawerOpen]);
+    
     // DRAGGABLE TAB POSITION
     const [tabBottom, setTabBottom] = useState(() => {
         const saved = localStorage.getItem('gemini_tab_y');
@@ -417,7 +422,17 @@ export const GeminiTerminal: React.FC = () => {
                     {/* Middle Section: Tabs (Scrollable) */}
                     <div style={styles.drawerTabs}>
                         {sessions.map(s => {
-                            const displayName = s.title || s.name;
+                            let displayName = s.title || s.name;
+                            
+                            // CLEANUP: If the title is just a status indicator (e.g. "_Ready (/mnt/...)"),
+                            // or contains the long path, it's too noisy for the tab name.
+                            if (displayName.includes('_Ready')) {
+                                displayName = s.name; // Fallback to workspace name
+                            } else if (displayName.length > 25 && displayName.includes('/')) {
+                                // If it looks like a long path, maybe just show the base name
+                                displayName = displayName.split('/').pop() || s.name;
+                            }
+
                             const isActive = activeId === s.id;
                             return (
                                 <div
