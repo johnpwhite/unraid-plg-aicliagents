@@ -337,7 +337,27 @@ if (isset($_GET['action'])) {
         $path = $_GET['path'] ?? '';
         $id = $_GET['id'] ?? null;
         $chatId = findGeminiChatSession($path, $id);
-        echo json_encode(['status' => 'ok', 'chatId' => $chatId]);
+        
+        // 1. Get Live Title from Tmux for initial sync
+        $title = null;
+        if ($id !== null) {
+            $session = "gemini-cli-$id";
+            $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
+            if (empty($title) || in_array($title, ['unraid', 'sh', 'bash'])) {
+                $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
+            }
+            if ($title) {
+                $statusPatterns = [ '/^_?\s*Ready/' => '◇', '/^_?\s*Working/' => '✦', '/^_?\s*Busy/' => '✋' ];
+                foreach ($statusPatterns as $pattern => $emoji) {
+                    if (preg_match($pattern, $title)) {
+                        $title = preg_replace($pattern, $emoji, $title);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        echo json_encode(['status' => 'ok', 'chatId' => $chatId, 'title' => $title]);
     } elseif ($_GET['action'] === 'save') {
         saveGeminiConfig($_POST);
         echo json_encode(['status' => 'ok']);
@@ -382,15 +402,17 @@ if (isset($_GET['action'])) {
             }
 
             // Restore Emojis: Gemini CLI uses ◇ (Ready), ✦ (Working), and ✋ (Busy)
-            // If they are coming through as text, map them back for a cleaner look.
-            $statusMap = [
-                '_Ready'   => '◇',
-                '_Working' => '✦',
-                '_Busy'    => '✋'
+            // If they are coming through as text (fallback), map them back for a cleaner look.
+            // Some systems might have a space: "_ Ready" or just "_Ready".
+            $statusPatterns = [
+                '/^_?\s*Ready/'   => '◇',
+                '/^_?\s*Working/' => '✦',
+                '/^_?\s*Busy/'    => '✋'
             ];
-            foreach ($statusMap as $txt => $emoji) {
-                if (strpos($title, $txt) !== false) {
-                    $title = str_replace($txt, $emoji, $title);
+            foreach ($statusPatterns as $pattern => $emoji) {
+                if (preg_match($pattern, $title)) {
+                    $title = preg_replace($pattern, $emoji, $title);
+                    break; // Only one status at a time
                 }
             }
     

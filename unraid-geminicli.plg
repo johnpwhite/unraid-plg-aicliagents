@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version "2026.03.02.09">
+<!ENTITY version "2026.03.02.10">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.09" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.10" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.03.02.10
+- Hardened status emoji mapping with regex and ensured initial load gets the correct title.
 ## 2026.03.02.09
 - Restored Gemini status emojis by mapping literal text fallbacks (_Ready, _Working) back to their respective icons (◇, ✦) in the status poller.
 ## 2026.03.02.08

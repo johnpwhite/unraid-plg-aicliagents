@@ -74,13 +74,13 @@ export const GeminiTerminal: React.FC = () => {
                         setActiveId(newId);
                     }
                     
-                    // Update initial sessions with their chat IDs
+                    // Update initial sessions with their chat IDs and titles
                     Promise.all(initial.map(s => {
                         return fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}&id=${s.id}`)
                             .then(r => r.json())
                             .then(cData => {
                                 // SYNC: Always update the UI with what's actually on disk (upward discovery)
-                                return { ...s, chatSessionId: cData.chatId || '' };
+                                return { ...s, chatSessionId: cData.chatId || '', title: cData.title || s.title };
                             })
                             .catch(() => s);
                     })).then(updated => {
