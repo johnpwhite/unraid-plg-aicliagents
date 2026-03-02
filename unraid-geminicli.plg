@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version "2026.03.02.13">
+<!ENTITY version "2026.03.02.14">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.13" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.14" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.03.02.14
+- Dependency Upgrades: Gemini CLI v0.31.0, Node.js v22.22.0, and tmux v3.6a.
 ## 2026.03.02.13
 - Refactored tab naming: prioritize folder name and ONLY prepend status emojis (◇, ✦) when detected, ignoring noisy terminal titles like 'bash'.
 ## 2026.03.02.12
@@ -397,7 +399,7 @@ set -e
 NAME="unraid-geminicli"
 VERSION="&version;"
 GIT_URL="&gitURL;"
-GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.30.0-preview.5/gemini.js"
+GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.31.0/gemini.js"
 EMHTTP_DEST="/usr/local/emhttp/plugins/$NAME"
 CONFIG_DIR="/boot/config/plugins/$NAME"
 
@@ -416,17 +418,17 @@ mkdir -p "$EMHTTP_DEST/scripts"
 mkdir -p "$CONFIG_DIR"
 
 # 1. Download gemini.js to /boot (persistence)
-echo "Downloading gemini.mjs..."
+echo "Downloading gemini.mjs (v0.31.0)..."
 wget -q -O "$CONFIG_DIR/gemini.mjs" "$GEMINI_JS_URL?v=$VERSION"
 # Copy to RAM for execution
 cp "$CONFIG_DIR/gemini.mjs" "$EMHTTP_DEST/bin/gemini.mjs"
 
-# 2. Download/Extract Portable Node.js (v20.11.0)
-NODE_TAR="node-v20.11.0-linux-x64.tar.xz"
-NODE_URL="https://nodejs.org/dist/v20.11.0/$NODE_TAR"
+# 2. Download/Extract Portable Node.js (v22.22.0)
+NODE_TAR="node-v22.22.0-linux-x64.tar.xz"
+NODE_URL="https://nodejs.org/dist/v22.22.0/$NODE_TAR"
 
 if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
-    echo "Downloading portable Node.js (v20.11.0)..."
+    echo "Downloading portable Node.js (v22.22.0)..."
     wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
 fi
 
@@ -440,11 +442,12 @@ mv "$NODE_BIN" "$EMHTTP_DEST/bin/node"
 chmod +x "$EMHTTP_DEST/bin/node"
 rm -rf "$TMP_EXTRACT"
 
-# 3. Download/Install Portable tmux (v3.5a)
-TMUX_URL="https://github.com/pythops/tmux-linux-binary/releases/download/v3.5a/tmux-linux-x86_64"
+# 3. Download/Install Portable tmux (v3.6a)
+TMUX_URL="https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6a/tmux.linux-amd64.gz"
 if [ ! -f "$CONFIG_DIR/tmux" ]; then
-    echo "Downloading portable tmux (v3.5a)..."
-    wget -q -O "$CONFIG_DIR/tmux" "$TMUX_URL"
+    echo "Downloading portable tmux (v3.6a)..."
+    wget -q -O "$CONFIG_DIR/tmux.gz" "$TMUX_URL"
+    gunzip -f "$CONFIG_DIR/tmux.gz"
 fi
 cp "$CONFIG_DIR/tmux" "$EMHTTP_DEST/bin/tmux"
 chmod +x "$EMHTTP_DEST/bin/tmux"
