@@ -369,20 +369,27 @@ if (isset($_GET['action'])) {
         } else {
             echo json_encode(['status' => 'error', 'message' => 'Invalid path or name']);
         }
-    } elseif ($_GET['action'] === 'get_title') {
-        $id = preg_replace('/[^a-z0-9\-]/', '', $_GET['id'] ?? '');
-        $session = "gemini-$id";
-        $title = '';
-        if (!empty($id)) {
-            // Get the window name (#W) or title (#T) from tmux
+        } elseif ($_GET['action'] === 'get_session_status') {
+            $id = preg_replace('/[^a-z0-9\-]/', '', $_GET['id'] ?? '');
+            $path = $_GET['path'] ?? '';
+            $session = "gemini-cli-$id";
+            
+            // 1. Get Live Title from Tmux
             $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
-            // Fallback to window name if title is empty or just the hostname/shell
-            if (empty($title) || $title === 'unraid' || $title === 'sh' || $title === 'bash') {
+            if (empty($title) || in_array($title, ['unraid', 'sh', 'bash'])) {
                 $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
             }
+    
+            // 2. Get Live Chat ID from Logs (Matches what's actually happening in terminal)
+            $chatId = findGeminiChatSession($path);
+    
+            echo json_encode([
+                'status' => 'ok', 
+                'title' => $title,
+                'chatId' => $chatId
+            ]);
         }
-        echo json_encode(['status' => 'ok', 'title' => $title]);
-    } elseif ($_GET['action'] === 'debug') {
+     elseif ($_GET['action'] === 'debug') {
         $debug = [
             'config' => getGeminiConfig(),
             'ttyd' => exec("which ttyd 2>&1"),

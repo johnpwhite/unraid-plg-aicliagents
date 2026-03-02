@@ -99,19 +99,24 @@ export const GeminiTerminal: React.FC = () => {
         }
     }, [sessions]);
 
-    // Dynamic Title Polling
+    // Dynamic Status Polling (Title & Chat ID)
     useEffect(() => {
         if (!sessions.length) return;
         
         const poll = () => {
             sessions.forEach(s => {
-                fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_title&id=${s.id}`)
+                fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_session_status&id=${s.id}&path=${encodeURIComponent(s.path)}`)
                     .then(r => r.json())
                     .then(data => {
-                        if (data.status === 'ok' && data.title && data.title !== s.title) {
-                            setSessions(prev => prev.map(ps => 
-                                ps.id === s.id ? { ...ps, title: data.title } : ps
-                            ));
+                        if (data.status === 'ok') {
+                            const titleChanged = data.title && data.title !== s.title;
+                            const chatChanged = data.chatId !== undefined && data.chatId !== s.chatSessionId;
+                            
+                            if (titleChanged || chatChanged) {
+                                setSessions(prev => prev.map(ps => 
+                                    ps.id === s.id ? { ...ps, title: data.title, chatSessionId: data.chatId || '' } : ps
+                                ));
+                            }
                         }
                     })
                     .catch(() => {}); // Silent fail for polling
