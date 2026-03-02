@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version "2026.03.02.14">
+<!ENTITY version "2026.03.02.15">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.14" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.15" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.03.02.15
+- Modified installer to ensure tmux (v3.6a) is always refreshed and re-installed during updates, ensuring version alignment.
 ## 2026.03.02.14
 - Dependency Upgrades: Gemini CLI v0.31.0, Node.js v22.22.0, and tmux v3.6a.
 ## 2026.03.02.13
@@ -444,11 +446,10 @@ rm -rf "$TMP_EXTRACT"
 
 # 3. Download/Install Portable tmux (v3.6a)
 TMUX_URL="https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6a/tmux.linux-amd64.gz"
-if [ ! -f "$CONFIG_DIR/tmux" ]; then
-    echo "Downloading portable tmux (v3.6a)..."
-    wget -q -O "$CONFIG_DIR/tmux.gz" "$TMUX_URL"
-    gunzip -f "$CONFIG_DIR/tmux.gz"
-fi
+echo "Downloading portable tmux (v3.6a)..."
+rm -f "$CONFIG_DIR/tmux"
+wget -q -O "$CONFIG_DIR/tmux.gz" "$TMUX_URL"
+gunzip -f "$CONFIG_DIR/tmux.gz"
 cp "$CONFIG_DIR/tmux" "$EMHTTP_DEST/bin/tmux"
 chmod +x "$EMHTTP_DEST/bin/tmux"
 
