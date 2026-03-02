@@ -51,13 +51,16 @@ while true; do
     clear
     echo -e "\n\033[1;36mPlease wait, Gemini CLI loading...\033[0m\n"
     if [ -n "$GEMINI_CHAT_SESSION_ID" ]; then
-        echo -e "\033[1;32mResuming chat session: $GEMINI_CHAT_SESSION_ID\033[0m\n"
+        echo -e "\033[1;32mAttempting to resume session: $GEMINI_CHAT_SESSION_ID\033[0m\n"
         if ! gemini --resume "$GEMINI_CHAT_SESSION_ID"; then
-            echo -e "\n\033[1;31m[Error] Failed to resume session $GEMINI_CHAT_SESSION_ID\033[0m"
-            echo -e "\033[1;33mThis usually happens if the session files were deleted.\033[0m"
-            echo -e "Starting a fresh session in 3 seconds...\n"
-            sleep 3
-            gemini
+            echo -e "\n\033[1;33m[Warning] Could not resume specific session $GEMINI_CHAT_SESSION_ID\033[0m"
+            echo -e "Attempting to find the latest valid session for this project...\n"
+            if ! gemini --resume latest; then
+                echo -e "\n\033[1;31m[Error] No resumable sessions found.\033[0m"
+                echo -e "Starting a fresh session in 3 seconds...\n"
+                sleep 3
+                gemini
+            fi
         fi
     else
         gemini

@@ -230,10 +230,16 @@ function findGeminiChatSession($path, $id = null) {
     $projectId = null;
     $checkPath = realpath($path);
     while ($checkPath && $checkPath !== '/') {
+        // Sort projects by path length (longest first) to ensure we match the most specific one
+        // in case of overlaps, although the loop already matches as it goes up.
         foreach ($data['projects'] as $pPath => $pId) {
-            if (realpath($pPath) === $checkPath) {
-                $projectId = $pId;
-                break 2;
+            $realPPath = realpath($pPath);
+            if ($realPPath && $realPPath === $checkPath) {
+                // VERIFY: Does the project folder actually exist in tmp?
+                if (is_dir("$home/.gemini/tmp/$pId")) {
+                    $projectId = $pId;
+                    break 2;
+                }
             }
         }
         $checkPath = dirname($checkPath);
