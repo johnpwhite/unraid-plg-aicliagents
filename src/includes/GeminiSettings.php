@@ -207,7 +207,16 @@ function startGeminiTerminal($id = 'default', $workingDir = null, $chatSessionId
     fclose($fp);
 }
 
-function findGeminiChatSession($path) {
+function findGeminiChatSession($path, $id = null) {
+    // 1. If we have a tab ID, check if it's already running. 
+    // If it is, the "truth" is whatever that process is currently using.
+    if ($id !== null && isGeminiRunning($id)) {
+        $chatIdFile = getGeminiChatIdFile($id);
+        if (file_exists($chatIdFile)) {
+            return trim(file_get_contents($chatIdFile));
+        }
+    }
+
     $config = getGeminiConfig();
     $home = $config['home_path'];
     $projectsFile = "$home/.gemini/projects.json";
@@ -319,7 +328,8 @@ if (isset($_GET['action'])) {
         echo json_encode(['status' => 'ok']);
     } elseif ($_GET['action'] === 'get_chat_session') {
         $path = $_GET['path'] ?? '';
-        $chatId = findGeminiChatSession($path);
+        $id = $_GET['id'] ?? null;
+        $chatId = findGeminiChatSession($path, $id);
         echo json_encode(['status' => 'ok', 'chatId' => $chatId]);
     } elseif ($_GET['action'] === 'save') {
         saveGeminiConfig($_POST);

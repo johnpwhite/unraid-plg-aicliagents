@@ -76,7 +76,7 @@ export const GeminiTerminal: React.FC = () => {
                     
                     // Update initial sessions with their chat IDs
                     Promise.all(initial.map(s => {
-                        return fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}`)
+                        return fetch(`/plugins/unraid-geminicli/GeminiAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}&id=${s.id}`)
                             .then(r => r.json())
                             .then(cData => {
                                 // SYNC: Always update the UI with what's actually on disk (upward discovery)
