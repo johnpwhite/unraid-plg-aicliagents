@@ -665,7 +665,7 @@ const styles: Record<string, React.CSSProperties> = {
         fontFamily: 'inherit',
         fontSize: 13,
         color: 'var(--text-color, inherit)',
-        backgroundColor: 'var(--content-background-color, var(--body-background, #f5f5f5))',
+        backgroundColor: 'transparent',
     },
     loading: {
         flex: 1,
@@ -829,12 +829,14 @@ const styles: Record<string, React.CSSProperties> = {
 
     /* ── Terminal ── */
     viewport: {
-        width: '100%',
-        height: '100%',
+        flex: 1,
+        margin: '8px',
         position: 'relative',
         overflow: 'hidden',
         zIndex: 0,
         backgroundColor: '#000',
+        borderRadius: '4px',
+        boxShadow: '0 4px 15px rgba(0,0,0,0.15)',
     },
     startingOverlay: {
         position: 'absolute',

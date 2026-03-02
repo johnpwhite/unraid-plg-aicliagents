@@ -193,8 +193,8 @@ $(function(){
             var footerHeight = footer ? footer.offsetHeight : 24;
             if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
             
-            // 2px safety gap: ensure we are always shorter than the viewport
-            var padding = 2;
+            // 0px safety gap: React component now handles internal padding
+            var padding = 0;
             var available = window.innerHeight - rect.top - footerHeight - padding;
             
             // Floor the height to avoid sub-pixel scaling causing 1px scrollbars
