@@ -380,6 +380,19 @@ if (isset($_GET['action'])) {
             if (empty($title) || in_array($title, ['unraid', 'sh', 'bash'])) {
                 $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
             }
+
+            // Restore Emojis: Gemini CLI uses ◇ (Ready), ✦ (Working), and ✋ (Busy)
+            // If they are coming through as text, map them back for a cleaner look.
+            $statusMap = [
+                '_Ready'   => '◇',
+                '_Working' => '✦',
+                '_Busy'    => '✋'
+            ];
+            foreach ($statusMap as $txt => $emoji) {
+                if (strpos($title, $txt) !== false) {
+                    $title = str_replace($txt, $emoji, $title);
+                }
+            }
     
             // 2. Get Live Chat ID from Logs (Matches what's actually happening in terminal)
             $chatId = findGeminiChatSession($path, $id);

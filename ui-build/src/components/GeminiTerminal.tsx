@@ -422,17 +422,7 @@ export const GeminiTerminal: React.FC = () => {
                     {/* Middle Section: Tabs (Scrollable) */}
                     <div style={styles.drawerTabs}>
                         {sessions.map(s => {
-                            let displayName = s.title || s.name;
-                            
-                            // CLEANUP: If the title is just a status indicator (e.g. "_Ready (/mnt/...)"),
-                            // or contains the long path, it's too noisy for the tab name.
-                            if (displayName.includes('_Ready')) {
-                                displayName = s.name; // Fallback to workspace name
-                            } else if (displayName.length > 25 && displayName.includes('/')) {
-                                // If it looks like a long path, maybe just show the base name
-                                displayName = displayName.split('/').pop() || s.name;
-                            }
-
+                            const displayName = s.title || s.name;
                             const isActive = activeId === s.id;
                             return (
                                 <div
