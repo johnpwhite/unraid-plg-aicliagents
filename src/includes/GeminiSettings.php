@@ -227,13 +227,18 @@ function findGeminiChatSession($path, $id = null) {
     $data = json_decode(file_get_contents($projectsFile), true);
     if (!isset($data['projects'])) return null;
     
+    // Sort projects by path length (longest first) to ensure we match the most specific one.
+    // This prevents /mnt/user/python/unraid-extensions from matching /mnt/user/python
+    $projects = $data['projects'];
+    uksort($projects, function($a, $b) {
+        return strlen($b) - strlen($a);
+    });
+
     // Traverse up to find the nearest project project root (matching Gemini CLI behavior)
     $projectId = null;
     $checkPath = realpath($path);
     while ($checkPath && $checkPath !== '/') {
-        // Sort projects by path length (longest first) to ensure we match the most specific one
-        // in case of overlaps, although the loop already matches as it goes up.
-        foreach ($data['projects'] as $pPath => $pId) {
+        foreach ($projects as $pPath => $pId) {
             $realPPath = realpath($pPath);
             if ($realPPath && $realPPath === $checkPath) {
                 // VERIFY: Does the project folder actually exist in tmp?
@@ -343,7 +348,7 @@ if (isset($_GET['action'])) {
         if ($id !== null) {
             $session = "gemini-cli-$id";
             $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
-            if (empty($title) || in_array($title, ['unraid', 'sh', 'bash'])) {
+            if (empty($title) || in_array(strtolower($title), ['unraid', 'sh', 'bash', 'tmux', 'node', 'zsh'])) {
                 $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
             }
             if ($title) {
@@ -397,7 +402,7 @@ if (isset($_GET['action'])) {
             
             // 1. Get Live Title from Tmux
             $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
-            if (empty($title) || in_array($title, ['unraid', 'sh', 'bash'])) {
+            if (empty($title) || in_array(strtolower($title), ['unraid', 'sh', 'bash', 'tmux', 'node', 'zsh'])) {
                 $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
             }
 
