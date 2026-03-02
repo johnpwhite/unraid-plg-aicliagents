@@ -2,16 +2,18 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "unraid-geminicli">
 <!ENTITY author    "John White">
-<!ENTITY version "2026.03.02.15">
+<!ENTITY version "2026.03.02.16">
 <!ENTITY launch    "Settings/GeminiSettings">
 <!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
 <!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
 <!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
 ]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.15" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.16" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
+## 2026.03.02.16
+- Modified installer to always show Node.js version whether downloading or using cache.
 ## 2026.03.02.15
 - Modified installer to ensure tmux (v3.6a) is always refreshed and re-installed during updates, ensuring version alignment.
 ## 2026.03.02.14
@@ -432,6 +434,8 @@ NODE_URL="https://nodejs.org/dist/v22.22.0/$NODE_TAR"
 if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
     echo "Downloading portable Node.js (v22.22.0)..."
     wget -q -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
+else
+    echo "Using cached Node.js (v22.22.0)..."
 fi
 
 echo "Extracting Node.js binary..."
