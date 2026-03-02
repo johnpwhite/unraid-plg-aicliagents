@@ -221,54 +221,71 @@ function findGeminiChatSession($path, $id = null) {
     $config = getGeminiConfig();
     $home = $config['home_path'];
     $projectsFile = "$home/.gemini/projects.json";
-    
     if (!file_exists($projectsFile)) return null;
     
     $data = json_decode(file_get_contents($projectsFile), true);
-    if (!isset($data['projects'])) return null;
+    $projects = $data['projects'] ?? [];
     
-    // Sort projects by path length (longest first) to ensure we match the most specific one.
-    // This prevents /mnt/user/python/unraid-extensions from matching /mnt/user/python
-    $projects = $data['projects'];
-    uksort($projects, function($a, $b) {
-        return strlen($b) - strlen($a);
-    });
+    // Optimized lookup: map realpath -> pId
+    $lookup = [];
+    foreach ($projects as $pPath => $pId) {
+        $rp = realpath($pPath);
+        if ($rp) $lookup[$rp] = $pId;
+    }
 
-    // Traverse up to find the nearest project project root (matching Gemini CLI behavior)
-    $projectId = null;
+    // Traverse up to find the nearest project root (matching Gemini CLI behavior)
     $checkPath = realpath($path);
     while ($checkPath && $checkPath !== '/') {
-        foreach ($projects as $pPath => $pId) {
-            $realPPath = realpath($pPath);
-            if ($realPPath && $realPPath === $checkPath) {
-                // VERIFY: Does the project folder actually exist in tmp?
-                if (is_dir("$home/.gemini/tmp/$pId")) {
-                    $projectId = $pId;
-                    break 2;
+        if (isset($lookup[$checkPath])) {
+            $pId = $lookup[$checkPath];
+            // We found the MOST SPECIFIC project root.
+            if (is_dir("$home/.gemini/tmp/$pId")) {
+                $logFile = "$home/.gemini/tmp/$pId/logs.json";
+                if (file_exists($logFile)) {
+                    $logs = json_decode(file_get_contents($logFile), true);
+                    if (is_array($logs) && !empty($logs)) {
+                        $last = end($logs);
+                        $fullId = $last['sessionId'] ?? null;
+                        if ($fullId) return (strlen($fullId) > 8) ? substr($fullId, 0, 8) : $fullId;
+                    }
                 }
+                // If this is a project root but has no logs, we STOP here.
+                // Falling back to a parent project's session would be invalid 
+                // because this sub-folder is its own project with its own .gemini config.
+                return null;
             }
         }
-        $checkPath = dirname($checkPath);
+        $parent = dirname($checkPath);
+        if ($parent === $checkPath) break;
+        $checkPath = $parent;
     }
     
-    if (!$projectId) return null;
-
-    $logFile = "$home/.gemini/tmp/$projectId/logs.json";
-    
-    if (file_exists($logFile)) {
-        $logs = json_decode(file_get_contents($logFile), true);
-        if (is_array($logs) && !empty($logs)) {
-            // Get the sessionId from the very last entry
-            $last = end($logs);
-            $fullId = $last['sessionId'] ?? null;
-            if ($fullId && strlen($fullId) > 8) {
-                // Gemini CLI expects the short 8-char prefix for --resume
-                return substr($fullId, 0, 8);
-            }
-            return $fullId;
-        }
-    }
     return null;
+}
+
+function getGeminiSessionTitle($id) {
+    $session = "gemini-cli-$id";
+    $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
+    
+    // 1. Clean up common noisy prefixes like root@Unraid: /mnt...
+    $title = preg_replace('/^[^@]+@[^:]+:\s*/', '', $title);
+    
+    // 2. Filter out generic titles (sh, bash, Unraid) to force fallback to window name (#W)
+    // We check if it contains 'unraid' or 'sh' as a whole word case-insensitive
+    $clean = strtolower(trim($title));
+    if (empty($clean) || preg_match('/\b(unraid|sh|bash|tmux|node|zsh|gemini-shell)\b/i', $clean) || $clean === '~') {
+        $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
+    }
+
+    // 3. Status Emoji Mapping
+    $statusPatterns = [ '/^_?\s*Ready/' => '◇', '/^_?\s*Working/' => '✦', '/^_?\s*Busy/' => '✋' ];
+    foreach ($statusPatterns as $pattern => $emoji) {
+        if (preg_match($pattern, $title)) {
+            $title = preg_replace($pattern, $emoji, $title);
+            break;
+        }
+    }
+    return $title;
 }
 
 /**
@@ -343,24 +360,8 @@ if (isset($_GET['action'])) {
         $id = $_GET['id'] ?? null;
         $chatId = findGeminiChatSession($path, $id);
         
-        // 1. Get Live Title from Tmux for initial sync
-        $title = null;
-        if ($id !== null) {
-            $session = "gemini-cli-$id";
-            $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
-            if (empty($title) || in_array(strtolower($title), ['unraid', 'sh', 'bash', 'tmux', 'node', 'zsh'])) {
-                $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
-            }
-            if ($title) {
-                $statusPatterns = [ '/^_?\s*Ready/' => '◇', '/^_?\s*Working/' => '✦', '/^_?\s*Busy/' => '✋' ];
-                foreach ($statusPatterns as $pattern => $emoji) {
-                    if (preg_match($pattern, $title)) {
-                        $title = preg_replace($pattern, $emoji, $title);
-                        break;
-                    }
-                }
-            }
-        }
+        // Initial sync: Get real-time title from tmux
+        $title = $id !== null ? getGeminiSessionTitle($id) : null;
         
         echo json_encode(['status' => 'ok', 'chatId' => $chatId, 'title' => $title]);
     } elseif ($_GET['action'] === 'save') {
@@ -398,30 +399,7 @@ if (isset($_GET['action'])) {
         } elseif ($_GET['action'] === 'get_session_status') {
             $id = preg_replace('/[^a-z0-9\-]/', '', $_GET['id'] ?? '');
             $path = $_GET['path'] ?? '';
-            $session = "gemini-cli-$id";
-            
-            // 1. Get Live Title from Tmux
-            $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
-            if (empty($title) || in_array(strtolower($title), ['unraid', 'sh', 'bash', 'tmux', 'node', 'zsh'])) {
-                $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
-            }
-
-            // Restore Emojis: Gemini CLI uses ◇ (Ready), ✦ (Working), and ✋ (Busy)
-            // If they are coming through as text (fallback), map them back for a cleaner look.
-            // Some systems might have a space: "_ Ready" or just "_Ready".
-            $statusPatterns = [
-                '/^_?\s*Ready/'   => '◇',
-                '/^_?\s*Working/' => '✦',
-                '/^_?\s*Busy/'    => '✋'
-            ];
-            foreach ($statusPatterns as $pattern => $emoji) {
-                if (preg_match($pattern, $title)) {
-                    $title = preg_replace($pattern, $emoji, $title);
-                    break; // Only one status at a time
-                }
-            }
-    
-            // 2. Get Live Chat ID from Logs (Matches what's actually happening in terminal)
+            $title = getGeminiSessionTitle($id);
             $chatId = findGeminiChatSession($path, $id);
     
             echo json_encode([
