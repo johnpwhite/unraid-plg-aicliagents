@@ -213,7 +213,8 @@ function findGeminiChatSession($path, $id = null) {
     if ($id !== null && isGeminiRunning($id)) {
         $chatIdFile = getGeminiChatIdFile($id);
         if (file_exists($chatIdFile)) {
-            return trim(file_get_contents($chatIdFile));
+            $current = trim(file_get_contents($chatIdFile));
+            if (!empty($current)) return $current;
         }
     }
 
@@ -381,7 +382,7 @@ if (isset($_GET['action'])) {
             }
     
             // 2. Get Live Chat ID from Logs (Matches what's actually happening in terminal)
-            $chatId = findGeminiChatSession($path);
+            $chatId = findGeminiChatSession($path, $id);
     
             echo json_encode([
                 'status' => 'ok', 

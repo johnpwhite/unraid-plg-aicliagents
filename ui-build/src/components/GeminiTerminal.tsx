@@ -574,7 +574,7 @@ export const GeminiTerminal: React.FC = () => {
                 )}
                 {!isStarting && (
                     <iframe
-                        key={activeId + (activeSession?.lastActive || '') + (activeSession?.chatSessionId || '')}
+                        key={activeId + (activeSession?.lastActive || '')}
                         src={terminalUrl}
                         style={styles.iframe}
                         title="Gemini Terminal"
