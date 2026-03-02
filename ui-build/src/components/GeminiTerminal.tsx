@@ -422,7 +422,7 @@ export const GeminiTerminal: React.FC = () => {
                     {/* Middle Section: Tabs (Scrollable) */}
                     <div style={styles.drawerTabs}>
                         {sessions.map(s => {
-                            const displayName = s.title || s.name;
+                            const displayName = (s.title ? s.title + ' ' : '') + s.name;
                             const isActive = activeId === s.id;
                             return (
                                 <div

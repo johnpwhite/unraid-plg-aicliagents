@@ -263,29 +263,23 @@ function findGeminiChatSession($path, $id = null) {
     return null;
 }
 
-function getGeminiSessionTitle($id) {
+function getGeminiStatusEmoji($id) {
     $session = "gemini-cli-$id";
+    // We only care about the title (#T) to find our status markers
     $title = exec("tmux display-message -p -t $session '#T' 2>/dev/null");
     
-    // 1. Clean up common noisy prefixes like root@Unraid: /mnt...
-    $title = preg_replace('/^[^@]+@[^:]+:\s*/', '', $title);
-    
-    // 2. Filter out generic titles (sh, bash, Unraid) to force fallback to window name (#W)
-    // We check if it contains 'unraid' or 'sh' as a whole word case-insensitive
-    $clean = strtolower(trim($title));
-    if (empty($clean) || preg_match('/\b(unraid|sh|bash|tmux|node|zsh|gemini-shell)\b/i', $clean) || $clean === '~') {
-        $title = exec("tmux display-message -p -t $session '#W' 2>/dev/null");
-    }
+    $statusPatterns = [ 
+        '/^_?\s*Ready/'   => '◇', 
+        '/^_?\s*Working/' => '✦', 
+        '/^_?\s*Busy/'    => '✋' 
+    ];
 
-    // 3. Status Emoji Mapping
-    $statusPatterns = [ '/^_?\s*Ready/' => '◇', '/^_?\s*Working/' => '✦', '/^_?\s*Busy/' => '✋' ];
     foreach ($statusPatterns as $pattern => $emoji) {
         if (preg_match($pattern, $title)) {
-            $title = preg_replace($pattern, $emoji, $title);
-            break;
+            return $emoji;
         }
     }
-    return $title;
+    return ''; // No status detected
 }
 
 /**
@@ -360,8 +354,8 @@ if (isset($_GET['action'])) {
         $id = $_GET['id'] ?? null;
         $chatId = findGeminiChatSession($path, $id);
         
-        // Initial sync: Get real-time title from tmux
-        $title = $id !== null ? getGeminiSessionTitle($id) : null;
+        // Initial sync: Get emoji status from tmux
+        $title = $id !== null ? getGeminiStatusEmoji($id) : null;
         
         echo json_encode(['status' => 'ok', 'chatId' => $chatId, 'title' => $title]);
     } elseif ($_GET['action'] === 'save') {
@@ -399,7 +393,7 @@ if (isset($_GET['action'])) {
         } elseif ($_GET['action'] === 'get_session_status') {
             $id = preg_replace('/[^a-z0-9\-]/', '', $_GET['id'] ?? '');
             $path = $_GET['path'] ?? '';
-            $title = getGeminiSessionTitle($id);
+            $title = getGeminiStatusEmoji($id);
             $chatId = findGeminiChatSession($path, $id);
     
             echo json_encode([
