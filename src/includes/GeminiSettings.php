@@ -239,7 +239,12 @@ function findGeminiChatSession($path) {
         if (is_array($logs) && !empty($logs)) {
             // Get the sessionId from the very last entry
             $last = end($logs);
-            return $last['sessionId'] ?? null;
+            $fullId = $last['sessionId'] ?? null;
+            if ($fullId && strlen($fullId) > 8) {
+                // Gemini CLI expects the short 8-char prefix for --resume
+                return substr($fullId, 0, 8);
+            }
+            return $fullId;
         }
     }
     return null;
