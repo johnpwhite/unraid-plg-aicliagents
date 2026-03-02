@@ -1,6 +1,6 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.17" launch="Settings/GeminiSettings" pluginURL="https://github.com.com/johnpwhite/unraid-plg-geminicli/raw/main/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.17" launch="Settings/GeminiSettings" pluginURL="https://github.com/johnpwhite/unraid-plg-geminicli/raw/main/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
 ## v2026.03.02.17
