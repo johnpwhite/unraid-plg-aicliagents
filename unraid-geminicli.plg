@@ -1,400 +1,29 @@
 <?xml version='1.0' standalone='yes'?>
-<!DOCTYPE PLUGIN [
-<!ENTITY name      "unraid-geminicli">
-<!ENTITY author    "John White">
-<!ENTITY version "2026.03.02.17">
-<!ENTITY launch    "Settings/GeminiSettings">
-<!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master">
-<!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg">
-<!ENTITY boot      "/boot/config/plugins/unraid-geminicli">
-<!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-geminicli">
-]>
-<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.17" launch="Settings/GeminiSettings" pluginURL="https://gitlab.johnpwhite.com/johner/unraid-plg-geminicli/-/raw/master/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
+
+<PLUGIN name="unraid-geminicli" author="John White" version="2026.03.02.17" launch="Settings/GeminiSettings" pluginURL="https://github.com.com/johnpwhite/unraid-plg-geminicli/raw/main/unraid-geminicli.plg" min="7.2.0" icon="unraid-geminicli.png">
 
 <CHANGES>
-## 2026.03.02.17
-- Added 8px padding around the terminal viewport with rounded corners and transparent background for better Unraid theme integration.
-## 2026.03.02.16
-- Modified installer to always show Node.js version whether downloading or using cache.
-## 2026.03.02.15
-- Modified installer to ensure tmux (v3.6a) is always refreshed and re-installed during updates, ensuring version alignment.
-## 2026.03.02.14
-- Dependency Upgrades: Gemini CLI v0.31.0, Node.js v22.22.0, and tmux v3.6a.
-## 2026.03.02.13
-- Refactored tab naming: prioritize folder name and ONLY prepend status emojis (◇, ✦) when detected, ignoring noisy terminal titles like 'bash'.
-## 2026.03.02.12
-- Quiet session resumption (hiding invalid ID errors), strict project isolation to prevent ID leaks, and improved tab title filtering.
-## 2026.03.02.11
-- Fix project mapping collision for nested paths by sorting by length descending
-- - Improved tab title fallback to avoid 'Unraid' or 'sh' labels.
-## 2026.03.02.10
-- Hardened status emoji mapping with regex and ensured initial load gets the correct title.
-## 2026.03.02.09
-- Restored Gemini status emojis by mapping literal text fallbacks (_Ready, _Working) back to their respective icons (◇, ✦) in the status poller.
-## 2026.03.02.08
-- Cleaned up tab names to remove noisy _Ready status and ensure overlay closes when drawer is closed.
-## 2026.03.02.07
-- Fix reconnect loop on session ID discovery by prioritizing existing session identifiers and removing ID from UI iframe cache key.
-## 2026.03.02.06
-- Fix: Automated Live Status Polling
-- - The UI now polls for both Title and Chat Session ID every 4 seconds, ensuring the hover-card stays in sync if you switch sessions in the terminal
-- - Improved: Refined project traversal to prevent multiple tabs from sharing the same session ID.
-## 2026.03.02.05
-- Fix: Improved upward project traversal in backend to ensure nested projects are correctly matched
-- - Fix: Enhanced terminal shell to automatically attempt '--resume latest' if a specific session ID fails before giving up and starting fresh.
-## 2026.03.02.04
-- Fix: Synchronize UI with reality
-- - The backend now prioritizes the currently running chat ID for a session over stale log entries, preventing the 'tug-of-war' when navigating away and back
-- - Improved: Passing session ID to get_chat_session action.
-## 2026.03.02.03
-- Fix: Extract the correct 8-character resumable ID from logs.json to fix 'Invalid session identifier' error on server restart
-- - Improved: Added more robust session recovery logic.
-## 2026.03.02.02
-- Fix: Terminals now persist in the background when switching tabs or navigating away in Unraid
-- - Removed closeOnDisconnect=true to allow instant re-attachment.
-## 2026.03.02.01
-- Fix: Reliable session discovery for all tabs on load
-- - Fix: Added invisible hover bridge to tab overlay so users can actually reach the RESET button
-- - Improved: Start action always uses discovered chatId to prevent empty-session fallbacks.
-## 2026.03.01.05
-- Refactor: Remove the special 'Main' tab concept
-- - The UI now initializes with a standard workspace tab for the default path, ensuring consistent behavior across all sessions
-- - Feature: Add manual RESET button to the tab metadata overlay to clear stuck or incorrect session IDs.
-## 2026.03.01.02
-- Fix: Resolve session ID desync between UI and terminal
-- - Fix: Implement circuit breaker to prevent infinite reload loops if a session is missing
-- - Improved: Auto-sync chatSessionId with backend on initial load.
-## 2026.03.01.01
-- Fix: Explicitly trigger resize inside the terminal iframe
-- - Fix: Force 100% width on internal xterm containers to eliminate the reserved scrollbar track gap.
-## 2026.02.28.22
-- Fix: Final boss attempt to kill scrollbar gutter
-- - 1
-- - scrolling=no on iframe
-- - 2
-- - persistent JS injection to kill internal gutters in iframe
-- - 3
-- - React onLoad injection for redundant coverage
-- - 4
-- - ttyd scrollbar:false theme option.
-## 2026.02.28.21
-- Fix: Explicitly disable ttyd internal scrollbar via theme option to eliminate the right-side gap.
-## 2026.02.28.19
-- Fix: Eliminate scrollbar gutter and ensure symmetrical horizontal padding
-- - Refine: Ensure all Unraid root containers are strictly 100% width and kill scroll persistent logic.
-## 2026.02.28.18
-- Fix: Injected CSS into terminal iframe to hide internal xterm.js scrollbar
-- - Style: Restored 2px page safety gap.
-## 2026.02.28.17
-- Fix: Applied the Nuclear Option for scrollbar suppression with a 20px safety gap and persistent JS overrides.
-## 2026.02.28.16
-- Fix: Removed excessive console logging in the UI that was causing performance issues.
-## 2026.02.28.15
-- Fix: Reliable cache-busting by pulling version from .plg file
-- - Feat: Stringified scroll diagnostics for easier debugging.
-## 2026.02.28.14
-- Fix: Further refined scrollbar suppression with requestAnimationFrame and 4px safety gap
-- - Feat: Added detailed element-path logging for scroll diagnostics.
-## 2026.02.28.13
-- Fix: Persistent vertical scrollbar by removing 100vh and applying scorched-earth CSS
-- - Feat: Added scroll diagnostic logging to UI.
-## 2026.02.28.12
-- Fix: Vertical scrollbar on terminal
-- - Feat: Drawer backdrop and outside click to close
-- - Style: Improved tab tooltip position and content
-- - Fix: Session persistence after plugin update.
-## 2026.02.28.11
-- Fix: Eliminate horizontal scrollbar and vertical scrolling by forcing overflow hidden on all Unraid containers
-- - Fix: Ensure terminal is perfectly flush with footer by dynamically calculating footer height
-- - Fix: Solve initial sizing issue by triggering window resize and multiple timeouts.
-## 2026.02.28.10
-- Fix: Add overflow-x hidden to kill horizontal scrollbars
-## 2026.02.28.09
-- Fix: Robust path-to-session mapping using projects.json to prevent ID collisions
-- Fix: Session resumption now correctly identifies unique projects even if they share a directory name
-## 2026.02.28.08
-- Feat: Track and resume Gemini chat sessions automatically across reboots
-- Feat: Added metadata overlay card on tab hover (shows full path and Gemini Session ID)
-- Backend: Added get_chat_session AJAX action and updated terminal start to support session resumption
-## 2026.02.28.07
-- Fix: Prevent 'Main' tab processes from restarting when other tabs are open
-- Fix: Ensure 'Main' tab processes restart and re-appear when the only tab is closed
-- Fix: Corrected React useEffect dependencies for robust session management and title polling
-- UI: Rebuilt frontend to include tab management fixes
-## 2026.02.28.06
-- UI: hide all scrollbars; Fix: persistence of activeId and ghost session prevention
-## 2026.02.28.05
-- Fix: aggressive node process cleanup in stopGeminiTerminal
-## 2026.02.28.03
-- Fix: Drawer toggle tab 'fleeing' bug by preventing vertical jump and adding threshold
-## 2026.02.28.02
-- Feat: Draggable Copilot tab; UI: Suppress page header &amp; force overflow hidden; Tabs: Close Main tab auto-recreates
-## 2026.02.28.01
-- Refresh (Fixed Script)
-## 2026.02.27.29
+## v2026.03.02.17
 
-## 2026.02.27.28
+- **Metadata Overlay**: Hover over any workspace tab to see its full filesystem path and active Gemini Session ID.
+- **Session Reset**: Added a manual "RESET" button to the tab overlay to clear stuck sessions or start fresh conversations.
+- **Smart Workspace Isolation**: Robust project detection that ensures nested folders correctly maintain their own independent Gemini sessions.
+- **Reliable Session Resumption**: Significant improvements to session recovery across server reboots and browser refreshes.
+- **Cleaner Tab Labels**: Redesigned tab titles that prioritize the workspace folder name and ONLY show status emojis (◇, ✦, ✋) when active.
+- **Polished Terminal UI**: Added a balanced 8px padding around the terminal with rounded corners and transparent background for better theme integration.
+- **Eliminated Scrollbars**: Implemented persistent suppression of internal and external scrollbars for a cleaner, full-screen terminal experience.
+- **Dependency Upgrades**: Upgraded to the latest stable versions of Gemini CLI (v0.31.0), Node.js (v22.22.0 LTS), and tmux (v3.6a).
+- **Improved Security**: Added CSRF validation for all state-changing AJAX actions.
 
-## 2026.02.27.27
+### v2026.02.27.20 - Initial Release: Key Features
 
-## 2026.02.27.26
-
-## 2026.02.27.25
-- UI Force Fix: Guaranteed side-by-side layout for path fields and browse buttons
-- Narrower label column (120px) and forced flex behavior with !important overrides.
-## 2026.02.27.24
-- UI Fix: Corrected Settings page field and button alignment
-- Browse buttons are now square and on the same row as path fields
-- Restored left-aligned labels.
-## 2026.02.27.23
-- UI: Refined Settings page layout
-- Slimmer labels, correctly sized browse buttons, and expandable path fields.
-## 2026.02.27.22
-- Feat: Added Settings shortcut button to the main terminal toolbar.
-## 2026.02.27.21
-- Feat: Unrestricted Directory Browser on Settings &amp; Workspaces
-- Added 'Browse' buttons to settings fields with a matching overlay UI.
-## 2026.02.27.20
-- Feature: Dynamic Tab Titles
-- Tabs now poll tmux and display real-time Gemini status icons and activity (◇ ✋ ✦)
-## 2026.02.27.19
-- UI: Remove whitespace above toolbar (div
-- title margin + displaybox padding)
-- Fix: Tab close button always visible
-- Tab text truncates independently with tooltip
-## 2026.02.27.18
-- UI: Tight toolbar padding (1px)
-- Dynamic terminal height pinned 6px above footer, auto-resizes with window
-## 2026.02.27.17
-- UI: Move action buttons above tab strip into page whitespace
-- Slim tab header with minimal padding
-## 2026.02.27.16
-- Fix: Create Folder now uses GET (POST hangs on Unraid NGINX)
-- Fix: Tab overflow with ellipsis truncation
-## 2026.02.27.15
-- Fix: Create Folder debugging and alert on error
-- Fix: 502 race condition (defer iframe until ttyd ready)
-- Debug logging for all AJAX calls
-## 2026.02.27.14
-- Fix: Create Folder (root-level AJAX endpoint), Fix: header scrollbar
-## 2026.02.27.13
-- CSRF fix for Create Folder, compact header, modal polish, scrollbar fix
-## 2026.02.27.12
-- Full theme integration with real Unraid CSS vars
-- Scroll history fix. 502 fix
-## 2026.02.27.11
-- UI Polish, Theme Integration, and 502 Fix
-## 2026.02.27.10
-- Fix: Critical UI theme integration (honors Unraid light/dark mode via system variables)
-- Fix: Standardized font sizes to Unraid native 13px for better readability
-- Fix: Final 502 Bad Gateway resolution (shorter IDs for NGINX compatibility)
-- Fix: Workshop Overlay alignment and Create Folder button functionality
-- Added: Improved modal UX and button styling
-## 2026.02.27.08
-- Fix: Critical CSS scoping fix (resolved issue where UI styles appeared as simple/unformatted)
-## 2026.02.27.07
-- Fix: Critical CSS scoping mismatch (resolved issue where UI styles appeared as simple/unformatted)
-- Fix: Corrected Tailwind utility mapping from .copilot-ui to .gemini-cli-ui
-## 2026.02.27.06
-- Reliable UI cache-busting fix
-## 2026.02.27.04
-- UI/UX improvements, tmux optimization, and NGINX 502 fix for new tabs
-## 2026.02.27.05
-- Fix: Hardened UI cache-busting by persisting version to configuration file during installation.
-## 2026.02.27.04
-- Fix: Resolved 502 Bad Gateway when opening new tabs (NGINX session ID compatibility)
-- Fix: Converted workspace browser to fixed overlay and standardized button sizes
-- Fix: Dynamic tab names based on path and removed tmux status bar for more space
-- Added: Terminal loading message and automatic clear screen on reload
-## 2026.02.27.02
-- Fix: Resolved tmux history inheritance bug and replaced React Portal with absolute absolute positioning for modal overlay.
-## 2026.02.27.01
-- Fix: Resolved terminal auto-load via wrapper script, forced strict UI button sizing, distinct tab styling, and migrated modal to React Portal.
-## 2026.02.26.56
-- Feat: Improved UI/UX, fixed terminal startup, integrated native Unraid modals, and updated standards.
-## 2026.02.26.55
-- Fix: Plugin icon missing in list (added icon attribute to PLUGIN tag)
-- Improved: Standardized icon filename to unraid-geminicli
-- png
-- Fix: Settings and Tab icons now consistent with renamed asset
-## 2026.02.26.54
-- Added: README
-- md for plugin list display
-- Improved: Plugin icon consistency
-## 2026.02.26.53
-- Added: Required README.md for correct display in the Unraid plugin list.
-- Improved: Ensured plugin icon (gemini-cli.png) is correctly served.
-## 2026.02.26.52
-- Fix: Perfect field alignment in settings
-- Fix: Apply &amp; Save button submission
-- Fix: Terminal rendering improvements (UTF-8)
-## 2026.02.26.51
-- Fix: Perfectly left-aligned all settings fields (Number, Text, Select) within cards.
-- Fix: Resolved "Apply &amp; Save" submission by ensuring CSRF and URLSearchParams are correctly handled.
-- Fix: Improved terminal rendering (Gemini logo, diffs) by forcing UTF-8 mode in ttyd.
-- Improved: Enhanced terminal stability with fixed titles and improved persistence loops.
-- Removed: "Done" button from settings page for a cleaner look.
-## 2026.02.26.50
-- Fix: PHP fatal error (duplicate function definition)
-- Verified: Clean GeminiSettings
-- php
-## 2026.02.26.49
-- Fix: Resolved PHP fatal error (duplicate function definition) preventing pages from rendering.
-## 2026.02.26.48
-- Feat: Multi-Workspace support with tabbed terminal interface
-- Feat: Integrated directory browser for workspace selection
-- Feat: Auto-loading Gemini with persistence loop
-- Fix: CSRF security for folder creation
-## 2026.02.26.47
-- Feat: Multi-Workspace support with a new tabbed terminal interface.
-- Feat: "Change Workspace" feature with an integrated directory browser modal.
-- Feat: Auto-loading Gemini on terminal start with an automatic persistence loop.
-- Added: Ability to create new folders directly from the workspace selector.
-- Improved: Tab-specific ttyd and tmux session management.
-## 2026.02.26.46
-- Fix: CSRF token validation for Apply &amp; Save button
-- Fix: Perfect left-alignment for all settings fields
-- Fix: Restored PNG settings icon
-## 2026.02.26.45
-- Fix: Resolved "Apply &amp; Save" button failure by implementing mandatory CSRF token validation.
-- Fix: Perfectly left-aligned all settings fields (Number, Text, Select) by simplifying layout rules.
-- Fix: Restored PNG settings icon (gemini-cli.png) to match Copilot plugin styling.
-- Improved: Enhanced backend security with state-change CSRF verification.
-## 2026.02.26.44
-- Fix: Standardized settings input height and alignment
-- Fix: Perfect left-alignment for all fields
-## 2026.02.26.43
-- Fix: Standardized height and alignment for all settings inputs (Number, Text, Select).
-- Fix: Ensured all fields are perfectly left-aligned within the settings cards.
-- Improved: Responsive layout for settings form.
-## 2026.02.26.42
-- Fix: Terminal rendering (UTF-8, 256colors)
-- Fix: Consolidated settings form and alignment
-- Removed: Done button
-## 2026.02.26.41
-- Fix: Improved terminal rendering (Gemini logo, colors, and diffs) by forcing UTF-8 and 256color mode in tmux.
-- Fix: Consolidated settings into a single form to ensure all changes are saved correctly.
-- Fix: Improved alignment of settings labels and inputs.
-- Removed: "Done" button from settings page as per request.
-## 2026.02.26.40
-- Feat: Complete overhaul of Settings UI using modern card-based layout
-- Fix: Settings icon and User Utilities integration
-- Fix: Apply button and save logic
-## 2026.02.26.39
-- Feat: Complete overhaul of Settings UI using a modern card-based layout.
-- Added: Global Settings card (Main Tab, History Limit).
-- Added: Session Profile card (Theme, Font, User, Paths).
-- Fix: Corrected settings icon (gemini-cli.png) and User Utilities integration.
-- Fix: Resolved Settings "Apply" button not submitting correctly.
-## 2026.02.26.38
-- Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement
-- Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category
-- Improved: Menu visibility toggle now correctly manages tab metadata
-## 2026.02.26.37
-- Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement.
-- Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category.
-- Improved: Menu visibility toggle now correctly manages tab metadata.
-## 2026.02.26.36
-- Fix: Terminal tab now appears correctly in the Main header menu
-- Fix: Settings icon correctly categorized under User Utilities
-- Improved: Robust menu visibility toggle logic
-## 2026.02.26.35
-- Fix: Navigation tab now correctly appears in the "Main" header menu when enabled.
-- Fix: Settings icon correctly categorized under "User Utilities" for better integration.
-- Improved: Menu visibility toggle logic is now more robust.
-## 2026.02.26.34
-- Feat: Refactored UI into a dedicated top-level tab and separate settings page
-- Added: Global configuration for theme, font size, history limit, and custom paths
-- Added: Dynamic tab visibility control
-- Improved: Clean terminal interface without internal toolbar
-## 2026.02.26.33
-- Feat: Refactored UI into a dedicated top-level tab and a separate settings page.
-- Added: Configurable theme, font size, history limit, and custom home/root paths.
-- Added: Dynamic tab visibility control.
-## 2026.02.26.32
-- Fix: Resolved PHP fatal error due to function name collision (tail) with Unraid core
-- Verified: Portable tmux integration and debug endpoint
-## 2026.02.26.31
-- Fix: Resolved PHP fatal error due to function name collision (tail) with Unraid core.
-## 2026.02.26.30
-- Fix: Resolved PHP crash on systems missing POSIX extension
-- Added: Bundled portable tmux binary for session sync
-- Improved: Installer robustness
-## 2026.02.26.29
-- Fix: Resolved PHP crash on systems missing POSIX extension.
-- Added: Bundled portable tmux binary to ensure session sync works on all Unraid versions.
-- Improved: Installer robustness and dependency management.
-## 2026.02.26.28
-- Fix: Improved session sync diagnostics
-- Added debug action to GeminiSettings
-- php
-- Improved tmux detection and logging in shell wrapper
-## 2026.02.26.27
-- Fix: Improved session sync diagnostics.
-- Added `/plugins/unraid-geminicli/includes/GeminiSettings.php?action=debug` endpoint.
-- Improved tmux detection and logging in shell wrapper.
-## 2026.02.26.26
-- Fix: Surgical process isolation to prevent ttyd from killing its own child shell processes
-- Improved process detection to distinguish between parent server and child terminal sessions
-## 2026.02.26.25
-- Fix: Surgical process isolation to prevent ttyd from killing its own child shell processes.
-- Improved process detection to distinguish between parent server and child terminal sessions.
-## 2026.02.26.24
-- Fix: Resolved duplicate ttyd process issue by strictly enforcing cleanup of unhealthy (socketless) processes
-- Improved backend locking and status detection
-## 2026.02.26.23
-- Fix: Resolved duplicate ttyd process issue by strictly enforcing cleanup of unhealthy (socketless) processes.
-- Improved backend locking and status detection.
-## 2026.02.26.22
-- Fix: Resolved terminal reset and session loss by improving process detection (pgrep) and socket stability
-- Improved session persistence by allowing shared tmux views (standard Unraid behavior)
-- Optimized frontend by reducing redundant iframe reloads during sync
-- Updated UI build artifacts
-## 2026.02.26.21
-- Fix: Resolved terminal reset and session loss by improving process detection (pgrep) and socket stability
-- Improved session persistence by allowing shared tmux views (standard Unraid behavior)
-- Optimized frontend by reducing redundant iframe reloads during sync.
-## 2026.02.26.20
-- Fix: Resolved vertical scrollbar by increasing offset to 245px and forcing overflow hidden on all parents
-- Improved session sync by reusing running ttyd instances
-- Polished toolbar UI.
-## 2026.02.26.19
-- Fix: Reverted to stable 230px height offset
-- Added overflow-x hidden to kill horizontal scrollbars
-- Added iframe onload resize trigger to ensure full-height terminal layout.
-## 2026.02.26.18
-- Fix: Reverted height offset to 230px to resolve scrollbar issues while maintaining all backend sync and locking fixes.
-## 2026.02.26.17
-- Fix: Atomic backend locking to prevent duplicate processes
-- Removed redundant AJAX start call
-- Forced ttyd size (160x60) to avoid initial collapse
-- Adjusted height offset to 260px for footer clearance
-- Polished UI toolbar styling.
-## 2026.02.26.16
-- Fix: Persistent terminal height bug fixed by forcing aggressive tmux client detach and large initial buffer
-- Surgical backend process tracking to prevent duplicate sockets
-- Polished UI toolbar styling.
-## 2026.02.26.15
-- Fix: Resolved duplicate process issue with locking and removed double-start calls
-- Fixed terminal height by forcing large initial tmux size (200x80) and aggressive client-side resizing.
-## 2026.02.26.14
-- Fix: Added aggressive process cleanup to installer to resolve session sync
-- Adjusted height offset to 230px to clear footer completely.
-## 2026.02.26.13
-- Fix: Aggressive process management
-- Always kill and restart ttyd on socket access to ensure correct flags (removed closeOnDisconnect)
-- Adjusted height offset to 200px to sit above footer.
-## 2026.02.26.12
-- Fix: Resolved final scrollbar issue with 170px offset
-- Improved session persistence by keeping ttyd server alive and using aggressive tmux re-attachment.
-## 2026.02.26.11
-- Fix: Aggressive cache-busting for all assets
-- Architectural fix for process tracking and zombie cleanup
-- Optimized height and session persistence logic.
-## 2026.02.26.10
-- Fix: Aggressive cache-busting for all plugin assets.
-- Fix: Architectural fix for process tracking and zombie cleanup.
-- Improved installer reliability with set -e and explicit entity expansion.
+- **Native AI Integration**: Direct integration of Google Gemini into the Unraid WebUI, providing a powerful AI agent for server management and coding tasks.
+- **Multi-Workspace Terminal**: Support for multiple terminal sessions (Workspaces). Open different folders in separate tabs to manage various projects simultaneously.
+- **Dynamic Status Tracking**: Tabs poll terminal state in real-time, displaying Gemini's status icons (Ready ◇, Working ✦, Action Required ✋) and active task descriptions.
+- **Integrated File Browser**: Seamlessly navigate your server's filesystem to select and open new workspaces.
+- **Responsive Terminal Design**: A modern, high-performance terminal wrapper with dynamic resizing that automatically fills available screen space and fits perfectly above the footer.
+- **Unraid Theme Integration**: Harmonious UI design that matches your Unraid theme (Light/Dark) and respects standard system variables.
+- **Smart Session Management**: Persistent terminal sessions that remain active in the background, allowing you to switch between tasks without losing state.
 </CHANGES>
 
 <!-- 1. INSTALLER SCRIPT -->
@@ -403,8 +32,8 @@
 #!/bin/bash
 set -e
 NAME="unraid-geminicli"
-VERSION="&version;"
-GIT_URL="&gitURL;"
+VERSION="2026.03.02.17"
+GIT_URL="https://github.com/johnpwhite/unraid-plg-geminicli/raw/main"
 GEMINI_JS_URL="https://github.com/google-gemini/gemini-cli/releases/download/v0.31.0/gemini.js"
 EMHTTP_DEST="/usr/local/emhttp/plugins/$NAME"
 CONFIG_DIR="/boot/config/plugins/$NAME"
@@ -497,7 +126,7 @@ download_file "src/unraid-geminicli.png" "unraid-geminicli.png"
 download_file "src/README.md" "README.md"
 
 # Sync menu visibility after install
-php -r "require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php'; \$config = getGeminiConfig(); updateGeminiMenuVisibility(\$config['enable_tab']); saveGeminiConfig(['version' => '&version;']);"
+php -r "require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php'; \$config = getGeminiConfig(); updateGeminiMenuVisibility(\$config['enable_tab']); saveGeminiConfig(['version' => '2026.03.02.17']);"
 
 echo "--- INSTALL COMPLETE ---"
 </INLINE>
