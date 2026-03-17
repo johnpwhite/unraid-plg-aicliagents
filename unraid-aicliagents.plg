@@ -9,7 +9,7 @@
 - **Feat: Hybrid Home Persistence**: Implemented a decoupled background sync daemon that asynchronously mirrors the high-performance RAM home directory to the Flash drive.
 - **Feat: Multi-User Migration**: Seamlessly migrates AI agent data when switching the active Unraid user, ensuring chat history is preserved.
 - **Improve: Premium UI Theming**: Unified orange button theme, consistent card layouts, and professional blue-sidebar help styling throughout the manager.
-- **Improve: Performance & Stability**: Optimized terminal initialization to eliminate 502 Bad Gateway errors and implemented atomic locking for background sync operations.
+- **Improve: Performance &amp; Stability**: Optimized terminal initialization to eliminate 502 Bad Gateway errors and implemented atomic locking for background sync operations.
 - **Improve: Clipboard Synchronization**: Enabled OSC 52 support for dual-direction clipboard synchronization between the AI terminal and your browser.
 - **Improve: TrueColor Support**: Full 24-bit TrueColor environment propagation across the entire terminal stack for better syntax highlighting.
 - **Fix: Terminal Rendering**: Resolved scrolling and corruption issues in terminal sessions, particularly for limited-user contexts.
