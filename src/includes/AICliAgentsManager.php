@@ -3,69 +3,358 @@
  * AICliAgents CLI Terminal Management
  */
 
-// One-time legacy Gemini CLI cleanup (handles registration and RAM assets)
-$legacyFiles = [
-    '/boot/config/plugins/unraid-geminicli.plg',
-    '/boot/config/plugins/geminicli.plg',
-    '/var/log/plugins/unraid-geminicli.plg',
-    '/var/log/plugins/geminicli.plg',
-    '/usr/local/emhttp/plugins/unraid-geminicli',
-    '/usr/local/emhttp/plugins/geminicli',
-    '/usr/local/bin/gemini'
-];
-foreach ($legacyFiles as $file) {
-    if (file_exists($file)) {
-        is_dir($file) ? @exec("rm -rf " . escapeshellarg($file)) : @unlink($file);
+// Force system/user timezone if available, otherwise fallback to UTC
+if (file_exists('/var/local/emhttp/var.ini')) {
+    $var = @parse_ini_file('/var/local/emhttp/var.ini');
+    if (!empty($var['timeZone'])) {
+        @date_default_timezone_set($var['timeZone']);
+    } else {
+        date_default_timezone_set('UTC');
     }
+} else {
+    date_default_timezone_set('UTC');
+}
+
+// Logging Levels
+define('AICLI_LOG_ERROR', 0);
+define('AICLI_LOG_WARN',  1);
+define('AICLI_LOG_INFO',  2);
+define('AICLI_LOG_DEBUG', 3);
+
+
+/**
+ * One-time initialization logic.
+ * Called lazily when the plugin is actually used.
+ */
+function aicli_init_plugin() {
+    if (file_exists('/tmp/unraid-aicliagents/init_done_v3')) return;
+
+    if (!is_dir('/tmp/unraid-aicliagents')) @mkdir('/tmp/unraid-aicliagents', 0777, true);
+    @chmod('/tmp/unraid-aicliagents', 0777);
+    
+    aicli_log("SCORCHED EARTH: Cleaning up all legacy ghost processes and sessions...", AICLI_LOG_WARN);
+    
+    // 1. Kill all detached background sync loops and old shell scripts
+    exec("pkill -9 -f 'Periodic sync triggered' > /dev/null 2>&1");
+    exec("pkill -9 -f 'sync-daemon-.*\.sh' > /dev/null 2>&1");
+    exec("pkill -9 -f 'aicli-shell.sh' > /dev/null 2>&1");
+    
+    // 2. Kill all tmux sessions matching our pattern to clear ghosts
+    exec("tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -I {} tmux kill-session -t {} > /dev/null 2>&1");
+    
+    // 3. Kill all standalone ttyd instances
+    exec("pkill -9 -x ttyd > /dev/null 2>&1");
+    
+    // 4. Clean up stale sockets and PIDs
+    exec("rm -f /var/run/aicliterm-*.sock");
+    exec("rm -f /var/run/unraid-aicliagents-*.pid");
+    exec("rm -f /tmp/unraid-aicliagents/sync-daemon-*.pid");
+    
+    // Run migration and legacy cleanup
+    aicli_cleanup_legacy();
+    aicli_migrate_home_path();
+
+    @touch('/tmp/unraid-aicliagents/init_done_v3');
+}
+
+/**
+ * Lazy initializer to ensure constants and config are ready.
+ */
+function aicli_ensure_init() {
+    aicli_init_plugin();
 }
 
 // Set up global error logging to debug file
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
-    aicli_debug("PHP ERROR [$errno]: $errstr in $errfile on line $errline");
+    // Check if error was suppressed with @ (works for PHP 7 and 8)
+    if (error_reporting() === 0) return false;
+    aicli_log("PHP ERROR [$errno]: $errstr in $errfile on line $errline", AICLI_LOG_ERROR);
     return false;
 });
 set_exception_handler(function($e) {
-    aicli_debug("PHP EXCEPTION: " . $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine());
+    aicli_log("PHP EXCEPTION: " . $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine(), AICLI_LOG_ERROR);
 });
 
-function aicli_debug($msg) {
-    // D-06: Cache debug flag in static var to prevent recursion (aicli_debug -> getAICliConfig -> error -> aicli_debug)
-    static $debugEnabled = null;
-    if ($debugEnabled === null) {
+/**
+ * Returns a hardcoded professional timestamp for unified logging.
+ */
+function aicli_get_formatted_timestamp() {
+    return date("Y-m-d H:i:s");
+}
+
+// Logging Levels are defined at the top of the file
+
+/**
+ * Main logging engine for AICliAgents.
+ */
+function aicli_log($msg, $level = AICLI_LOG_INFO) {
+    static $currentLevel = null;
+    if ($currentLevel === null) {
         $configFile = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
         $cfg = file_exists($configFile) ? @parse_ini_file($configFile) : [];
-        $debugEnabled = (($cfg['debug_logging'] ?? '0') === '1');
+        if (!isset($cfg['log_level']) && isset($cfg['debug_logging'])) {
+            $currentLevel = ($cfg['debug_logging'] === '1') ? AICLI_LOG_DEBUG : AICLI_LOG_INFO;
+        } else {
+            $currentLevel = (int)($cfg['log_level'] ?? AICLI_LOG_INFO);
+        }
     }
 
-    $msgStr = is_string($msg) ? $msg : json_encode($msg);
-    // Always log critical errors even if debug is off
-    if (!$debugEnabled && strpos($msgStr, 'ERROR') === false && strpos($msgStr, 'EXCEPTION') === false) return;
+    if ($level > $currentLevel && $level > AICLI_LOG_WARN) return;
 
-    // D-10: Write to RAM instead of USB to prevent flash wear
+    $levelNames = [0 => 'ERROR', 1 => 'WARN', 2 => 'INFO', 3 => 'DEBUG'];
+    $levelName = $levelNames[$level] ?? 'UNKNOWN';
+
+    $msgStr = is_string($msg) ? $msg : json_encode($msg);
     $logDir = "/tmp/unraid-aicliagents";
-    if (!is_dir($logDir)) @mkdir($logDir, 0777, true);
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0777, true);
+        @chmod($logDir, 0777);
+    }
     $logFile = "$logDir/debug.log";
 
-    // Size cap: truncate if > 500KB to prevent runaway growth
-    if (file_exists($logFile) && filesize($logFile) > 512000) {
-        $tail = @file_get_contents($logFile, false, null, -256000);
+    if (file_exists($logFile) && filesize($logFile) > 1048576) {
+        $tail = @file_get_contents($logFile, false, null, -524288);
         @file_put_contents($logFile, "--- LOG TRUNCATED ---\n" . $tail);
     }
 
-    $timestamp = date("Y-m-d H:i:s");
-    $output = "[$timestamp] $msgStr\n";
+    $timestamp = aicli_get_formatted_timestamp();
+    $output = "[$timestamp] [$levelName] $msgStr\n";
     @file_put_contents($logFile, $output, FILE_APPEND);
+    
+    if (function_exists('posix_getuid') && @fileowner($logFile) === posix_getuid()) {
+        @chmod($logFile, 0666);
+    }
+}
+
+/**
+ * Standalone Sync Daemon Manager
+ * Handles the background schedule independently of terminal sessions.
+ */
+function aicli_manage_sync_daemon($username, $force = false) {
+    // D-37: If we are in installer mode, don't start the daemon yet. 
+    // It will be started lazily when the user first opens the plugin tab.
+    if (getenv('AICLI_INSTALLER') === '1') {
+        aicli_log("Installer mode detected. Skipping sync daemon start for $username.", AICLI_LOG_DEBUG);
+        return;
+    }
+
+    $config = getAICliConfig();
+    $syncMins = (int)($config['sync_interval_mins'] ?? 0) + ((int)($config['sync_interval_hours'] ?? 0) * 60);
+    $lockFile = "/tmp/unraid-aicliagents/sync-daemon-$username.pid";
+    
+    // 1. Check if daemon is already running
+    if (file_exists($lockFile)) {
+        $pid = trim(file_get_contents($lockFile));
+        if ($pid && aicli_is_pid_running($pid)) {
+            // D-40: Only kill if we are forcing a restart (e.g. interval changed) or if sync is now disabled
+            if ($syncMins <= 0 || $force) {
+                aicli_log("Cleaning up existing sync daemon (PID $pid) for $username " . ($syncMins <= 0 ? "as sync is disabled." : "to apply new settings."), AICLI_LOG_INFO);
+                exec("kill -9 $pid > /dev/null 2>&1");
+                @unlink($lockFile);
+                if ($syncMins <= 0) return;
+            } else {
+                // Daemon is running and we are not forcing a restart.
+                return;
+            }
+        }
+    }
+
+    // 2. Start daemon if enabled
+    if ($syncMins > 0) {
+        aicli_log("Starting standalone sync daemon for $username (Interval: $syncMins min)", AICLI_LOG_INFO);
+        $script = "/tmp/unraid-aicliagents/sync-daemon-$username.sh";
+        // D-38: EXTREMELY IMPORTANT - We must close all inherited FDs (especially FD 3 used by Unraid installer)
+        // to prevent the plugin manager from hanging.
+        $cmd = "#!/bin/bash\n" .
+               "exec 0<&- 1>&- 2>&- 3>&-\n" . 
+               "echo \$\$ > " . escapeshellarg($lockFile) . "\n" .
+               "while true; do\n" .
+               "  sleep " . ($syncMins * 60) . "\n" .
+               "  cd / && /usr/bin/php -r \"require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php'; aicli_log('Global periodic sync heartbeat triggered ($syncMins min)', 2); aicli_sync_home('$username', true);\"\n" .
+               "done\n";
+        file_put_contents($script, $cmd);
+        chmod($script, 0755);
+        // Use surgical bg exec to prevent installer hangs
+        aicli_exec_bg("nohup $script > /dev/null 2>&1");
+    }
+}
+
+// Legacy wrapper for compatibility
+function aicli_debug($msg) {
+    aicli_log($msg, AICLI_LOG_DEBUG);
+}
+
+function aicli_is_pid_running($pid) {
+    if (empty($pid) || !is_numeric($pid)) return false;
+    if (function_exists('posix_getpgid')) return @posix_getpgid($pid) !== false;
+    exec("kill -0 " . escapeshellarg($pid) . " 2>/dev/null", $output, $result);
+    return $result === 0;
+}
+
+function aicli_exec_bg($command) {
+    aicli_log("Background Exec (Detached): $command", AICLI_LOG_DEBUG);
+    // D-36: Standard Linux detachment pattern. 
+    // Redirecting all output to /dev/null and using & ensures PHP does not wait.
+    exec("nohup $command > /dev/null 2>&1 &");
 }
 
 function aicli_notify($subject, $message, $type = 'normal') {
     $command = "/usr/local/emhttp/webGui/scripts/notify -e \"AI CLI Agents Plugin\" -s " . escapeshellarg($subject) . " -d " . escapeshellarg($message) . " -i " . escapeshellarg($type);
-    shell_exec($command);
+    exec($command . " > /dev/null 2>&1");
 }
 
-function setInstallStatus($msg, $progress) {
+/**
+ * Hybrid Storage Helpers
+ */
+function aicli_get_work_dir($username) {
+    return "/tmp/unraid-aicliagents/work/$username/home";
+}
+
+function aicli_get_persist_dir($username) {
+    return "/boot/config/plugins/unraid-aicliagents/persistence/$username/home";
+}
+
+function aicli_init_working_dir($username) {
+    $workBase = "/tmp/unraid-aicliagents/work";
+    if (!is_dir($workBase)) {
+        if (!@mkdir($workBase, 0777, true)) {
+            aicli_log("ERROR: Failed to create work base directory: $workBase", AICLI_LOG_ERROR);
+        }
+        @chmod($workBase, 0777);
+    } else {
+        @chmod($workBase, 0777);
+    }
+    
+    $userDir = "$workBase/$username";
+    if (!is_dir($userDir)) {
+        if (!@mkdir($userDir, 0700, true)) {
+            aicli_log("ERROR: Failed to create user directory: $userDir", AICLI_LOG_ERROR);
+        }
+    }
+    
+    // Always ensure the user owns their directory if we are root
+    // D-25: This fixes Permission Denied if root created it but user needs to write logs
+    if (trim((string)shell_exec('whoami')) === 'root') {
+        exec("chown -R " . escapeshellarg($username) . ":users " . escapeshellarg($userDir), $out, $res);
+        if ($res !== 0) aicli_log("ERROR: Failed to chown user directory $userDir to $username", AICLI_LOG_ERROR);
+        chmod($userDir, 0700);
+    }
+
+    $ramDir = "$userDir/home";
+    $flashDir = aicli_get_persist_dir($username);
+
+    if (!is_dir($ramDir)) {
+        aicli_log("Initializing RAM home for $username: $ramDir", AICLI_LOG_INFO);
+        if (!@mkdir($ramDir, 0700, true)) {
+            aicli_log("ERROR: Failed to create RAM home directory: $ramDir", AICLI_LOG_ERROR);
+        }
+        if (trim((string)shell_exec('whoami')) === 'root') {
+             exec("chown -R " . escapeshellarg($username) . ":users " . escapeshellarg($ramDir));
+        }
+
+        // Restore from flash if it exists
+        if (is_dir($flashDir)) {
+            aicli_log("Restoring persistent data from Flash: $flashDir", AICLI_LOG_INFO);
+            // rsync -a preserves permissions, so we follow up with chown
+            exec("rsync -a " . escapeshellarg($flashDir . "/") . " " . escapeshellarg($ramDir . "/"), $out, $res);
+            if ($res !== 0) aicli_log("ERROR: Failed to restore persistent data from Flash ($flashDir) to RAM ($ramDir)", AICLI_LOG_ERROR);
+            
+            if (trim((string)shell_exec('whoami')) === 'root') {
+                 exec("chown -R " . escapeshellarg($username) . ":users " . escapeshellarg($ramDir));
+            }
+        }
+    } else {
+        // Even if it exists, ensure ownership is correct (in case of manual user switch)
+        if (trim((string)shell_exec('whoami')) === 'root') {
+            exec("chown -R " . escapeshellarg($username) . ":users " . escapeshellarg($ramDir));
+        }
+    }
+    return $ramDir;
+}
+
+function aicli_sync_home($username, $force = false) {
+    $config = getAICliConfig();
+    $activeUser = $config['user'] ?? 'root';
+    
+    // D-35: Security/Stability - Only allow sync for the user CURRENTLY selected in settings
+    // This immediately kills any 'ghost' triggers from previous sessions/users
+    if ($username !== $activeUser) {
+        aicli_log("BLOCKING sync for $username: Not the active user ($activeUser).", AICLI_LOG_WARN);
+        return false;
+    }
+
+    $ramDir = aicli_get_work_dir($username);
+    $flashDir = aicli_get_persist_dir($username);
+    
+    // If not forced (manual/daemon), check for active sessions
+    if (!$force) {
+        $socks = glob("/var/run/aicliterm-*.sock");
+        if (!empty($socks)) {
+            aicli_log("Bypassing sync for $username: Active workspaces detected.", AICLI_LOG_DEBUG);
+            return;
+        }
+    }
+    
+    if (!is_dir($ramDir)) {
+        aicli_log("Bypassing sync for $username: RAM directory does not exist.", AICLI_LOG_DEBUG);
+        return false;
+    }
+    
+    if (!is_writable($ramDir)) {
+        aicli_log("Bypassing sync for $username: RAM directory is not writable by current user (" . trim(shell_exec('whoami')) . ")", AICLI_LOG_WARN);
+        return false;
+    }
+
+    $syncLock = "/tmp/unraid-aicliagents/sync-operation.lock";
+    $fp = fopen($syncLock, "w+");
+    if (!$fp || !flock($fp, LOCK_EX | LOCK_NB)) {
+        aicli_log("Sync already in progress for $username. Skipping this cycle.", AICLI_LOG_INFO);
+        if ($fp) fclose($fp);
+        return false;
+    }
+
+    aicli_log("Syncing RAM home to Flash drive for $username (Force: " . ($force ? "Yes" : "No") . ")", AICLI_LOG_INFO);
+    
+    if (!is_dir($flashDir)) {
+        @mkdir($flashDir, 0700, true);
+    }
+    
+    $cmd = "rsync -rltD --delete --no-p --no-g --no-o --modify-window=2 --itemize-changes " .
+           "--exclude='*.db-wal' --exclude='*.db-shm' " .
+           escapeshellarg($ramDir . "/") . " " . escapeshellarg($flashDir . "/");
+           
+    exec("cd / && " . $cmd . " 2>&1", $out, $res);
+    
+    if ($res !== 0) {
+        aicli_log("ERROR: Sync failed for $username (Code $res). Output: " . implode("\n", $out), AICLI_LOG_ERROR);
+    } else {
+        aicli_log("Sync complete for $username", AICLI_LOG_INFO);
+    }
+    
+    flock($fp, LOCK_UN);
+    fclose($fp);
+    return ($res === 0);
+}
+
+function aicli_sync_all() {
+    $workBase = "/tmp/unraid-aicliagents/work";
+    if (!is_dir($workBase)) return;
+    
+    $users = array_diff(scandir($workBase), ['.', '..']);
+    foreach ($users as $username) {
+        aicli_sync_home($username, true);
+    }
+}
+
+
+function setInstallStatus($message, $progress, $agentId = '') {
     $dir = "/tmp/unraid-aicliagents";
     if (!is_dir($dir)) @mkdir($dir, 0777, true);
-    file_put_contents("$dir/install-status", json_encode(['message' => $msg, 'progress' => $progress]));
+    
+    $status = ['message' => $message, 'progress' => $progress, 'agentId' => $agentId, 'timestamp' => time()];
+    $file = empty($agentId) ? "$dir/install-status" : "$dir/install-status-$agentId";
+    
+    file_put_contents($file, json_encode($status));
 }
 
 function saveAICliConfig($newConfig) {
@@ -73,10 +362,19 @@ function saveAICliConfig($newConfig) {
     $vaultFile = "/boot/config/plugins/unraid-aicliagents/secrets.cfg";
     $current = getAICliConfig();
     
-    aicli_debug("saveAICliConfig called");
+    aicli_log("saveAICliConfig called", AICLI_LOG_INFO);
 
     // 1. Handle Vault (API Keys) - Preserve existing keys if not in POST
+    $registry = getAICliAgentsRegistry();
     $vaultKeys = ['GEMINI_API_KEY', 'CLAUDE_API_KEY', 'AIDER_API_KEY', 'OPENAI_API_KEY'];
+    foreach ($registry as $agent) {
+        $prefix = $agent['env_prefix'] ?? '';
+        if (!empty($prefix)) {
+            $keyName = $prefix . "_API_KEY";
+            if (!in_array($keyName, $vaultKeys)) $vaultKeys[] = $keyName;
+        }
+    }
+    
     $existingVault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
     $vaultIni = "";
     foreach ($vaultKeys as $vk) {
@@ -86,12 +384,16 @@ function saveAICliConfig($newConfig) {
         $vaultIni .= "$vk='$escapedVal'\n";
     }
     
-    aicli_debug("Updating secrets vault");
+    aicli_log("Updating secrets vault", AICLI_LOG_DEBUG);
     file_put_contents($vaultFile, $vaultIni);
     chmod($vaultFile, 0600); 
 
+    // Capture old state for comparison
+    $oldConfig = getAICliConfig();
+    $oldSyncMins = (int)($oldConfig['sync_interval_mins'] ?? 0) + ((int)($oldConfig['sync_interval_hours'] ?? 0) * 60);
+
     // 2. Handle Main Config
-    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version', 'debug_logging'];
+    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version', 'debug_logging', 'sync_interval_hours', 'sync_interval_mins', 'log_level'];
     foreach ($newConfig as $key => $val) {
         if (strpos($key, 'preview_') === 0) $allowed[] = $key;
     }
@@ -101,7 +403,22 @@ function saveAICliConfig($newConfig) {
             $current[$key] = $value;
         }
     }
+
+    // Capture new user for migration check
+    $oldUser = $oldConfig['user'] ?? 'root';
+    $newUser = $current['user'] ?? 'root';
     
+    // D-41: Force home_path to the NEW user persistence folder if it's a standard path
+    if ($oldUser !== $newUser && strpos($current['home_path'], "/boot/config/plugins/unraid-aicliagents/") === 0) {
+        $current['home_path'] = "/boot/config/plugins/unraid-aicliagents/persistence/$newUser/home";
+    }
+
+    // 3. User Transition: Sync old user's RAM to Flash before we change anything
+    if ($oldUser !== $newUser) {
+        aicli_log("User changing from $oldUser to $newUser. Syncing old user's RAM to Flash first...", AICLI_LOG_INFO);
+        aicli_sync_home($oldUser, true);
+    }
+
     // Build the INI string
     // D-17: Escape double quotes and backslashes to prevent INI corruption
     $ini = "";
@@ -114,14 +431,226 @@ function saveAICliConfig($newConfig) {
         mkdir(dirname($configFile), 0777, true);
     }
     
-    aicli_debug("Writing config to $configFile");
+    aicli_log("Writing config to $configFile", AICLI_LOG_DEBUG);
     if (file_put_contents($configFile, $ini) !== false) {
         aicli_notify("Settings Saved", "Plugin configuration has been updated.");
+        
+        // Refresh the standalone sync daemon with the new settings (forced)
+        aicli_manage_sync_daemon($newUser, true);
+
+        // Ensure home directory is migrated if it was legacy or if the user changed
+        aicli_migrate_home_path();
+
+        // D-22: If user changed, ensure permissions on home path are updated AND move RAM dir
+        if ($oldUser !== $newUser) {
+            $oldRam = "/tmp/unraid-aicliagents/work/$oldUser";
+            $newRam = "/tmp/unraid-aicliagents/work/$newUser";
+            
+            if (is_dir($oldRam)) {
+                aicli_log("Moving RAM work directory from $oldRam to $newRam", AICLI_LOG_INFO);
+                if (is_dir($newRam)) exec("rm -rf " . escapeshellarg($newRam));
+                exec("mv " . escapeshellarg($oldRam) . " " . escapeshellarg($newRam));
+            }
+            
+            // Re-fetch config to get the migrated home_path
+            $finalConfig = getAICliConfig();
+            $finalHome = $finalConfig['home_path'];
+            
+            aicli_log("Updating permissions for $newUser on $finalHome and $newRam", AICLI_LOG_INFO);
+            exec("chown -R " . escapeshellarg($newUser) . ":users " . escapeshellarg($finalHome));
+            if (is_dir($newRam)) exec("chown -R " . escapeshellarg($newUser) . ":users " . escapeshellarg($newRam));
+        }
     } else {
-        aicli_debug("ERROR: Failed to write to config file $configFile");
+        aicli_log("ERROR: Failed to write to config file $configFile", AICLI_LOG_ERROR);
     }
     
     updateAICliMenuVisibility($current['enable_tab']);
+}
+
+/**
+ * Migration & Cleanup Helpers
+ * These are called by the installer or on-demand, not during normal operation.
+ */
+function aicli_cleanup_legacy() {
+    $legacyFiles = [
+        '/boot/config/plugins/unraid-geminicli.plg',
+        '/boot/config/plugins/geminicli.plg',
+        '/var/log/plugins/unraid-geminicli.plg',
+        '/var/log/plugins/geminicli.plg',
+        '/usr/local/emhttp/plugins/unraid-geminicli',
+        '/usr/local/emhttp/plugins/geminicli',
+        '/usr/local/bin/gemini'
+    ];
+    foreach ($legacyFiles as $file) {
+        if (file_exists($file)) {
+            aicli_log("Cleanup: Removing legacy file $file", AICLI_LOG_WARN);
+            is_dir($file) ? @exec("rm -rf " . escapeshellarg($file)) : @unlink($file);
+        }
+    }
+}
+
+function aicli_migrate_home_path() {
+    $configFile = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
+    if (!file_exists($configFile)) return;
+    
+    $config = @parse_ini_file($configFile);
+    if (!$config) return;
+    
+    $oldHome = $config['home_path'] ?? '';
+    $user = $config['user'] ?? 'root';
+    $legacyDefault = "/boot/config/plugins/unraid-aicliagents/home";
+    
+    // New Standard: persistence dir for the user
+    $newPersistBase = "/boot/config/plugins/unraid-aicliagents/persistence/$user/home";
+
+    // Migration logic:
+    // 1. If home_path is the old default or pointing to legacy plugin root (non-persistence)
+    // 2. If home_path points to a differernt user's persistence folder
+    $isLegacyPath = ($oldHome === $legacyDefault || (strpos($oldHome, "/boot/config/plugins/unraid-aicliagents/") === 0 && strpos($oldHome, "/persistence/") === false));
+    $isWrongUserPersistence = (strpos($oldHome, "/boot/config/plugins/unraid-aicliagents/persistence/") === 0 && strpos($oldHome, "/persistence/$user/") === false);
+
+    if ($isLegacyPath || $isWrongUserPersistence) {
+        if (is_dir($oldHome) && $oldHome !== $newPersistBase) {
+            aicli_log("MIGRATION: Moving home data from $oldHome to $newPersistBase", AICLI_LOG_INFO);
+            if (!is_dir(dirname($newPersistBase))) @mkdir(dirname($newPersistBase), 0755, true);
+            if (!is_dir($newPersistBase)) @mkdir($newPersistBase, 0700, true);
+            
+            // Move files, avoiding overwriting
+            exec("rsync -a " . escapeshellarg($oldHome . "/") . " " . escapeshellarg($newPersistBase . "/"));
+            
+            // D-42: Remove the old folder to avoid migration loops in subsequent refreshes
+            exec("rm -rf " . escapeshellarg($oldHome));
+            
+            // Update configuration directly to avoid recursion
+            $config['home_path'] = $newPersistBase;
+            $ini = "";
+            foreach ($config as $k => $v) {
+                $escapedV = addcslashes($v, '"\\');
+                $ini .= "$k=\"$escapedV\"\n";
+            }
+            file_put_contents($configFile, $ini);
+            aicli_log("MIGRATION: Configuration updated to $newPersistBase and old folder removed.", AICLI_LOG_INFO);
+        } elseif (!is_dir($oldHome) || $oldHome !== $newPersistBase) {
+            // If it doesn't exist or is invalid, just update the config directly
+            $config['home_path'] = $newPersistBase;
+            $ini = "";
+            foreach ($config as $k => $v) {
+                $escapedV = addcslashes($v, '"\\');
+                $ini .= "$k=\"$escapedV\"\n";
+            }
+            file_put_contents($configFile, $ini);
+            aicli_log("MIGRATION: Updated home_path reference to $newPersistBase", AICLI_LOG_INFO);
+        }
+    }
+}
+
+
+/**
+ * Returns a list of valid Unraid users by parsing /etc/passwd.
+ * Filters out system accounts and returns an array of [username => description].
+ */
+function getUnraidUsers() {
+    $users = [];
+    $data = @file_get_contents('/etc/passwd');
+    if (!$data) return ['root' => 'Superuser'];
+
+    $lines = explode("\n", trim($data));
+    foreach ($lines as $line) {
+        $parts = explode(':', $line);
+        if (count($parts) < 5) continue;
+        
+        $user = $parts[0];
+        $uid = (int)$parts[2];
+        $desc = $parts[4];
+
+        // Unraid user range: root (0) or standard users (usually > 1000 or as defined in Unraid config)
+        // We also want to include 'root' as the default.
+        if ($uid === 0 || ($uid >= 1000 && $uid < 65000)) {
+            // Clean up description (Unraid often stores a full name or description here)
+            $users[$user] = !empty($desc) ? $desc : ucfirst($user);
+        }
+    }
+    ksort($users);
+    return $users;
+}
+
+/**
+ * Create a new Unraid user using the internal emcmd tool.
+ * This ensures the user is synced to the flash drive and Samba.
+ */
+function createUnraidUser($username, $password, $description = '') {
+    // Basic validation
+    if (!preg_match('/^[a-z][-a-z0-9_]*$/', $username)) {
+        return ['status' => 'error', 'message' => 'Invalid username format (lowercase, starts with letter).'];
+    }
+
+    aicli_log("Creating Unraid user: $username", AICLI_LOG_INFO);
+    
+    // Unraid cmdUserEdit requires password to be base64 encoded
+    $encodedPassword = base64_encode($password);
+    
+    // Build query string matching Unraid's internal expectations
+    $params = [
+        'cmdUserEdit' => 'Add',
+        'userName' => $username,
+        'userPassword' => $encodedPassword,
+        'userPasswordConf' => $encodedPassword,
+        'userDesc' => $description
+    ];
+    
+    $queryString = http_build_query($params, '', '&');
+    
+    $script = "/tmp/unraid-aicliagents/user-create-bg.php";
+    
+    // We use HEREDOC to avoid escaping hell. Variables starting with \$ will be literal in the script.
+    $phpCode = <<<BG_PHP_SCRIPT
+<?php
+// Follow Unraid Timezone
+\$var = @parse_ini_file('/var/local/emhttp/var.ini');
+if (!empty(\$var['timeZone'])) @date_default_timezone_set(\$var['timeZone']);
+
+function get_ts() {
+    \$display = @parse_ini_file('/boot/config/plugins/dynamix/dynamix.cfg');
+    \$legacy = ['%c' => 'D j M Y h:i A','%A' => 'l','%Y' => 'Y','%B' => 'F','%e' => 'j','%d' => 'd','%m' => 'm','%I' => 'h','%H' => 'H','%M' => 'i','%S' => 's','%p' => 'a','%R' => 'H:i', '%F' => 'Y-m-d', '%T' => 'H:i:s'];
+    \$fmt = strtr(\$display['date'] ?? 'Y-m-d', \$legacy);
+    if ((\$display['date'] ?? '') !== '%c' && !empty(\$display['time'] ?? '')) \$fmt .= ' ' . strtr(\$display['time'], \$legacy);
+    return date(\$fmt);
+}
+
+try {
+    \$payload = "$queryString";
+    \$who = trim((string)shell_exec('whoami'));
+    
+    // Use Unraid's native emcmd utility which handles the socket and CSRF correctly.
+    \$cmd = "/usr/local/emhttp/plugins/dynamix/scripts/emcmd " . escapeshellarg(\$payload);
+    \$reply = shell_exec("\$cmd 2>&1");
+    
+    \$now = get_ts();
+    \$log = "[\$now] [UserCreate] Running as: \$who\\n";
+    \$log .= "[\$now] [UserCreate] Payload: \$payload\\n";
+    \$log .= "[\$now] [UserCreate] Command: \$cmd\\n";
+    \$log .= "[\$now] [UserCreate] Reply Start---\\n\$reply\\n---Reply End\\n";
+    
+    if (empty(trim((string)\$reply))) {
+        \$log .= "[\$now] [UserCreate] Note: Empty reply is common if successful. Checking emhttpd state...\\n";
+        \$log .= "[\$now] [UserCreate] emhttpd state: " . trim((string)shell_exec('ps aux | grep emhttpd | grep -v grep')) . "\\n";
+    }
+    
+    file_put_contents('/tmp/unraid-aicliagents/debug.log', \$log, FILE_APPEND);
+} catch (Throwable \$e) {
+    \$now = get_ts();
+    file_put_contents('/tmp/unraid-aicliagents/debug.log', "[\$now] [UserCreate] PHP Crash: " . \$e->getMessage() . "\\n", FILE_APPEND);
+}
+?>
+BG_PHP_SCRIPT;
+    
+    if (!is_dir('/tmp/unraid-aicliagents')) @mkdir('/tmp/unraid-aicliagents', 0777, true);
+    file_put_contents($script, $phpCode);
+    
+    aicli_log("Triggering Unraid user creation via background script: $username", AICLI_LOG_INFO);
+    aicli_exec_bg("/usr/bin/php -q $script");
+
+    return ['status' => 'ok'];
 }
 
 function getAICliConfig() {
@@ -131,11 +660,14 @@ function getAICliConfig() {
         'theme' => 'dark',
         'font_size' => '14',
         'history' => '1000',
-        'home_path' => '/boot/config/plugins/unraid-aicliagents/home',
+        'home_path' => '/boot/config/plugins/unraid-aicliagents/persistence/root/home',
         'user' => 'root',
         'root_path' => '/mnt/user',
         'version' => 'unknown',
-        'debug_logging' => '0'
+        'debug_logging' => '0',
+        'log_level' => '2',
+        'sync_interval_mins' => '0',
+        'sync_interval_hours' => '0'
     ];
     
     if (file_exists($configFile)) {
@@ -256,6 +788,23 @@ function isAICliRunning($id = 'default', $chatId = null, $agentId = null) {
 }
 
 function stopAICliTerminal($id = 'default', $killTmux = false) {
+    // Decrement session count for the user
+    $config = getAICliConfig();
+    $username = $config['user'];
+    $countFile = "/var/run/aicli-sessions/$username.count";
+    if (file_exists($countFile)) {
+        $count = (int)file_get_contents($countFile);
+        if ($count > 0) file_put_contents($countFile, $count - 1);
+        
+        // D-35: Decoupled schedule - No longer triggering sync on last session close.
+        // Sync is now managed entirely by the standalone daemon and manual triggers.
+        /*
+        if ($count <= 1) {
+            aicli_sync_home($username);
+        }
+        */
+    }
+
     // D-01: Validate session ID to prevent command injection
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
     $sock = getAICliSock($id);
@@ -268,17 +817,27 @@ function stopAICliTerminal($id = 'default', $killTmux = false) {
     exec("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep " . escapeshellarg($sock) . " | awk '{print $1}'", $pids);
     foreach ($pids as $pid) {
         $pid = trim($pid);
-        if (!empty($pid) && ctype_digit($pid)) exec("kill -9 " . escapeshellarg($pid) . " > /dev/null 2>&1");
+        if (!empty($pid) && ctype_digit($pid)) {
+            // D-21: Graceful SIGTERM (15) first, then SIGKILL (9) fallback to allow agents to save state
+            exec("kill -15 " . escapeshellarg($pid) . " > /dev/null 2>&1; sleep 0.2; kill -9 " . escapeshellarg($pid) . " > /dev/null 2>&1");
+        }
     }
     
-    // 2. Kill associated agent processes (even if orphaned)
+    // Aggressive Socket Cleanup: Sometimes ttyd exits but the socket remains, blocking new instances
+    if (file_exists($sock)) {
+        aicli_log("Aggressive Socket Cleanup: Removing stale socket $sock", AICLI_LOG_WARN);
+        @unlink($sock);
+    }
     // D-03: Initialize $nodePids before exec() to prevent undefined variable
     $nodePids = [];
     $escapedId = escapeshellarg("AICLI_SESSION_ID=$id");
     exec("pgrep -f $escapedId 2>/dev/null", $nodePids);
     foreach ($nodePids as $np) {
         $np = trim($np);
-        if (!empty($np) && ctype_digit($np)) exec("kill -9 " . escapeshellarg($np) . " > /dev/null 2>&1");
+        if (!empty($np) && ctype_digit($np)) {
+            // D-21: Graceful SIGTERM (15) first, then SIGKILL (9) fallback to allow agents to save state
+            exec("kill -15 " . escapeshellarg($np) . " > /dev/null 2>&1; sleep 0.2; kill -9 " . escapeshellarg($np) . " > /dev/null 2>&1");
+        }
     }
     
     if (file_exists($sock)) @unlink($sock);
@@ -296,6 +855,7 @@ function stopAICliTerminal($id = 'default', $killTmux = false) {
 // D-19: Shared NPM package mapping to avoid duplication across install and update functions
 function getAICliNpmMap() {
     return [
+        'gemini-cli' => '@google/gemini-cli',
         'opencode' => 'opencode-ai',
         'claude-code' => '@anthropic-ai/claude-code',
         'kilocode' => '@kilocode/cli',
@@ -316,11 +876,11 @@ function getAICliAgentsRegistry() {
             'icon_url' => '/plugins/unraid-aicliagents/unraid-aicliagents.png',
             'release_notes' => 'https://github.com/google-gemini/gemini-cli/releases',
             'runtime' => 'node',
-            'binary' => "node $binDir/aicli.mjs",
-            'resume_cmd' => "node $binDir/aicli.mjs --resume {chatId}",
-            'resume_latest' => "node $binDir/aicli.mjs --resume",
+            'binary' => "$binDir/node_modules/.bin/gemini",
+            'resume_cmd' => "$binDir/node_modules/.bin/gemini --resume {chatId}",
+            'resume_latest' => "$binDir/node_modules/.bin/gemini --resume",
             'env_prefix' => 'GEMINI',
-            'is_installed' => file_exists("$binDir/aicli.mjs")
+            'is_installed' => file_exists("$binDir/node_modules/.bin/gemini")
         ],
         'claude-code' => [
             'id' => 'claude-code',
@@ -393,13 +953,72 @@ function getAICliAgentsRegistry() {
 
     return $defaultRegistry;
 }
+
+function getWorkspaceEnvs($path, $agentId) {
+    if (empty($path)) return [];
+    
+    // 1. Load custom workspace overrides from persistence
+    $file = "/boot/config/plugins/unraid-aicliagents/workspace_envs.json";
+    $data = file_exists($file) ? json_decode(file_get_contents($file), true) : [];
+    $key = $path . ":" . $agentId;
+    $envs = $data[$key] ?? [];
+    
+    // 2. Inject global API key from Secrets Vault if not already overridden
+    $registry = getAICliAgentsRegistry();
+    $prefix = $registry[$agentId]['env_prefix'] ?? '';
+    if (!empty($prefix)) {
+        $apiKeyVar = $prefix . "_API_KEY";
+        // If not in local overrides, fetch from global vault
+        if (!isset($envs[$apiKeyVar])) {
+            $vaultFile = "/boot/config/plugins/unraid-aicliagents/secrets.cfg";
+            $vault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
+            // Special cases for agents that might use multiple providers
+            $checkVars = [$apiKeyVar];
+            if ($agentId === 'opencode' || $agentId === 'codex-cli' || $agentId === 'kilocode') {
+                $checkVars[] = 'OPENAI_API_KEY';
+                $checkVars[] = 'GEMINI_API_KEY';
+            }
+            
+            foreach ($checkVars as $v) {
+                if (!empty($vault[$v])) {
+                    $envs[$v] = $vault[$v];
+                    // We only inject the first one we find that matches the prefix or standard keys
+                    break;
+                }
+            }
+        }
+    }
+    
+    return $envs;
+}
+
+function saveWorkspaceEnvs($path, $agentId, $envs) {
+    if (empty($path)) return;
+    $file = "/boot/config/plugins/unraid-aicliagents/workspace_envs.json";
+    $data = file_exists($file) ? json_decode(file_get_contents($file), true) : [];
+    $key = $path . ":" . $agentId;
+    
+    if (empty($envs)) {
+        unset($data[$key]);
+    } else {
+        $filtered = [];
+        foreach ($envs as $k => $v) {
+            $k = preg_replace('/[^a-zA-Z0-9_-]/', '', $k);
+            if (!empty($k)) $filtered[$k] = $v;
+        }
+        $data[$key] = $filtered;
+    }
+    
+    file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
+}
+
 function startAICliTerminal($id = 'default', $workingDir = null, $chatSessionId = null, $agentId = 'gemini-cli') {
     // D-01/D-02: Sanitize inputs to prevent command injection
     $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
     $agentId = preg_replace('/[^a-zA-Z0-9_-]/', '', $agentId);
     if ($chatSessionId !== null) $chatSessionId = preg_replace('/[^a-zA-Z0-9_-]/', '', $chatSessionId);
 
-    aicli_debug("startAICliTerminal called: ID=$id, Agent=$agentId, Path=$workingDir");
+    aicli_log("startAICliTerminal called: ID=$id, Agent=$agentId, Path=$workingDir", AICLI_LOG_INFO);
     $sock = getAICliSock($id);
     $shell = "/usr/local/emhttp/plugins/unraid-aicliagents/scripts/aicli-shell.sh";
     $logDir = "/tmp/unraid-aicliagents";
@@ -417,35 +1036,46 @@ function startAICliTerminal($id = 'default', $workingDir = null, $chatSessionId 
     $agent = $registry[$agentId] ?? $registry['gemini-cli'];
 
     if (!$agent['is_installed']) {
-        aicli_debug("ERROR: Agent $agentId is not installed.");
+        aicli_log("ERROR: Agent $agentId is not installed.", AICLI_LOG_ERROR);
         return;
     }
 
     $config = getAICliConfig();
     $workingDir = $workingDir ?: $config['root_path'];
 
-    // Ensure Home directory exists
-    $homePath = $config['home_path'];
-    if (!is_dir($homePath)) {
-        aicli_debug("Creating home directory: $homePath");
-        mkdir($homePath, 0777, true);
-    }
+    // Ensure Home directory exists (Hybrid RAM storage)
+    $username = $config['user'];
+    $homePath = aicli_init_working_dir($username);
+
+    // Ensure standalone sync daemon is running for this user
+    aicli_manage_sync_daemon($username);
+
+    // Track session count for concurrency/sync safety (Unified with shell ref)
+    $refFile = "/tmp/unraid-aicliagents/sync-$username.ref";
+    if (!is_dir(dirname($refFile))) @mkdir(dirname($refFile), 0777, true);
+    $count = file_exists($refFile) ? (int)file_get_contents($refFile) : 0;
+    // Note: shell script increments this, but we initialize it if missing
+    if (!file_exists($refFile)) file_put_contents($refFile, "0");
 
     // Ensure binary is in RAM (Restore from USB cache if missing)
-    $binPath = ($agentId === 'gemini-cli') ? "$binDir/aicli.mjs" : "$binDir/node_modules";
+    $binExists = file_exists($agent['binary']);
+    // Fallback for gemini-cli old-style installs if NPM binary is missing
+    if ($agentId === 'gemini-cli' && !$binExists) {
+        $binExists = file_exists("$binDir/aicli.mjs");
+    }
     
-    if (!file_exists($binPath)) {
-        aicli_debug("Agent $agentId missing from RAM, attempting restore...");
+    if (!$binExists) {
+        aicli_log("Agent $agentId missing from RAM, attempting restore...", AICLI_LOG_WARN);
         $cacheFile = "/boot/config/plugins/unraid-aicliagents/pkg-cache/$agentId.tar.gz";
         if (file_exists($cacheFile)) {
-            aicli_debug("Found cached agent: $cacheFile. Restoring to RAM...");
+            aicli_log("Found cached agent: $cacheFile. Restoring to RAM...", AICLI_LOG_INFO);
             // D-20: Use --no-same-owner for permission robustness on Unraid filesystems
             exec("tar -xzf " . escapeshellarg($cacheFile) . " --no-same-owner -C " . escapeshellarg($binDir) . "/");
         } elseif ($agentId === 'gemini-cli') {
             // Legacy/Optimized single-file fallback for Gemini
             $bootSource = "/boot/config/plugins/unraid-aicliagents/aicli.mjs";
             if (file_exists($bootSource)) {
-                aicli_debug("Restoring Gemini from legacy boot source");
+                aicli_log("Restoring Gemini from legacy boot source", AICLI_LOG_INFO);
                 copy($bootSource, "$binDir/aicli.mjs");
             }
         }
@@ -459,31 +1089,43 @@ function startAICliTerminal($id = 'default', $workingDir = null, $chatSessionId 
         return; 
     }
 
+    // D-33: Enhanced Heartbeat Check (Unified Lock File)
+    $syncMins = (int)($config['sync_interval_mins'] ?? 0) + ((int)($config['sync_interval_hours'] ?? 0) * 60);
+    $heartbeatRunning = true;
+    if ($syncMins > 0) {
+        $hbLock = "/tmp/unraid-aicliagents/sync-daemon-$username.pid";
+        if (!file_exists($hbLock)) {
+            $heartbeatRunning = false;
+        } else {
+            $hbPid = trim(file_get_contents($hbLock));
+            if (!$hbPid || !aicli_is_pid_running($hbPid)) $heartbeatRunning = false;
+        }
+    }
+
     if (isAICliRunning($id, $chatSessionId, $agentId) && file_exists($sock)) {
         flock($fp, LOCK_UN);
         fclose($fp);
         return;
     }
 
-    stopAICliTerminal($id, false);
-    
-    // Check if the agent has changed for this session ID
+    // D-35: Even if heartbeat is missing, we don't forcefully restart terminal sessions here.
+    // The daemon will be restarted lazily via aicli_manage_sync_daemon($username) above if needed.
+    // However, if the sesson exists but the AGENT has changed, we MUST kill and restart.
     $runningAgentId = file_exists($agentIdFile) ? trim(file_get_contents($agentIdFile)) : '';
     if ($runningAgentId !== '' && $runningAgentId !== $agentId) {
-        // Agent changed! We MUST kill the old tmux session or we will just re-attach to the old agent
-        $sessionName = "aicli-agent-" . escapeshellarg($runningAgentId) . "-" . escapeshellarg($id);
-        exec("tmux kill-session -t $sessionName > /dev/null 2>&1");
-        aicli_debug("Killed old agent session: $sessionName");
+        aicli_log("Agent ID changed ($runningAgentId -> $agentId). Forcing session restart.", AICLI_LOG_INFO);
+        stopAICliTerminal($id, true);
     }
 
     if (file_exists($shell)) chmod($shell, 0755);
 
     // Save state before starting
-    file_put_contents($chatIdFile, $chatSessionId ?: '');
+    if ($chatSessionId !== null) file_put_contents($chatIdFile, $chatSessionId);
     file_put_contents($agentIdFile, $agentId);
 
     // D-02: Escape all env values to prevent shell injection
-    $safeHome = escapeshellarg($config['home_path']);
+    // D-25: Export the RAM working dir as AICLI_HOME to ensure write access and performance
+    $safeHome = escapeshellarg($homePath);
     $safeUser = escapeshellarg($config['user']);
     $safeRoot = escapeshellarg($workingDir);
     $safeHistory = escapeshellarg($config['history']);
@@ -496,22 +1138,36 @@ function startAICliTerminal($id = 'default', $workingDir = null, $chatSessionId 
     $safeResumeLatest = escapeshellarg($agent['resume_latest']);
     $safeSock = escapeshellarg($sock);
     $safeFontSize = escapeshellarg($config['font_size']);
+    $logLevel = (isset($config['log_level'])) ? (string)$config['log_level'] : (($config['debug_logging'] ?? '0') === '1' ? '3' : '2');
+    $safeDebug = escapeshellarg($logLevel);
+    $syncMins = (int)($config['sync_interval_mins'] ?? 0) + ((int)($config['sync_interval_hours'] ?? 0) * 60);
+    $safeSync = escapeshellarg((string)$syncMins);
 
     $env = "export AICLI_HOME=$safeHome; " .
            "export AICLI_USER=$safeUser; " .
            "export AICLI_ROOT=$safeRoot; " .
            "export AICLI_HISTORY=$safeHistory; " .
            "export AICLI_SESSION_ID=$safeId; " .
+           "export AICLI_DEBUG=$safeDebug; " .
+           "export AICLI_SYNC_MINS=$safeSync; " .
            "export AGENT_ID=$safeAgentId; " .
            "export AGENT_NAME=$safeAgentName; " .
            "export ENV_PREFIX=$safeEnvPrefix; " .
            "export BINARY=$safeBinary; " .
            "export RESUME_CMD=$safeResumeCmd; " .
-           "export RESUME_LATEST=$safeResumeLatest; ";
+           "export RESUME_LATEST=$safeResumeLatest; " .
+           "export COLORTERM=truecolor; " .
+           "export OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT=true; ";
            
     if (!empty($chatSessionId)) {
         $safeChatId = escapeshellarg($chatSessionId);
         $env .= "export AICLI_CHAT_SESSION_ID=$safeChatId; ";
+    }
+
+    // Load and export User-defined Workspace Environment Variables
+    $customEnvs = getWorkspaceEnvs($workingDir, $agentId);
+    foreach ($customEnvs as $k => $v) {
+        $env .= "export " . escapeshellarg($k) . "=" . escapeshellarg($v) . "; ";
     }
 
     $themeStr = getAICliTtydTheme($config['theme'] ?? 'dark');
@@ -520,14 +1176,25 @@ function startAICliTerminal($id = 'default', $workingDir = null, $chatSessionId 
            "-t fontSize=$safeFontSize " .
            "-t fontFamily='monospace' " .
            "-t theme='$themeStr' " .
+           "-t termName=xterm-256color " .
+           "-t copyOnSelection=true " .
            "-t disableLeaveAlert=true " .
            "-t enable-utf8=true " .
+           "-t allowProposedApi=true " .
+           "-t terminalType=xterm-256color " .
+           "-t 'terminalOverrides=xterm-256color:Ms=\\E]52;c;%p2%s\\7' " .
            "-t titleFixed=" . escapeshellarg($agent['name'] . " - $id") . " " .
-           "bash -c \"$env $shell\"";
+           "runuser -u " . $safeUser . " -- /bin/bash -c " . escapeshellarg("$env $shell");
     
     exec("nohup $cmd >> " . escapeshellarg($log) . " 2>&1 & echo $!", $output);
+    @chmod($log, 0666);
     $pid = trim($output[0] ?? '');
-    if ($pid && ctype_digit($pid)) file_put_contents($pidFile, $pid);
+    if ($pid && ctype_digit($pid)) {
+        file_put_contents($pidFile, $pid);
+        // D-30: Give ttyd a moment to bind the Unix socket before returning to frontend.
+        // This prevents the Nginx proxy from returning 502 Bad Gateway on first load.
+        usleep(800000); 
+    }
     
     flock($fp, LOCK_UN);
     fclose($fp);
@@ -613,18 +1280,47 @@ function saveAICliVersion($agentId, $version) {
     file_put_contents($file, json_encode($versions, JSON_PRETTY_PRINT));
 }
 
+function gcPkgCache() {
+    $cacheDir = "/boot/config/plugins/unraid-aicliagents/pkg-cache";
+    if (!is_dir($cacheDir)) return;
+    
+    $registry = getAICliAgentsRegistry();
+    $allowed = array_keys($registry);
+    
+    $files = glob("$cacheDir/*.tar.gz");
+    foreach ($files as $file) {
+        $name = basename($file, ".tar.gz");
+        if (!in_array($name, $allowed)) {
+            aicli_log("GC: Removing orphaned cache file: $file", AICLI_LOG_WARN);
+            unlink($file);
+        }
+    }
+}
+
 function installAgent($agentId) {
-    aicli_debug("installAgent started for $agentId");
-    setInstallStatus("Initializing...", 10);
+    if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+
+    $lockFile = "/tmp/unraid-aicliagents/install-$agentId.lock";
+    if (file_exists($lockFile)) {
+        $pid = trim(@file_get_contents($lockFile));
+        if (aicli_is_pid_running($pid)) {
+             return ['status' => 'error', 'message' => "Installation for $agentId is already in progress (PID $pid)."];
+        }
+    }
+    file_put_contents($lockFile, getmypid());
+
+    aicli_log("installAgent started for $agentId", AICLI_LOG_INFO);
+    try {
+        setInstallStatus("Initializing...", 10, $agentId);
     $registry = getAICliAgentsRegistry();
     if (!isset($registry[$agentId])) {
-        aicli_debug("ERROR: Agent $agentId not found in registry");
+        aicli_log("ERROR: Agent $agentId not found in registry", AICLI_LOG_ERROR);
         return ['status' => 'error', 'error' => 'Agent not found in registry'];
     }
     
     $config = getAICliConfig();
     $usePreview = ($config["preview_$agentId"] ?? "0") === "1";
-    aicli_debug("Using preview channel: " . ($usePreview ? "yes" : "no"));
+    aicli_log("Using preview channel: " . ($usePreview ? "yes" : "no"), AICLI_LOG_DEBUG);
     
     $bootConfig = "/boot/config/plugins/unraid-aicliagents";
     $cacheDir = "$bootConfig/pkg-cache";
@@ -634,71 +1330,50 @@ function installAgent($agentId) {
     if (!is_dir($binDir)) mkdir($binDir, 0777, true);
 
     // 1. Prepare temporary RAM directory for installation/staging
-    setInstallStatus("Preparing temporary RAM area...", 20);
+    setInstallStatus("Preparing temporary RAM area...", 20, $agentId);
     $tmpDir = "/tmp/aicli-install-$agentId";
     if (is_dir($tmpDir)) exec("rm -rf $tmpDir");
     mkdir($tmpDir, 0777, true);
 
     $installedVer = "installed";
 
-    if ($agentId === 'gemini-cli') {
-        setInstallStatus("Checking " . ($usePreview ? "preview" : "latest") . " version...", 30);
-        $opts = [ "http" => [ "method" => "GET", "header" => "User-Agent: Unraid-AICliAgents\r\n" ] ];
-        $context = stream_context_create($opts);
-        
-        $githubUrl = $usePreview ? "https://api.github.com/repos/google-gemini/gemini-cli/releases" : "https://api.github.com/repos/google-gemini/gemini-cli/releases/latest";
-        aicli_debug("Fetching Gemini releases from $githubUrl");
-        
-        $tag = "v0.31.0"; 
-        try {
-            $response = @file_get_contents($githubUrl, false, $context);
-            if ($response) {
-                $data = json_decode($response, true);
-                if ($usePreview && is_array($data) && isset($data[0]['tag_name'])) {
-                    $tag = $data[0]['tag_name'];
-                } elseif (!$usePreview && isset($data['tag_name'])) {
-                    $tag = $data['tag_name'];
-                }
-                aicli_debug("Resolved Gemini tag: $tag");
-            } else {
-                aicli_debug("WARNING: GitHub API returned no response, using fallback tag $tag");
-            }
-        } catch (Exception $e) {
-            aicli_debug("EXCEPTION: GitHub API call failed: " . $e->getMessage());
-        }
-
-        setInstallStatus("Downloading Gemini $tag...", 50);
-        $url = "https://github.com/google-gemini/gemini-cli/releases/download/$tag/gemini.js";
-        $dest = "$tmpDir/aicli.mjs";
-        aicli_debug("Downloading Gemini from $url to $dest");
-        exec("wget -q -O " . escapeshellarg($dest) . " " . escapeshellarg($url), $output, $result);
-        
-        if ($result !== 0 || !file_exists($dest)) {
-            aicli_debug("ERROR: Gemini download failed (code $result)");
-            return ['status' => 'error', 'error' => "Download failed (wget code $result)"];
-        }
-        $installedVer = $tag;
-    } else {
-        // NPM-based agents — D-19: Use shared mapping function
-        $npmMap = getAICliNpmMap();
+    // NPM-based agents — D-19: Use shared mapping function
+    $npmMap = getAICliNpmMap();
 
         $package = $npmMap[$agentId] ?? null;
         if (!$package) {
-            aicli_debug("ERROR: No NPM package mapping for $agentId");
+            aicli_log("ERROR: No NPM package mapping for $agentId", AICLI_LOG_ERROR);
             return ['status' => 'error', 'error' => 'NPM package mapping missing'];
         }
 
         $installPackage = $package;
-        if ($usePreview) $installPackage .= "@next";
+        if ($usePreview) {
+            // D-21: Generic tag discovery for preview releases
+            $tagsOutput = [];
+            exec("npm info " . escapeshellarg($package) . " dist-tags --json 2>/dev/null", $tagsOutput);
+            $tags = json_decode(implode("\n", $tagsOutput), true);
+            
+            if (isset($tags['preview'])) {
+                $installPackage .= "@preview";
+            } elseif (isset($tags['next'])) {
+                $installPackage .= "@next";
+            } elseif (isset($tags['nightly'])) {
+                $installPackage .= "@nightly";
+            } else {
+                $installPackage .= "@latest";
+            }
+        } else {
+            $installPackage .= "@latest";
+        }
 
-        setInstallStatus("Downloading & Installing $installPackage (NPM)...", 50);
-        aicli_debug("Running: npm install --prefix " . escapeshellarg($tmpDir) . " " . escapeshellarg($installPackage));
+        setInstallStatus("Downloading & Installing $installPackage (NPM)...", 50, $agentId);
+        aicli_log("Running: npm install --prefix " . escapeshellarg($tmpDir) . " " . escapeshellarg($installPackage), AICLI_LOG_DEBUG);
         $npmOutput = [];
         exec("npm install --prefix " . escapeshellarg($tmpDir) . " " . escapeshellarg($installPackage) . " 2>&1", $npmOutput, $result);
-        aicli_debug("NPM finished with code $result.");
+        aicli_log("NPM finished with code $result.", AICLI_LOG_DEBUG);
         
         if ($result !== 0) {
-            aicli_debug("ERROR: NPM install failed for $installPackage");
+            aicli_log("ERROR: NPM install failed for $installPackage", AICLI_LOG_ERROR);
             return ['status' => 'error', 'error' => 'NPM install failed: ' . end($npmOutput)];
         }
 
@@ -707,38 +1382,83 @@ function installAgent($agentId) {
         if (file_exists($pJson)) {
             $pData = json_decode(file_get_contents($pJson), true);
             $installedVer = $pData['version'] ?? $installedVer;
-            aicli_debug("Detected version from package.json: $installedVer");
+            aicli_log("Detected version from package.json: $installedVer", AICLI_LOG_DEBUG);
         }
-    }
 
     // 2. UNIFIED CACHING: Tarball the resulting installation to USB
-    setInstallStatus("Backing up install for reboot support...", 70);
-    aicli_debug("Taring $tmpDir to $cacheDir/$agentId.tar.gz");
+    setInstallStatus("Backing up install for reboot support...", 70, $agentId);
+    aicli_log("Taring $tmpDir to $cacheDir/$agentId.tar.gz", AICLI_LOG_DEBUG);
     $tarOutput = [];
     // D-20: Use --no-same-owner during both pack and unpack to ensure compatibility
     exec("tar -czf " . escapeshellarg("$cacheDir/$agentId.tar.gz") . " --no-same-owner -C " . escapeshellarg($tmpDir) . " . 2>&1", $tarOutput, $result);
     if ($result !== 0) {
-        aicli_debug("ERROR: Tarball creation failed. Log: " . implode("\n", $tarOutput));
+        aicli_log("ERROR: Tarball creation failed. Log: " . implode("\n", $tarOutput), AICLI_LOG_ERROR);
         return ['status' => 'error', 'error' => 'Caching to USB failed'];
     }
 
     // 3. Move to active RAM bin directory
-    setInstallStatus("Deploying to active RAM environment...", 90);
-    aicli_debug("Copying installed files from $tmpDir to $binDir");
-    // Ensure binary directory clean for this agent if it was a single file (like Gemini)
-    if ($agentId === 'gemini-cli' && file_exists("$binDir/aicli.mjs")) unlink("$binDir/aicli.mjs");
+    setInstallStatus("Deploying to active RAM environment...", 90, $agentId);
+    aicli_log("Cleaning up old version from RAM before deployment...", AICLI_LOG_DEBUG);
+    if ($agentId === 'gemini-cli') {
+        if (file_exists("$binDir/aicli.mjs")) {
+            unlink("$binDir/aicli.mjs");
+        }
+    }
     
-    exec("cp -r " . escapeshellarg($tmpDir) . "/* " . escapeshellarg($binDir) . "/", $output, $result);
-    exec("rm -rf $tmpDir");
+    $npmMap = getAICliNpmMap();
+    $package = $npmMap[$agentId] ?? null;
+    if ($package) {
+        setInstallStatus("Cleaning up active package directory...", 92, $agentId);
+        $pkgDir = "$binDir/node_modules/" . str_replace('/', DIRECTORY_SEPARATOR, $package);
+        if (is_dir($pkgDir)) {
+            aicli_log("Removing existing package dir: $pkgDir", AICLI_LOG_DEBUG);
+            exec("rm -rf " . escapeshellarg($pkgDir));
+        }
+        
+        // Also clean up any potential legacy binary links in node_modules/.bin
+        $binName = basename($package);
+        $binLink = "$binDir/node_modules/.bin/$binName";
+        if (file_exists($binLink)) @unlink($binLink);
+    }
+
+    setInstallStatus("Copying files to RAM bin...", 95, $agentId);
+    aicli_log("Copying installed files from $tmpDir to $binDir", AICLI_LOG_DEBUG);
+    exec("cp -r " . escapeshellarg($tmpDir) . "/* " . escapeshellarg($binDir) . "/ 2>&1", $cpOutput, $result);
+    
+    if ($result !== 0) {
+        aicli_log("ERROR: Failed to copy installed files from $tmpDir to $binDir. Output: " . implode(" ", $cpOutput), AICLI_LOG_ERROR);
+        return ['status' => 'error', 'error' => 'Deployment to RAM failed: ' . end($cpOutput)];
+    }
+    
+    setInstallStatus("Finalizing...", 98, $agentId);
+    exec("rm -rf " . escapeshellarg($tmpDir));
 
     saveAICliVersion($agentId, $installedVer);
-    setInstallStatus("Installation Complete!", 100);
-    aicli_debug("Agent $agentId installed successfully");
+    gcPkgCache();
+    setInstallStatus("Installation Complete!", 100, $agentId);
+    aicli_log("Agent $agentId installed successfully", AICLI_LOG_INFO);
+    @unlink("/tmp/unraid-aicliagents/install-$agentId.lock");
     return ['status' => 'ok'];
+} catch (Exception $e) {
+    aicli_log("Installation failed: " . $e->getMessage(), AICLI_LOG_ERROR);
+    @unlink("/tmp/unraid-aicliagents/install-$agentId.lock");
+    setInstallStatus("Error: " . $e->getMessage(), 0, $agentId);
+    return ['status' => 'error', 'message' => $e->getMessage()];
+}
 }
 
 function uninstallAgent($agentId) {
-    aicli_debug("uninstallAgent started for $agentId");
+    $lockFile = "/tmp/unraid-aicliagents/install-$agentId.lock";
+    if (file_exists($lockFile)) {
+        $pid = trim(@file_get_contents($lockFile));
+        if (aicli_is_pid_running($pid)) {
+             return ['status' => 'error', 'message' => 'Operation already in progress for this agent.'];
+        }
+    }
+    file_put_contents($lockFile, getmypid());
+    
+    try {
+        aicli_log("uninstallAgent started for $agentId", AICLI_LOG_INFO);
     $bootConfig = "/boot/config/plugins/unraid-aicliagents";
     $cacheDir = "$bootConfig/pkg-cache";
     $binDir = "/usr/local/emhttp/plugins/unraid-aicliagents/bin";
@@ -755,7 +1475,7 @@ function uninstallAgent($agentId) {
             $pkgDir = "$binDir/node_modules/" . str_replace('/', DIRECTORY_SEPARATOR, $package);
             if (is_dir($pkgDir)) {
                 exec("rm -rf " . escapeshellarg($pkgDir));
-                aicli_debug("Removed NPM package dir: $pkgDir");
+                aicli_log("Removed NPM package dir: $pkgDir", AICLI_LOG_DEBUG);
             }
             // Remove the .bin symlink if it exists
             $binName = basename($package);
@@ -767,7 +1487,7 @@ function uninstallAgent($agentId) {
     // 2. Remove USB cache
     $cacheFile = "$cacheDir/$agentId.tar.gz";
     if (file_exists($cacheFile)) {
-        aicli_debug("Removing cache file: $cacheFile");
+        aicli_log("Removing cache file: $cacheFile", AICLI_LOG_DEBUG);
         unlink($cacheFile);
     }
     
@@ -779,12 +1499,26 @@ function uninstallAgent($agentId) {
     // 3. Remove version record
     $versions = getAICliVersions();
     if (isset($versions[$agentId])) {
-        aicli_debug("Removing version record for $agentId");
+        aicli_log("Removing version record for $agentId", AICLI_LOG_DEBUG);
         unset($versions[$agentId]);
         file_put_contents("/boot/config/plugins/unraid-aicliagents/versions.json", json_encode($versions, JSON_PRETTY_PRINT));
     }
     
+    gcPkgCache();
+    @unlink("/tmp/unraid-aicliagents/install-$agentId.lock");
     return ['status' => 'ok'];
+} catch (Exception $e) {
+    aicli_log("Uninstallation failed: " . $e->getMessage(), AICLI_LOG_ERROR);
+    @unlink("/tmp/unraid-aicliagents/install-$agentId.lock");
+    return ['status' => 'error', 'message' => $e->getMessage()];
+}
+}
+
+function aicli_versions_match($v1, $v2) {
+    if ($v1 === $v2) return true;
+    $v1 = ltrim(trim((string)$v1), 'vV');
+    $v2 = ltrim(trim((string)$v2), 'vV');
+    return $v1 === $v2;
 }
 
 function checkAgentUpdates() {
@@ -800,26 +1534,29 @@ function checkAgentUpdates() {
         $current = $currentVersions[$id] ?? "0.0.0";
         $usePreview = ($config["preview_$id"] ?? "0") === "1";
 
-        if ($id === 'gemini-cli') {
-            $opts = [ "http" => [ "method" => "GET", "header" => "User-Agent: Unraid-AICliAgents\r\n" ] ];
-            $context = stream_context_create($opts);
-            $url = $usePreview ? "https://api.github.com/repos/google-gemini/gemini-cli/releases" : "https://api.github.com/repos/google-gemini/gemini-cli/releases/latest";
-            $response = @file_get_contents($url, false, $context);
-            if ($response) {
-                $data = json_decode($response, true);
-                $latestVersion = $usePreview ? ($data[0]['tag_name'] ?? 'Unknown') : ($data['tag_name'] ?? 'Unknown');
-                if ($latestVersion !== $current) $hasUpdate = true;
+        // NPM-based agents — D-21: Intelligent tag discovery for updates
+        $npmMap = getAICliNpmMap();
+        $package = $npmMap[$id] ?? null;
+        
+        if ($package) {
+            $tagsOutput = [];
+            exec("npm info " . escapeshellarg($package) . " dist-tags --json 2>/dev/null", $tagsOutput);
+            $tags = json_decode(implode("\n", $tagsOutput), true);
+            
+            if ($usePreview) {
+                if (isset($tags['preview'])) $latestVersion = $tags['preview'];
+                elseif (isset($tags['next'])) $latestVersion = $tags['next'];
+                elseif (isset($tags['nightly'])) $latestVersion = $tags['nightly'];
+                else $latestVersion = $tags['latest'] ?? 'Unknown';
+            } else {
+                $latestVersion = $tags['latest'] ?? 'Unknown';
             }
-        } else {
-            // NPM agents — D-19: Use shared mapping function
-            $npmMap = getAICliNpmMap();
-            $package = $npmMap[$id] ?? null;
-            if ($package) {
-                $tag = $usePreview ? "next" : "latest";
-                $latestVersion = trim(shell_exec("npm show " . escapeshellarg($package) . " version --tag=" . escapeshellarg($tag)) ?? '');
-                if ($latestVersion && $latestVersion !== $current) $hasUpdate = true;
+            
+            if ($latestVersion !== 'Unknown' && !aicli_versions_match($latestVersion, $current)) {
+                $hasUpdate = true;
             }
         }
+        
         $updates[$id] = ['has_update' => $hasUpdate, 'latest_version' => $latestVersion, 'installed_version' => $current];
     }
     return ['status' => 'ok', 'updates' => $updates];
@@ -830,203 +1567,4 @@ function aicli_tail($file, $lines) {
     return explode("\n", $output ?? "");
 }
 
-if (isset($_GET['action'])) {
-    // Standard CSRF Validation for ALL actions
-    $var = @parse_ini_file("/var/local/emhttp/var.ini");
-    $expected = $var['csrf_token'] ?? 'NOT_SET';
-    
-    // Check POST first, then GET (some legacy calls use GET)
-    $received = $_POST['csrf_token'] ?? $_GET['csrf_token'] ?? 'MISSING';
-    
-    if (is_array($received)) {
-        aicli_debug("CSRF is array: " . json_encode($received));
-        $received = end($received);
-    }
-    
-    $received = trim((string)$received);
-    $expected = trim((string)$expected);
-    
-    if ($received === 'MISSING' || $received !== $expected) {
-        // Fallback to Session Check (Unraid 7+)
-        @session_start();
-        if (isset($_SESSION['csrf_token']) && trim((string)$_SESSION['csrf_token']) === $received) {
-            aicli_debug("CSRF Validation Passed via Session Fallback.");
-        } else {
-            aicli_debug("CSRF VALIDATION FAILED! Action: " . $_GET['action']);
-            aicli_debug("Expected (from var.ini): [$expected]");
-            aicli_debug("Received: [$received]");
-            if (isset($_SESSION['csrf_token'])) aicli_debug("Session CSRF also mismatch: [" . trim((string)$_SESSION['csrf_token']) . "]");
-            
-            header('Content-Type: application/json');
-            echo json_encode(['status' => 'error', 'message' => 'Invalid CSRF Token']);
-            exit;
-        }
-    }
-    
-    header('Content-Type: application/json');
-    $id = $_GET['id'] ?? 'default';
-
-    if ($_GET['action'] === 'start') {
-        $path = $_GET['path'] ?? null;
-        $chatId = $_GET['chatId'] ?? null;
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
-        startAICliTerminal($id, $path, $chatId, $agentId);
-        echo json_encode(['status' => 'ok', 'sock' => "/webterminal/aicliterm-$id/"]);
-    } elseif ($_GET['action'] === 'install_agent') {
-        $agentId = $_GET['agentId'] ?? '';
-        echo json_encode(installAgent($agentId));
-    } elseif ($_GET['action'] === 'uninstall_agent') {
-        $agentId = $_GET['agentId'] ?? '';
-        echo json_encode(uninstallAgent($agentId));
-    } elseif ($_GET['action'] === 'check_updates') {
-        echo json_encode(checkAgentUpdates());
-    } elseif ($_GET['action'] === 'stop') {
-        stopAICliTerminal($id, isset($_GET['hard']));
-        echo json_encode(['status' => 'ok']);
-    } elseif ($_GET['action'] === 'gc') {
-        gcAICliSessions();
-        echo json_encode(['status' => 'ok']);
-    } elseif ($_GET['action'] === 'restart') {
-        $path = $_GET['path'] ?? null;
-        $chatId = $_GET['chatId'] ?? null;
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
-        stopAICliTerminal($id, true);
-        startAICliTerminal($id, $path, $chatId, $agentId);
-        echo json_encode(['status' => 'ok']);
-    } elseif ($_GET['action'] === 'get_chat_session') {
-        $path = $_GET['path'] ?? '';
-        $id = $_GET['id'] ?? null;
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
-        $chatId = findAICliChatSession($path, $id, $agentId);
-        echo json_encode(['chatId' => $chatId]);
-    } elseif ($_GET['action'] === 'save') {
-        saveAICliConfig($_POST);
-        echo json_encode(['status' => 'ok']);
-    } elseif ($_GET['action'] === 'move_home') {
-        $old = $_POST['old_path'] ?? '';
-        $new = $_POST['new_path'] ?? '';
-        if (empty($old) || empty($new) || !is_dir($old)) {
-            echo json_encode(['status' => 'error', 'message' => 'Invalid source or target']);
-            exit;
-        }
-        if (!is_dir($new)) mkdir($new, 0777, true);
-        
-        aicli_debug("Moving home data from $old to $new");
-        exec("cp -rn " . escapeshellarg($old) . "/* " . escapeshellarg($new) . "/ 2>&1", $output, $result);
-        if ($result === 0) {
-            echo json_encode(['status' => 'ok']);
-        } else {
-            echo json_encode(['status' => 'error', 'message' => 'Failed to copy data', 'output' => $output]);
-        }
-    } elseif ($_GET['action'] === 'list_dir') {
-        $path = $_GET['path'] ?? '/mnt';
-        if (!is_dir($path)) { echo json_encode(['error' => 'Not a directory']); exit; }
-        $items = [];
-        if ($path !== '/') $items[] = ['name' => '..', 'path' => dirname($path)];
-        foreach (scandir($path) as $file) {
-            if ($file === '.' || $file === '..') continue;
-            if (is_dir("$path/$file")) $items[] = ['name' => $file, 'path' => "$path/$file"];
-        }
-        echo json_encode(['path' => $path, 'items' => $items]);
-    } elseif ($_GET['action'] === 'create_dir') {
-        // D-08: Frontend sends params via GET query string, not POST body
-        $parent = $_GET['parent'] ?? '';
-        $name = $_GET['name'] ?? '';
-        if (is_dir("$parent/$name")) { echo json_encode(['status' => 'error', 'message' => 'Folder already exists']); exit; }
-        if (mkdir("$parent/$name", 0777, true)) echo json_encode(['status' => 'ok']);
-        else echo json_encode(['status' => 'error', 'message' => 'Failed to create folder']);
-    } elseif ($_GET['action'] === 'get_session_status') {
-        $path = $_GET['path'] ?? '';
-        $chatId = findAICliChatSession($path, $id, $_GET['agentId'] ?? 'gemini-cli');
-        $title = "";
-        if ($chatId) {
-            $home = getAICliConfig()['home_path'];
-            $logFile = "$home/.gemini/tmp/$chatId/logs.json";
-            if (file_exists($logFile)) {
-                $logs = @json_decode(file_get_contents($logFile), true);
-                if ($logs && count($logs) > 0) $title = end($logs)['title'] ?? '';
-            }
-        }
-        echo json_encode(['status' => 'ok', 'chatId' => $chatId, 'title' => $title]);
-    } elseif ($_GET['action'] === 'get_log') {
-        // D-10: Read from RAM log path
-        $logFile = "/tmp/unraid-aicliagents/debug.log";
-        if (file_exists($logFile)) {
-            $lines = aicli_tail($logFile, 50);
-            echo implode("\n", $lines);
-        } else {
-            echo "Log is empty or does not exist.";
-        }
-    } elseif ($_GET['action'] === 'clear_log') {
-        // D-10: Clear from RAM log path
-        $logFile = "/tmp/unraid-aicliagents/debug.log";
-        if (file_exists($logFile)) {
-            @file_put_contents($logFile, "");
-            echo json_encode(['status' => 'ok']);
-        } else {
-            echo json_encode(['status' => 'error', 'message' => 'Log file does not exist']);
-        }
-    } elseif ($_GET['action'] === 'upload_chunk') {
-        @set_time_limit(0); 
-        $path = str_replace(array('\0', '..'), '', $_POST['path'] ?? '');
-        if (empty($path) || !is_dir($path)) {
-            aicli_debug("[FileUpload] Failed. Invalid path: $path");
-            echo json_encode(['status' => 'error', 'error' => 'Invalid destination path']);
-            exit;
-        }
-
-        $fileName = basename($_POST['filename'] ?? '');
-        $fileData = $_POST['filedata'] ?? '';
-        $chunkIndex = intval($_POST['chunk_index'] ?? 0);
-        $totalChunks = intval($_POST['total_chunks'] ?? 1);
-
-        if (empty($fileName) || empty($fileData)) {
-            aicli_debug("[FileUpload] Failed. Missing filename or filedata payload.");
-            echo json_encode(['status' => 'error', 'error' => 'File payload or filename missing']);
-            exit;
-        }
-
-        $decodedData = base64_decode(str_replace(' ', '+', $fileData));
-        if ($decodedData === false) {
-            aicli_debug("[FileUpload] Failed to decode base64 chunk $chunkIndex");
-            echo json_encode(['status' => 'error', 'error' => 'Failed to decode base64 payload']);
-            exit;
-        }
-
-        // Write to destination directory with .partial suffix to bypass /tmp RAM limits
-        $targetFile = rtrim($path, '/') . '/' . $fileName;
-        $tmpFile = $targetFile . ".partial";
-        
-        $writeMode = ($chunkIndex === 0) ? 0 : FILE_APPEND;
-        
-        if (file_put_contents($tmpFile, $decodedData, $writeMode) === false) {
-            aicli_debug("[FileUpload] Failed to write chunk $chunkIndex to $tmpFile");
-            echo json_encode(['status' => 'error', 'error' => 'Failed to write chunk to disk']);
-            exit;
-        }
-
-        if ($chunkIndex === $totalChunks - 1) {
-            if (rename($tmpFile, $targetFile)) {
-                aicli_debug("[FileUpload] Success: uploaded and assembled $fileName to $targetFile");
-                aicli_notify("File Uploaded", "Successfully uploaded $fileName to " . basename($path));
-                echo json_encode(['status' => 'ok', 'complete' => true]);
-            } else {
-                aicli_debug("[FileUpload] Failed to move assembled file to $targetFile");
-                @unlink($tmpFile);
-                echo json_encode(['status' => 'error', 'error' => 'Failed to finalize file']);
-            }
-        } else {
-            echo json_encode(['status' => 'ok', 'chunk_received' => true]);
-        }
-    } elseif ($_GET['action'] === 'get_install_status') {
-        $statusFile = "/tmp/unraid-aicliagents/install-status";
-        if (file_exists($statusFile)) {
-            echo file_get_contents($statusFile);
-        } else {
-            echo json_encode(['message' => '', 'progress' => 0]);
-        }
-    } elseif ($_GET['action'] === 'debug') {
-        echo json_encode(['status' => 'ok', 'config' => getAICliConfig(), 'registry' => getAICliAgentsRegistry()]);
-    }
-    exit;
-}
+// LIBRARY END - No direct AJAX handler here. use AICliAjax.php instead.

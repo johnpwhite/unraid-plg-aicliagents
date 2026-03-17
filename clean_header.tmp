@@ -1,0 +1,945 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "unraid-aicliagents">
+<!ENTITY author    "John White">
+<!ENTITY version   "2026.03.15.04">
+<!ENTITY launch    "Settings/AICliAgentsManager">
+<!ENTITY gitURL    "https://gitlab.johnpwhite.com/johner/unraid-plg-aicliagents/-/raw/master">
+<!ENTITY pluginURL "https://gitlab.johnpwhite.com/johner/unraid-plg-aicliagents/-/raw/master/unraid-aicliagents.plg">
+<!ENTITY boot      "/boot/config/plugins/unraid-aicliagents">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/unraid-aicliagents">
+]>
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.15.04" launch="Settings/AICliAgentsManager" pluginURL="&pluginURL;" min="7.2.0" icon="unraid-aicliagents.png">
+
+<CHANGES>
+## 2026.03.15.04
+- Refined Home directory migration and persistence logic (v2)
+## 2026.03.15.03
+- Refined Home directory migration and persistence logic
+## 2026.03.15.02
+- Fix: Definitive Home directory migration logic (handles transitions between user persistence folders).
+- Fix: Background sync loop now works for non-root users via environment variables.
+- Fix: Proactive ownership enforcement in RAM working directory setup.
+- Feat: Hybrid Storage system (RAM-Flash) for Home directories.
+- Feat: Dual-dropdown sync interval settings (Hours/Minutes).
+- Feat: Manual 'Sync Now' button on settings page.
+- Feat: Unraid stopping event integration for shutdown synchronization.
+## 2026.03.15.01
+- Fix: Definitive Home directory migration logic (now handles transitions between different user persistence folders on Flash).
+- Fix: Background sync loop now works for non-root users by utilizing env-vars instead of reading protected config files.
+- Fix: Proactive ownership enforcement in RAM working directory setup.
+## 2026.03.14.14
+- Fix: Hardened RAM working directory initialization with proactive ownership enforcement and 0777 work base
+- Feat: Integrated migration check into config save loop to ensure home_path is always synced to the correct user persistence dir.
+## 2026.03.14.13
+- Fix: Moved user-specific shell logs and run scripts to their own owned directories to eliminate cross-user permission conflicts
+- Fix: Updated directory ownership logic in manager to chown the entire user-specific RAM area.
+## 2026.03.14.12
+- Fix: Resolved terminal permission denied errors for limited users by exporting AICLI_DEBUG env var and ensuring consistent user-specific temp filenames
+- Fix: Added explicit chmod 0777 to temp directory in shell wrapper.
+## 2026.03.14.11
+- Feat: Implemented automatic Home directory migration to hybrid RAM-Flash storage
+- Fix: Resolved terminal permission denied errors for non-root users by using user-specific temp files and relaxed log directory permissions
+- Refactor: Moved migration and legacy cleanup logic to the installer.
+## 2026.03.14.10
+- Fix terminal startup for users with bin/false shell
+## 2026.03.14.09
+- Optimize legacy cleanup to run only once and reduce socket load
+## 2026.03.14.08
+- Change UserAdd to new tab and add manual refresh button
+## 2026.03.14.07
+- Fix full UI in modal (display=fixed) and replace remaining alerts/confirms with swal
+## 2026.03.14.06
+- Replaced browser modals with swal, improved user creation with native overlay, and updated terminal UI.
+## 2026.03.14.05
+- Fix: Switched to Unraid native emcmd for user creation to bypass PHP curl socket mapping issues. - Refactor: Simplified background script logic.
+## 2026.03.14.04
+- Fix: Switched to native PHP curl for user creation to resolve socket connection issues. - Refactor: Improved background script generation syntax.
+## 2026.03.14.03
+- Fix: Logging timestamps now follow Unraid user settings. - Fix: User creation backend logic improved (targets
+- htm endpoint, enhanced curl logging). - Refactor: Moved fatal error logging to RAM-based debug path.
+## 2026.03.14.02
+- Fix: Standardize all logging to UTC and enhance background user creation diagnostics with socket/process state capture
+## 2026.03.14.01
+- Fix: Resolve syntax error in background worker generation and fix error handler to respect @ suppression; improved background diagnostics
+## 2026.03.13.33
+- Fix: Target native /update
+- htm via CLI curl on unix socket for user creation to ensure full system state synchronization
+## 2026.03.13.32
+- Fix: Revert user creation to system emcmd binary using background subshell with comprehensive debug logging
+## 2026.03.13.31
+- Fix: Utilize CLI curl binary for background user creation to bypass PHP extension socket compatibility issues on Unraid
+## 2026.03.13.30
+- Fix: Resolve fatal PHP crash during user creation by replacing dependent Unraid publish code with native curl execution in background script
+## 2026.03.13.29
+- Fix: Resolve user creation connectivity error by utilizing native Unraid curl_socket method and targeting the raw /update emhttpd endpoint instead of Nginx /update
+- htm wrapper
+## 2026.03.13.28
+- Fix: Fix mkdir existing directory warning and force critical background logs to debug file regardless of verbosity setting
+## 2026.03.13.27
+- Fix: Implement dedicated CURL background worker script to handle UserAdd POST securely without emcmd wrapping side-effects
+## 2026.03.13.26
+- Fix: Resolve user creation timeout by executing emcmd asynchronously via aicli_exec_bg
+## 2026.03.13.25
+- Fix CSRF collisions and add AJAX logging
+## 2026.03.13.24
+- Fix user creation timeout and parameter names
+## 2026.03.13.23
+- Fix JS scoping and polyfill codeAZ for dynamix
+- js
+## 2026.03.13.22
+- Prefix user creation IDs to avoid dynamix
+- js conflicts
+## 2026.03.13.21
+- Fix SyntaxError: Identifier already declared
+## 2026.03.13.20
+- Robustness fix for JS CSRF and variable scopes
+## 2026.03.13.19
+- Fix ReferenceError in checkUpdates script
+## 2026.03.13.18
+- Fix missing CSRF variable in page load script
+## 2026.03.13.17
+- Integrated Unraid User Management and secure session switching
+## 2026.03.13.16
+- Feat: Start exploration of Unraid user management and migration logic.
+## 2026.03.13.15
+- Fix: Normalized version comparison to ignore 'v' prefixes and unified update checking under the NPM mechanism for all agents
+## 2026.03.13.14
+- Feat: Implemented intelligent NPM tag discovery for preview releases (detects @preview, @next, or @nightly dynamically)
+## 2026.03.13.13
+- Refactor: Migrated Gemini CLI to standard NPM installation mechanism to support esbuild chunk splitting in preview and latest releases
+## 2026.03.13.12
+- Fix: Removed malformed 'tui' parameter from OpenCode binary path that caused directory change errors
+## 2026.03.13.11
+- Feat: Implemented Unraid boot vs upgrade toggle to intelligently cache files for boot speed while downloading fresh updates during manual GUI upgrades
+## 2026.03.13.10
+- Fix: Corrected plg downloader to always pull latest updates instead of using stale USB cache
+## 2026.03.13.09
+- Fix: Fixed BG installer and silenced unneeded network errors during unload
+## 2026.03.13.08
+- Architectural Feat: Completely decoupled Installations from the WebUI thread using a new PHP background wrapper (install-bg
+- php).
+- Feat: Enabled multi-track parallel upgrades and installations.
+- Feat: Suppressed network error alerts during page reloads/navigation to prevent false error popups when one task finishes while others are running.
+## 2026.03.13.07
+- Feat: Enabled truly parallel agent installations.
+- Feat: Implemented asynchronous background execution via PHP CLI wrapper to prevent WebUI timeouts and 'Network Error' popups.
+- Feat: Per-agent status tracking and individual progress bars.
+- Fix: Removed global store lockout to allow multiple concurrent tasks.
+## 2026.03.13.06
+- Fix: Hardened UI mutual exclusion by removing inline '!important' styles that prevented visual button disabling.
+- Fix: Immediate lockout on click before confirmation dialogs.
+- Fix: Intelligent unlocking that respects background tasks held by other tabs or processes.
+## 2026.03.13.05
+- Fix: Hardened mutual exclusion for agent operations. - Fix: Visually disable buttons during active tasks. - Fix: Robust PID check for server-side locking (handles missing POSIX extension).
+## 2026.03.13.04
+- Feat: Added mutual exclusion for agent installations and uninstalls.
+- Feat: Implemented server-side locking (via install
+- lock) to prevent parallel install attempts.
+- Feat: Improved Agent Store UI by disabling action buttons during active operations.
+- Fix: Persistent install progress tracking that survives page refreshes.
+## 2026.03.13.03
+- Fix: Corrected bash syntax errors (missing 'fi' tags) in the plugin installer that caused 'returned 2' failures.
+## 2026.03.13.02
+- Fix: Improved agent cleanup in RAM after updates.
+- Feat: Added automated 'Garbage Collection' for unused USB agent caches.
+- Feat: Smart dependency checks for Node
+- js (v22+), tmux, fd, and rg to avoid redundant downloads.
+- Fix: Respectful symlinking to avoid overwriting existing system binaries or Slackware packages.
+## 2026.03.13.01
+- Fix: Graceful SIGTERM shutdown for agents to improve session saving.
+- Fix: Explicitly use 'tui' subcommand for OpenCode to ensure reliable interactive resumption.
+## 2026.03.12.01
+- Feat: Added 'Manage Env' to the workspace drawer.
+- Feat: Persist environment variables per workspace and agent.
+- Feat: Export user ENVs before starting the terminal session.
+## 2026.03.09.19
+- Fix: Aggressive legacy geminicli cleanup (registration purge).
+## 2026.03.09.18
+- Fix: Aggressive legacy geminicli cleanup (removes broken plugin list entries).
+## 2026.03.09.17
+- UX: Polished installer UI and friendlier notification title.
+## 2026.03.09.16
+- UX: Polished installer UI and notifications for clarity and conciseness.
+## 2026.03.09.15
+- UX: Resilient uninstaller summary (no right borders) for better UI alignment.
+## 2026.03.09.13
+- Fix: Quiet uninstaller logging (replace log) and premium ASCII summary.
+## 2026.03.09.09
+- Fix: Escaped shell operators in .plg to fix XML corruption.
+## 2026.03.09.08
+- Fix: Persistent uninstaller log on USB, tty fix, and full pkg-cache cleanup.
+## 2026.03.09.06
+- Fix: Implemented dual-output logging and granular cleanup for uninstaller.
+## 2026.03.09.04
+- Fix: Optimized Node
+- js check to prevent redundant downloads on boot.
+## 2026.03.09.03
+- Fix: Node
+- js extraction logic
+- Refactor: RAM-based logging in /tmp
+- Refactor: Cleaned up installer UI messages.
+## 2026.03.09.02
+- Fix: Implemented USB source file caching to resolve plugin disappearance on reboot
+- Fix: Installer now uses Cache-First logic
+- Fix: Enforced CRLF normalization
+- Fix: Ensured XML well-formedness
+- Refactor: Updated uninstaller to preserve user settings.
+## 2026.03.09.01
+- Fix: Enabled maximum installer verbosity (set -x and full redirection to install
+- log).
+- Fix: Simplified
+- page headers to the bare minimum to resolve 'Invalid
+- page format' errors.
+- Fix: Added strict error checking to all file downloads.
+## 2026.03.08.11
+- Fix: Used recursive chmod for scripts and bin folders to resolve 'Permission denied' on nested binaries (opencode, etc.)
+## 2026.03.08.10
+- Fix: Improved installer with persistent logging and strict permission enforcement.
+- Fix: Resolved 'Invalid
+- page format' by updating headers with Type and Tabs parameters.
+- Fix: Removed redundant session_start from manager for better Unraid integration.
+## 2026.03.08.09
+- Fix: Escaped shell operators in
+- plg to fix XML corruption.
+- Fix: Simplified
+- page headers to resolve Dynamix parsing errors.
+- Fix: Optimized backend polling to reduce process pileup.
+## 2026.03.08.08
+- Fix: Enhanced legacy Gemini CLI cleanup to also remove /var/log/plugins/unraid-geminicli
+- plg, forcing it out of the UI list.
+- Fix: Uninstaller now preserves /boot/config/plugins/unraid-aicliagents directory (home and settings) while removing the
+- plg registration.
+## 2026.03.08.07
+- Fix: Added PHP-level runtime cleanup of legacy geminicli
+- plg file
+- The Unraid plugin manager re-writes the file after the installer deletes it, so it must be cleaned on page load instead.
+## 2026.03.08.06
+- Fix: Restart/sync button now properly awaits backend restart before refreshing iframe, preventing double-start race condition.
+- Fix: Restart now passes agentId to backend to prevent defaulting to gemini-cli.
+- Fix: Installer and uninstaller now remove /boot/config/plugins/ folders and plg files for both aicliagents and legacy geminicli.
+## 2026.03.08.05
+- Fix: Installer now removes legacy Gemini CLI boot config folder and plg file from /boot/config/plugins/.
+- Fix: Uninstaller now removes its own boot config folder, plg file, and any remaining Gemini CLI remnants.
+## 2026.03.08.04
+- Fix: Replaced BusyBox-incompatible cp -a DIR/
+- with portable cp -r DIR/* for Node
+- js deployment.
+- Fix: Removed set -e which caused installer abort on non-fatal pgrep/cleanup commands.
+- Fix: Standardized ALL shell redirection operators to use proper XML entities.
+- Fix: Removed duplicate shebang in aicli wrapper script.
+## 2026.03.08.03
+- Fix: Removed double shebang in aicli wrapper.
+- Fix: Verified XML well-formedness for all redirection operators.
+## 2026.03.08.02
+- Fix: Significant XML cleanup and validation to resolve parse errors during installation.
+- Fix: Standardized on literal versions and escaped redirection operators.
+- Feat: Truncated changelog history to improve Unraid plugin manager performance.
+## 2026.03.08.01
+- Fix: Resolved XML parsing errors in the plugin installer (escaped ampersands and redirection operators).
+- Fix: Ensured the PLUGIN tag uses a literal version string for better Unraid compatibility.
+- Feat: Consolidated temporary runtime files into /tmp/unraid-aicliagents/ for a cleaner system environment.
+## 2026.03.06.09
+- **Clutter-Free /tmp**: Consolidated all temporary runtime logs and scripts into a single `/tmp/unraid-aicliagents/` directory.
+- **Legacy Cleanup**: Added automated removal of old `gemini-*` and `ttyd-gemini-*` files left behind from previous versions.
+
+## 2026.03.06.08
+- **Clean Uninstall**: Hardened the uninstallation process to ensure all global symlinks (npm, npx, fd, rg) and temporary run-state files are thoroughly removed.
+- **Bug Fix**: Fixed PHP warnings in the agent update checker when 'is_installed' key was missing.
+
+## 2026.03.06.07
+- **Installer Robustness**: Fixed a potential error where empty directory globs could cause the installer to fail with 'bash returned 1'.
+- **Improved Extraction**: Switched to universal tar extraction and added better error messages for corrupted downloads.
+
+## 2026.03.06.06
+- **Installer Fix**: Improved the Node.js distribution extraction logic to prevent "bash returned 1" errors on some systems.
+- **Robust Pathing**: Added explicit checks and safer copy commands for Node.js and npm deployment.
+
+## 2026.03.06.05
+- **Expanded Agent Store**: Added support for Claude Code, OpenCode, Kilo Code, Pi Coder, and Codex CLI.
+- **Improved Installation**: Now includes a full Node.js distribution (v22.22.0) with npm to enable direct agent installations from the store.
+- **Bug Fix**: Resolved an issue where some agents wouldn't install correctly due to missing npm dependencies.
+- **UI Refresh**: Polished the agent store with better status indicators and update tracking.
+
+### 2026.03.06.04
+- **Large File Support**: Implemented chunked uploads to support files up to 10GB+ without hitting RAM or timeout limits.
+- **Stability**: Fixed CSRF validation issues and improved upload progress tracking.
+
+### 2026.03.06.03
+- **Repository Migration**: Migrated from Gemini CLI to AI CLI Agents.
+## 2026.03.06.02
+- Feature: Implement chunked file upload to bypass PHP POST limits for large files, and add chunk progress UI
+## 2026.03.06.01
+- Restore CSRF token to URL query string to survive max_post_size truncation and ensure stable Unraid auth fallback
+## 2026.03.05.04
+- Integrate Unraid SweetAlert module for upload success/failure toasts
+- Implement Base64 JSON parsing and logging on client to diagnose Nginx/PHP HTTP errors
+## 2026.03.05.03
+- Refactor file upload engine to utilize Base64 datastreams to natively bypass emhttp strict multipart/form-data POST filtering
+## 2026.03.05.02
+- Fix HTTP 500 File Upload Error by explicitly appending CSRF token to form data payload for Unraid emhttp intercept proxy validation
+## 2026.03.05.01
+- Fix upload button styling by rendering as a proper button element
+- Add Unraid notifications on successful upload
+- Add comprehensive backend logging for the upload API to isolate permission or path issues
+## 2026.03.04.44
+- Fix active state border bug on unselected buttons
+- Add AI-CLI-AGENTS hyphenation to tab title
+- Add Upload File button to terminal drawer
+## 2026.03.04.43
+- Fix preview checkbox persistence, visual glitches in workspace selector, and refine UI labeling
+## 2026.03.04.42
+- Fix: Resolved persistence issue where "preview" checkbox in settings would reset on page refresh.
+- Fix: Corrected visual outline glitch in workspace selector buttons.
+- Style: Further refinements to label readability and terminal theme integration.
+## 2026.03.04.41
+- Feat: Added full Terminal Theme support (Light, Dark, Solarized) by injecting JSON themes into 'ttyd'.
+- Fix: Renamed all labels from 'AICliAgents CLI' to 'AI CLI Agents' for improved readability on settings and tab bars.
+- Fix: Use spaced labels in tab bar to avoid jammed 'AICLIAGENTS' text.
+## 2026.03.04.39
+- Fix: Left-align debug log viewer output for better readability.
+## 2026.03.04.38
+- Fix: Hardened all plugin 'tar' commands with '--no-same-owner'.
+## 2026.03.04.37
+- Fix: Resolve Pi Coder (and other agents) startup errors by pre-installing static 'fd' and 'ripgrep' (rg) binaries.
+- Fix: Hardened all 'tar' commands with '--no-same-owner' to prevent permission errors on Unraid's RAM/Flash filesystems.
+- Feat: Added 'PI_OFFLINE=1' env var to the shell wrapper to ensure agents stay stable and don't attempt runtime updates.
+## 2026.03.04.36
+- Fix: Included static binaries for 'fd' and 'ripgrep' (rg) in the core plugin installer to resolve runtime download issues.
+## 2026.03.04.35
+- Fix: Replaced placeholder icon screenshots with correct high-quality icons for Codex (OpenAI logo) and Pi Coder (Pixel Pi).
+## 2026.03.04.34
+- Fix: Updated icons for Codex and Pi Coder with higher-quality versions.
+## 2026.03.04.33
+- Feat: Improved Workspace Selector UI with thinner buttons and 3-item wrapping.
+- Feat: UI now forces workspace selection when the last tab is closed.
+- Feat: Added dedicated empty state with 'Select Workspace' launcher.
+## 2026.03.04.32
+- Applied 20 defect fixes across 6 files
+- Summary: Security (command injection &amp; INI escaping), Error Handling (vars &amp; recursion), UX (RAM logs &amp; card alignment), Performance (polling &amp; timeouts), Maintenance (cleanup &amp; shared logic).
+## 2026.03.04.27
+- Fix: Final correction for agent binary path evaluation in terminal.
+- Fix: Properly escaped shell variables in runtime script generation.
+## 2026.03.04.26
+- Style: Simplified terminal status messages to focus on lifecycle actions.
+- Fix: Ensure terminal falls back to fresh start if session resume fails.
+- Refactor: Improved clarity of 'resuming' vs 'starting fresh' in the shell wrapper.
+## 2026.03.04.25
+- Fix: Resolve terminal loading error 'Agent binary not found'.
+- Fix: Corrected variable escaping in shell wrapper for runtime evaluation.
+- Fix: Resolve PHP 8.1+ deprecation error in log tailing function.
+- Style: Finalized left-alignment and vertical consistency in System Information card.
+- Feat: Added 'CLEAR LOG' button to System Information card.
+## 2026.03.04.24
+- Style: Fixed System Information card alignment (labels and paths now left-aligned).
+- Feat: Added 'CLEAR LOG' button to System Information card.
+- Refactor: Improved responsive behavior for long log paths.
+## 2026.03.04.23
+- Style: Reverted System Information card to left-alignment for better readability.
+- Style: Kept 'View Log' button on the same line as the debug log path.
+## 2026.03.04.22
+- Fix: Resolve undefined array key error for preview checkboxes.
+- Style: Right-align paths and labels in System Information card.
+- Style: Position 'View Log' button immediately to the right of the log path.
+## 2026.03.04.21
+- Fix: Resolve terminal startup loop when agent is missing.
+- Fix: Hardened session detection logic (isAICliRunning) to prevent accidental restarts.
+- Fix: Ensure agents are automatically restored to RAM from USB cache on session start if missing.
+- Refactor: Added binary existence validation in shell wrapper.
+## 2026.03.04.20
+- Fix: Resolve 'Invalid CSRF Token' error by correctly handling session state.
+- Security: Added mandatory @session_start() to backend for stable CSRF validation.
+- Security: Ensure Settings page sends CSRF token in both URL and body for maximum compatibility.
+- Refactor: Unified CSRF token variable usage in manager page.
+## 2026.03.04.19
+- Feat: Standardize AI Agent Lifecycle &amp; Caching.
+- Standardize: Priority given to standalone binary/bundle assets over heavy NPM installs.
+- Standardize: Unified 'pkg-cache' structure for all agents (including Gemini).
+- Standardize: Consistent tarball-based persistence model on USB boot drive.
+- Docs: Added AGENT_LIFECYCLE_SPEC.md to document the 'Binary-First' architecture.
+## 2026.03.04.18
+- Fix: Resolve 'Invalid CSRF Token' error on settings page.
+- Security: Enforce CSRF validation for ALL AJAX actions.
+- Security: Add Session fallback for CSRF validation.
+- Refactor: Improve CSRF validation debug logging.
+- Build: Update React UI with CSRF token support.
+## 2026.03.04.17
+- Fix: Hardened CSRF validation and implemented deduplication.
+- Added strict key deduplication in settings save logic to prevent duplicate CSRF tokens.
+- Enhanced backend CSRF check with granular string debugging (length, whitespace, array handling).
+- Stabilized configuration saving for improved reliability.
+## 2026.03.04.16
+- Fix: Hardened dependency management and execution paths.
+- Updated shell wrapper to prioritize RAM-backed binaries (node, tmux) in PATH.
+- Optimized installer to consistently use cached tmux binary from boot drive.
+- Verified 'Cache &amp; Unpack' model for all system dependencies to minimize flash wear.
+## 2026.03.04.15
+- Fix: Resolved settings saving and installation failures.
+- Fixed 'Invalid CSRF Token' by removing redundant token submission in settings page.
+- Hardened backend to handle duplicate CSRF keys gracefully.
+- Improved NPM installation logic with better error capture and granular debug logging.
+- Ensured 'Debug Logging' setting correctly persists when changed.
+## 2026.03.04.14
+- Fix: Resolved terminal startup loop on fresh installations.
+- Normalized session ID handling in the UI to prevent infinite reload triggers.
+- Ensured consistent 'no session' state comparison between frontend and backend.
+## 2026.03.04.13
+- Fix: Resolved duplicate CSRF token error and hardened debug logging.
+- Fixed 'Invalid CSRF Token' by handling array-type CSRF inputs in the backend.
+- Enhanced aicli_debug to gracefully handle non-string data types.
+- Verified and restored internal backend functions to resolve 500 errors during installation.
+## 2026.03.04.12
+- Fix: Restored missing installation status function and hardened CSRF.
+- Fixed 500 Internal Server Error during install by restoring 'setInstallStatus' function.
+- Resolved 'Apply Settings' failure by hardening CSRF check and POST body encoding.
+- Added detailed CSRF failure logging to debug.log.
+## 2026.03.04.11
+- Fix: Hardened settings management and added in-UI log viewer.
+- Implemented 'View Log' modal in settings for easier troubleshooting.
+- Added fatal error recovery and raw response logging to capture all 500 error details.
+- Fixed 'Apply Settings' failure by hardening CSRF and POST body submission.
+- Improved API key preservation in the Secrets Vault.
+## 2026.03.04.10
+- Fix: Hardened backend with global error handling and notifications.
+- Added global PHP error/exception handler to capture all 500 error details into debug.log.
+- Integrated native Unraid system notifications for settings updates.
+- Added explicit Config File path to System Information card.
+- Optimized AJAX error handling to prevent JSON parse failures.
+## 2026.03.04.09
+- Fix: Hardened API calls and corrected CSRF handling.
+- Added try-catch and granular error logging to Gemini version check.
+- Fixed CSRF token submission in settings page to resolve 'Apply Settings' failure.
+- Restricted CSRF verification strictly to configuration saving.
+## 2026.03.04.08
+- Fix: Resolved 500 error during agent installation.
+- Removed literal ellipsis syntax error from AICliAgentsManager.php.
+- (Cumulative) Added 'Move Data' prompt for Home directory changes.
+- (Cumulative) Added 'Debug Log' path to System Info card.
+## 2026.03.04.07
+- Fix: Resolved installer crash caused by PHP syntax error.
+- Fixed broken code block in AICliAgentsManager.php.
+- Verified file validity with php -l.
+- (Cumulative) Added 'Move Data' prompt for Home directory changes.
+- (Cumulative) Added 'Debug Log' path to System Info card.
+## 2026.03.04.06
+- Fix: Resolved installer crash (exit code 255) during agent restoration.
+- Hardened .plg restoration logic with nullglob and explicit directory creation.
+- Improved error handling during tarball extraction.
+- Verified configuration handling for debug logging and preview release channels.
+## 2026.03.04.05
+- Feat: Improved path management and UX.
+- Added explicit 'Debug Log' path to System Information card.
+- Implemented automatic Home directory creation on session start.
+- Added 'Move Data' prompt (SweetAlert) when changing the Home directory path.
+- Hardened Home directory migration logic via backend move_home action.
+## 2026.03.04.04
+- Feat: Implemented comprehensive Debug Logging system.
+- Added 'Debug Logging' toggle to global settings.
+- Instrumented backend (PHP), installation logic, and shell wrapper with granular logging.
+- Logs are saved to /boot/config/plugins/unraid-aicliagents/debug.log for easier troubleshooting.
+## 2026.03.04.03
+- Feat: Added support for Preview Releases and persistent version tracking.
+- Implemented versions.json to accurately track installed agent versions.
+- Added 'Preview' checkboxes for all agents (GitHub pre-releases &amp; NPM @next).
+- Corrected Gemini upgrade check logic.
+- Updated System Information text to clarify USB boot requirements.
+- Refined UI behavior when toggling agent release channels.
+## 2026.03.04.02
+- Feat: Enhanced agent management and dynamic versioning.
+- Implemented real-time installation progress with descriptive stages.
+- Added explicit 'Upgrade' button for agents when updates are available.
+- Automated fetching of the latest Gemini CLI version from GitHub.
+- Added 'System Information' card to settings for installation path validation.
+- Made 'Not Installed' overlay dynamic and generic.
+## 2026.03.04.01
+- Perf: Implemented 'Cache &amp; Unpack' RAM-first installation model.
+- Moved agent execution and node_modules entirely to RAM (/usr/local/emhttp/plugins/unraid-aicliagents/bin/).
+- Automated persistent caching of agents to USB (/boot/config/plugins/unraid-aicliagents/pkg-cache/).
+- Enabled automatic boot-time restoration of all cached agents.
+- Minimized flash wear and improved execution performance.
+## 2026.03.03.26
+- Style: Added branded icons for Pi Coder and Codex CLI.
+- Integrated official Pi Coder (Exy mascot) and OpenAI Codex icons.
+- Updated both backend and frontend registries to reflect new icon assets.
+## 2026.03.03.25
+- Feat: Added support for Pi Coder and Codex CLI.
+- Integrated @mariozechner/pi-coding-agent as 'Pi Coder'.
+- Integrated @openai/codex as 'Codex CLI'.
+- Added OpenAI API Key (Codex) field to Secrets Vault.
+- Docs: Added New Coding Agent Specification (AGENT_SPEC.md).
+- Style: Improved 'Check for Updates' button height and alignment.
+## 2026.03.03.22
+- Fix: Replaced corrupted Gemini icon with valid plugin icon.
+- Updated both backend and frontend registries to use unraid-aicliagents.png for Gemini.
+## 2026.03.03.20
+- Fix: Hardened agent session isolation and environment freezing.
+- Isolated tmux sessions by including Agent ID in the session name.
+- Implemented Environment Freezing in the shell wrapper to prevent stale variable inheritance.
+- Forced UI iframe reload on agent change via key update.
+## 2026.03.03.19
+- Fix: Strict session-to-agent scoping for multiple tabs.
+- Corrected findAICliChatSession to strictly isolate Gemini-specific session discovery.
+- Resolved issue where multiple tabs on the same path would 'leak' their running agent session to each other.
+## 2026.03.03.18
+- Fix: Strict agent session isolation.
+- Fixed bug where switching agents on the same path would incorrectly reuse the previous agent session.
+- Implemented process-level verification of running agents.
+- Improved 'Waking' overlay accuracy and stability.
+## 2026.03.03.17
+- Fix: Strict agent session isolation.
+- Fixed bug where switching agents on the same path would incorrectly reuse the previous agent session.
+- Implemented process-level verification of running agents.
+- Improved 'Waking' overlay accuracy and stability.
+## 2026.03.03.16
+- Fix: Hardened agent switching and icon visibility.
+- Fix: Standardized process cleanup to ensure old agents are killed when switching types on the same session.
+- Fix: Verified icon paths and rebuilt UI assets to resolve missing Gemini logo.
+## 2026.03.03.15
+- Fix: Corrected icon extensions in installer download list (.png -> .ico).
+## 2026.03.03.13
+- Fix: Session collision and branded icons.
+- Resolved bug where multiple agents on the same path would incorrectly switch sessions.
+- Added high-quality branded icons for all supported agents.
+- Optimized UI stability during background chat session discovery.
+## 2026.03.03.12
+- Fix: Dynamic agent selection.
+- The 'New Workspace' modal now only shows agents that are actually installed.
+- Added guidance message when no agents are found.
+## 2026.03.03.11
+- Feat: Multi-agent stabilization and Store expansion.
+- Added OpenCode and Kilo Code agents to the store.
+- Resolved 'Waking' screen refresh loops for seamless interaction.
+- Implemented robust agent verification to prevent session socket conflicts.
+- Improved metadata visibility in the workspace drawer.
+## 2026.03.03.10
+- Feat: Multi-agent update management and improved UI stability.
+- Feat: Added background update checking for agents (Gemini CLI via GitHub API).
+- Feat: Added 'Check for Updates' button and info icons linking to release notes.
+- Feat: Added OpenCode and Kilo Code agents to the store.
+- Fix: Resolved terminal UI refresh loops by implementing transparent chat session discovery.
+- Fix: Hardened agent binary persistence across reboots.
+## 2026.03.03.09
+- Fix: Final stability and legacy session cleanup.
+- Resolved terminal looping issue via configuration locking.
+- Automated removal of incompatible legacy workspace tabs.
+- Added dynamic agent naming to loading screens.
+- Improved metadata visibility in workspace drawer.
+## 2026.03.03.08
+- Fix: Resolved terminal disconnection loop.
+- Refined React useEffect dependencies to prevent rapid-fire restarts.
+- Removed volatile lastActive timestamp from the connection effect logic.
+## 2026.03.03.07
+- Fix: Final reliability improvements for AICliAgents.
+- Automatic cleanup of incompatible legacy sessions.
+- Fixed terminal UI looping issue.
+- Dynamic agent naming in both WebUI and Terminal loader.
+- Improved metadata visibility in workspace drawer.
+## 2026.03.03.06
+- Fix: Final polish for AICliAgents Manager.
+- Fixed broken icons and layout on Settings page.
+- Added real-time registry polling to detect agent installs.
+- Improved persistence of agent binaries across reboots.
+## 2026.03.03.04
+- Fix: Filename alignment for installer compatibility
+- - Standardized on AICliAjax.php and AICliAgentsManager.page.
+## 2026.03.03.03
+- Final: Verified offline installation model
+- - Removed hardcoded Gemini downloads.
+## 2026.03.03.02
+- Refine: Transitioned to offline agent installation model.
+- Removed hardcoded Gemini download from installer for a lightweight footprint.
+- Added dynamic is_installed detection to the backend registry.
+- Implemented intelligent holding screen in the UI for unconfigured agents.
+- Added direct setup link from terminal to agent settings.
+## 2026.03.03.01
+- Major: Generalized AICliAgents Manager architecture (Phases 1-4).
+- Feat: Multi-agent support via manifest-driven registry.
+- Feat: Branded icons and Agent Selector in Unified Workspace Drawer.
+- Feat: Secure Secrets Vault for centralized API key management.
+- Refactor: Global brand migration from Gemini CLI to AICliAgents.
+- Fix: Automated legacy session migration and hardened shell execution loop.
+## 2026.03.02.19
+- Hardened installer: Added aggressive cleanup of all existing AICli sessions (ttyd, tmux, node) and temporary state files to prevent upgrade conflicts.
+## 2026.03.02.18
+- Hardened installer: Added aggressive cleanup of all existing AICli sessions (ttyd, tmux, node) and temporary state files to prevent upgrade conflicts.
+## 2026.03.02.17
+- Added 8px padding around the terminal viewport with rounded corners and transparent background for better Unraid theme integration.
+## 2026.03.02.16
+- Modified installer to always show Node.js version whether downloading or using cache.
+## 2026.03.02.15
+- Modified installer to ensure tmux (v3.6a) is always refreshed and re-installed during updates, ensuring version alignment.
+## 2026.03.02.14
+- Dependency Upgrades: AICliAgents CLI v0.31.0, Node.js v22.22.0, and tmux v3.6a.
+## 2026.03.02.13
+- Refactored tab naming: prioritize folder name and ONLY prepend status emojis (◇, ✦) when detected, ignoring noisy terminal titles like 'bash'.
+## 2026.03.02.12
+- Quiet session resumption (hiding invalid ID errors), strict project isolation to prevent ID leaks, and improved tab title filtering.
+## 2026.03.02.11
+- Fix project mapping collision for nested paths by sorting by length descending
+- - Improved tab title fallback to avoid 'Unraid' or 'sh' labels.
+## 2026.03.02.10
+- Hardened status emoji mapping with regex and ensured initial load gets the correct title.
+## 2026.03.02.09
+- Restored AICli status emojis by mapping literal text fallbacks (_Ready, _Working) back to their respective icons (◇, ✦) in the status poller.
+## 2026.03.02.08
+- Cleaned up tab names to remove noisy _Ready status and ensure overlay closes when drawer is closed.
+## 2026.03.02.07
+- Fix reconnect loop on session ID discovery by prioritizing existing session identifiers and removing ID from UI iframe cache key.
+## 2026.03.02.06
+- Fix: Automated Live Status Polling
+- - The UI now polls for both Title and Chat Session ID every 4 seconds, ensuring the hover-card stays in sync if you switch sessions in the terminal
+- - Improved: Refined project traversal to prevent multiple tabs from sharing the same session ID.
+## 2026.03.02.05
+- Fix: Improved upward project traversal in backend to ensure nested projects are correctly matched
+- - Fix: Enhanced terminal shell to automatically attempt '--resume latest' if a specific session ID fails before giving up and starting fresh.
+## 2026.03.02.04
+- Fix: Synchronize UI with reality
+- - The backend now prioritizes the currently running chat ID for a session over stale log entries, preventing the 'tug-of-war' when navigating away and back
+- - Improved: Passing session ID to get_chat_session action.
+## 2026.03.02.03
+- Fix: Extract the correct 8-character resumable ID from logs.json to fix 'Invalid session identifier' error on server restart
+- - Improved: Added more robust session recovery logic.
+## 2026.03.02.02
+- Fix: Terminals now persist in the background when switching tabs or navigating away in Unraid
+- - Removed closeOnDisconnect=true to allow instant re-attachment.
+## 2026.03.02.01
+- Fix: Reliable session discovery for all tabs on load
+- - Fix: Added invisible hover bridge to tab overlay so users can actually reach the RESET button
+- - Improved: Start action always uses discovered chatId to prevent empty-session fallbacks.
+## 2026.03.01.05
+- Refactor: Remove the special 'Main' tab concept
+- - The UI now initializes with a standard workspace tab for the default path, ensuring consistent behavior across all sessions
+- - Feature: Add manual RESET button to the tab metadata overlay to clear stuck or incorrect session IDs.
+## 2026.03.01.02
+- Fix: Resolve session ID desync between UI and terminal
+- - Fix: Implement circuit breaker to prevent infinite reload loops if a session is missing
+- - Improved: Auto-sync chatSessionId with backend on initial load.
+## 2026.03.01.01
+- Fix: Explicitly trigger resize inside the terminal iframe
+- - Fix: Force 100% width on internal xterm containers to eliminate the reserved scrollbar track gap.
+## 2026.02.28.22
+- Fix: Final boss attempt to kill scrollbar gutter
+- - 1
+- - scrolling=no on iframe
+- - 2
+- - persistent JS injection to kill internal gutters in iframe
+- - 3
+- - React onLoad injection for redundant coverage
+- - 4
+- - ttyd scrollbar:false theme option.
+## 2026.02.28.21
+- Fix: Explicitly disable ttyd internal scrollbar via theme option to eliminate the right-side gap.
+## 2026.02.28.19
+- Fix: Eliminate scrollbar gutter and ensure symmetrical horizontal padding
+- - Refine: Ensure all Unraid root containers are strictly 100% width and kill scroll persistent logic.
+## 2026.02.28.18
+- Fix: Injected CSS into terminal iframe to hide internal xterm.js scrollbar
+- - Style: Restored 2px page safety gap.
+## 2026.02.28.17
+- Fix: Applied the Nuclear Option for scrollbar suppression with a 20px safety gap and persistent JS overrides.
+## 2026.02.28.16
+- Fix: Removed excessive console logging in the UI that was causing performance issues.
+## 2026.02.28.15
+- Fix: Reliable cache-busting by pulling version from .plg file
+- - Feat: Stringified scroll diagnostics for easier debugging.
+## 2026.02.28.14
+- Fix: Further refined scrollbar suppression with requestAnimationFrame and 4px safety gap
+- - Feat: Added detailed element-path logging for scroll diagnostics.
+## 2026.02.28.13
+- Fix: Persistent vertical scrollbar by removing 100vh and applying scorched-earth CSS
+- - Feat: Added scroll diagnostic logging to UI.
+## 2026.02.28.12
+- Fix: Vertical scrollbar on terminal
+- - Feat: Drawer backdrop and outside click to close
+- - Style: Improved tab tooltip position and content
+- - Fix: Session persistence after plugin update.
+## 2026.02.28.11
+- Fix: Eliminate horizontal scrollbar and vertical scrolling by forcing overflow hidden on all Unraid containers
+- - Fix: Ensure terminal is perfectly flush with footer by dynamically calculating footer height
+- - Fix: Solve initial sizing issue by triggering window resize and multiple timeouts.
+## 2026.02.28.10
+- Fix: Add overflow-x hidden to kill horizontal scrollbars
+## 2026.02.28.09
+- Fix: Robust path-to-session mapping using projects.json to prevent ID collisions
+- Fix: Session resumption now correctly identifies unique projects even if they share a directory name
+## 2026.02.28.08
+- Feat: Track and resume AICli chat sessions automatically across reboots
+- Feat: Added metadata overlay card on tab hover (shows full path and AICli Session ID)
+- Backend: Added get_chat_session AJAX action and updated terminal start to support session resumption
+## 2026.02.28.07
+- Fix: Prevent 'Main' tab processes from restarting when other tabs are open
+- Fix: Ensure 'Main' tab processes restart and re-appear when the only tab is closed
+- Fix: Corrected React useEffect dependencies for robust session management and title polling
+- UI: Rebuilt frontend to include tab management fixes
+## 2026.02.28.06
+- UI: hide all scrollbars; Fix: persistence of activeId and ghost session prevention
+## 2026.02.28.05
+- Fix: aggressive node process cleanup in stopAICliTerminal
+## 2026.02.28.03
+- Fix: Drawer toggle tab 'fleeing' bug by preventing vertical jump and adding threshold
+## 2026.02.28.02
+- Feat: Draggable Copilot tab; UI: Suppress page header &amp; force overflow hidden; Tabs: Close Main tab auto-recreates
+## 2026.02.28.01
+- Refresh (Fixed Script)
+## 2026.02.27.29
+
+## 2026.02.27.28
+
+## 2026.02.27.27
+
+## 2026.02.27.26
+
+## 2026.02.27.25
+- UI Force Fix: Guaranteed side-by-side layout for path fields and browse buttons
+- Narrower label column (120px) and forced flex behavior with !important overrides.
+## 2026.02.27.24
+- UI Fix: Corrected Settings page field and button alignment
+- Browse buttons are now square and on the same row as path fields
+- Restored left-aligned labels.
+## 2026.02.27.23
+- UI: Refined Settings page layout
+- Slimmer labels, correctly sized browse buttons, and expandable path fields.
+## 2026.02.27.22
+- Feat: Added Settings shortcut button to the main terminal toolbar.
+## 2026.02.27.21
+- Feat: Unrestricted Directory Browser on Settings &amp; Workspaces
+- Added 'Browse' buttons to settings fields with a matching overlay UI.
+## 2026.02.27.20
+- Feature: Dynamic Tab Titles
+- Tabs now poll tmux and display real-time AICli status icons and activity (◇ ✋ ✦)
+## 2026.02.27.19
+- UI: Remove whitespace above toolbar (div
+- title margin + displaybox padding)
+- Fix: Tab close button always visible
+- Tab text truncates independently with tooltip
+## 2026.02.27.18
+- UI: Tight toolbar padding (1px)
+- Dynamic terminal height pinned 6px above footer, auto-resizes with window
+## 2026.02.27.17
+- UI: Move action buttons above tab strip into page whitespace
+- Slim tab header with minimal padding
+## 2026.02.27.16
+- Fix: Create Folder now uses GET (POST hangs on Unraid NGINX)
+- Fix: Tab overflow with ellipsis truncation
+## 2026.02.27.15
+- Fix: Create Folder debugging and alert on error
+- Fix: 502 race condition (defer iframe until ttyd ready)
+- Debug logging for all AJAX calls
+## 2026.02.27.14
+- Fix: Create Folder (root-level AJAX endpoint), Fix: header scrollbar
+## 2026.02.27.13
+- CSRF fix for Create Folder, compact header, modal polish, scrollbar fix
+## 2026.02.27.12
+- Full theme integration with real Unraid CSS vars
+- Scroll history fix. 502 fix
+## 2026.02.27.11
+- UI Polish, Theme Integration, and 502 Fix
+## 2026.02.27.10
+- Fix: Critical UI theme integration (honors Unraid light/dark mode via system variables)
+- Fix: Standardized font sizes to Unraid native 13px for better readability
+- Fix: Final 502 Bad Gateway resolution (shorter IDs for NGINX compatibility)
+- Fix: Workshop Overlay alignment and Create Folder button functionality
+- Added: Improved modal UX and button styling
+## 2026.02.27.08
+- Fix: Critical CSS scoping fix (resolved issue where UI styles appeared as simple/unformatted)
+## 2026.02.27.07
+- Fix: Critical CSS scoping mismatch (resolved issue where UI styles appeared as simple/unformatted)
+- Fix: Corrected Tailwind utility mapping from .copilot-ui to .gemini-ui
+## 2026.02.27.06
+- Reliable UI cache-busting fix
+## 2026.02.27.04
+- UI/UX improvements, tmux optimization, and NGINX 502 fix for new tabs
+## 2026.02.27.05
+- Fix: Hardened UI cache-busting by persisting version to configuration file during installation.
+## 2026.02.27.04
+- Fix: Resolved 502 Bad Gateway when opening new tabs (NGINX session ID compatibility)
+- Fix: Converted workspace browser to fixed overlay and standardized button sizes
+- Fix: Dynamic tab names based on path and removed tmux status bar for more space
+- Added: Terminal loading message and automatic clear screen on reload
+## 2026.02.27.02
+- Fix: Resolved tmux history inheritance bug and replaced React Portal with absolute absolute positioning for modal overlay.
+## 2026.02.27.01
+- Fix: Resolved terminal auto-load via wrapper script, forced strict UI button sizing, distinct tab styling, and migrated modal to React Portal.
+## 2026.02.26.56
+- Feat: Improved UI/UX, fixed terminal startup, integrated native Unraid modals, and updated standards.
+## 2026.02.26.55
+- Fix: Plugin icon missing in list (added icon attribute to PLUGIN tag)
+- Improved: Standardized icon filename to unraid-aicliagents
+- png
+- Fix: Settings and Tab icons now consistent with renamed asset
+## 2026.02.26.54
+- Added: README
+- md for plugin list display
+- Improved: Plugin icon consistency
+## 2026.02.26.53
+- Added: Required README.md for correct display in the Unraid plugin list.
+- Improved: Ensured plugin icon (aicli-cli.png) is correctly served.
+## 2026.02.26.52
+- Fix: Perfect field alignment in settings
+- Fix: Apply &amp; Save button submission
+- Fix: Terminal rendering improvements (UTF-8)
+## 2026.02.26.51
+- Fix: Perfectly left-aligned all settings fields (Number, Text, Select) within cards.
+- Fix: Resolved "Apply &amp; Save" submission by ensuring CSRF and URLSearchParams are correctly handled.
+- Fix: Improved terminal rendering (AICli logo, diffs) by forcing UTF-8 mode in ttyd.
+- Improved: Enhanced terminal stability with fixed titles and improved persistence loops.
+- Removed: "Done" button from settings page for a cleaner look.
+## 2026.02.26.50
+- Fix: PHP fatal error (duplicate function definition)
+- Verified: Clean AICliAgentsManager
+- php
+## 2026.02.26.49
+- Fix: Resolved PHP fatal error (duplicate function definition) preventing pages from rendering.
+## 2026.02.26.48
+- Feat: Multi-Workspace support with tabbed terminal interface
+- Feat: Integrated directory browser for workspace selection
+- Feat: Auto-loading AICli with persistence loop
+- Fix: CSRF security for folder creation
+## 2026.02.26.47
+- Feat: Multi-Workspace support with a new tabbed terminal interface.
+- Feat: "Change Workspace" feature with an integrated directory browser modal.
+- Feat: Auto-loading AICli on terminal start with an automatic persistence loop.
+- Added: Ability to create new folders directly from the workspace selector.
+- Improved: Tab-specific ttyd and tmux session management.
+## 2026.02.26.46
+- Fix: CSRF token validation for Apply &amp; Save button
+- Fix: Perfect left-alignment for all settings fields
+- Fix: Restored PNG settings icon
+## 2026.02.26.45
+- Fix: Resolved "Apply &amp; Save" button failure by implementing mandatory CSRF token validation.
+- Fix: Perfectly left-aligned all settings fields (Number, Text, Select) by simplifying layout rules.
+- Fix: Restored PNG settings icon (aicli-cli.png) to match Copilot plugin styling.
+- Improved: Enhanced backend security with state-change CSRF verification.
+## 2026.02.26.44
+- Fix: Standardized settings input height and alignment
+- Fix: Perfect left-alignment for all fields
+## 2026.02.26.43
+- Fix: Standardized height and alignment for all settings inputs (Number, Text, Select).
+- Fix: Ensured all fields are perfectly left-aligned within the settings cards.
+- Improved: Responsive layout for settings form.
+## 2026.02.26.42
+- Fix: Terminal rendering (UTF-8, 256colors)
+- Fix: Consolidated settings form and alignment
+- Removed: Done button
+## 2026.02.26.41
+- Fix: Improved terminal rendering (AICli logo, colors, and diffs) by forcing UTF-8 and 256color mode in tmux.
+- Fix: Consolidated settings into a single form to ensure all changes are saved correctly.
+- Fix: Improved alignment of settings labels and inputs.
+- Removed: "Done" button from settings page as per request.
+## 2026.02.26.40
+- Feat: Complete overhaul of Settings UI using modern card-based layout
+- Fix: Settings icon and User Utilities integration
+- Fix: Apply button and save logic
+## 2026.02.26.39
+- Feat: Complete overhaul of Settings UI using a modern card-based layout.
+- Added: Global Settings card (Main Tab, History Limit).
+- Added: Session Profile card (Theme, Font, User, Paths).
+- Fix: Corrected settings icon (aicli-cli.png) and User Utilities integration.
+- Fix: Resolved Settings "Apply" button not submitting correctly.
+## 2026.02.26.38
+- Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement
+- Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category
+- Improved: Menu visibility toggle now correctly manages tab metadata
+## 2026.02.26.37
+- Fix: Terminal tab now uses Tasks:10 and xmenu type for correct header placement.
+- Fix: Settings icon now uses fa-sparkles (four pointed star) and correct Utilities category.
+- Improved: Menu visibility toggle now correctly manages tab metadata.
+## 2026.02.26.36
+- Fix: Terminal tab now appears correctly in the Main header menu
+- Fix: Settings icon correctly categorized under User Utilities
+- Improved: Robust menu visibility toggle logic
+## 2026.02.26.35
+- Fix: Navigation tab now correctly appears in the "Main" header menu when enabled.
+- Fix: Settings icon correctly categorized under "User Utilities" for better integration.
+- Improved: Menu visibility toggle logic is now more robust.
+## 2026.02.26.34
+- Feat: Refactored UI into a dedicated top-level tab and separate settings page
+- Added: Global configuration for theme, font size, history limit, and custom paths
+- Added: Dynamic tab visibility control
+- Improved: Clean terminal interface without internal toolbar
+## 2026.02.26.33
+- Feat: Refactored UI into a dedicated top-level tab and a separate settings page.
+- Added: Configurable theme, font size, history limit, and custom home/root paths.
+- Added: Dynamic tab visibility control.
+## 2026.02.26.32
+- Fix: Resolved PHP fatal error due to function name collision (tail) with Unraid core
+- Verified: Portable tmux integration and debug endpoint
+## 2026.02.26.31
+- Fix: Resolved PHP fatal error due to function name collision (tail) with Unraid core.
+## 2026.02.26.30
+- Fix: Resolved PHP crash on systems missing POSIX extension
+- Added: Bundled portable tmux binary for session sync
+- Improved: Installer robustness
+## 2026.02.26.29
+- Fix: Resolved PHP crash on systems missing POSIX extension.
+- Added: Bundled portable tmux binary to ensure session sync works on all Unraid versions.
+- Improved: Installer robustness and dependency management.
+## 2026.02.26.28
+- Fix: Improved session sync diagnostics
+- Added debug action to AICliAgentsManager
+- php
+- Improved tmux detection and logging in shell wrapper
+## 2026.02.26.27
+- Fix: Improved session sync diagnostics.
+- Added `/plugins/unraid-aicliagents/includes/AICliAgentsManager.php?action=debug` endpoint.
+- Improved tmux detection and logging in shell wrapper.
+## 2026.02.26.26
+- Fix: Surgical process isolation to prevent ttyd from killing its own child shell processes
+- Improved process detection to distinguish between parent server and child terminal sessions
+## 2026.02.26.25
+- Fix: Surgical process isolation to prevent ttyd from killing its own child shell processes.
+- Improved process detection to distinguish between parent server and child terminal sessions.
+## 2026.02.26.24
+- Fix: Resolved duplicate ttyd process issue by strictly enforcing cleanup of unhealthy (socketless) processes
+- Improved backend locking and status detection
+## 2026.02.26.23
+- Fix: Resolved duplicate ttyd process issue by strictly enforcing cleanup of unhealthy (socketless) processes.
+- Improved backend locking and status detection.
+## 2026.02.26.22
+- Fix: Resolved terminal reset and session loss by improving process detection (pgrep) and socket stability
+- Improved session persistence by allowing shared tmux views (standard Unraid behavior)
+- Optimized frontend by reducing redundant iframe reloads during sync
+- Updated UI build artifacts
+## 2026.02.26.21
+- Fix: Resolved terminal reset and session loss by improving process detection (pgrep) and socket stability
+- Improved session persistence by allowing shared tmux views (standard Unraid behavior)
+- Optimized frontend by reducing redundant iframe reloads during sync.
+## 2026.02.26.20
+- Fix: Resolved vertical scrollbar by increasing offset to 245px and forcing overflow hidden on all parents
+- Improved session sync by reusing running ttyd instances
+- Polished toolbar UI.
+## 2026.02.26.19
+- Fix: Reverted to stable 230px height offset
+- Added overflow-x hidden to kill horizontal scrollbars
+- Added iframe onload resize trigger to ensure full-height terminal layout.
+## 2026.02.26.18
+- Fix: Reverted height offset to 230px to resolve scrollbar issues while maintaining all backend sync and locking fixes.
+## 2026.02.26.17
+- Fix: Atomic backend locking to prevent duplicate processes
+- Removed redundant AJAX start call
+- Forced ttyd size (160x60) to avoid initial collapse
+- Adjusted height offset to 260px for footer clearance
+- Polished UI toolbar styling.
+## 2026.02.26.16
+- Fix: Persistent terminal height bug fixed by forcing aggressive tmux client detach and large initial buffer
+- Surgical backend process tracking to prevent duplicate sockets
+- Polished UI toolbar styling.
+## 2026.02.26.15
+- Fix: Resolved duplicate process issue with locking and removed double-start calls
+- Fixed terminal height by forcing large initial tmux size (200x80) and aggressive client-side resizing.
+## 2026.02.26.14
+- Fix: Added aggressive process cleanup to installer to resolve session sync
+- Adjusted height offset to 230px to clear footer completely.
+## 2026.02.26.13
+- Fix: Aggressive process management
+- Always kill and restart ttyd on socket access to ensure correct flags (removed closeOnDisconnect)
+- Adjusted height offset to 200px to sit above footer.
+## 2026.02.26.12
+- Fix: Resolved final scrollbar issue with 170px offset
+- Improved session persistence by keeping ttyd server alive and using aggressive tmux re-attachment.
+## 2026.02.26.11
+- Fix: Aggressive cache-busting for all assets
+- Architectural fix for process tracking and zombie cleanup
+- Optimized height and session persistence logic.
+## 2026.02.26.10
+- Fix: Aggressive cache-busting for all plugin assets.

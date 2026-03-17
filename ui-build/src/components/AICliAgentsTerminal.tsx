@@ -52,9 +52,7 @@ export const AICliAgentsTerminal: React.FC = () => {
     const lastSuccessfulStartKey = useRef<string>('');
 
     useEffect(() => {
-        if (activeId) {
-            localStorage.setItem('aicliagents_active_id', activeId);
-        }
+        localStorage.setItem('aicliagents_active_id', activeId || '');
     }, [activeId]);
 
     const [browserOpen, setBrowserOpen] = useState(false);
@@ -62,12 +60,18 @@ export const AICliAgentsTerminal: React.FC = () => {
     const [dirItems, setDirItems] = useState<any[]>([]);
     const [newDirName, setNewDirName] = useState('');
     const [isStarting, setIsStarting] = useState(false);
+    const [isSyncing, setIsSyncing] = useState(false);
     const [startAttempts, setStartAttempts] = useState<Record<string, number>>({});
 
     // File Upload State
     const [isUploading, setIsUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [uploadFilename, setUploadFilename] = useState('');
+
+    // Environment Variables State
+    const [envModalOpen, setEnvModalOpen] = useState(false);
+    const [workspaceEnvs, setWorkspaceEnvs] = useState<Record<string, string>>({});
+    const [isSavingEnvs, setIsSavingEnvs] = useState(false);
 
     // Load configuration and Registry
     useEffect(() => {
@@ -103,7 +107,7 @@ export const AICliAgentsTerminal: React.FC = () => {
         if (savedSessions) {
             try {
                 const parsed = JSON.parse(savedSessions);
-                if (parsed && Array.isArray(parsed) && parsed.length > 0) {
+                if (parsed && Array.isArray(parsed)) {
                     // CLEANUP: Remove old-style sessions without agentId
                     initial = parsed.filter((s: any) => s.agentId !== undefined);
                 }
@@ -117,21 +121,6 @@ export const AICliAgentsTerminal: React.FC = () => {
             .then(r => r.json())
             .then(data => {
                 if (data && data.config) {
-                    if (initial.length === 0) {
-                        const name = data.config.root_path === '/' ? 'Root' : data.config.root_path.split('/').pop() || 'Workspace';
-                        const newId = 's' + Math.random().toString(36).substring(2, 7);
-                        initial = [{
-                            id: newId,
-                            name: name,
-                            path: data.config.root_path,
-                            agentId: 'gemini-cli',
-                            lastActive: Date.now(),
-                            title: '',
-                            chatSessionId: ''
-                        }];
-                        setActiveId(newId);
-                    }
-
                     Promise.all(initial.map(s => {
                         return fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_chat_session&path=${encodeURIComponent(s.path)}&id=${s.id}&agentId=${s.agentId}&csrf_token=${csrf}`)
                             .then(r => r.json())
@@ -148,9 +137,7 @@ export const AICliAgentsTerminal: React.FC = () => {
 
     // Session Persistence
     useEffect(() => {
-        if (sessions.length > 0) {
-            localStorage.setItem('aicliagents_sessions', JSON.stringify(sessions));
-        }
+        localStorage.setItem('aicliagents_sessions', JSON.stringify(sessions));
     }, [sessions]);
 
     // Dynamic Status Polling (Title & Chat ID)
@@ -311,7 +298,15 @@ export const AICliAgentsTerminal: React.FC = () => {
                     setNewDirName('');
                     browseTo(currentPath);
                 } else {
-                    alert('Error creating folder: ' + (data.message || data.error));
+                    if (typeof (window as any).swal === 'function') {
+                        (window as any).swal('Error', 'Error creating folder: ' + (data.message || data.error), 'error');
+                    } else {
+                        (window as any).swal({
+                            title: "Error",
+                            text: "Error creating folder: " + (data.message || data.error),
+                            type: "error"
+                        });
+                    }
                 }
             });
     };
@@ -322,20 +317,35 @@ export const AICliAgentsTerminal: React.FC = () => {
         const filtered = sessions.filter(s => s.id !== id);
         let nextId = activeId;
 
+        const isLastSession = filtered.length === 0;
+
         if (activeId === id) {
             if (filtered.length > 0) {
                 const nextIndex = Math.min(index, filtered.length - 1);
                 nextId = filtered[nextIndex].id;
             } else {
                 nextId = '';
-                openBrowser();
             }
         }
 
+        if (isLastSession) setIsSyncing(true);
+
         setSessions(filtered);
         setActiveId(nextId);
+        
         const csrf = (window as any).csrf_token || '';
-        fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=stop&id=${id}&hard=1&csrf_token=${csrf}`);
+        fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=stop&id=${id}&hard=1&csrf_token=${csrf}`)
+            .then(() => {
+                if (isLastSession) {
+                    setTimeout(() => {
+                        setIsSyncing(false);
+                        openBrowser();
+                    }, 1500);
+                }
+            })
+            .catch(() => {
+                if (isLastSession) setIsSyncing(false);
+            });
     };
 
     const resetSession = (e: React.MouseEvent, id: string) => {
@@ -362,6 +372,70 @@ export const AICliAgentsTerminal: React.FC = () => {
             })
             .catch(() => {
                 setIsStarting(false);
+            });
+    };
+
+    const openEnvModal = () => {
+        const active = sessions.find(s => s.id === activeId);
+        if (!active) return;
+        
+        const csrf = (window as any).csrf_token || '';
+        fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_env&path=${encodeURIComponent(active.path)}&agentId=${active.agentId}&csrf_token=${csrf}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    setWorkspaceEnvs(data.envs || {});
+                    setEnvModalOpen(true);
+                }
+            })
+            .catch(e => console.error('[AICli] Fetch Env Error:', e));
+    };
+
+    const saveEnvs = () => {
+        const active = sessions.find(s => s.id === activeId);
+        if (!active) return;
+
+        setIsSavingEnvs(true);
+        const csrf = (window as any).csrf_token || '';
+        // Unraid NGINX prefers GET for standalone PHP scripts to avoid hanging
+        const envData = encodeURIComponent(JSON.stringify(workspaceEnvs));
+        fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=save_env&path=${encodeURIComponent(active.path)}&agentId=${active.agentId}&envs=${envData}&csrf_token=${csrf}`)
+            .then(r => r.json())
+            .then(data => {
+                setIsSavingEnvs(false);
+                if (data.status === 'ok') {
+                    setEnvModalOpen(false);
+                    // Optionally restart session to apply ENVs
+                    if (typeof (window as any).swal === 'function') {
+                        (window as any).swal({
+                            title: 'Apply Changes?',
+                            text: 'Environment variables saved. Restart session now to apply?',
+                            type: 'info',
+                            showCancelButton: true,
+                            confirmButtonText: 'Restart',
+                            cancelButtonText: 'Later'
+                        }, (confirmed: boolean) => {
+                            if (confirmed) resetSession({ stopPropagation: () => { } } as any, activeId);
+                        });
+                    } else {
+                        (window as any).swal({
+                            title: "Saved",
+                            text: "Environment variables saved. Restart session now to apply?",
+                            type: "success",
+                            showCancelButton: true,
+                            confirmButtonText: "Restart Now",
+                            cancelButtonText: "Later"
+                        }, (confirmed: boolean) => {
+                            if (confirmed) {
+                                resetSession({ stopPropagation: () => { } } as any, activeId);
+                            }
+                        });
+                    }
+                }
+            })
+            .catch(e => {
+                setIsSavingEnvs(false);
+                console.error('[AICli] Save Env Error:', e);
             });
     };
 
@@ -404,26 +478,51 @@ export const AICliAgentsTerminal: React.FC = () => {
 
     const activeSession = sessions.find(s => s.id === activeId);
     const activeAgent = getAgentInfo(activeSession?.agentId || 'gemini-cli');
+    const hasAnyAgent = Object.values(registry).some(a => a.is_installed);
+    const isVerbose = config.log_level === '3';
 
     const themeJson = THEMES[config.theme as keyof typeof THEMES] || THEMES.dark;
     const themeEncoded = encodeURIComponent(themeJson);
-    const terminalUrl = `/webterminal/aicliterm-${activeId}/?theme=${themeEncoded}&fontSize=${config.font_size}&fontFamily=monospace&v=${activeSession?.lastActive || 'stable'}`;
+    const terminalUrl = `/webterminal/aicliterm-${activeId}/?theme=${themeEncoded}&fontSize=${config.font_size}&fontFamily=monospace&v=${activeSession?.lastActive || 'stable'}${isVerbose ? '' : '&quiet=1'}`;
 
     const handleIframeLoad = (e: React.SyntheticEvent<HTMLIFrameElement>) => {
         try {
             const iframe = e.currentTarget;
-            const doc = iframe.contentDocument || iframe.contentWindow?.document;
-            if (doc) {
+            const win = iframe.contentWindow;
+            const doc = iframe.contentDocument || win?.document;
+            if (doc && win) {
+                // 1. Inject Scrollbar Killer CSS
                 const style = doc.createElement('style');
                 style.textContent = `
                     #terminal .xterm-viewport::-webkit-scrollbar { width: 0px !important; display: none !important; }
                     .xterm-viewport { overflow-y: hidden !important; }
                 `;
                 doc.head.appendChild(style);
-                console.log('[AICli] Injected scrollbar-killer into terminal iframe');
+
+                // 2. Surgical Log Suppression (Frontend noise reduction)
+                if (!isVerbose) {
+                    const script = doc.createElement('script');
+                    script.textContent = `
+                        (function() {
+                            const _log = console.log;
+                            const _info = console.info;
+                            const _warn = console.warn;
+                            const shouldSuppress = (args) => {
+                                if (!args[0] || typeof args[0] !== 'string') return false;
+                                const msg = args[0].toLowerCase();
+                                return msg.includes('[ttyd]') || msg.includes('[xterm]');
+                            };
+                            console.log = function(...args) { if (!shouldSuppress(args)) _log.apply(console, args); };
+                            console.info = function(...args) { if (!shouldSuppress(args)) _info.apply(console, args); };
+                            console.warn = function(...args) { if (!shouldSuppress(args)) _warn.apply(console, args); };
+                        })();
+                    `;
+                    doc.head.appendChild(script);
+                }
+                console.log('[AICli] Terminal iframe initialized' + (isVerbose ? ' (Verbose)' : ' (Quiet Mode)'));
             }
         } catch (err) {
-            console.warn('[AICli] Could not inject styles into iframe (cross-origin?):', err);
+            console.warn('[AICli] Could not access iframe internals (cross-origin?):', err);
         }
     };
 
@@ -442,7 +541,11 @@ export const AICliAgentsTerminal: React.FC = () => {
             >
                 <div style={styles.drawerContent}>
                     <div style={styles.drawerTop}>
-                        <button onClick={() => { openBrowser(); setDrawerOpen(false); }} style={styles.drawerBtnPrimary}>
+                        <button 
+                            onClick={() => { openBrowser(); setDrawerOpen(false); }} 
+                            style={{...styles.drawerBtnPrimary, opacity: hasAnyAgent ? 1 : 0.5}}
+                            disabled={!hasAnyAgent}
+                        >
                             <i className="fa fa-plus-circle"></i>
                             New Workspace
                         </button>
@@ -486,6 +589,19 @@ export const AICliAgentsTerminal: React.FC = () => {
                     </div>
 
                     <div style={styles.drawerBottom}>
+                        <button
+                            onClick={openEnvModal}
+                            style={{
+                                ...styles.drawerBtn,
+                                opacity: activeSession ? 1 : 0.5,
+                                cursor: activeSession ? 'pointer' : 'not-allowed'
+                            }}
+                            title="Manage Environment Variables"
+                            disabled={!activeSession}
+                        >
+                            <i className="fa fa-list-alt"></i>
+                            MANAGE ENV
+                        </button>
                         <button
                             onClick={() => document.getElementById('aicli-file-upload')?.click()}
                             style={{
@@ -554,7 +670,8 @@ export const AICliAgentsTerminal: React.FC = () => {
                                                             if (typeof (window as any).swal === 'function') {
                                                                 (window as any).swal({ title: 'File Uploaded', text: `Successfully uploaded ${file.name} to ${activeSession.path}`, type: 'success', timer: 2500, showConfirmButton: false });
                                                             } else {
-                                                                alert('File Uploaded!');
+                                                                // Swapped alert for swal or minimal fallback
+                                                                console.log('File Uploaded!');
                                                             }
                                                             setIsUploading(false);
                                                         } else {
@@ -567,7 +684,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                                                         if (typeof (window as any).swal === 'function') {
                                                             (window as any).swal('Upload Failed', errMsg, 'error');
                                                         } else {
-                                                            alert('Upload failed: ' + errMsg);
+                                                            console.error('Upload failed: ' + errMsg);
                                                         }
                                                     }
                                                 } catch (e) {
@@ -576,7 +693,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                                                     if (typeof (window as any).swal === 'function') {
                                                         (window as any).swal('Upload Failed', 'Invalid server response: ' + text.substring(0, 100), 'error');
                                                     } else {
-                                                        alert('Upload failed: Invalid server response');
+                                                        console.error('Upload failed: Invalid server response');
                                                     }
                                                 }
                                             })
@@ -586,7 +703,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                                                 if (typeof (window as any).swal === 'function') {
                                                     (window as any).swal('Upload Failed', 'Network Error: ' + err.message, 'error');
                                                 } else {
-                                                    alert('Upload failed: Network Error (' + err.message + ')');
+                                                    console.error('Upload failed: Network Error (' + err.message + ')');
                                                 }
                                             });
                                     };
@@ -597,22 +714,6 @@ export const AICliAgentsTerminal: React.FC = () => {
                                 e.target.value = '';
                             }}
                         />
-                        <button
-                            onClick={() => {
-                                const updated = sessions.map(s => s.id === activeId ? { ...s, lastActive: Date.now() } : s);
-                                lastStartedKey.current = ''; // Allow refresh to trigger start logic
-                                setSessions(updated);
-                                const csrf = (window as any).csrf_token || '';
-                                fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=restart&id=${activeId}&path=${encodeURIComponent(activeSession?.path || '')}&agentId=${activeSession?.agentId || ''}&csrf_token=${csrf}`);
-                                setDrawerOpen(false);
-                            }}
-
-                            style={styles.drawerBtn}
-                            title="Restart Session"
-                        >
-                            <i className="fa fa-refresh"></i>
-                            Sync / Restart
-                        </button>
                         <button onClick={() => window.location.href = '/Settings/AICliAgentsManager'} style={styles.drawerBtn} title="Plugin Settings">
                             <i className="fa fa-cog"></i>
                             Settings
@@ -698,7 +799,41 @@ export const AICliAgentsTerminal: React.FC = () => {
                     </div>
                 )}
 
-                {sessions.length === 0 && (
+                {isSyncing && (
+                    <div style={{ ...styles.startingOverlay, zIndex: 101 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, backgroundColor: 'var(--content-background-color, #fff)', padding: '30px 40px', borderRadius: 8, boxShadow: '0 10px 40px rgba(0,0,0,0.2)', border: '1px solid var(--border-color, #ccc)', minWidth: 300 }}>
+                            <i className="fa fa-refresh fa-spin" style={{ fontSize: 36, color: 'var(--orange, #e68a00)' }}></i>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontWeight: 700, marginBottom: 4 }}>Automatic Syncing</div>
+                                <div style={{ fontSize: 11, opacity: 0.6 }}>Mirroring home directory to Flash drive...</div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {!hasAnyAgent && (
+                    <div style={styles.startingOverlay}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, textAlign: 'center', padding: 40 }}>
+                            <div style={{ padding: 25, borderRadius: '50%', backgroundColor: 'var(--mild-background-color, rgba(230,138,0,0.05))', border: '1px solid var(--orange, #e68a00)', opacity: 0.8 }}>
+                                <i className="fa fa-warning" style={{ fontSize: 48, color: 'var(--orange, #e68a00)' }}></i>
+                            </div>
+                            <div>
+                                <h3 style={{ margin: '0 0 8px 0', color: 'var(--orange, #e68a00)' }}>No Agents Installed</h3>
+                                <p style={{ margin: 0, opacity: 0.6, fontSize: 13, maxWidth: 350 }}>
+                                    To use AI CLI Agents, you must first install and configure at least one agent (e.g., Gemini, Claude) from the settings page.
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => window.location.href = '/Settings/AICliAgentsManager'}
+                                style={{ ...styles.openBtn, padding: '12px 32px', fontSize: 13, borderRadius: 6 }}
+                            >
+                                <i className="fa fa-cog"></i> Go to Agent Settings
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {hasAnyAgent && sessions.length === 0 && (
                     <div style={styles.startingOverlay}>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20, textAlign: 'center', padding: 40 }}>
                             <div style={{ padding: 25, borderRadius: '50%', backgroundColor: 'var(--mild-background-color, rgba(0,0,0,0.03))', border: '1px solid var(--border-color, #eee)' }}>
@@ -720,7 +855,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                     </div>
                 )}
 
-                {activeSession && !registry[activeSession.agentId]?.is_installed && (
+                {hasAnyAgent && activeSession && !registry[activeSession.agentId]?.is_installed && (
                     <div style={styles.startingOverlay}>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, textAlign: 'center', padding: 40 }}>
                             <img src={getAgentInfo(activeSession.agentId).icon} style={{ width: 64, height: 64, opacity: 0.5 }} alt="" />
@@ -740,7 +875,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                     </div>
                 )}
 
-                {isStarting && activeSession && registry[activeSession.agentId]?.is_installed && (
+                {hasAnyAgent && isStarting && activeSession && registry[activeSession.agentId]?.is_installed && (
                     <div style={styles.startingOverlay}>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
                             <i className="fa fa-circle-o-notch fa-spin" style={{ fontSize: 24, color: 'var(--orange, #e68a00)' }}></i>
@@ -750,7 +885,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                         </div>
                     </div>
                 )}
-                {!isStarting && registry[activeSession?.agentId || '']?.is_installed && (
+                {hasAnyAgent && !isStarting && registry[activeSession?.agentId || '']?.is_installed && (
                     <iframe
                         key={activeId + (activeSession?.agentId || '') + (activeSession?.lastActive || '')}
                         src={terminalUrl}
@@ -758,6 +893,7 @@ export const AICliAgentsTerminal: React.FC = () => {
                         title="AICli Terminal"
                         onLoad={handleIframeLoad}
                         scrolling="no"
+                        allow="clipboard-read; clipboard-write"
                     />
                 )}
             </div>
@@ -841,6 +977,95 @@ export const AICliAgentsTerminal: React.FC = () => {
                     </div>
                 </div>
             )}
+
+            {/* Environment Variables Modal */}
+            {envModalOpen && (
+                <div style={styles.modalBackdrop}>
+                    <div style={{ ...styles.modalBox, width: 600 }}>
+                        <div style={styles.modalHeader}>
+                            <span style={styles.modalTitle}>
+                                <i className="fa fa-list-alt" style={{ color: 'var(--orange, #e68a00)' }}></i>
+                                {' '}Manage Session Environment
+                            </span>
+                            <i className="fa fa-times" style={{ cursor: 'pointer', opacity: 0.5 }} onClick={() => setEnvModalOpen(false)}></i>
+                        </div>
+
+                        <div style={styles.modalBody}>
+                            <div style={{ ...styles.pathBar, marginBottom: 8 }}>
+                                <img src={getAgentInfo(activeSession?.agentId || 'gemini-cli').icon} style={{ width: 14, height: 14 }} alt="" />
+                                {activeSession?.agentId} @ {activeSession?.path}
+                            </div>
+                            
+                            <p style={{ fontSize: 11, opacity: 0.6, margin: '0 0 15px 4px' }}>
+                                These variables are specific to this workspace + agent combination.
+                            </p>
+
+                            <div style={{ maxHeight: 300, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, padding: 4 }}>
+                                {Object.entries(workspaceEnvs).map(([key, value], idx) => (
+                                    <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                        <input 
+                                            style={{ ...styles.createInput, flex: 2, fontFamily: 'monospace' }} 
+                                            value={key} 
+                                            placeholder="VARIABLE_NAME"
+                                            onChange={(e) => {
+                                                const newEnvs = { ...workspaceEnvs };
+                                                const val = e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '');
+                                                delete newEnvs[key];
+                                                newEnvs[val] = value;
+                                                setWorkspaceEnvs(newEnvs);
+                                            }}
+                                        />
+                                        <div style={{ opacity: 0.3 }}>=</div>
+                                        <input 
+                                            style={{ ...styles.createInput, flex: 3 }} 
+                                            value={value} 
+                                            placeholder="value"
+                                            onChange={(e) => {
+                                                setWorkspaceEnvs({ ...workspaceEnvs, [key]: e.target.value });
+                                            }}
+                                        />
+                                        <button 
+                                            onClick={() => {
+                                                const newEnvs = { ...workspaceEnvs };
+                                                delete newEnvs[key];
+                                                setWorkspaceEnvs(newEnvs);
+                                            }}
+                                            style={{ ...styles.createBtn, color: '#ff4444', border: '1px solid #ff4444' }}
+                                        >
+                                            <i className="fa fa-trash-o"></i>
+                                        </button>
+                                    </div>
+                                ))}
+
+                                {Object.keys(workspaceEnvs).length === 0 && (
+                                    <div style={{ textAlign: 'center', padding: '20px 0', opacity: 0.4, fontStyle: 'italic', fontSize: 12 }}>
+                                        No custom environment variables defined.
+                                    </div>
+                                )}
+                            </div>
+
+                            <button 
+                                onClick={() => setWorkspaceEnvs({ ...workspaceEnvs, '': '' })}
+                                style={{ ...styles.createBtn, width: '100%', marginTop: 15, height: 32, borderStyle: 'dashed' }}
+                            >
+                                <i className="fa fa-plus"></i> Add Variable
+                            </button>
+                        </div>
+
+                        <div style={styles.modalFooter}>
+                            <button onClick={() => setEnvModalOpen(false)} style={styles.cancelBtn}>Cancel</button>
+                            <button 
+                                onClick={saveEnvs} 
+                                style={{ ...styles.openBtn, opacity: isSavingEnvs ? 0.7 : 1 }}
+                                disabled={isSavingEnvs}
+                            >
+                                {isSavingEnvs ? <i className="fa fa-circle-o-notch fa-spin"></i> : <i className="fa fa-check"></i>}
+                                {' '}Save Changes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
@@ -876,7 +1101,7 @@ const styles: Record<string, React.CSSProperties> = {
         bottom: 0,
         width: 240,
         zIndex: 1000,
-        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        backgroundColor: 'var(--background-color, var(--body-background, #fff))',
         borderRight: '1px solid var(--border-color, #ccc)',
         transition: 'transform 0.3s ease-in-out',
         display: 'flex',
@@ -978,10 +1203,11 @@ const styles: Record<string, React.CSSProperties> = {
         textTransform: 'uppercase' as const,
         border: 'none',
         borderRadius: 6,
-        backgroundColor: 'var(--orange, #e68a00)',
+        backgroundColor: 'var(--orange, #ff8c00)',
         color: '#fff',
         cursor: 'pointer',
-        boxShadow: '0 4px 12px rgba(230, 138, 0, 0.2)',
+        boxShadow: '0 4px 12px rgba(255, 140, 0, 0.3)',
+        transition: 'all 0.2s ease',
     },
     drawerBtn: {
         display: 'flex',
@@ -989,13 +1215,16 @@ const styles: Record<string, React.CSSProperties> = {
         gap: 10,
         width: '100%',
         padding: '10px 12px',
-        fontSize: 12,
-        fontWeight: 600,
-        border: '1px solid var(--border-color, #ccc)',
+        fontSize: 11,
+        fontWeight: 700,
+        textTransform: 'uppercase' as const,
+        border: 'none',
         borderRadius: 4,
-        backgroundColor: 'var(--button-background, transparent)',
-        color: 'var(--text-color, inherit)',
+        backgroundColor: '#ff8c00',
+        color: '#fff',
         cursor: 'pointer',
+        boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+        transition: 'all 0.15s ease',
     },
     drawerToggle: {
         position: 'absolute',
@@ -1003,7 +1232,7 @@ const styles: Record<string, React.CSSProperties> = {
         bottom: 20,
         width: 32,
         height: 48,
-        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        backgroundColor: 'var(--background-color, var(--body-background, #fff))',
         border: '1px solid var(--border-color, #ccc)',
         borderLeft: 'none',
         borderRadius: '0 8px 8px 0',
@@ -1032,7 +1261,7 @@ const styles: Record<string, React.CSSProperties> = {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: 'var(--content-background-color, rgba(255,255,255,0.85))',
+        backgroundColor: 'var(--background-color, rgba(255,255,255,0.85))',
         backdropFilter: 'blur(4px)',
         overflow: 'hidden',
     },
@@ -1061,7 +1290,7 @@ const styles: Record<string, React.CSSProperties> = {
         overflow: 'hidden',
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         border: '1px solid var(--border-color, #ccc)',
-        backgroundColor: 'var(--content-background-color, var(--body-background, #fff))',
+        backgroundColor: 'var(--background-color, var(--body-background, #fff))',
         color: 'var(--text-color, inherit)',
     },
     modalHeader: {
@@ -1165,15 +1394,16 @@ const styles: Record<string, React.CSSProperties> = {
     createBtn: {
         height: 28,
         padding: '0 12px',
-        fontSize: 11,
-        fontWeight: 700,
+        fontSize: 10,
+        fontWeight: 800,
         textTransform: 'uppercase' as const,
-        border: '1px solid var(--button-border, var(--border-color, #bbb))',
+        border: 'none',
         borderRadius: 3,
-        backgroundColor: 'var(--button-background, var(--mild-background-color, #e8e8e8))',
-        color: 'var(--button-text-color, inherit)',
+        backgroundColor: '#ff8c00',
+        color: '#fff',
         cursor: 'pointer',
         transition: 'all 0.15s',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
     },
     modalFooter: {
         display: 'flex',
@@ -1201,12 +1431,12 @@ const styles: Record<string, React.CSSProperties> = {
         fontSize: 11,
         fontWeight: 900,
         textTransform: 'uppercase' as const,
-        backgroundColor: 'var(--orange, #e68a00)',
+        backgroundColor: '#ff8c00',
         border: 'none',
         borderRadius: 3,
         color: '#fff',
         cursor: 'pointer',
         transition: 'all 0.15s',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+        boxShadow: '0 2px 8px rgba(255, 140, 0, 0.4)',
     },
 };

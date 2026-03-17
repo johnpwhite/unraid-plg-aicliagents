@@ -7,7 +7,7 @@
  * The AICliAgents CLI page loads on EVERY Unraid page, so any :root 
  * styles here would override Unraid's own CSS variables.
  */
-.gemini-ui {
+.aicli-ui {
   --background: 0 0% 100%;
   --foreground: 0 0% 3.9%;
   --card: 0 0% 100%;
@@ -40,8 +40,8 @@
 }
 
 /* Unraid dark mode detection */
-.gemini-ui.dark,
-body[class*="dark"] .gemini-ui {
+.aicli-ui.dark,
+body[class*="dark"] .aicli-ui {
   --background: 0 0% 3.9%;
   --foreground: 0 0% 98%;
   --card: 0 0% 3.9%;
@@ -65,4 +65,25 @@ body[class*="dark"] .gemini-ui {
   --background-color: var(--body-background, #1e1e1e);
   --text-color: var(--body-text, #e0e0e0);
   --border-color: var(--line-color, #333);
+}
+
+.aicli-ui button {
+  background-color: #ff8c00 !important;
+  color: white !important;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.aicli-ui button:hover {
+  background-color: #e67e00 !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+}
+
+.aicli-ui button:disabled {
+  background-color: #444 !important;
+  color: #888 !important;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
 }

@@ -4,6 +4,7 @@ Icon="unraid-aicliagents.png"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php';
+aicli_ensure_init();
 
 $config = getAICliConfig();
 // If disabled, just redirect or show message
