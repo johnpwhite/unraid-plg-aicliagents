@@ -1,0 +1,222 @@
+Menu="Tasks"
+Title="AI CLI Agents"
+Icon="unraid-aicliagents.png"
+---
+<?php
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php';
+aicli_ensure_init();
+
+$config = getAICliConfig();
+// If disabled, just redirect or show message
+if ($config['enable_tab'] !== '1') {
+    echo "AICliAgents CLI Tab is disabled in settings.";
+    return;
+}
+
+// Get version for cache busting
+$version = $config['version'] ?? time();
+
+// Get CSRF token
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
+?>
+
+<div id="aicliagents-root"></div>
+
+<script>
+    window.csrf_token = '<?=$csrf_token?>';
+</script>
+
+<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= $version ?>">
+<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= $version ?>"></script>
+
+<style>
+/* 
+   SCORCHED EARTH on scrollbars. 
+   We force hidden on EVERY potential parent wrapper.
+*/
+/* 
+   SUPER-NUCLEAR reset for scrollbars and gutters.
+   We force hidden/clip on EVERYTHING that could reserve space.
+*/
+html,
+body, 
+#displaybox, 
+#sb-body, 
+#sb-container,
+.gemini-ui, 
+main, 
+#main-content,
+#aicliagents-root,
+.main-section,
+.main-row,
+#form {
+    overflow: hidden !important;
+    overflow-y: hidden !important;
+    overflow-x: hidden !important;
+    /* Use clip if supported to prevent any scroll-container behavior */
+    overflow: clip !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+    scrollbar-gutter: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    border: none !important;
+}
+
+body::-webkit-scrollbar,
+html::-webkit-scrollbar,
+#displaybox::-webkit-scrollbar,
+#sb-body::-webkit-scrollbar,
+.gemini-ui::-webkit-scrollbar,
+main::-webkit-scrollbar,
+#main-content::-webkit-scrollbar,
+#aicliagents-root::-webkit-scrollbar,
+.main-section::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+}
+
+/* HIDE THE PAGE HEADER */
+div.title, .title, .title-row, .title-bar, .header-row {
+    display: none !important;
+}
+
+#displaybox, #main-content {
+    position: relative !important;
+    left: 0 !important;
+    right: 0 !important;
+}
+
+#aicliagents-root {
+    width: 100% !important;
+    display: flex;
+    flex-direction: column;
+    margin: 0 !important;
+    padding: 0 !important; /* Total flush */
+    min-height: 400px;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+    position: relative !important;
+}
+
+.gemini-ui {
+    height: 100%;
+    width: 100%;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+</style>
+
+<script>
+$(function(){
+    var resizeTimer;
+    
+    // Force a resize event INSIDE the iframe so ttyd/xterm recalculates its fit
+    function triggerIframeResize() {
+        try {
+            var iframe = document.querySelector('iframe[title="AICli Terminal"]');
+            if (iframe && iframe.contentWindow) {
+                iframe.contentWindow.dispatchEvent(new Event('resize'));
+            }
+        } catch(e) {}
+    }
+
+    // THE NUCLEAR OPTION: Persistently kill scrollbars and force width on the root containers
+    function killScroll() {
+        var targets = 'html, body, #displaybox, #sb-body, #sb-container, #main-content, .main-section';
+        $(targets).css({
+            'overflow': 'hidden',
+            'overflow-y': 'hidden',
+            'scrollbar-gutter': 'none',
+            'width': '100%',
+            'max-width': '100%',
+            'margin': '0',
+            'padding': '0'
+        });
+        document.documentElement.style.setProperty('overflow', 'hidden', 'important');
+        document.body.style.setProperty('overflow', 'hidden', 'important');
+        
+        // Ensure no right padding is inherited from Unraid themes
+        $('#displaybox, #main-content').each(function() {
+            this.style.setProperty('padding', '0', 'important');
+            this.style.setProperty('margin', '0', 'important');
+            this.style.setProperty('width', '100%', 'important');
+        });
+
+        // Reach into the iframe to kill internal scrollbars (Same-Origin via Proxy)
+        try {
+            var iframe = document.querySelector('iframe[title="AICli Terminal"]');
+            if (iframe && iframe.contentDocument) {
+                var doc = iframe.contentDocument;
+                var styleId = 'aicli-kill-scroll';
+                if (!doc.getElementById(styleId)) {
+                    var style = doc.createElement('style');
+                    style.id = styleId;
+                    style.innerHTML = `
+                        html, body, .terminal, .xterm, .xterm-viewport, .xterm-screen { 
+                            overflow: hidden !important; 
+                            scrollbar-width: none !important; 
+                            padding: 0 !important; 
+                            margin: 0 !important;
+                            scrollbar-gutter: none !important;
+                            width: 100% !important;
+                            max-width: 100% !important;
+                        } 
+                        ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+                    `;
+                    doc.head.appendChild(style);
+                }
+            }
+        } catch(e) {}
+    }
+
+    // Dynamically size the root to fill from its top edge to the footer
+    function resizeRoot() {
+        if (resizeTimer) cancelAnimationFrame(resizeTimer);
+        
+        resizeTimer = requestAnimationFrame(function() {
+            var el = document.getElementById('aicliagents-root');
+            if (!el) return;
+            
+            // Re-calculate top position to account for any dynamically injected Unraid banners
+            var rect = el.getBoundingClientRect();
+            
+            // Try to find the Unraid footer
+            var footer = document.getElementById('footer');
+            var footerHeight = footer ? footer.offsetHeight : 24;
+            if (!footerHeight || footerHeight < 10) footerHeight = 24; // Fallback
+            
+            // 0px safety gap: React component now handles internal padding
+            var padding = 0;
+            var available = window.innerHeight - rect.top - footerHeight - padding;
+            
+            // Floor the height to avoid sub-pixel scaling causing 1px scrollbars
+            var finalHeight = Math.floor(available);
+            el.style.height = Math.max(400, finalHeight) + 'px';
+            
+            killScroll();
+            
+            // Force a resize event on the window to let the iframe know its container changed
+            window.dispatchEvent(new Event('resize'));
+            setTimeout(triggerIframeResize, 10);
+            setTimeout(triggerIframeResize, 500);
+        });
+    }
+    
+    // Run on load, on resize, and after React mounts
+    resizeRoot();
+    window.addEventListener('resize', resizeRoot);
+    
+    // D-13: Reduced from 7 timeouts — 3 is enough to catch Unraid UI shifts
+    [100, 500, 2000].forEach(ms => setTimeout(resizeRoot, ms));
+    // D-12: One-shot killScroll on load instead of wasteful 1-second interval
+    killScroll();
+});
+</script>
+

@@ -1,0 +1,11 @@
+#!/bin/bash
+# AI CLI Agents: Shutdown/Array Stop persistence sync
+# This script ensures all RAM-based home directories are flushed to Flash on shutdown.
+
+LOG="/tmp/unraid-aicliagents/debug.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] System shutdown detected. Syncing all AI CLI home directories..." >> "$LOG"
+
+# Call the PHP sync utility
+/usr/bin/php -r "require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php'; aicli_sync_all();"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] Sync complete." >> "$LOG"
