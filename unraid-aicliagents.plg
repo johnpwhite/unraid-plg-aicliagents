@@ -3,7 +3,7 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.17.35" launch="Settings/AICliAgentsManager" pluginURL="https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/unraid-aicliagents.plg" min="7.2.0" icon="unraid-aicliagents.png">
 
 <CHANGES>
-## 2026.03.17.35 - The "Professional Workspace" Update 💼
+## 2026.03.17.35 - The "Professional Workspace" Update
 - **Feat: Advanced Workspace Environment Management**: New "Manage ENV" drawer overlay allows viewing and overriding global API keys per workspace without affecting global settings.
 - **Feat: Intelligent API Persistence**: Dynamically discovers and persists API keys for all installed agents (OpenCode, Kilo Code, etc.) in the Secrets Vault.
 - **Feat: Hybrid Home Persistence**: Implemented a decoupled background sync daemon that asynchronously mirrors the high-performance RAM home directory to the Flash drive.
@@ -16,7 +16,7 @@
 - **Fix: Setting Persistence**: Ensured fallback API keys and backup schedule settings correctly persist between reboots and user changes.
 - **Fix: Environment Visibility**: Resolved a critical bug where custom environment variables and Secrets Vault keys were not correctly propagated to the active AI agent.
 
-## 2026.03.09.19 - The "Premium UX" Update 💎
+## 2026.03.09.19 - The "Premium UX" Update
 - **Feat: Expanded Agent Store**: Added support for Claude Code, OpenCode, Kilo Code, Pi Coder, and Codex CLI.
 - **Feat: Integrated Node.js Environment**: Bundled Node.js (v22.22.0) with npm for seamless, portable agent management.
 - **Feat: Premium Uninstaller UI**: Completely redesigned uninstallation with quiet logging and a resilient, high-contrast summary box confirming preservation of settings and chats.
