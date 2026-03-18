@@ -860,7 +860,8 @@ function getAICliNpmMap() {
         'claude-code' => '@anthropic-ai/claude-code',
         'kilocode' => '@kilocode/cli',
         'pi-coder' => '@mariozechner/pi-coding-agent',
-        'codex-cli' => '@openai/codex'
+        'codex-cli' => '@openai/codex',
+        'factory-cli' => '@factory/cli'
     ];
 }
 
@@ -941,6 +942,18 @@ function getAICliAgentsRegistry() {
             'resume_latest' => "$binDir/node_modules/.bin/codex",
             'env_prefix' => 'CODEX',
             'is_installed' => file_exists("$binDir/node_modules/.bin/codex")
+        ],
+        'factory-cli' => [
+            'id' => 'factory-cli',
+            'name' => 'Factory CLI',
+            'icon_url' => '/plugins/unraid-aicliagents/assets/icons/factory.png',
+            'release_notes' => 'https://www.npmjs.com/package/@factory/cli?activeTab=versions',
+            'runtime' => 'node',
+            'binary' => "$binDir/node_modules/.bin/droid",
+            'resume_cmd' => "$binDir/node_modules/.bin/droid",
+            'resume_latest' => "$binDir/node_modules/.bin/droid",
+            'env_prefix' => 'FACTORY',
+            'is_installed' => file_exists("$binDir/node_modules/.bin/droid")
         ]
     ];
 
