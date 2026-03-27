@@ -1,8 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.27.18" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.27.19" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.03.27.19
+- Feat: Added Shell Integration aliases for all agents (kilo, pi, codex, droid, nanocoder).
+- Fix: Resolved 'Status not available' by fixing GitHub URL extraction for SSH-over-443 remotes.
+- Fix: Corrected changelog replacement to prevent symbol corruption during publishing.
+
 ## 2026.03.27.18
 - Feat: Added Support for OpenCode, Claude Code, and NanoCoder agents.
 - Feat: Global Shell Integration providing native 'claude', 'gemini', and 'opencode' aliases in all SSH and local terminal sessions.
@@ -76,7 +81,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.03.27.18"
+export VERSION="2026.03.27.19"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"

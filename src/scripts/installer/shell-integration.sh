@@ -23,6 +23,10 @@ _aicli_run() {
 alias claude='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/claude-code/node_modules/.bin/claude'
 alias opencode='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/opencode/node_modules/.bin/opencode'
 alias gemini='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/gemini-cli/node_modules/.bin/gemini'
+alias kilo='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/kilocode/node_modules/.bin/kilo'
+alias pi='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/pi-coder/node_modules/.bin/pi'
+alias codex='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/codex-cli/node_modules/.bin/codex'
+alias droid='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/factory-cli/node_modules/.bin/droid'
 alias nanocoder='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/nanocoder/node_modules/.bin/nanocoder'
 
 # Note: Any commands run via these aliases will have their data automatically
