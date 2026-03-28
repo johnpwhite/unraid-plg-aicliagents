@@ -1,6 +1,6 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.28.05" launch="Settings/AICliAgentsManager" pluginURL="https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.28.05" launch="Settings/AICliAgentsManager" pluginURL="https://github.com/443/unraid-plg-aicliagents/raw/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
 ## 2026.03.28.05
@@ -60,22 +60,22 @@
 
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
 <FILE Name="/tmp/aicli-clean.sh">
-<URL>https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/src/scripts/installer/cleanup.sh</URL>
+<URL>https://github.com/443/unraid-plg-aicliagents/raw/main/src/scripts/installer/cleanup.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-legacy.sh">
-<URL>https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/src/scripts/installer/legacy-migrate.sh</URL>
+<URL>https://github.com/443/unraid-plg-aicliagents/raw/main/src/scripts/installer/legacy-migrate.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-runtime.sh">
-<URL>https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/src/scripts/installer/runtime.sh</URL>
+<URL>https://github.com/443/unraid-plg-aicliagents/raw/main/src/scripts/installer/runtime.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-ui.sh">
-<URL>https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/src/scripts/installer/ui-assets.sh</URL>
+<URL>https://github.com/443/unraid-plg-aicliagents/raw/main/src/scripts/installer/ui-assets.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-storage.sh">
-<URL>https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/src/scripts/installer/storage.sh</URL>
+<URL>https://github.com/443/unraid-plg-aicliagents/raw/main/src/scripts/installer/storage.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-finalize.sh">
-<URL>https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main/src/scripts/installer/finalize.sh</URL>
+<URL>https://github.com/443/unraid-plg-aicliagents/raw/main/src/scripts/installer/finalize.sh</URL>
 </FILE>
 
 <!-- MAIN INSTALL ENGINE -->
@@ -85,7 +85,7 @@
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
 export VERSION="2026.03.28.05"
-export GIT_URL="https://github.com/johnpwhite/unraid-plg-aicliagents/raw/main"
+export GIT_URL="https://github.com/443/unraid-plg-aicliagents/raw/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
 
