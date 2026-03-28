@@ -1,9 +1,9 @@
-import { GeminiTerminal } from "./components/GeminiTerminal";
+import { AICliAgentsTerminal } from "./components/AICliAgentsTerminal";
 
 export default function App() {
   return (
-    <div className="gemini-cli-ui h-full w-full flex flex-col bg-transparent">
-      <GeminiTerminal />
+    <div className="aicli-ui h-full w-full flex flex-col bg-transparent">
+      <AICliAgentsTerminal />
     </div>
   );
 }

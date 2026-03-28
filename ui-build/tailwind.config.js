@@ -1,7 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 export default {
 	darkMode: ["class"],
-	important: '.gemini-cli-ui',
+	important: '.gemini-ui',
 	content: [
 		"./index.html",
 		"./src/**/*.{js,ts,jsx,tsx}",

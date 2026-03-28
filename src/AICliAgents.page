@@ -1,16 +1,15 @@
-Menu="Tasks:10"
-Type="xmenu"
-Tabs="false"
-Title="Gemini CLI"
-Icon="unraid-geminicli.png"
+Menu="Tasks"
+Title="AI CLI Agents"
+Icon="assets/icons/google-gemini.png"
 ---
 <?php
-require_once '/usr/local/emhttp/plugins/unraid-geminicli/includes/GeminiSettings.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php';
+aicli_ensure_init();
 
-$config = getGeminiConfig();
+$config = getAICliConfig();
 // If disabled, just redirect or show message
 if ($config['enable_tab'] !== '1') {
-    echo "Gemini CLI Tab is disabled in settings.";
+    echo "AICliAgents CLI Tab is disabled in settings.";
     return;
 }
 
@@ -22,14 +21,14 @@ $var = @parse_ini_file("/var/local/emhttp/var.ini");
 $csrf_token = $var['csrf_token'] ?? '';
 ?>
 
-<div id="gemini-cli-root"></div>
+<div id="aicliagents-root"></div>
 
 <script>
     window.csrf_token = '<?=$csrf_token?>';
 </script>
 
-<link rel="stylesheet" href="/plugins/unraid-geminicli/assets/ui/index.css?v=<?= $version ?>">
-<script type="module" src="/plugins/unraid-geminicli/assets/ui/index.js?v=<?= $version ?>"></script>
+<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= $version ?>">
+<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= $version ?>"></script>
 
 <style>
 /* 
@@ -45,10 +44,10 @@ body,
 #displaybox, 
 #sb-body, 
 #sb-container,
-.gemini-cli-ui, 
+.gemini-ui, 
 main, 
 #main-content,
-#gemini-cli-root,
+#aicliagents-root,
 .main-section,
 .main-row,
 #form {
@@ -72,10 +71,10 @@ body::-webkit-scrollbar,
 html::-webkit-scrollbar,
 #displaybox::-webkit-scrollbar,
 #sb-body::-webkit-scrollbar,
-.gemini-cli-ui::-webkit-scrollbar,
+.gemini-ui::-webkit-scrollbar,
 main::-webkit-scrollbar,
 #main-content::-webkit-scrollbar,
-#gemini-cli-root::-webkit-scrollbar,
+#aicliagents-root::-webkit-scrollbar,
 .main-section::-webkit-scrollbar {
     display: none !important;
     width: 0 !important;
@@ -93,7 +92,7 @@ div.title, .title, .title-row, .title-bar, .header-row {
     right: 0 !important;
 }
 
-#gemini-cli-root {
+#aicliagents-root {
     width: 100% !important;
     display: flex;
     flex-direction: column;
@@ -105,7 +104,7 @@ div.title, .title, .title-row, .title-bar, .header-row {
     position: relative !important;
 }
 
-.gemini-cli-ui {
+.gemini-ui {
     height: 100%;
     width: 100%;
     overflow: hidden !important;
@@ -121,7 +120,7 @@ $(function(){
     // Force a resize event INSIDE the iframe so ttyd/xterm recalculates its fit
     function triggerIframeResize() {
         try {
-            var iframe = document.querySelector('iframe[title="Gemini Terminal"]');
+            var iframe = document.querySelector('iframe[title="AICli Terminal"]');
             if (iframe && iframe.contentWindow) {
                 iframe.contentWindow.dispatchEvent(new Event('resize'));
             }
@@ -152,10 +151,10 @@ $(function(){
 
         // Reach into the iframe to kill internal scrollbars (Same-Origin via Proxy)
         try {
-            var iframe = document.querySelector('iframe[title="Gemini Terminal"]');
+            var iframe = document.querySelector('iframe[title="AICli Terminal"]');
             if (iframe && iframe.contentDocument) {
                 var doc = iframe.contentDocument;
-                var styleId = 'gemini-kill-scroll';
+                var styleId = 'aicli-kill-scroll';
                 if (!doc.getElementById(styleId)) {
                     var style = doc.createElement('style');
                     style.id = styleId;
@@ -182,7 +181,7 @@ $(function(){
         if (resizeTimer) cancelAnimationFrame(resizeTimer);
         
         resizeTimer = requestAnimationFrame(function() {
-            var el = document.getElementById('gemini-cli-root');
+            var el = document.getElementById('aicliagents-root');
             if (!el) return;
             
             // Re-calculate top position to account for any dynamically injected Unraid banners
@@ -214,9 +213,10 @@ $(function(){
     resizeRoot();
     window.addEventListener('resize', resizeRoot);
     
-    // Multiple intervals to catch Unraid UI shifts
-    [50, 150, 300, 600, 1200, 2500, 5000].forEach(ms => setTimeout(resizeRoot, ms));
-    setInterval(killScroll, 1000);
+    // D-13: Reduced from 7 timeouts — 3 is enough to catch Unraid UI shifts
+    [100, 500, 2000].forEach(ms => setTimeout(resizeRoot, ms));
+    // D-12: One-shot killScroll on load instead of wasteful 1-second interval
+    killScroll();
 });
 </script>
 

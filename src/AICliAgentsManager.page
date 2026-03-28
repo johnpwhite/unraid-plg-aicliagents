@@ -1,0 +1,1011 @@
+Menu="Utilities"
+Title="AI CLI Agents"
+Icon="assets/icons/google-gemini.png"
+---
+<?php
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php';
+aicli_ensure_init();
+$config = getAICliConfig();
+$registry = getAICliAgentsRegistry();
+// Get the aicli_csrf token from the system
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
+$users = getUnraidUsers();
+?>
+
+<style>
+    .aicli-layout { display: flex; gap: 20px; align-items: flex-start; width: 100%; margin-top: 10px; }
+    .aicli-cards { flex: 0 0 600px; display: flex; flex-direction: column; }
+    .aicli-side { flex: 1; min-width: 350px; display: flex; flex-direction: column; }
+
+    .aicli-card {
+        background: var(--background-color, #1e1e1e);
+        border-radius: 8px;
+        border: 1px solid var(--border-color, #333);
+        margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        overflow: hidden;
+    }
+    .aicli-card-header {
+        background: var(--title-header-background-color, #2a2a2a);
+        padding: 10px 15px;
+        border-bottom: 1px solid var(--border-color, #333);
+        font-weight: bold;
+        font-size: 1.1em;
+        color: var(--text-color, #eee);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .aicli-card-body { padding: 15px; color: var(--text-color, #ccc); }
+
+    /* Force DL/DD to stay as a tight horizontal row */
+    .aicli-card-body dl { display: grid; grid-template-columns: 220px 1fr; gap: 8px 10px; margin: 0; }
+    .aicli-card-body dl dt { color: var(--text-color); opacity: 0.7; font-weight: 500; font-size: 0.9em; line-height: 2.4; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .aicli-card-body dl dd { 
+        margin: 0; 
+        color: var(--text-color); 
+        display: flex !important; 
+        flex-direction: row !important; 
+        align-items: center !important; 
+        justify-content: flex-start !important; 
+        gap: 8px !important;
+        flex-wrap: nowrap !important;
+        overflow: visible !important;
+        min-height: 24px;
+        line-height: 1.4;
+    }
+    
+    .aicli-card-body input, .aicli-card-body select {
+        background: var(--background-color, #111) !important;
+        border: 1px solid var(--border-color, #444) !important;
+        color: var(--text-color, #eee) !important;
+        border-radius: 3px;
+        font-size: 0.95em;
+        padding: 4px 8px !important;
+        height: 28px !important;
+        line-height: 20px !important;
+        box-sizing: border-box;
+        margin: 0 !important;
+    }
+    .aicli-card-body input[type="number"] { width: 80px !important; text-align: left !important; }
+    .aicli-card-body input[type="text"], .aicli-card-body select { width: 220px !important; }
+    
+    /* Path fields grow to fill space */
+    #home_path, #root_path { 
+        width: 0 !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex: 1 1 auto !important;
+    }
+    .aicli-btn {
+        padding: 10px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: bold;
+        font-size: 0.9em;
+        transition: all 0.15s ease;
+        background: var(--button-text-color, #ff8c00) !important;
+        border: none !important;
+        color: #fff !important;
+        text-transform: uppercase;
+        width: 100%;
+        margin-top: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        display: block;
+        text-align: center;
+    }
+    .aicli-btn {
+        padding: 10px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 0.95em;
+        transition: all 0.15s ease;
+        background: #ff8c00 !important;
+        border: none !important;
+        color: #fff !important;
+        text-transform: uppercase;
+        width: 100%;
+        margin-top: 10px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        display: block;
+        text-align: center;
+    }
+    .aicli-btn:hover { background: #e67e00 !important; color: #fff !important; transform: translateY(-1px); box-shadow: 0 6px 15px rgba(0,0,0,0.4); }
+    .aicli-btn:disabled { opacity: 0.5; cursor: not-allowed; background: #444 !important; color: #888 !important; }
+    
+    #aicli-settings-form .aicli-btn-slim, .aicli-card-header .aicli-btn-slim {
+        height: 28px !important;
+        padding: 0 15px !important;
+        border-radius: 4px;
+        cursor: pointer;
+        background: #ff8c00 !important;
+        border: none !important;
+        color: #fff !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        font-size: 11px !important;
+        margin: 0 !important;
+        font-weight: 800;
+        text-transform: uppercase;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        transition: all 0.15s ease;
+    }
+    .aicli-btn-sync, .aicli-btn-upgrade, .aicli-btn-slim:not(.danger):not(:disabled) {
+        background: #ff8c00 !important;
+        color: #fff !important;
+        border: none !important;
+    }
+    .aicli-btn-slim:hover, .aicli-btn-sync:hover, .aicli-btn-upgrade:hover {
+        background: #e67e00 !important;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.3) !important;
+        color: #fff !important;
+    }
+
+    /* Agent Store Styles */
+    .agent-item {
+        display: flex; align-items: center; gap: 15px; padding: 12px;
+        border: 1px solid var(--border-color, #333); border-radius: 6px; margin-bottom: 10px;
+        background: rgba(0,0,0,0.1);
+    }
+    .agent-icon { width: 48px !important; height: 48px !important; border-radius: 4px; flex-shrink: 0; object-fit: contain; }
+    .agent-info { flex: 1; }
+    .agent-name-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+    .agent-name { font-weight: bold; }
+    .agent-status { font-size: 0.8em; opacity: 0.6; display: flex; align-items: center; gap: 6px; }
+    .agent-status.installed { color: #86b32d; opacity: 1; }
+    .agent-status.update { color: #ff8c00; opacity: 1; font-weight: bold; }
+    
+    .install-progress { height: 20px; background: #333; border-radius: 4px; margin-top: 8px; overflow: hidden; display: none; position: relative; }
+    .install-bar { height: 100%; background: #ff8c00; width: 0%; transition: width 0.3s; }
+    .install-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; font-weight: bold; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+
+    /* Unraid style info icon */
+    .info-icon { color: #3a87ad; cursor: pointer; font-size: 14px; }
+    .info-icon:hover { color: #2d6987; }
+
+    /* Modal Overlay Styles */
+    .aicli-modal-backdrop {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 9999;
+    }
+    .aicli-modal-box {
+        background: var(--background-color, #1e1e1e);
+        border: 1px solid var(--border-color, #444);
+        border-radius: 12px; width: 500px; max-width: 90%;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+        display: flex; flex-direction: column; overflow: hidden;
+    }
+    .aicli-modal-header {
+        padding: 15px 20px; background: var(--title-header-background-color, #2a2a2a);
+        border-bottom: 1px solid var(--border-color, #444); font-weight: bold; font-size: 1.1em;
+    }
+    .aicli-modal-body { padding: 0; display: flex; flex-direction: column; }
+    .aicli-modal-path {
+        background: rgba(0,0,0,0.2); padding: 8px 15px; font-family: monospace; font-size: 0.9em;
+        border-bottom: 1px solid var(--border-color, #333); color: var(--text-color); opacity: 0.8;
+    }
+    .aicli-modal-list { height: 300px; overflow-y: auto; padding: 5px 0; }
+    .aicli-modal-item {
+        padding: 8px 15px; cursor: pointer; display: flex; align-items: center; gap: 10px;
+        transition: background 0.15s;
+    }
+    .aicli-modal-item:hover { background: var(--title-header-background-color, #333); }
+    .aicli-modal-item i { color: #ff8c00; opacity: 0.7; }
+    .aicli-modal-footer {
+        padding: 15px 20px; border-top: 1px solid var(--border-color, #444);
+        display: flex; justify-content: flex-end; gap: 10px;
+    }
+    .aicli-modal-btn {
+        padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; border: none;
+    }
+    .aicli-modal-btn.primary { background: #ff8c00; color: #fff; }
+    .aicli-modal-btn.secondary { background: transparent; border: 1px solid var(--border-color, #444); color: var(--text-color); }
+
+    .help-text { 
+        font-size: 0.85em; 
+        opacity: 0.75; 
+        margin-top: 15px; 
+        display: block; 
+        line-height: 1.5; 
+        padding-left: 12px; 
+        border-left: 3px solid #3a87ad; 
+    }
+    .swal-wide { width: 80% !important; max-width: 1000px !important; }
+    .swal-wide p { text-align: left !important; white-space: pre-wrap !important; font-family: monospace !important; font-size: 11px !important; line-height: 1.4 !important; opacity: 0.9; }
+    .swal-wide .sa-confirm-button-container { display: block; }
+
+    /* System Info Layout Fix */
+    .aicli-info-row { display: flex; align-items: center; gap: 15px; margin-bottom: 8px; font-size: 0.95em; }
+    .aicli-info-label { width: 180px; flex-shrink: 0; opacity: 0.6; color: var(--text-color); }
+    .aicli-info-value { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .aicli-info-value code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9em; opacity: 0.9; }
+    .aicli-info-btns { display: flex; gap: 4px; flex-shrink: 0; }
+    .aicli-pill-btn { cursor: pointer; font-size: 9px; font-weight: bold; letter-spacing: 0.5px; padding: 4px 10px; border: none; border-radius: 3px; background: var(--button-text-color, #ff8c00); color: #fff; line-height: 1; transition: all 0.15s; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .aicli-pill-btn:hover { background: #e67e00; transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
+    .aicli-pill-btn.danger { background: #cc0000; color: #fff; }
+    .aicli-pill-btn.danger:hover { background: #aa0000; }
+</style>
+
+<div class="aicli-layout">
+    <div class="aicli-cards">
+        <form onsubmit="saveAICliAgentsManager(this); return false;" id="aicli-settings-form">
+            <input type="hidden" name="csrf_token" value="<?=$csrf_token?>">
+            
+            <!-- CARD: GLOBAL SETTINGS -->
+            <div class="aicli-card">
+                <div class="aicli-card-header">
+                    <i class="fa fa-globe text-orange-500"></i>
+                    <span>Global Settings</span>
+                </div>
+                <div class="aicli-card-body">
+                    <dl>
+                        <dt>Enable Main Tab:</dt>
+                        <dd>
+                            <select name="enable_tab">
+                                <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
+                                <?=mk_option($config['enable_tab'], "0", _('No'))?>
+                            </select>
+                        </dd>
+                        <dt>Logging Level:</dt>
+                        <dd>
+                            <select name="log_level" onchange="saveAICliAgentsManager(document.getElementById('aicli-settings-form'), true)">
+                                <?=mk_option($config['log_level'], "0", _('Errors Only'))?>
+                                <?=mk_option($config['log_level'], "1", _('Warnings'))?>
+                                <?=mk_option($config['log_level'], "2", _('Normal (Info)'))?>
+                                <?=mk_option($config['log_level'], "3", _('Debug (Verbose)'))?>
+                            </select>
+                        </dd>
+                        <dt>History Limit:</dt>
+                        <dd>
+                            <input type="number" name="history" value="<?=$config['history']?>" min="100">
+                        </dd>
+                        <dt>Backup home interval:</dt>
+                        <dd style="gap: 10px !important;">
+                            <select name="sync_interval_hours" style="width: 80px !important;">
+                                <?php for($i=0; $i<=23; $i++): ?>
+                                    <?=mk_option($config['sync_interval_hours'], $i, $i."h")?>
+                                <?php endfor; ?>
+                            </select>
+                            <select name="sync_interval_mins" style="width: 80px !important;">
+                                <?php for($i=0; $i<=59; $i++): ?>
+                                    <?=mk_option($config['sync_interval_mins'], $i, $i."m")?>
+                                <?php endfor; ?>
+                            </select>
+                            <button type="button" class="aicli-btn-slim aicli-btn-sync" onclick="manualSyncHome()" title="Save RAM data to Flash now"><i class="fa fa-save"></i> SYNC NOW</button>
+                        </dd>
+                    </dl>
+                    <span class="help-text">Enable debug logging to troubleshoot network or installation issues. Home directory is backed up automatically at the interval set above.</span>
+                </div>
+            </div>
+
+            <!-- CARD: SESSION PROFILE -->
+            <div class="aicli-card">
+                <div class="aicli-card-header">
+                    <i class="fa fa-user-circle text-orange-500"></i>
+                    <span>Session Profile</span>
+                </div>
+                <div class="aicli-card-body">
+                    <dl>
+                        <dt>Terminal Theme:</dt>
+                        <dd>
+                            <select name="theme">
+                                <?=mk_option($config['theme'], "dark", _('Dark'))?>
+                                <?=mk_option($config['theme'], "light", _('Light'))?>
+                                <?=mk_option($config['theme'], "solarized", _('Solarized'))?>
+                            </select>
+                        </dd>
+                        <dt>Font Size:</dt>
+                        <dd>
+                            <input type="number" name="font_size" value="<?=$config['font_size']?>" min="8" max="32">
+                        </dd>
+                        <dt>Terminal User:</dt>
+                        <dd style="gap: 5px !important;">
+                            <select name="user" id="user_select" onchange="onUserChange(this.value); saveAICliAgentsManager(document.getElementById('aicli-settings-form'), true)">
+                                <?php foreach ($users as $u => $d): ?>
+                                    <?=mk_option($config['user'], $u, $u . (empty($d) || $u === $d ? "" : " ($d)"))?>
+                                <?php endforeach; ?>
+                            </select>
+                            <button type="button" class="aicli-btn-slim" onclick="openCreateUserModal()" title="Create New Unraid User"><i class="fa fa-user-plus"></i></button>
+                            <button type="button" class="aicli-btn-slim" onclick="refreshUserList()" title="Refresh User List"><i class="fa fa-refresh"></i></button>
+                        </dd>
+                        <dt>Default workspace path: <i class="fa fa-info-circle" title="Base directory for project discovery. Standard Unraid path is /mnt/user"></i></dt>
+                        <dd>
+                            <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>">
+                            <button type="button" class="aicli-btn-slim" onclick="openPicker('root_path', '/mnt/user')"><i class="fa fa-folder-open"></i></button>
+                        </dd>
+                    </dl>
+                </div>
+            </div>
+            
+            <!-- CARD: SECRETS VAULT -->
+            <div class="aicli-card">
+                <div class="aicli-card-header">
+                    <i class="fa fa-key text-orange-500"></i>
+                    <span>Secrets Vault</span>
+                </div>
+                <div class="aicli-card-body">
+                    <p style="margin-bottom: 10px; opacity: 0.7; font-size: 0.85em; font-style: italic;">
+                        <i class="fa fa-info-circle"></i> Additional per-workspace session ENVs can be added in the AI CLI Agent tab drawer.
+                    </p>
+                    <dl>
+                        <?php
+                        $vaultFile = "/boot/config/plugins/unraid-aicliagents/secrets.cfg";
+                        $vault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
+                        $registry = getAICliAgentsRegistry();
+                        $displayedKeys = [];
+                        
+                        foreach ($registry as $agent) {
+                            if (!$agent['is_installed']) continue;
+                            $keyName = ($agent['env_prefix'] ?? 'AGENT') . "_API_KEY";
+                            if (in_array($keyName, $displayedKeys)) continue;
+                            $displayedKeys[] = $keyName;
+                            ?>
+                            <dt><?= $agent['name'] ?> API Key:</dt>
+                            <dd>
+                                <input type="password" name="<?= $keyName ?>" value="<?= htmlspecialchars($vault[$keyName] ?? '') ?>" placeholder="Enter API Key">
+                            </dd>
+                            <?php
+                        }
+                        
+                        if (empty($displayedKeys)) {
+                            echo "<p style='padding: 10px; opacity: 0.5; font-size: 0.9em;'>No agents installed. Install an agent to configure its API key.</p>";
+                        }
+                        ?>
+                    </dl>
+                    <p class="help-text">API keys are stored securely in <code>secrets.cfg</code> (permissions 0600) and are automatically injected into your agent sessions at runtime.</p>
+                </div>
+            </div>
+
+            <button type="submit" class="aicli-btn">Apply & Save Settings</button>
+        </form>
+    </div>
+
+    <!-- SIDEBAR: AGENT STORE -->
+    <div class="aicli-side">
+        <div class="aicli-card">
+            <div class="aicli-card-header" style="justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <i class="fa fa-shopping-cart text-orange-500"></i>
+                    <span>Agent Store</span>
+                </div>
+                <button type="button" id="btn-check-updates" class="aicli-btn-slim" onclick="checkUpdates()">
+                    <i class="fa fa-refresh"></i> Check for Updates
+                </button>
+            </div>
+            <div class="aicli-card-body">
+                <p style="margin-top:0; margin-bottom:15px; font-size:0.9em; opacity:0.7;">Install or update AI agents to use in your workspaces.</p>
+                
+                <?php 
+                $updatesData = checkAgentUpdates();
+                $updates = $updatesData['updates'] ?? [];
+                foreach ($registry as $id => $agent): 
+                    $hasUpdate = $updates[$id]['has_update'] ?? false;
+                ?>
+                <div class="agent-item" id="agent-row-<?=$id?>">
+                    <img src="<?=$agent['icon_url']?>" class="agent-icon" alt="">
+                    <div class="agent-info">
+                        <div class="agent-name-wrap">
+                            <span class="agent-name"><?=$agent['name']?></span>
+                            <a href="<?=$agent['release_notes']?>" target="_blank" title="View Release Notes">
+                                <i class="fa fa-info-circle info-icon"></i>
+                            </a>
+                            <label style="margin-left:auto; font-size:0.7em; opacity:0.7; display:flex; align-items:center; gap:4px; cursor:pointer;" title="Install pre-releases or @next versions if available">
+                                <input type="checkbox" name="preview_<?=$id?>" value="1" <?=(($config["preview_$id"] ?? '0') ==='1'?'checked':'')?> onchange="saveAICliAgentsManager(document.getElementById('aicli-settings-form'), true)">
+                                Preview
+                            </label>
+                        </div>
+                        <span class="agent-status <?=($agent['is_installed']?'installed':'')?>" id="status-<?=$id?>">
+                            <?php if ($agent['is_installed']): ?>
+                                <i class="fa fa-check-circle"></i> Installed (<?=$updates[$id]['installed_version'] ?? '?'?>)
+                                <?php if ($hasUpdate): ?>
+                                    <span style="color:#ff8c00; margin-left:10px;"><i class="fa fa-arrow-circle-up"></i> Update Available (<?=$updates[$id]['latest_version']?>)</span>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                Not Installed
+                            <?php endif; ?>
+                        </span>
+                        <div class="install-progress" id="progress-<?=$id?>">
+                            <div class="install-bar" id="bar-<?=$id?>"></div>
+                            <div class="install-text" id="text-<?=$id?>">Initializing...</div>
+                        </div>
+                    </div>
+                    <div class="agent-actions" id="actions-<?=$id?>" style="display:flex; gap:5px;">
+                        <?php if ($agent['is_installed']): ?>
+                            <?php if ($hasUpdate): ?>
+                                <button type="button" id="btn-upgrade-<?=$id?>" class="aicli-btn-slim aicli-btn-upgrade" onclick="installAgent('<?=$id?>', true, this)" title="Upgrade Agent"><i class="fa fa-arrow-circle-up"></i> UPGRADE</button>
+                            <?php endif; ?>
+                            <button type="button" id="btn-uninstall-<?=$id?>" class="aicli-btn-slim" onclick="uninstallAgent('<?=$id?>', this)" title="Uninstall"><i class="fa fa-trash"></i></button>
+                        <?php else: ?>
+                            <button type="button" id="btn-install-<?=$id?>" class="aicli-btn-slim" onclick="installAgent('<?=$id?>', false, this)" title="Install"><i class="fa fa-download"></i></button>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+
+        <!-- CARD: SYSTEM INFORMATION -->
+        <div class="aicli-card">
+            <div class="aicli-card-header">
+                <i class="fa fa-info-circle text-orange-500"></i>
+                <span>System Information</span>
+            </div>
+            <div class="aicli-card-body" style="padding: 15px 20px;">
+                <div class="aicli-info-row">
+                    <div class="aicli-info-label">Help & Guide:</div>
+                    <div class="aicli-info-value">
+                        <a href="https://gitlab.johnpwhite.com/johner/unraid-plg-aicliagents/-/blob/master/docs/USER_GUIDE.md" target="_blank" style="color: #ff8c00; font-weight: bold; text-decoration: none;">
+                            <i class="fa fa-book"></i> VIEW ONLINE USER GUIDE
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="aicli-info-row">
+
+                    <div class="aicli-info-label">Config File:</div>
+                    <div class="aicli-info-value"><code>/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg</code></div>
+                </div>
+                
+                <div class="aicli-info-row">
+                    <div class="aicli-info-label">Debug Log:</div>
+                    <div class="aicli-info-value">
+                        <code>/tmp/unraid-aicliagents/debug.log</code>
+                        <div class="aicli-info-btns">
+                            <span onclick="viewDebugLog()" class="aicli-pill-btn">VIEW</span>
+                            <span onclick="clearLog()" class="aicli-pill-btn danger">CLEAR</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="aicli-info-row">
+                    <div class="aicli-info-label">Home Directory (RAM):</div>
+                    <div class="aicli-info-value"><code id="display_ram_dir"><?= aicli_get_work_dir($config['user']) ?></code></div>
+                </div>
+
+                <div class="aicli-info-row">
+                    <div class="aicli-info-label">Home Backup Path:</div>
+                    <div class="aicli-info-value">
+                        <code id="display_home_path"><?=$config['home_path']?></code>
+                        <input type="hidden" name="home_path" id="home_path" value="<?=$config['home_path']?>">
+                    </div>
+                </div>
+                
+                <div class="aicli-info-row">
+                    <div class="aicli-info-label">RAM Bin:</div>
+                    <div class="aicli-info-value"><code>/usr/local/emhttp/plugins/unraid-aicliagents/bin/</code></div>
+                </div>
+                
+                <div class="aicli-info-row">
+                    <div class="aicli-info-label">USB Cache:</div>
+                    <div class="aicli-info-value"><code>/boot/config/plugins/unraid-aicliagents/pkg-cache/</code></div>
+                </div>
+                <p class="help-text">
+                    To protect your Flash drive from wear, agents execute entirely from RAM. This plugin utilizes a <b>Hybrid RAM-Flash storage</b> system; your home directory is restored automatically on boot and synchronized back to the USB drive at the interval configured above.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Picker Modal (still used for directory selection) -->
+    <div id="picker-modal" class="aicli-modal-backdrop">
+        <div class="aicli-modal-box">
+            <div class="aicli-modal-header">
+                <i class="fa fa-folder-open"></i> Select Directory
+            </div>
+            <div class="aicli-modal-body">
+                <div id="picker-path" class="aicli-modal-path">/mnt</div>
+                <div id="picker-list" class="aicli-modal-list">
+                    <!-- Items will be injected here -->
+                </div>
+            </div>
+            <div class="aicli-modal-footer">
+                <button type="button" class="aicli-modal-btn secondary" onclick="closePicker()">Cancel</button>
+                <button type="button" class="aicli-modal-btn primary" onclick="confirmSelection()">Select Directory</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Use the PHP-parsed aicli_csrf token as the primary source of truth
+window.csrf_token = window.csrf_token || '<?=$csrf_token?>';
+
+function getCsrf() {
+    return window.csrf_token || (typeof csrf_token !== 'undefined' ? csrf_token : '');
+}
+
+var codeAZ; // Polyfill for Dynamix shortcut handler (Andrew Zawadzki's codeAZ conflict)
+var aicli_csrf = getCsrf();
+var isInstalling = false; // Legacy flag, using activeInstalls now
+var progressTimers = {};
+var activeInstalls = new Set();
+var isGlobalLocked = false;
+var isUnloading = false;
+window.addEventListener('beforeunload', () => { isUnloading = true; });
+
+let currentPickerTarget = null;
+let currentPickerPath = '/mnt';
+
+function openPicker(targetId, startPath = null) {
+    currentPickerTarget = targetId;
+    const initialPath = startPath || document.getElementById(targetId).value || '/mnt';
+    currentPickerPath = initialPath;
+    
+    document.getElementById('picker-modal').style.display = 'flex';
+    browseTo(initialPath);
+}
+
+function closePicker() {
+    document.getElementById('picker-modal').style.display = 'none';
+}
+
+function browseTo(path) {
+    currentPickerPath = path;
+    document.getElementById('picker-path').innerText = path;
+    const list = document.getElementById('picker-list');
+    list.innerHTML = '<div style="padding: 20px; text-align: center; opacity: 0.5;"><i class="fa fa-circle-o-notch fa-spin"></i> Reading...</div>';
+    
+    aicli_csrf = getCsrf();
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=list_dir&path=${encodeURIComponent(path)}&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.json())
+        .then(data => {
+            list.innerHTML = '';
+            
+            // Add items
+            data.items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'aicli-modal-item';
+                div.onclick = () => browseTo(item.path);
+                
+                const icon = item.name === '..' ? 'fa-level-up' : 'fa-folder';
+                div.innerHTML = `<i class="fa ${icon}"></i> <span>${item.name}</span>`;
+                list.appendChild(div);
+            });
+            
+            if (data.items.length === 0) {
+                list.innerHTML = '<div style="padding: 20px; text-align: center; opacity: 0.3;">Empty Directory</div>';
+            }
+        })
+        .catch(err => {
+            list.innerHTML = `<div style="padding: 20px; text-align: center; color: #ff5555;">Error: ${err.message}</div>`;
+        });
+}
+
+function confirmSelection() {
+    if (currentPickerTarget) {
+        document.getElementById(currentPickerTarget).value = currentPickerPath;
+    }
+    closePicker();
+}
+
+function openCreateUserModal() {
+    window.open('/Users/UserAdd', '_blank');
+}
+
+function refreshUserList() {
+    aicli_csrf = getCsrf();
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_users&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'ok' && data.users) {
+                const select = document.getElementById('user_select');
+                const currentVal = select.value;
+                select.innerHTML = '';
+                Object.entries(data.users).forEach(([u, d]) => {
+                    const opt = document.createElement('option');
+                    opt.value = u;
+                    opt.innerText = u + (d && u !== d ? ` (${d})` : "");
+                    select.appendChild(opt);
+                });
+                select.value = currentVal; // Preserve selection
+                onUserChange(currentVal);
+            }
+        });
+}
+
+function onUserChange(username) {
+    // Dynamically update UI paths to show user what will happen on save
+    const ramDisplay = document.getElementById('display_ram_dir');
+    const homeInput = document.getElementById('home_path');
+    const homeDisplay = document.getElementById('display_home_path');
+    
+    if (ramDisplay) ramDisplay.innerText = `/tmp/unraid-aicliagents/work/${username}`;
+    if (homeInput) homeInput.value = `/boot/config/plugins/unraid-aicliagents/persistence/${username}/home`;
+    if (homeDisplay) homeDisplay.innerText = `/boot/config/plugins/unraid-aicliagents/persistence/${username}/home`;
+}
+
+function checkUpdates() {
+    if (activeInstalls.size > 0) return;
+    const btn = document.getElementById('btn-check-updates');
+    console.log("[AICli] Checking for updates...");
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa fa-circle-o-notch fa-spin"></i> Checking...';
+
+    aicli_csrf = getCsrf();
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=check_updates&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa fa-refresh"></i> Check for Updates';
+            
+            if (data.status === 'ok' && data.updates) {
+                Object.entries(data.updates).forEach(([id, info]) => {
+                    const status = document.getElementById(`status-${id}`);
+                    if (status && info.has_update) {
+                        status.className = 'agent-status update';
+                        status.innerHTML = `<i class="fa fa-arrow-circle-up"></i> Update Available (${info.latest_version})`;
+                    }
+                });
+            }
+        })
+        .catch(err => {
+            console.error(err);
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa fa-refresh"></i> Check for Updates';
+        });
+}
+
+function viewDebugLog() {
+    aicli_csrf = getCsrf();
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_log&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.text())
+        .then(text => {
+            if (typeof swal === 'function') {
+                swal({
+                    title: "Debug Log (Last 50 lines)",
+                    text: text || "Log is empty.",
+                    customClass: "swal-wide"
+                });
+            }
+        });
+}
+
+function manualSyncHome() {
+    aicli_csrf = getCsrf();
+    const btn = event.currentTarget;
+    const originalHtml = btn.innerHTML;
+    
+    // Show non-closable overlay
+    if (typeof swal === 'function') {
+        swal({
+            title: "Syncing to Flash...",
+            text: "Mirroring RAM home directory to the USB drive. This may take a few moments depending on the amount of data.",
+            type: "info",
+            showConfirmButton: false,
+            closeOnConfirm: false
+        });
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa fa-circle-o-notch fa-spin"></i> Syncing...';
+
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=sync_home&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP error! status: ${r.status}`);
+            return r.text().then(text => {
+                try {
+                    return JSON.parse(text);
+                } catch (e) {
+                    console.error("[AICli] Failed to parse sync response:", text);
+                    throw new Error("Invalid JSON response from server");
+                }
+            });
+        })
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            if (data.status === 'ok') {
+                if (typeof swal === 'function') {
+                    swal({
+                        title: "Sync Successful",
+                        text: "Home directory contents have been mirrored to the USB Flash drive.",
+                        type: "success",
+                        confirmButtonText: "Close"
+                    });
+                }
+            } else {
+                if (typeof swal === 'function') {
+                    swal("Sync Failed", "There was an error syncing to flash. Check debug logs.", "error");
+                }
+            }
+        })
+        .catch(err => {
+            console.error(err);
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            if (typeof swal === 'function') {
+                swal("Sync Error", "Network or server error during sync.", "error");
+            }
+        });
+}
+
+function clearLog() {
+    swal({
+        title: "Clear debug log?",
+        text: "This will truncate the current debug.log file in RAM.",
+        type: "warning",
+        showCancelButton: true,
+        confirmButtonText: "Clear Log",
+        cancelButtonText: "Cancel",
+        closeOnConfirm: false
+    }, function() {
+        aicli_csrf = getCsrf();
+        fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=clear_log&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    swal("Log Cleared", "The debug log has been truncated.", "success");
+                } else {
+                    swal("Error", "Failed to clear log: " + (data.message || 'Unknown error'), "error");
+                }
+            })
+            .catch(() => {
+                swal("Error", "Network error while clearing log.", "error");
+            });
+    });
+}
+
+
+
+function setAgentStoreLocked(locked) {
+    isGlobalLocked = locked;
+    // We only disable buttons if we reach a certain limit or if we want to prevent UNINSTALLS during installs.
+    // For now, let's keep it fluid.
+}
+
+function pollInstallStatus(agentId) {
+    aicli_csrf = getCsrf();
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_install_status&agentId=${agentId}&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.json())
+        .then(data => {
+            const textEl = document.getElementById(`text-${agentId}`);
+            const barEl = document.getElementById(`bar-${agentId}`);
+            const statusEl = document.getElementById(`status-${agentId}`);
+            const btnInstall = document.getElementById(`btn-install-${agentId}`);
+            const btnUpgrade = document.getElementById(`btn-upgrade-${agentId}`);
+
+            if (data.message) {
+                if (textEl) textEl.innerText = data.message;
+                if (barEl) barEl.style.width = data.progress + '%';
+            }
+            
+            if (data.progress >= 100) {
+                clearInterval(progressTimers[agentId]);
+                delete progressTimers[agentId];
+                activeInstalls.delete(agentId);
+                
+                if (statusEl) {
+                    statusEl.className = 'agent-status installed';
+                    statusEl.innerHTML = '<i class="fa fa-check-circle"></i> ' + (data.message || 'Installed');
+                }
+                
+                // Only reload if this was the last active install
+                if (activeInstalls.size === 0) {
+                    setTimeout(() => { if (!isUnloading) window.location.reload(); }, 2000);
+                }
+            } else if (data.message && data.message.includes('Error:')) {
+                clearInterval(progressTimers[agentId]);
+                delete progressTimers[agentId];
+                activeInstalls.delete(agentId);
+                if (btnInstall) btnInstall.disabled = false;
+                if (btnUpgrade) btnUpgrade.disabled = false;
+            }
+        })
+        .catch(err => {
+            if (isUnloading) return;
+            console.error(`[AICli] Poll Error for ${agentId}:`, err);
+        });
+}
+
+function installAgent(agentId, isUpgrade = false, btn = null) {
+    if (activeInstalls.has(agentId)) return;
+    
+    if (isUpgrade) {
+        swal({
+            title: "Upgrade Agent?",
+            text: `Confirm upgrading ${agentId} to the latest version.`,
+            type: "info",
+            showCancelButton: true,
+            confirmButtonText: "Upgrade Now",
+            cancelButtonText: "Cancel"
+        }, function(confirmed) {
+            if (confirmed) {
+                performAgentInstall(agentId, isUpgrade, btn);
+            }
+        });
+    } else {
+        performAgentInstall(agentId, isUpgrade, btn);
+    }
+}
+
+function performAgentInstall(agentId, isUpgrade, btn) {
+    
+    const status = document.getElementById(`status-${agentId}`);
+    const progress = document.getElementById(`progress-${agentId}`);
+    const bar = document.getElementById(`bar-${agentId}`);
+    const text = document.getElementById(`text-${agentId}`);
+    
+    // Disable the button which was clicked
+    if (btn) btn.disabled = true;
+
+    progress.style.display = 'block';
+    bar.style.width = '10%';
+    if (text) text.innerText = 'Starting...';
+    status.innerHTML = '<i class="fa fa-circle-o-notch fa-spin"></i> ' + (isUpgrade ? 'Upgrading...' : 'Installing...');
+
+    aicli_csrf = getCsrf();
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=install_agent&agentId=${agentId}&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'ok') {
+                if (progressTimers[agentId]) clearInterval(progressTimers[agentId]);
+                progressTimers[agentId] = setInterval(() => pollInstallStatus(agentId), 800);
+            } else {
+                activeInstalls.delete(agentId);
+                if (btn) btn.disabled = false;
+                swal("Installation Failed", (data.message || data.error), "error");
+                status.innerHTML = 'Start Failed';
+            }
+        })
+        .catch(err => {
+            if (isUnloading) return;
+            activeInstalls.delete(agentId);
+            if (btn) btn.disabled = false;
+            console.error('[AICli] Start Error:', err);
+            swal("Network Error", "Process might still be starting in background.", "warning");
+        });
+}
+
+function uninstallAgent(agentId, btn = null) {
+    if (activeInstalls.has(agentId)) return;
+    
+    swal({
+        title: "Uninstall Agent?",
+        text: `Are you sure you want to remove ${agentId}? All associated data and configurations for this agent will be purged.`,
+        type: "warning",
+        showCancelButton: true,
+        confirmButtonColor: "#DD6B55",
+        confirmButtonText: "Yes, Uninstall",
+        cancelButtonText: "Cancel"
+    }, function(confirmed) {
+        if (confirmed) {
+            activeInstalls.add(agentId);
+            if (btn) btn.disabled = true;
+
+            aicli_csrf = getCsrf();
+            fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=uninstall_agent&agentId=${agentId}&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        window.location.reload();
+                    } else {
+                        activeInstalls.delete(agentId);
+                        if (btn) btn.disabled = false;
+                        swal("Uninstall Failed", (data.message || data.error), "error");
+                    }
+                })
+                .catch(err => {
+                    if (isUnloading) return;
+                    activeInstalls.delete(agentId);
+                    if (btn) btn.disabled = false;
+                    console.error(err);
+                    swal("Network Error", "Check console for details.", "error");
+                });
+        }
+    });
+}
+
+function saveAICliAgentsManager(form, silent = false) {
+    const formData = new FormData(form);
+    const params = new URLSearchParams();
+    
+    // Deduplicate aicli_csrf and other keys
+    for (const [key, value] of formData.entries()) {
+        params.set(key, value); 
+    }
+    
+    // Ensure we use the latest system aicli_csrf token if Dynamix has provided one
+    aicli_csrf = getCsrf() || formData.get('csrf_token') || '';
+    params.set('csrf_token', aicli_csrf);
+    
+    // D-18: Collect all preview checkboxes (they may be outside the main settings form)
+    document.querySelectorAll('input[type="checkbox"][name^="preview_"]').forEach(cb => {
+        params.set(cb.name, cb.checked ? "1" : "0");
+    });
+    
+    console.log('[AICli] Saving settings (deduplicated):', params.toString());
+
+    const performSave = (callback) => {
+        fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=${encodeURIComponent(aicli_csrf)}`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: params.toString()
+        })
+        .then(r => {
+            if (!r.ok) {
+                return r.text().then(txt => {
+                    console.error('[AICli] Server Error (HTTP ' + r.status + '):', txt);
+                    throw new Error('Server returned ' + r.status);
+                });
+            }
+            return r.json();
+        })
+        .then(data => {
+            console.log('[AICli] Save response:', data);
+            if (data.status === 'ok' && callback) callback();
+            else if (data.status === 'ok' && !silent) {
+                if (typeof swal === 'function') {
+                    swal({
+                        title: "Settings Saved",
+                        text: "Changes applied. Some settings may require a terminal restart. Restart now?",
+                        type: "success",
+                        showCancelButton: true,
+                        confirmButtonText: "Restart Terminal",
+                        cancelButtonText: "Later"
+                    }, function(confirmed) {
+                        if (confirmed) {
+                            fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=restart&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+                            .then(() => window.location.reload());
+                        } else {
+                            window.location.reload();
+                        }
+                    });
+                } else {
+                    window.location.reload();
+                }
+            } else if (data.status === 'ok' && silent) {
+                window.location.reload();
+            } else {
+                swal("Save Failed", (data.message || 'Unknown error'), "error");
+            }
+        })
+        .catch(err => {
+            console.error("[AICli] Save Error:", err);
+            swal("Network Error", "Settings failed to save. See console for details.", "error");
+        });
+    };
+
+    performSave();
+}
+
+// Auto-check for updates on page load
+document.addEventListener('DOMContentLoaded', () => {
+aicli_csrf = getCsrf();
+// Check for any ongoing installs across all agents
+document.querySelectorAll('.agent-actions').forEach(container => {
+    const id = container.id.replace('actions-', '');
+    if (!id) return;
+    
+    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_install_status&agentId=${id}&csrf_token=${encodeURIComponent(aicli_csrf)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.progress > 0 && data.progress < 100) {
+                const status = document.getElementById(`status-${id}`);
+                const progress = document.getElementById(`progress-${id}`);
+                const bar = document.getElementById(`bar-${id}`);
+                const text = document.getElementById(`text-${id}`);
+                
+                if (status && progress) {
+                    activeInstalls.add(id);
+                    status.innerHTML = '<i class="fa fa-circle-o-notch fa-spin"></i> Resuming...';
+                    progress.style.display = 'block';
+                    bar.style.width = data.progress + '%';
+                    if (text) text.innerText = data.message || 'Resuming...';
+                    
+                    if (progressTimers[id]) clearInterval(progressTimers[id]);
+                    progressTimers[id] = setInterval(() => pollInstallStatus(id), 800);
+                }
+            }
+        });
+});
+
+setTimeout(checkUpdates, 1000);
+});
+</script>

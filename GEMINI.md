@@ -1,10 +1,10 @@
-# Context: Unraid Gemini CLI
+# Context: Unraid AI Cli Agents
 
-Integration of the Gemini CLI into the Unraid WebUI for AI-assisted server management.
+Integration of the AI Cli Agents into the Unraid WebUI for AI-assisted server management.
 
 ## Project Specifics
 - **Architecture**: PHP Native (Neuron AI Framework).
-- **Backend**: Gemini CLI / PHP.
+- **Backend**: AICliAgents CLI / PHP.
 - **State**: HITL (Human-in-the-Loop).
 
 ## Local Reference

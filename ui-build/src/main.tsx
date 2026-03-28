@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 
-const rootId = 'gemini-cli-root';
+const rootId = 'aicliagents-root';
 const el = document.getElementById(rootId);
 
 if (el) {

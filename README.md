@@ -1,6 +1,6 @@
-# Unraid Gemini CLI
+# Unraid AI Cli Agents
 
-This plugin integrates the Gemini CLI into the Unraid WebUI, providing an AI-assisted interface for managing your Unraid server.
+This plugin integrates the AI Cli Agents into the Unraid WebUI, providing an AI-assisted interface for managing your Unraid server.
 
 ## Features
 - AI-assisted server management.
