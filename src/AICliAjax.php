@@ -28,10 +28,22 @@ register_shutdown_function(function() {
 });
 
 require_once __DIR__ . '/includes/AICliAgentsManager.php';
-aicli_ensure_init();
 
 if (isset($_GET['action'])) {
-    aicli_log("AJAX Request: action=" . ($_GET['action'] ?? 'NONE') . " method=" . $_SERVER['REQUEST_METHOD'], AICLI_LOG_DEBUG);
+    $currentAction = $_GET['action'] ?? 'NONE';
+    
+    // D-166: Avoid auto-init/mount for repair actions to prevent race conditions
+    if (!in_array($currentAction, ['get_repair_status', 'repair_plugin'])) {
+        aicli_ensure_init();
+    }
+
+    aicli_log("AJAX Request: action=$currentAction method=" . $_SERVER['REQUEST_METHOD'], AICLI_LOG_DEBUG);
+    
+    // D-15: Throttle AJAX logging. Most actions are now DEBUG only to prevent log flooding.
+    $criticalActions = ['install_agent', 'uninstall_agent', 'migrate_agents', 'migrate_home'];
+    $currentAction = $_GET['action'] ?? 'NONE';
+    $logPriority = in_array($currentAction, $criticalActions) ? AICLI_LOG_INFO : AICLI_LOG_DEBUG;
+    aicli_log("AJAX Exec: action=$currentAction", $logPriority);
     
     // Standard CSRF Validation
     $var = @parse_ini_file("/var/local/emhttp/var.ini");
@@ -44,8 +56,11 @@ if (isset($_GET['action'])) {
     
     if ($received === 'MISSING' || $received !== $expected) {
         @session_start();
-        if (!isset($_SESSION['csrf_token']) || trim((string)$_SESSION['csrf_token']) !== $received) {
-            aicli_log("CSRF VALIDATION FAILED! Action: " . $_GET['action'], AICLI_LOG_ERROR);
+        $sessionToken = $_SESSION['csrf_token'] ?? 'NOT_SET';
+        if ($sessionToken === 'NOT_SET' || trim((string)$sessionToken) !== $received) {
+            $postKeys = implode(',', array_keys($_POST));
+            $getKeys = implode(',', array_keys($_GET));
+            aicli_log("CSRF VALIDATION FAILED! Action: " . $_GET['action'] . " (Method: " . $_SERVER['REQUEST_METHOD'] . ", Received: $received, Expected: $expected, Session: $sessionToken, POST_KEYS: [$postKeys], GET_KEYS: [$getKeys])", AICLI_LOG_ERROR);
             header('Content-Type: application/json');
             echo json_encode(['status' => 'error', 'message' => 'Invalid CSRF Token']);
             exit;
@@ -66,6 +81,17 @@ if (isset($_GET['action'])) {
         $agentId = $_GET['agentId'] ?? '';
         aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId));
         echo json_encode(['status' => 'ok', 'message' => 'Started']);
+    } elseif ($action === 'get_workspaces') {
+        echo json_encode(aicli_get_workspaces());
+    } elseif ($action === 'save_workspaces') {
+        $json = $_POST['workspaces'] ?? '[]';
+        $data = json_decode($json, true);
+        if (is_array($data)) {
+            aicli_save_workspaces($data);
+            echo json_encode(['status' => 'ok']);
+        } else {
+            echo json_encode(['status' => 'error', 'message' => 'Invalid data']);
+        }
     } elseif ($action === 'uninstall_agent') {
         $agentId = $_GET['agentId'] ?? '';
         echo json_encode(uninstallAgent($agentId));
@@ -76,6 +102,14 @@ if (isset($_GET['action'])) {
         echo json_encode(['status' => 'ok']);
     } elseif ($action === 'gc') {
         gcAICliSessions();
+        echo json_encode(['status' => 'ok']);
+    } elseif ($action === 'evict_all') {
+        $ids = $_GET['ids'] ?? '';
+        if (empty($ids)) {
+            aicli_evict_all();
+        } else {
+            aicli_evict_targeted($ids);
+        }
         echo json_encode(['status' => 'ok']);
     } elseif ($action === 'restart') {
         $path = $_GET['path'] ?? null;
@@ -91,8 +125,17 @@ if (isset($_GET['action'])) {
         $chatId = findAICliChatSession($path, $id, $agentId);
         echo json_encode(['chatId' => $chatId]);
     } elseif ($action === 'save') {
+        $oldConfig = getAICliConfig();
         saveAICliConfig($_POST);
-        echo json_encode(['status' => 'ok']);
+        $newConfig = getAICliConfig();
+        $userChanged = ($oldConfig['user'] !== $newConfig['user']);
+        echo json_encode(['status' => 'ok', 'userChanged' => $userChanged]);
+    } elseif ($action === 'migrate_storage') {
+        $path = $_GET['path'] ?? '';
+        echo json_encode(aicli_migrate_persistence($path));
+    } elseif ($action === 'migrate_agent_storage') {
+        $path = $_GET['path'] ?? '';
+        echo json_encode(aicli_migrate_agent_storage($path));
     } elseif ($action === 'get_env') {
         $path = $_GET['path'] ?? '';
         $agentId = $_GET['agentId'] ?? '';
@@ -111,6 +154,23 @@ if (isset($_GET['action'])) {
         $pass = $_POST['password'] ?? '';
         $desc = $_POST['description'] ?? '';
         echo json_encode(createUnraidUser($user, $pass, $desc));
+    } elseif ($action === 'repair_plugin') {
+        $repairScript = "/usr/local/emhttp/plugins/unraid-aicliagents/scripts/user/repair-plugin.sh";
+        if (file_exists($repairScript)) {
+            aicli_log("AJAX: Launching background plugin repair...", AICLI_LOG_WARN);
+            // D-121: Handle detachment manually to ensure logs are appended to debug.log
+            exec("nohup bash " . escapeshellarg($repairScript) . " >> /tmp/unraid-aicliagents/debug.log 2>&1 &");
+            echo json_encode(['status' => 'ok']);
+        } else {
+            echo json_encode(['status' => 'error', 'message' => 'Repair script not found.']);
+        }
+    } elseif ($action === 'get_repair_status') {
+        $file = "/tmp/unraid-aicliagents/repair-status";
+        if (file_exists($file)) {
+            echo file_get_contents($file);
+        } else {
+            echo json_encode(['progress' => 100, 'message' => 'Not Running']);
+        }
     } elseif ($action === 'sync_home') {
         try {
             aicli_log("AJAX: Manual Home Sync Requested", AICLI_LOG_INFO);
@@ -135,7 +195,7 @@ if (isset($_GET['action'])) {
         } else {
             if (!is_dir($new)) mkdir($new, 0777, true);
             aicli_log("Moving home data from $old to $new", AICLI_LOG_INFO);
-            exec("cp -rn " . escapeshellarg($old) . "/* " . escapeshellarg($new) . "/ 2>&1", $output, $result);
+            exec("mv -f " . escapeshellarg($old) . "/* " . escapeshellarg($new) . "/ 2>&1", $output, $result);
             if ($result === 0) {
                 $config = getAICliConfig();
                 exec("chown -R " . escapeshellarg($config['user']) . ":users " . escapeshellarg($new));
@@ -151,14 +211,18 @@ if (isset($_GET['action'])) {
         if ($path !== '/') $items[] = ['name' => '..', 'path' => dirname($path)];
         foreach (scandir($path) as $file) {
             if ($file === '.' || $file === '..') continue;
-            if (is_dir("$path/$file")) $items[] = ['name' => $file, 'path' => "$path/$file"];
+            $fullPath = rtrim($path, '/') . '/' . $file;
+            if (is_dir($fullPath)) $items[] = ['name' => $file, 'path' => $fullPath];
         }
         echo json_encode(['path' => $path, 'items' => $items]);
     } elseif ($action === 'create_dir') {
         $parent = $_GET['parent'] ?? '';
         $name = $_GET['name'] ?? '';
         if (is_dir("$parent/$name")) { echo json_encode(['status' => 'error', 'message' => 'Folder already exists']); exit; }
-        if (mkdir("$parent/$name", 0777, true)) echo json_encode(['status' => 'ok']);
+            if (mkdir("$parent/$name", 0777, true)) {
+                aicli_log("AJAX: Folder created: $parent/$name", AICLI_LOG_INFO);
+                echo json_encode(['status' => 'ok']);
+            }
         else echo json_encode(['status' => 'error', 'message' => 'Failed to create folder']);
     } elseif ($action === 'get_session_status') {
         $path = $_GET['path'] ?? '';
@@ -211,7 +275,8 @@ if (isset($_GET['action'])) {
         }
         if ($chunkIndex === $totalChunks - 1) {
             if (rename($tmpFile, $targetFile)) {
-                aicli_notify("File Uploaded", "Successfully uploaded $fileName to " . basename($path));
+                // D-126: Swap Subject/Message for Unraid standard: Subject="File Uploaded", Message="Successfully uploaded..."
+                aicli_notify("Successfully uploaded $fileName to " . basename($path), "File Uploaded");
                 echo json_encode(['status' => 'ok', 'complete' => true]);
             } else {
                 @unlink($tmpFile);
@@ -224,10 +289,40 @@ if (isset($_GET['action'])) {
         $agentId = $_GET['agentId'] ?? '';
         $dir = "/tmp/unraid-aicliagents";
         $file = empty($agentId) ? "$dir/install-status" : "$dir/install-status-$agentId";
-        if (file_exists($file)) echo file_get_contents($file);
-        else echo json_encode(['message' => '', 'progress' => 0]);
+        if (file_exists($file)) {
+            $data = @json_decode(file_get_contents($file), true);
+            if ($data && isset($data['message'])) {
+                // Filter out progress strings from the message UI
+                $lines = explode("\n", $data['message']);
+                $filtered = array_filter($lines, function($line) {
+                    $l = trim($line);
+                    return !empty($l) && strpos($l, 'PROGRESS:') !== 0 && strpos($l, '[Installation Complete]') === false;
+                });
+                $data['message'] = implode("\n", $filtered);
+                echo json_encode($data);
+            } else {
+                echo file_get_contents($file);
+            }
+        } else {
+            echo json_encode(['message' => '', 'progress' => 0]);
+        }
+    } elseif ($action === 'get_storage_status') {
+        echo json_encode(aicli_get_storage_status());
+    } elseif ($action === 'expand_storage') {
+        $type = $_GET['type'] ?? 'agents';
+        $inc = ($type === 'agents') ? '256M' : '128M';
+        echo json_encode(aicli_expand_storage($type, $inc));
+    } elseif ($action === 'shrink_storage') {
+        $type = $_GET['type'] ?? 'agents';
+        $dec = ($type === 'agents') ? '256M' : '128M';
+        echo json_encode(aicli_shrink_storage($type, $dec));
     } elseif ($action === 'debug') {
-        echo json_encode(['status' => 'ok', 'config' => getAICliConfig(), 'registry' => getAICliAgentsRegistry()]);
+        echo json_encode([
+            'status' => 'ok', 
+            'config' => getAICliConfig(), 
+            'registry' => getAICliAgentsRegistry(),
+            'storage_status' => aicli_get_storage_status()
+        ]);
     }
     exit;
 }

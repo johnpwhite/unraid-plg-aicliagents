@@ -1,8 +1,22 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.03.27.20" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.04.04.05" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.04.04.05
+- Improve: Storage Intelligence - Implemented advanced Btrfs management including tail-block evacuation for reliable image shrinking, intelligent expansion guards to protect Flash drive headroom, and automated self-healing for corrupted loopback images.
+- Improve: UI &amp; UX Refinement - Redesigned the Agent Store and configuration drawers with a high-density layout, improved spacing, and automated drawer management for a smoother workspace transition.
+- Improve: Terminal Resilience - Significantly hardened terminal session stability and connection reliability through improved user isolation and robust environment variable propagation.
+- Improve: Diagnostics &amp; Transparency - Enhanced the storage dashboard with "Truthful Capacity Reporting" showing both logical data size and physical disk footprint, along with better error visibility for system maintenance tasks.
+- Fix: Storage Permissions - Resolved edge cases where agent storage could become write-protected or inaccessible due to kernel-level loopback locks.
+
+## 2026.03.28.05
+- Improve: Data Integrity - Implemented SQLite 'Surgical Repair' (PRAGMA integrity_check) and automated pre-flight recovery for OpenCode and Claude agent databases.
+- Improve: Performance - Drastically reduced plugin upgrade time and periodic sync latency on USB Flash drives by implementing '--size-only' rsync and excluding non-essential caches (.npm, .bun).
+- Security: Replaced 'eval' command execution with safe Bash array-based execution in the terminal wrapper to eliminate arbitrary code execution risks.
+- Fix: PHP 8.0+ Compatibility - Resolved 'unlink' warnings and improved custom error handling to correctly respect the suppression operator (@).
+- Fix: Upgrade Reliability - Added automated RAM-to-Flash backup and SQLite 'wal_checkpoint' during plugin updates to ensure zero data loss.
+
 ## 2026.03.27.20
 - Fix: Critical XML Validation (Escapes raw ampersands in changelogs to resolve 'XML parse error' failures).
 - Fix: Switched to high-fidelity literal replacement logic for public releases to prevent corrupted .plg structure.
@@ -25,37 +39,26 @@
 - UI: Added Factory icon and updated agent registry
 
 ## 2026.03.17.35 - The "Professional Workspace" Update
-- **Feat: Advanced Workspace Environment Management**: New "Manage ENV" drawer overlay allows viewing and overriding global API keys per workspace without affecting global settings.
-- **Feat: Intelligent API Persistence**: Dynamically discovers and persists API keys for all installed agents (OpenCode, Kilo Code, etc.) in the Secrets Vault.
-- **Feat: Hybrid Home Persistence**: Implemented a decoupled background sync daemon that asynchronously mirrors the high-performance RAM home directory to the Flash drive.
-- **Feat: Multi-User Migration**: Seamlessly migrates AI agent data when switching the active Unraid user, ensuring chat history is preserved.
-- **Improve: Premium UI Theming**: Unified orange button theme, consistent card layouts, and professional blue-sidebar help styling throughout the manager.
-- **Improve: Performance &amp; Stability**: Optimized terminal initialization to eliminate 502 Bad Gateway errors and implemented atomic locking for background sync operations.
-- **Improve: Clipboard Synchronization**: Enabled OSC 52 support for dual-direction clipboard synchronization between the AI terminal and your browser.
-- **Improve: TrueColor Support**: Full 24-bit TrueColor environment propagation across the entire terminal stack for better syntax highlighting.
-- **Fix: Terminal Rendering**: Resolved scrolling and corruption issues in terminal sessions, particularly for limited-user contexts.
-- **Fix: Setting Persistence**: Ensured fallback API keys and backup schedule settings correctly persist between reboots and user changes.
-- **Fix: Environment Visibility**: Resolved a critical bug where custom environment variables and Secrets Vault keys were not correctly propagated to the active AI agent.
+- Feat: Advanced Workspace Environment Management - New "Manage ENV" drawer overlay allows viewing and overriding global API keys per workspace without affecting global settings.
+- Feat: Intelligent API Persistence - Dynamically discovers and persists API keys for all installed agents (OpenCode, Kilo Code, etc.) in the Secrets Vault.
+- Feat: Hybrid Home Persistence - Implemented a decoupled background sync daemon that asynchronously mirrors the high-performance RAM home directory to the Flash drive.
+- Feat: Multi-User Migration - Seamlessly migrates AI agent data when switching the active Unraid user, ensuring chat history is preserved.
+- Improve: Premium UI Theming - Unified orange button theme, consistent card layouts, and professional blue-sidebar help styling throughout the manager.
+- Improve: Performance &amp; Stability - Optimized terminal initialization to eliminate 502 Bad Gateway errors and implemented atomic locking for background sync operations.
+- Improve: Clipboard Synchronization - Enabled OSC 52 support for dual-direction clipboard synchronization between the AI terminal and your browser.
+- Improve: TrueColor Support - Full 24-bit TrueColor environment propagation across the entire terminal stack for better syntax highlighting.
+- Fix: Terminal Rendering - Resolved scrolling and corruption issues in terminal sessions, particularly for limited-user contexts.
+- Fix: Setting Persistence - Ensured fallback API keys and backup schedule settings correctly persist between reboots and user changes.
+- Fix: Environment Visibility - Resolved a critical bug where custom environment variables and Secrets Vault keys were not correctly propagated to the active AI agent.
 
 ## 2026.03.09.19 - The "Premium UX" Update
-- **Feat: Expanded Agent Store**: Added support for Claude Code, OpenCode, Kilo Code, Pi Coder, and Codex CLI.
-- **Feat: Integrated Node.js Environment**: Bundled Node.js (v22.22.0) with npm for seamless, portable agent management.
-- **Feat: Premium Uninstaller UI**: Completely redesigned uninstallation with quiet logging and a resilient, high-contrast summary box confirming preservation of settings and chats.
-- **Feat: Premium Installer UX**: Polished installation flow with professional status updates and a new "INSTALL COMPLETE" visual summary.
-- **Improve: System Branding**: Unified all system notifications and UI elements under the "AI CLI Agents Plugin" title.
-- **Improve: Boot Resiliency**: Implemented persistent USB source caching for instant UI availability on reboot.
-- **Improve: Hardware Optimization**: Moved all runtime logs to RAM (/tmp) to minimize USB flash drive wear.
-- **Fix: Legacy Migration**: Aggressive deep-clean of all "ghost" registrations (removes broken `geminicli` entries from the plugin list).
-- **Fix: Robust Stability**: Resolved XML parsing errors, 'Invalid .page format' issues, and critical permission bugs for nested binaries.
-
-## 2026.03.06.03
-- Repository Migration: Migrated from Gemini CLI to AI CLI Agents.
-
-## 2026.02.27.20 - Initial Release: Key Features
-- Native AI Integration: Direct integration of Google AICli into the Unraid WebUI.
-- Multi-Workspace Terminal: Support for multiple terminal sessions (Workspaces).
-- Dynamic Status Tracking: Tabs poll terminal state in real-time.
-- Unraid Theme Integration: Harmonious UI design matching your Unraid theme.
+- Feat: Expanded Agent Store - Added support for Claude Code, OpenCode, Kilo Code, Pi Coder, and Codex CLI.
+- Feat: Integrated Node.js Environment - Bundled Node.js (v22.22.0) with npm for seamless, portable agent management.
+- Feat: Premium Uninstaller UI - Completely redesigned uninstallation with quiet logging and a resilient, high-contrast summary box confirming preservation of settings and chats.
+- Feat: Premium Installer UX - Polished installation flow with professional status updates and a new "INSTALL COMPLETE" visual summary.
+- Improve: System Branding - Unified all system notifications and UI elements under the "AI CLI Agents Plugin" title.
+- Improve: Boot Resiliency - Implemented persistent USB source caching for instant UI availability on reboot.
+- Improve: Hardware Optimization - Moved all runtime logs to RAM (/tmp) to minimize USB flash drive wear.
 </CHANGES>
 
 
@@ -75,8 +78,17 @@
 <FILE Name="/tmp/aicli-storage.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/storage.sh</URL>
 </FILE>
+<FILE Name="/tmp/aicli-btrfs.sh">
+<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/btrfs_delta_service.sh</URL>
+</FILE>
 <FILE Name="/tmp/aicli-finalize.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
+</FILE>
+<FILE Name="/tmp/aicli-repair.sh">
+<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
+</FILE>
+<FILE Name="/tmp/aicli-stop-warning.page">
+<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>
 </FILE>
 
 <!-- MAIN INSTALL ENGINE -->
@@ -85,44 +97,112 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.03.27.20"
+export VERSION="2026.04.04.05"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
 
-# 1. Base Setup
-exec 3&gt;&amp;1
+# --- I/O Setup ---
+# FD 3 is the Unraid plugin manager's display channel.
+# All user-visible status goes to FD 3; verbose trace goes to the log file.
+# --- I/O Setup (FD 1 = Log, FD 3 = Progress) ---
+status() { echo "$1" &gt;&amp;4; echo "[$(date +%T)] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
+step()   { echo "" &gt;&amp;4; echo "  [>] $1" &gt;&amp;4; echo "[$(date +%T)]   [>] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
+ok()     { echo "  [OK] $1" &gt;&amp;4; echo "[$(date +%T)]   [OK] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
+warn()   { echo "  [!!] $1" &gt;&amp;4; echo "[$(date +%T)]   [!!] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
+fail()   { echo "  [FAIL] $1" &gt;&amp;4; echo "[$(date +%T)]   [FAIL] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
+progress() { echo "PROGRESS: $1" &gt;&amp;3; }
+export -f status step ok warn fail progress
+
+chmod +x /tmp/aicli-*.sh
+
 mkdir -p /tmp/unraid-aicliagents "$CONFIG_DIR"
 LOG_FILE="/tmp/unraid-aicliagents/install.log"
+exec 4&gt;&amp;1
 exec &gt; "$LOG_FILE" 2&gt;&amp;1
 set -x
 
-status() { echo "$1" &gt;&amp;3; }
-export -f status
+# --- Upgrade vs Fresh Install Detection ---
+if [ -f "/var/log/plugins/${NAME}.plg" ]; then
+    export UPGRADE_MODE=1
+    INSTALL_MODE_LABEL="UPGRADE"
+else
+    export UPGRADE_MODE=0
+    INSTALL_MODE_LABEL="FRESH INSTALL"
+fi
 
-# Upgrade vs Fresh Detection
-if [ -f "/var/log/plugins/${NAME}.plg" ]; then export UPGRADE_MODE=1; else export UPGRADE_MODE=0; fi
+status " "
+status "================================================================="
+status "  AI CLI AGENTS  v$VERSION"
+status "  Mode: $INSTALL_MODE_LABEL"
+status "  Log:  $LOG_FILE"
+status "  Press ^C to abort."
+status "================================================================="
+progress "10"
 
-status "--- MODULAR INSTALL START ---"
+# -----------------------------------------------------------------
+#  [1/5]  SYSTEM PREPARATION
+# -----------------------------------------------------------------
+status " "
+status "  [1/5] System Preparation"
+status "-----------------------------------------------------------------"
+mkdir -p "$EMHTTP_DEST/scripts/user"
+mv /tmp/aicli-repair.sh "$EMHTTP_DEST/scripts/user/repair-plugin.sh"
+mv /tmp/aicli-stop-warning.page "$EMHTTP_DEST/ArrayStopWarning.page"
+ok "Manifest deployed. Directories ready."
 
-# 2. Cleanup &amp; Migration
-status "[1/5] Preparing system..."
+# -----------------------------------------------------------------
+#  [2/5]  PERSISTENT STORAGE (Btrfs)
+# -----------------------------------------------------------------
+progress "20"
+status " "
+status "  [2/5] Persistent Storage (Btrfs)"
+status "-----------------------------------------------------------------"
+bash /tmp/aicli-storage.sh
+
+# -----------------------------------------------------------------
+#  [3/5]  LEGACY CLEANUP &amp; SESSION BACKUP
+# -----------------------------------------------------------------
+progress "40"
+status " "
+status "  [3/5] Legacy Cleanup &amp; Session Backup"
+status "-----------------------------------------------------------------"
 bash /tmp/aicli-clean.sh
-status "[2/5] Handling legacy data..."
 bash /tmp/aicli-legacy.sh
 
-# 3. Dependencies &amp; Assets
-status "[3/5] Installing runtimes (Node, tmux, fd, rg)..."
+# -----------------------------------------------------------------
+#  [4/5]  RUNTIME DEPENDENCIES
+# -----------------------------------------------------------------
+progress "70"
+status " "
+status "  [4/5] Runtime Dependencies (Node, tmux, fd, rg)"
+status "-----------------------------------------------------------------"
 bash /tmp/aicli-runtime.sh
-status "[4/5] Syncing UI components..."
+
+# -----------------------------------------------------------------
+#  [5/5]  UI ASSETS &amp; FINALIZATION
+# -----------------------------------------------------------------
+progress "90"
+status " "
+status "  [5/5] UI Assets &amp; Finalization"
+status "-----------------------------------------------------------------"
 bash /tmp/aicli-ui.sh
 
-# 4. Storage &amp; Finish
-status "[5/5] Initializing hybrid storage..."
-bash /tmp/aicli-storage.sh
+# Deploy Btrfs service to persistent emhttp location
+mkdir -p "/usr/local/emhttp/plugins/unraid-aicliagents/scripts"
+cp /tmp/aicli-btrfs.sh "/usr/local/emhttp/plugins/unraid-aicliagents/scripts/btrfs_delta_service.sh"
+chmod +x "/usr/local/emhttp/plugins/unraid-aicliagents/scripts/btrfs_delta_service.sh"
 bash /tmp/aicli-finalize.sh
 
-# Cleanup installers
+progress "100"
+status " "
+status "================================================================="
+status "  [OK] INSTALLATION COMPLETE  --  v$VERSION"
+status "  Full log: $LOG_FILE"
+status "================================================================="
+status " "
+
+# Cleanup installer scripts from /tmp
 rm -f /tmp/aicli-*.sh
 </INLINE>
 </FILE>
@@ -183,8 +263,10 @@ fi
 # 4. Forced emhttp removal (Ensures tab disappears)
 if [ -d "$EMHTTP_DEST" ]; then
     status "Removing plugin files from emhttp..."
+    rm -f /usr/local/bin/aicli-repair
     rm -rf "$EMHTTP_DEST"
 fi
+rm -f /tmp/aicli-btrfs.sh
 
 # 5. Final PLG clean
 rm -f /var/log/plugins/${NAME}.plg

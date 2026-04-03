@@ -3,9 +3,13 @@
 # This script ensures all RAM-based home directories are flushed to Flash on shutdown.
 
 LOG="/tmp/unraid-aicliagents/debug.log"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] System shutdown detected. Syncing all AI CLI home directories..." >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] Shutdown detected. Evicting all agents to release file locks..." >> "$LOG"
 
-# Call the PHP sync utility
+# 1. Evict all agents and kill background processes
+/usr/bin/php -r "require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php'; aicli_evict_all();"
+
+# 2. Sync all RAM data to Flash (Persistent Image)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] Syncing all AI CLI home directories..." >> "$LOG"
 /usr/bin/php -r "require_once '/usr/local/emhttp/plugins/unraid-aicliagents/includes/AICliAgentsManager.php'; aicli_sync_all();"
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] Sync complete." >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EVENT-STOPPING] Eviction and Sync complete." >> "$LOG"

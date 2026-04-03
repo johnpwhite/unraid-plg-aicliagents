@@ -23,8 +23,13 @@ aicli_debug("Background Install Job Started for: $agentId (PID: " . getmypid() .
 // 4. Run the install
 // installAgent already handles its own logging and status updates
 try {
-    installAgent($agentId);
-    aicli_debug("Background Install Job Complete for: $agentId");
+    $result = installAgent($agentId);
+    if (isset($result['status']) && $result['status'] === 'error') {
+        aicli_debug("Background Install Job FAILED for $agentId: " . ($result['message'] ?? $result['error'] ?? 'Unknown Error'));
+        setInstallStatus("Error: " . ($result['message'] ?? $result['error'] ?? 'Install Failed'), 0, $agentId, $result['reason'] ?? '');
+    } else {
+        aicli_debug("Background Install Job Complete for: $agentId");
+    }
 } catch (Exception $e) {
     aicli_debug("Background Install Job EXCEPTION for $agentId: " . $e->getMessage());
     setInstallStatus("Fatal Error: " . $e->getMessage(), 0, $agentId);

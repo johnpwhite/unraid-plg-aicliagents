@@ -14,7 +14,7 @@ if ($config['enable_tab'] !== '1') {
 }
 
 // Get version for cache busting
-$version = $config['version'] ?? time();
+$version = "2026.04.02.39";
 
 // Get CSRF token
 $var = @parse_ini_file("/var/local/emhttp/var.ini");
@@ -24,7 +24,65 @@ $csrf_token = $var['csrf_token'] ?? '';
 <div id="aicliagents-root"></div>
 
 <script>
-    window.csrf_token = '<?=$csrf_token?>';
+    window.csrf_token = '<?=$csrf_token?>' || (typeof csrf_token !== 'undefined' ? csrf_token : '');
+    window.aicli_version = '<?=$version?>';
+
+    // SERVER-AUTHORITATIVE WORKSPACE SYNC
+    (async function() {
+        // 1. INITIAL SYNC: Load from server before React initializes
+        try {
+            const resp = await fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=get_workspaces&csrf_token=${window.csrf_token}`);
+            const data = await resp.json();
+            
+            // Migration Logic: If server is empty but local has data, push to server (one-time move)
+            const localSessString = localStorage.getItem('aicliagents_sessions');
+            const localSessions = localSessString ? JSON.parse(localSessString) : [];
+            const localActiveId = localStorage.getItem('aicliagents_active_id');
+            const serverSessions = (data && data.sessions) ? data.sessions : [];
+
+            if (serverSessions.length === 0 && localSessions.length > 0) {
+                console.log("[AICli] Migrating local sessions to server-authoritative storage...");
+                fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=save_workspaces&csrf_token=${window.csrf_token}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        csrf_token: window.csrf_token,
+                        workspaces: JSON.stringify({ sessions: localSessions, activeId: localActiveId })
+                    })
+                });
+            } else if (data && typeof data === 'object') {
+                // Server has data (or is explicitly empty after migration), use it
+                localStorage.setItem('aicliagents_sessions', JSON.stringify(serverSessions));
+                if (data.activeId !== undefined) localStorage.setItem('aicliagents_active_id', data.activeId);
+                console.log("[AICli] Workspace sessions synced from server. Count:", serverSessions.length);
+            }
+        } catch (e) {
+            console.warn("[AICli] could not sync sessions from server:", e);
+        }
+
+        // 2. PERSISTENCE PROXY: Hijack localStorage.setItem to push changes to server
+        const originalSetItem = localStorage.setItem;
+        localStorage.setItem = function(key, value) {
+            if (key === 'aicliagents_sessions' || key === 'aicliagents_active_id') {
+                const sessions = key === 'aicliagents_sessions' ? JSON.parse(value) : JSON.parse(localStorage.getItem('aicliagents_sessions') || '[]');
+                const activeId = key === 'aicliagents_active_id' ? value : localStorage.getItem('aicliagents_active_id');
+                
+                // Debounce/Push to server
+                clearTimeout(window._aicliSyncTimer);
+                window._aicliSyncTimer = setTimeout(() => {
+                    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=save_workspaces&csrf_token=${window.csrf_token}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: new URLSearchParams({
+                            csrf_token: window.csrf_token,
+                            workspaces: JSON.stringify({ sessions, activeId })
+                        })
+                    }).catch(e => console.error("[AICli] Failed to save workspace to server:", e));
+                }, 500);
+            }
+            originalSetItem.apply(this, arguments);
+        };
+    })();
 </script>
 
 <link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= $version ?>">
@@ -32,11 +90,11 @@ $csrf_token = $var['csrf_token'] ?? '';
 
 <style>
 /* 
-   SCORCHED EARTH on scrollbars. 
+   Full scrollbar suppression. 
    We force hidden on EVERY potential parent wrapper.
 */
 /* 
-   SUPER-NUCLEAR reset for scrollbars and gutters.
+   Comprehensive reset for scrollbars and gutters.
    We force hidden/clip on EVERYTHING that could reserve space.
 */
 html,
@@ -127,7 +185,7 @@ $(function(){
         } catch(e) {}
     }
 
-    // THE NUCLEAR OPTION: Persistently kill scrollbars and force width on the root containers
+    // PERSISTENT OVERRIDE: Maintain scrollbar suppression and force container geometry.
     function killScroll() {
         var targets = 'html, body, #displaybox, #sb-body, #sb-container, #main-content, .main-section';
         $(targets).css({

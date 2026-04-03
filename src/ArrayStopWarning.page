@@ -1,0 +1,103 @@
+Menu="Buttons"
+---
+<script>
+/**
+ * AI CLI Agents: Global Array Stop Interceptor
+ * This script wraps the standard Unraid stopArray function to provide a warning
+ * only if active AI CLI Agent workspaces are targeting array/pool paths (/mnt/).
+ */
+(function() {
+    // Wait for the DOM to be ready
+    document.addEventListener('DOMContentLoaded', function() {
+        const checkAndIntercept = () => {
+            const originalStopArray = window.stopArray;
+            
+            // Only wrap if it exists and hasn't been wrapped yet
+            if (typeof originalStopArray === 'function' && !originalStopArray._aicli_wrapped) {
+                console.log('[AICli] Global Array Stop Interceptor Active');
+                
+                window.stopArray = function(form) {
+                    let sessions = [];
+                    try {
+                        sessions = JSON.parse(localStorage.getItem('aicliagents_sessions') || '[]');
+                    } catch (e) {
+                        console.warn('[AICli] Failed to parse sessions for stop warning:', e);
+                    }
+                    
+                    // Filter for sessions on /mnt/ (Array or Pools)
+                    const arraySessions = sessions.filter(s => {
+                        const path = (s.path || '').replace(/\/+/g, '/'); // Normalize double slashes
+                        const isActiveOnArray = path.startsWith('/mnt/');
+                        if (isActiveOnArray) {
+                            console.log('[AICli] Detected Array Session:', s.id, 'Path:', path);
+                        }
+                        return isActiveOnArray;
+                    });
+                    
+                    const arraySessionIds = arraySessions.map(s => s.id).join(',');
+                    console.log('[AICli] Active Array Sessions Count:', arraySessions.length);
+                    
+                    if (arraySessions.length > 0) {
+                        if (typeof window.swal === 'function') {
+                            window.swal({
+                                title: "AI CLI Agents Active",
+                                text: "You have <strong style='color:#ff4444'>" + arraySessions.length + "</strong> active agent sessions on the array. <br><br>Stopping the array will <strong style='color:#ff4444'>forcefully terminate</strong> these specific processes to prevent unmount locks. <br><br>Proceed with stopping the array?",
+                                type: "warning",
+                                html: true,
+                                showCancelButton: true,
+                                confirmButtonText: "Close Agents & Stop Array",
+                                cancelButtonText: "Cancel",
+                                confirmButtonColor: "#DD6B55"
+                            }, function(confirmed) {
+                                if (confirmed) {
+                                    // 1. Trigger targeted eviction via AJAX
+                                    const csrf = window.csrf_token || '';
+                                    fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=evict_all&ids=${arraySessionIds}&csrf_token=${csrf}`)
+                                        .then(() => {
+                                            // 2. Force-submit the stop form. 
+                                            // We append cmdStop=Stop to bypass Unraid's redundant second swal.
+                                            if (!$(form).find('input[name="cmdStop"]').length) {
+                                                $(form).append('<input type="hidden" name="cmdStop" value="Stop">');
+                                            }
+                                            form.submit();
+                                        })
+                                        .catch(err => {
+                                            console.error('[AICli] Eviction failed, proceeding with stop anyway:', err);
+                                            if (!$(form).find('input[name="cmdStop"]').length) {
+                                                $(form).append('<input type="hidden" name="cmdStop" value="Stop">');
+                                            }
+                                            form.submit();
+                                        });
+                                }
+                            });
+                        } else {
+                            if (confirm("AI CLI Agents are active on the array. Stopping the array will kill them. Proceed?")) {
+                                const csrf = window.csrf_token || '';
+                                fetch(`/plugins/unraid-aicliagents/AICliAjax.php?action=evict_all&ids=${arraySessionIds}&csrf_token=${csrf}`)
+                                    .finally(() => {
+                                        if (!$(form).find('input[name="cmdStop"]').length) {
+                                            $(form).append('<input type="hidden" name="cmdStop" value="Stop">');
+                                        }
+                                        form.submit();
+                                    });
+                            }
+                        }
+                    } else {
+                        // No array sessions, call the original to preserve default Unraid behavior/popups
+                        originalStopArray(form);
+                    }
+                };
+                
+                // Mark as wrapped
+                window.stopArray._aicli_wrapped = true;
+            }
+        };
+
+        // Initial check
+        checkAndIntercept();
+        
+        // Re-check periodically in case Unraid redefines it
+        setInterval(checkAndIntercept, 5000);
+    });
+})();
+</script>
