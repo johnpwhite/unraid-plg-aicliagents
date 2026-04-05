@@ -26,7 +26,7 @@ case "$ACTION" in
     "init")
         # Initialize a new sparse Btrfs image
         TARGET_IMG="$3"
-        # D-117: FAT32 Compatibility Safeguard (128MB default for Home)
+        # D-180: Default 128MB sparse (grows on demand via sync_delta expansion)
         SIZE="${4:-128M}"
         [ -f "$TARGET_IMG" ] && exit 0
         status "Creating sparse Btrfs home image for $USER_NAME at $TARGET_IMG ($SIZE)..."
@@ -42,7 +42,7 @@ case "$ACTION" in
         [ -f "$DEST_IMG" ] && exit 0
         
         status "Migrating $USER_NAME home folder into Btrfs image..."
-        # D-117: Safe 128MB ceiling for FAT32 compatibility (Flash stick storage)
+        # D-180: 128MB starting size (sparse, grows on demand)
         truncate -s 128M "$DEST_IMG"
         mkfs.btrfs -f "$DEST_IMG" > /dev/null 2>&1
         
@@ -77,7 +77,14 @@ case "$ACTION" in
         # Convenient wrapper for high-level sync (Handles its own state)
         # Usage: btrfs_delta_service.sh sync <user> <persist_img>
         PERSIST_IMG="$3"
-        [ -z "$PERSIST_IMG" ] && PERSIST_IMG="/boot/config/plugins/unraid-aicliagents/persistence/home_$USER_NAME.img"
+        # D-180: Default persistence off-Flash. Read from config if available.
+        if [ -z "$PERSIST_IMG" ]; then
+            CONFIG_FILE="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+            PERSIST_BASE=""
+            [ -f "$CONFIG_FILE" ] && PERSIST_BASE=$(grep -oP '^persistence_base="\K[^"]+' "$CONFIG_FILE" || true)
+            [ -z "$PERSIST_BASE" ] && PERSIST_BASE="/mnt/user/appdata/aicliagents/persistence"
+            PERSIST_IMG="$PERSIST_BASE/home_$USER_NAME.img"
+        fi
         
         STATE_FILE="/tmp/unraid-aicliagents/work/$USER_NAME/.last_sync_snap"
         LAST_SNAP=""
@@ -161,17 +168,22 @@ case "$ACTION" in
 
         if [ -z "$LAST_SNAP" ]; then
             status "DEBUG: Entering Full Sync Fallback..."
-            # D-117: FAT32 Safety Check (Limit expansion to 2GB total for home images)
             local current_bytes=$(stat -c %s "$PERSIST_IMG")
-            
-            # D-170: Intelligent Expansion - Only expand if we have less than 100MB free 
-            # and we are under the 2GB safety limit.
-            if [ "$current_bytes" -lt 2147483648 ]; then
+
+            # D-180: Expansion limit depends on storage location.
+            # Flash (FAT32): 2GB ceiling. Disk (XFS/Btrfs/ZFS): 10GB ceiling.
+            local MAX_BYTES=10737418240  # 10GB for disk storage
+            if [[ "$PERSIST_IMG" == /boot/* ]]; then
+                MAX_BYTES=2147483648     # 2GB for Flash
+            fi
+
+            # D-170: Intelligent Expansion - Only expand if we have less than 100MB free
+            if [ "$current_bytes" -lt "$MAX_BYTES" ]; then
                 local mnt_stats=$(df -m --output=avail "$TEMP_MNT" | tail -n 1 | tr -dc '0-9')
                 [ -z "$mnt_stats" ] && mnt_stats=0
-                
+
                 if [ "$mnt_stats" -lt 100 ]; then
-                    status "Headroom: Expansion required ($mnt_stats MiB free). Expanding (+512M) within 2GB safe-zone..."
+                    status "Headroom: Expansion required ($mnt_stats MiB free). Expanding (+512M)..."
                     umount "$TEMP_MNT"
                     truncate -s "+512M" "$PERSIST_IMG"
                     mount -o loop,noatime,compress=zstd:1 "$PERSIST_IMG" "$TEMP_MNT"
@@ -331,7 +343,7 @@ case "$ACTION" in
         TARGET_MNT="${3:-$RAM_MNT}"
         if [ -d "$TARGET_MNT" ]; then
             status "Pruning non-essential caches and logs from $USER_NAME home..."
-            # D-117: Aggressive pruning of node-based agents to stay under 4GB FAT32 limit
+            # D-117: Aggressive pruning of node-based agent caches to keep images lean
             # D-120: Specifically prune .sync_snaps from find to avoid "Read-only file system" errors
             find "$TARGET_MNT" -path "*/.sync_snaps" -prune -o -maxdepth 4 -type d \( -name ".npm" -o -name ".cache" -o -name ".bun" -o -name ".node-gyp" -o -name "log" -o -name "npm-cache" -o -name ".bin" \) -exec rm -rf {} +
             find "$TARGET_MNT" -path "*/.sync_snaps" -prune -o -maxdepth 4 -type f -name "*.log" -delete

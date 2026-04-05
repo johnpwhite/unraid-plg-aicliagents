@@ -38,7 +38,7 @@ if (!function_exists('command_exists')) {
  */
 function aicli_init_plugin() {
     // D-61: Versioned init sentinel ensures cleanup runs exactly once per upgrade
-    $version = "2026.04.03.24"; // Match current release
+    $version = "2026.04.05.01"; // Match current release
     $doneFile = "/tmp/unraid-aicliagents/init_done_$version";
     if (file_exists($doneFile)) return;
 
@@ -122,7 +122,7 @@ function aicli_ensure_agent_storage_mounted($forceRw = false) {
     if (!flock($fp, LOCK_EX)) { if ($fp) fclose($fp); return false; }
     
     $config = getAICliConfig();
-    $storageBase = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+    $storageBase = $config['agent_storage_path'] ?? "/mnt/user/appdata/aicliagents";
     $img = "$storageBase/aicli-agents.img";
 
     // D-144: Robust Namespace/Visibility Validation
@@ -145,7 +145,14 @@ function aicli_ensure_agent_storage_mounted($forceRw = false) {
     }
 
     if (!file_exists($img)) {
+        // D-180: Don't auto-create on an unavailable path (e.g. array not started)
+        if (!aicli_is_path_ready(dirname($img))) {
+            aicli_log("STABILIZER: Agent storage path not ready ($storageBase). Array may not be started.", AICLI_LOG_WARN);
+            flock($fp, LOCK_UN); fclose($fp);
+            return false;
+        }
         aicli_log("STABILIZER: Agent storage image missing at $img. Recreating fresh 512MB volume...", AICLI_LOG_WARN);
+        if (!is_dir(dirname($img))) @mkdir(dirname($img), 0755, true);
         // D-166: Auto-initialize missing binary storage (Default to 512MB)
         exec("truncate -s 512M " . escapeshellarg($img));
         // Force mkfs to clear any stale metadata ghosts
@@ -218,7 +225,7 @@ function aicli_agent_storage_unlock() {
     
     // Canonical image path resolution
     $config = getAICliConfig();
-    $storageBase = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+    $storageBase = $config['agent_storage_path'] ?? "/mnt/user/appdata/aicliagents";
     $imgFile = "$storageBase/aicli-agents.img";
     
     // Force loop detachment to clear stale kernel state
@@ -466,7 +473,7 @@ function aicli_get_work_dir($username) {
 
 function aicli_get_persist_dir($username) {
     $config = getAICliConfig();
-    $base = !empty($config['persistence_base']) ? rtrim($config['persistence_base'], '/') : "/boot/config/plugins/unraid-aicliagents/persistence";
+    $base = !empty($config['persistence_base']) ? rtrim($config['persistence_base'], '/') : "/mnt/user/appdata/aicliagents/persistence";
     return "$base/$username/home";
 }
 
@@ -710,7 +717,7 @@ function aicli_sync_agents_to_backend() {
     $load_agents_ram = (string)($config['load_agents_ram'] ?? '0');
     if ($load_agents_ram === '0') return true;
 
-    $targetPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+    $targetPath = $config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents';
     $persistImg = rtrim($targetPath, '/') . "/aicli-agents.img";
     $ramMnt = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
 
@@ -764,7 +771,7 @@ function aicli_evict_all() {
         if (!empty($cid)) $checkpoint[$id] = ['chat_id' => $cid, 'agent_id' => $aid, 'ts' => time()];
     }
     if (!empty($checkpoint)) {
-        $cpFile = "/boot/config/plugins/unraid-aicliagents/persistence/upgrade_checkpoint.json";
+        $cpFile = "/boot/config/plugins/unraid-aicliagents/upgrade_checkpoint.json";
         @file_put_contents($cpFile, json_encode($checkpoint, JSON_PRETTY_PRINT));
         aicli_log("STABILIZER: Checkpointed " . count($checkpoint) . " active sessions for post-upgrade resumption.", AICLI_LOG_INFO);
     }
@@ -880,7 +887,7 @@ function saveAICliConfig($newConfig, $notify = true) {
     $oldSyncMins = (int)($oldConfig['sync_interval_mins'] ?? 0) + ((int)($oldConfig['sync_interval_hours'] ?? 0) * 60);
 
     // 2. Handle Main Config
-    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version', 'debug_logging', 'sync_interval_hours', 'sync_interval_mins', 'log_level', 'agent_storage_path', 'load_home_ram', 'load_agents_ram', 'storage_opt_last_run', 'sync_last_run', 'write_protect_agents'];
+    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version', 'debug_logging', 'sync_interval_hours', 'sync_interval_mins', 'log_level', 'agent_storage_path', 'persistence_base', 'load_home_ram', 'load_agents_ram', 'storage_opt_last_run', 'sync_last_run', 'write_protect_agents'];
     foreach ($newConfig as $key => $val) {
         if (strpos($key, 'preview_') === 0 || strpos($key, 'node_memory_') === 0) $allowed[] = $key;
     }
@@ -895,10 +902,9 @@ function saveAICliConfig($newConfig, $notify = true) {
     $oldUser = $oldConfig['user'] ?? 'root';
     $newUser = $current['user'] ?? 'root';
     
-    // D-41: Force home_path to the NEW user persistence folder if it's a standard path
-    if ($oldUser !== $newUser && strpos($current['home_path'], "/boot/config/plugins/unraid-aicliagents/") === 0) {
-        $current['home_path'] = "/boot/config/plugins/unraid-aicliagents/persistence/$newUser/home";
-    }
+    // D-180: Always derive home_path from persistence_base + user to keep in sync
+    $persistBase = rtrim($current['persistence_base'] ?? '/mnt/user/appdata/aicliagents/persistence', '/');
+    $current['home_path'] = "$persistBase/$newUser/home";
 
     // 3. User Transition: Sync old user's RAM to Flash before we change anything
     if ($oldUser !== $newUser) {
@@ -906,7 +912,7 @@ function saveAICliConfig($newConfig, $notify = true) {
         aicli_sync_home($oldUser, true);
 
         // D-72: Auto-Clone Image: If the new user doesn't have an image, clone the current one
-        $persistBase = $current['persistence_base'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+        $persistBase = $current['persistence_base'] ?? '/mnt/user/appdata/aicliagents/persistence';
         $oldImg = $persistBase . "/home_$oldUser.img";
         $newImg = $persistBase . "/home_$newUser.img";
 
@@ -1044,8 +1050,9 @@ function aicli_migrate_home_path() {
     $user = $config['user'] ?? 'root';
     $legacyDefault = "/boot/config/plugins/unraid-aicliagents/home";
     
-    // New Standard: persistence dir for the user
-    $newPersistBase = "/boot/config/plugins/unraid-aicliagents/persistence/$user/home";
+    // New Standard: persistence dir for the user (D-180: use configured base, not /boot)
+    $persistBase = $config['persistence_base'] ?? '/mnt/user/appdata/aicliagents/persistence';
+    $newPersistBase = "$persistBase/$user/home";
 
     // Migration logic:
     // 1. If home_path is the old default or pointing to legacy plugin root (non-persistence)
@@ -1199,13 +1206,17 @@ BG_PHP_SCRIPT;
 
 function getAICliConfig() {
     $configFile = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
+    // D-180: Storage defaults moved OFF /boot to reduce USB Flash wear.
+    // Only minimal config (.cfg, secrets.cfg, small JSON) stays on /boot.
+    // Large data (agent binaries, user homes) defaults to /mnt/user/appdata/aicliagents.
     $defaults = [
         'enable_tab' => '1',
         'theme' => 'dark',
         'font_size' => '14',
         'history' => '1000',
-        'home_path' => '/boot/config/plugins/unraid-aicliagents/persistence/root/home',
-        'persistence_base' => '/boot/config/plugins/unraid-aicliagents/persistence',
+        'home_path' => '/mnt/user/appdata/aicliagents/persistence/root/home',
+        'persistence_base' => '/mnt/user/appdata/aicliagents/persistence',
+        'agent_storage_path' => '/mnt/user/appdata/aicliagents',
         'user' => 'root',
         'root_path' => '/mnt/user',
         'version' => 'unknown',
@@ -1873,7 +1884,7 @@ function startAICliTerminal($id = 'default', $workingDir = null, $chatSessionId 
         $env .= "export AICLI_CHAT_SESSION_ID=$safeChatId; ";
     } else {
         // D-156: Checkpoint Restoration - If no session ID was provided, check if we have a persistent token from an upgrade
-        $cpFile = "/boot/config/plugins/unraid-aicliagents/persistence/upgrade_checkpoint.json";
+        $cpFile = "/boot/config/plugins/unraid-aicliagents/upgrade_checkpoint.json";
         if (file_exists($cpFile)) {
             $checkpoint = json_decode(@file_get_contents($cpFile), true);
             if (isset($checkpoint[$id]) && $checkpoint[$id]['agent_id'] === $agentId) {
@@ -2063,7 +2074,9 @@ function aicli_get_flash_headroom() {
  * Returns detailed status of the Btrfs agent storage.
  */
 function aicli_get_storage_status() {
-    $img = "/boot/config/plugins/unraid-aicliagents/aicli-agents.img";
+    $config = getAICliConfig();
+    $storageBase = $config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents';
+    $img = "$storageBase/aicli-agents.img";
     $mnt = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
     
     $status = ['status' => 'missing', 'used_mb' => 0, 'total_mb' => 0, 'available_mb' => 0, 'logical_used_mb' => 0, 'home_stats' => []];
@@ -2196,10 +2209,15 @@ function aicli_expand_storage($type = 'agents', $sizeAdd = '256M') {
     }
 
     if ($type === 'agents') {
-        $img = "/boot/config/plugins/unraid-aicliagents/aicli-agents.img";
+        $config = getAICliConfig();
+        $storageBase = $config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents';
+        $img = "$storageBase/aicli-agents.img";
         $mnt = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
-        $headroom = aicli_get_flash_headroom();
-        if ($headroom < 150) return ['status' => 'error', 'message' => 'Flash too full to expand image safely. Free up 150MB+ on Flash first.'];
+        // D-180: Only check Flash headroom if storage is actually on Flash
+        if (strpos($storageBase, '/boot/') === 0) {
+            $headroom = aicli_get_flash_headroom();
+            if ($headroom < 150) return ['status' => 'error', 'message' => 'Flash too full to expand image safely. Free up 150MB+ on Flash first.'];
+        }
         
         aicli_log("Expanding Agent storage binary container ($img) by $sizeAdd...", AICLI_LOG_INFO);
         aicli_agent_storage_unlock();
@@ -2257,9 +2275,11 @@ function aicli_shrink_storage($type = 'agents', $sizeSub = '256M') {
     }
 
     if ($type === 'agents') {
-        $img = "/boot/config/plugins/unraid-aicliagents/aicli-agents.img";
+        $config = getAICliConfig();
+        $storageBase = $config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents';
+        $img = "$storageBase/aicli-agents.img";
         $mnt = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
-        
+
         aicli_log("Shrinking agent storage container by $sizeSub...", AICLI_LOG_INFO);
         if (is_dir($mnt)) {
             if (!aicli_agent_storage_unlock()) {
@@ -2838,7 +2858,7 @@ function aicli_migrate_persistence($newBase) {
     }
 
     $config = getAICliConfig();
-    $oldBase = rtrim($config['persistence_base'] ?? "/boot/config/plugins/unraid-aicliagents/persistence", '/');
+    $oldBase = rtrim($config['persistence_base'] ?? "/mnt/user/appdata/aicliagents/persistence", '/');
     if ($oldBase === $newBase) return ['status' => 'ok', 'message' => 'Path is identical, no move needed.'];
 
     aicli_log("MIGRATION: Starting persistence migration from $oldBase to $newBase", AICLI_LOG_INFO);
@@ -2887,7 +2907,7 @@ function aicli_migrate_agent_storage($newBase) {
     }
 
     $config = getAICliConfig();
-    $oldBase = rtrim($config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents", '/');
+    $oldBase = rtrim($config['agent_storage_path'] ?? "/mnt/user/appdata/aicliagents", '/');
     if ($oldBase === $newBase) return ['status' => 'ok', 'message' => 'Path is identical.'];
 
     $oldImg = "$oldBase/aicli-agents.img";
@@ -3005,7 +3025,7 @@ function aicli_migrate_root_sessions($targetUser = '') {
 
     aicli_log("MIGRATION: Importing sessions from root to $targetUser...", AICLI_LOG_INFO);
     
-    $rootPersist = "/boot/config/plugins/unraid-aicliagents/persistence/root/home";
+    $rootPersist = aicli_get_persist_dir('root');
     $targetMnt = aicli_get_work_dir($targetUser);
 
     if (!is_dir($rootPersist)) return ['status' => 'error', 'message' => 'Root persistence directory not found.'];

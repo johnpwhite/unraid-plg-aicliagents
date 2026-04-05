@@ -362,6 +362,31 @@ $users = getUnraidUsers();
                 </div>
             </div>
 
+            <?php
+            // D-180: Flash Storage Warning Banner
+            $storageOnFlash = (strpos($config['persistence_base'] ?? '', '/boot/') === 0)
+                || (strpos(($config['agent_storage_path'] ?? ''), '/boot/') === 0);
+            if ($storageOnFlash): ?>
+            <div class="aicli-card" style="border: 2px solid #ff4444; background: rgba(255,68,68,0.08);">
+                <div class="aicli-card-header" style="color: #ff4444;">
+                    <i class="fa fa-exclamation-triangle"></i>
+                    <span>USB Flash Wear Warning</span>
+                </div>
+                <div class="aicli-card-body" style="font-size: 0.9em;">
+                    <p>One or more storage paths are configured on <strong>/boot</strong> (USB Flash drive). This causes excessive write wear on the USB stick and can lead to drive failure.</p>
+                    <p style="margin-top:6px;">Move storage to an Array or Pool disk (e.g. <code>/mnt/user/appdata/aicliagents</code>) using the <strong>Migrate</strong> buttons in Session Profile below. Only minimal config files should remain on /boot.</p>
+                    <div style="margin-top:8px; font-size:0.85em; opacity:0.7;">
+                        <?php if (strpos(($config['agent_storage_path'] ?? ''), '/boot/') === 0): ?>
+                            <div><i class="fa fa-hdd-o"></i> Agent Binaries: currently on Flash</div>
+                        <?php endif; ?>
+                        <?php if (strpos($config['persistence_base'] ?? '', '/boot/') === 0): ?>
+                            <div><i class="fa fa-home"></i> Home Backup: currently on Flash</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+
             <!-- CARD: SESSION PROFILE -->
             <div class="aicli-card">
                 <div class="aicli-card-header">
@@ -394,13 +419,13 @@ $users = getUnraidUsers();
                         </dd>
                         <dt>Default workspace path: <i class="fa fa-info-circle" title="Base directory for project discovery. Standard Unraid path is /mnt/user"></i></dt>
                         <dd>
-                            <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>" data-pickroot="/mnt/" data-pickfilter="dir" style="width: 250px;">
+                            <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>" style="width: 250px;" placeholder="/mnt/user">
                         </dd>
                         <dt>Home Backup Location: <i class="fa fa-info-circle" title="Where user data (chats, config) is permanently saved."></i></dt>
                         <dd>
                             <div style="display:flex; flex-direction:column; gap:4px;">
                                 <div style="display:flex; gap:10px; width: 100%;">
-                                    <input type="text" id="new_storage_path" value="<?=$config['persistence_base']?>" data-pickroot="/mnt/" data-pickfilter="dir" style="width: 250px;" oninput="toggleMigrateBtn('new_storage_path', 'btn-migrate-home', '<?=$config['persistence_base']?>')">
+                                    <input type="text" id="new_storage_path" name="persistence_base" value="<?=$config['persistence_base']?>" style="width: 250px;" placeholder="/mnt/user/appdata/aicliagents/persistence" oninput="toggleMigrateBtn('new_storage_path', 'btn-migrate-home', '<?=$config['persistence_base']?>')">
                                     <button type="button" id="btn-migrate-home" class="aicli-btn-slim" onclick="executeStorageMigration()" title="Migrate Home Storage" disabled style="opacity:0.5; cursor:not-allowed;"><i class="fa fa-exchange"></i> Migrate</button>
                                 </div>
                                 <label style="display:flex; align-items:center; gap:5px; font-size: 0.85em; cursor:pointer;" title="Run from blazing fast RAM, syncing down to storage backend array">
@@ -414,7 +439,7 @@ $users = getUnraidUsers();
                         <dd>
                             <div style="display:flex; flex-direction:column; gap:4px;">
                                 <div style="display:flex; gap:10px; width: 100%;">
-                                    <input type="text" id="agent_storage_path" name="agent_storage_path" value="<?=$config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents'?>" data-pickroot="/mnt/" data-pickfilter="dir" style="width: 250px;" oninput="toggleMigrateBtn('agent_storage_path', 'btn-migrate-agents', '<?=$config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents'?>')">
+                                    <input type="text" id="agent_storage_path" name="agent_storage_path" value="<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>" style="width: 250px;" placeholder="/mnt/user/appdata/aicliagents" oninput="toggleMigrateBtn('agent_storage_path', 'btn-migrate-agents', '<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>')">
                                     <button type="button" id="btn-migrate-agents" class="aicli-btn-slim" onclick="executeAgentStorageMigration()" title="Migrate Agent Storage" disabled style="opacity:0.5; cursor:not-allowed;"><i class="fa fa-exchange"></i> Migrate</button>
                                 </div>
                                 <label style="display:flex; align-items:center; gap:5px; font-size: 0.85em; cursor:pointer;" title="Mounts the agent storage as Read-Only for Flash safety. (Temporarily unlocks for installs/resizes).">
@@ -427,7 +452,7 @@ $users = getUnraidUsers();
                                     <input type="checkbox" name="load_agents_ram" value="1" <?=((string)($config['load_agents_ram'] ?? '0') === '1' ? 'checked' : '')?>>
                                     Load and run from RAM (Experimental)
                                 </label>
-                                <div style="font-size:10px; color:#ff8c00; margin-top:4px;"><i class="fa fa-warning" style="margin-right:2px;"></i> Using an Array path (/mnt/user/...) for storage prevents persistence or agent availability while the Array is stopped.</div>
+                                <div style="font-size:10px; color:#ff8c00; margin-top:4px;"><i class="fa fa-warning" style="margin-right:2px;"></i> Agents are unavailable while the Array is stopped. Using /boot (Flash USB) for storage causes excessive wear and is strongly discouraged.</div>
                             </div>
                         </dd>
                     </dl>
@@ -570,7 +595,7 @@ $users = getUnraidUsers();
                 <div class="aicli-info-row">
                     <div class="aicli-info-label">Help & Guide:</div>
                     <div class="aicli-info-value">
-                        <a href="https://github.com/johnpwhite/unraid-plg-aicliagents/blob/main/docs/USER_GUIDE.md" target="_blank" style="color: #ff8c00; font-weight: bold; text-decoration: none;">
+                        <a href="https://github.com/scs3jb/unraid-plg-aicliagents/blob/main/docs/USER_GUIDE.md" target="_blank" style="color: #ff8c00; font-weight: bold; text-decoration: none;">
                             <i class="fa fa-book"></i> VIEW ONLINE USER GUIDE
                         </a>
                     </div>
@@ -620,11 +645,14 @@ $users = getUnraidUsers();
                     <div class="aicli-info-value"><code id="display_ram_dir"><?= aicli_get_work_dir($config['user']) ?></code></div>
                 </div>
 
+                <?php
+                    $derivedHomePath = rtrim($config['persistence_base'] ?? '/mnt/user/appdata/aicliagents/persistence', '/') . '/' . ($config['user'] ?? 'root') . '/home';
+                ?>
                 <div class="aicli-info-row">
                     <div class="aicli-info-label">Home Backup Path:</div>
                     <div class="aicli-info-value">
-                        <code id="display_home_path"><?=$config['home_path']?></code>
-                        <input type="hidden" name="home_path" id="home_path" value="<?=$config['home_path']?>">
+                        <code id="display_home_path"><?=$derivedHomePath?></code>
+                        <input type="hidden" name="home_path" id="home_path" value="<?=$derivedHomePath?>">
                     </div>
                 </div>
                 
@@ -706,16 +734,8 @@ var isGlobalLocked = false;
 var isUnloading = false;
 window.addEventListener('beforeunload', () => { isUnloading = true; });
 
-// Bind native Unraid file picker UI
-$(function() {
-    // D-65: Defensive check for fileTreeAttach to prevent TypeError if library is delayed
-    if ($.isFunction($.fn.fileTreeAttach)) {
-        $('input[data-pickroot]').fileTreeAttach(null, null, function(path) {
-            $(document).trigger('close.fileTree');
-            $(this).trigger('change');
-        });
-    }
-});
+// D-180: Removed fileTreeAttach file picker - it captures clicks/focus and obscures input.
+// Path inputs are now plain text fields.
 
 function openCreateUserModal() {
     window.open('/Users/UserAdd', '_blank');
@@ -749,8 +769,9 @@ function onUserChange(username) {
     const homeDisplay = document.getElementById('display_home_path');
     
     if (ramDisplay) ramDisplay.innerText = `/tmp/unraid-aicliagents/work/${username}`;
-    if (homeInput) homeInput.value = `/boot/config/plugins/unraid-aicliagents/persistence/${username}/home`;
-    if (homeDisplay) homeDisplay.innerText = `/boot/config/plugins/unraid-aicliagents/persistence/${username}/home`;
+    const persistBase = document.getElementById('new_storage_path')?.value || '/mnt/user/appdata/aicliagents/persistence';
+    if (homeInput) homeInput.value = `${persistBase}/${username}/home`;
+    if (homeDisplay) homeDisplay.innerText = `${persistBase}/${username}/home`;
 }
 
 function checkUpdates() {
@@ -1304,7 +1325,7 @@ function executeRepair() {
 }
 
 function executeStorageMigration() {
-    const current = '<?=$config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents'?>';
+    const current = '<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>';
     const pathInput = document.getElementById('agent_storage_path');
     const newPath = pathInput ? pathInput.value : '';
     const csrf = getCsrf();

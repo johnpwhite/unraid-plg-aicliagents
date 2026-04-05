@@ -61,7 +61,12 @@ if [ "$UPGRADE_MODE" = "1" ] && [ -d "/tmp/unraid-aicliagents/work" ]; then
     step "Backing up active RAM sessions to persistence (multi-user sync)..."
 
     PERSIST_BASE=$(grep "persistence_base=" "$CONFIG_DIR/unraid-aicliagents.cfg" | sed -e 's/persistence_base=//' -e 's/\"//g' -e "s/'//g" 2>/dev/null)
-    [ -z "$PERSIST_BASE" ] && PERSIST_BASE="$CONFIG_DIR/persistence"
+    # D-180: Default persistence off-Flash
+    [ -z "$PERSIST_BASE" ] && PERSIST_BASE="/mnt/user/appdata/aicliagents/persistence"
+    # If the default path isn't ready (array not started), fall back to /boot
+    if ! is_path_ready "$PERSIST_BASE"; then
+        PERSIST_BASE="$CONFIG_DIR/persistence"
+    fi
 
     SESSION_COUNT=0
     for user_work in /tmp/unraid-aicliagents/work/*; do

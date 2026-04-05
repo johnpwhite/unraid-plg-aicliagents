@@ -1,8 +1,15 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.04.04.05" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.04.05.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.04.05.01
+- Improve: Flash Wear Protection - All large data (agent binaries, user home persistence) now defaults to /mnt/user/appdata/aicliagents instead of /boot USB Flash. Only minimal config files remain on Flash.
+- Improve: Auto-Migration - Existing Flash-based agent images are automatically migrated to the configured disk path on install. Installer falls back to /boot gracefully when the Array is not yet started.
+- Improve: Storage Warnings - New red warning banner in Settings when storage paths are configured on /boot, with guidance to migrate to Array/Pool storage.
+- Improve: Expansion Limits - Home image expansion ceiling raised from 2GB to 10GB when persistence is on a real disk (Btrfs/XFS/ZFS), retaining 2GB limit only for Flash storage.
+- Fix: Repair utility and sync engine now read storage paths from config instead of hardcoding /boot, ensuring correct operation after storage migration.
+
 ## 2026.04.04.05
 - Improve: Storage Intelligence - Implemented advanced Btrfs management including tail-block evacuation for reliable image shrinking, intelligent expansion guards to protect Flash drive headroom, and automated self-healing for corrupted loopback images.
 - Improve: UI &amp; UX Refinement - Redesigned the Agent Store and configuration drawers with a high-density layout, improved spacing, and automated drawer management for a smoother workspace transition.
@@ -64,31 +71,31 @@
 
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
 <FILE Name="/tmp/aicli-clean.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/cleanup.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/installer/cleanup.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-legacy.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/legacy-migrate.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/installer/legacy-migrate.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-runtime.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/runtime.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/installer/runtime.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-ui.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/ui-assets.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/installer/ui-assets.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-storage.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/storage.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/installer/storage.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-btrfs.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/btrfs_delta_service.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/btrfs_delta_service.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-finalize.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/installer/finalize.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-repair.sh">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/scripts/user/repair-plugin.sh</URL>
 </FILE>
 <FILE Name="/tmp/aicli-stop-warning.page">
-<URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>
+<URL>https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main/src/ArrayStopWarning.page</URL>
 </FILE>
 
 <!-- MAIN INSTALL ENGINE -->
@@ -97,8 +104,8 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.04.04.05"
-export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
+export VERSION="2026.04.05.01"
+export GIT_URL="https://raw.githubusercontent.com/scs3jb/unraid-plg-aicliagents/refs/heads/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
 
@@ -281,14 +288,15 @@ status "  [DONE] Runtime processes terminated"
 status "  [DONE] Agent package caches pruned"
 status " "
 status "  [NOTE] YOUR SETTINGS HAVE BEEN PRESERVED:"
-status "  > Config:     $CONFIG_DIR/*.cfg"
-status "  > Persistence: $CONFIG_DIR/persistence/"
+status "  > Config: $CONFIG_DIR/*.cfg"
+status "  > Data:   Check your configured storage path (Settings > Storage)"
 status " "
 status "  [LOGS] Detailed uninstall trace preserved at:"
 status "  > $LOG_FILE"
 status " "
-status "  [TIP] To fully remove all data, manually delete:"
+status "  [TIP] To fully remove all data, delete config and storage:"
 status "  > rm -rf $CONFIG_DIR"
+status "  > (Also remove your configured storage path if on Array/Pool)"
 status "==========================================================="
 
 echo "Uninstall of $NAME complete."

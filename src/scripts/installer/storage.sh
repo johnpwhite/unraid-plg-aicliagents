@@ -1,13 +1,15 @@
 #!/bin/bash
 # AICliAgents Installer: Persistent Btrfs Storage Initialization
-# Refactored for Flash longevity and zero-RAM permanent footprint.
+# D-180: Defaults to /mnt/user/appdata/aicliagents to minimize USB Flash wear.
+# Falls back to /boot only if the array is not started and no config exists.
 
 AGENT_BASE="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
 CONFIG_FILE="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
 LEGACY_CACHE="/boot/config/plugins/unraid-aicliagents/pkg-cache"
 
 # --- Read Config Options ---
-AGENT_STORAGE_PATH="/boot/config/plugins/unraid-aicliagents"
+# D-180: New default is off-Flash. Only use /boot as last resort.
+AGENT_STORAGE_PATH="/mnt/user/appdata/aicliagents"
 LOAD_AGENTS_RAM=0
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -15,6 +17,20 @@ if [ -f "$CONFIG_FILE" ]; then
     TMP_RAM=$(grep -oP '^load_agents_ram="\K[^"]+' "$CONFIG_FILE" || true)
     [ -n "$TMP_AGENT_PATH" ] && AGENT_STORAGE_PATH="$TMP_AGENT_PATH"
     [ -n "$TMP_RAM" ] && LOAD_AGENTS_RAM="$TMP_RAM"
+fi
+
+# --- D-180: Array Readiness Check ---
+# If the configured path is under /mnt/, verify the array is started.
+# If not, fall back to /boot for this install cycle only (will migrate on next boot with array).
+ORIGINAL_STORAGE_PATH="$AGENT_STORAGE_PATH"
+if [[ "$AGENT_STORAGE_PATH" == /mnt/* ]]; then
+    # Check if Unraid array is started
+    ARRAY_STATE=$(grep -oP '^mdState="\K[^"]+' /var/local/emhttp/var.ini 2>/dev/null || echo "")
+    if [ "$ARRAY_STATE" != "STARTED" ]; then
+        warn "Array not started. Agent storage path ($AGENT_STORAGE_PATH) not available."
+        warn "Falling back to /boot for this install cycle. Storage will migrate when array starts."
+        AGENT_STORAGE_PATH="/boot/config/plugins/unraid-aicliagents"
+    fi
 fi
 
 PERSIST_IMAGE_PATH="$AGENT_STORAGE_PATH/aicli-agents.img"
@@ -33,16 +49,31 @@ mkdir -p "$AGENT_STORAGE_PATH"
 
 # --- 2. Persistent Image Initialization ---
 if [ ! -f "$PERSIST_IMAGE_PATH" ]; then
-    echo "    > Creating new Btrfs storage container..." >&3
-    MNT_POINT=$(df -P "$AGENT_STORAGE_PATH" | tail -1 | awk '{print $6}')
-    FLASH_FREE=$(df -m "$MNT_POINT" | tail -1 | awk '{print $4}')
-    if [ "$FLASH_FREE" -lt 200 ]; then
-        fail "Insufficient space on target volume (${FLASH_FREE} MB free). Aborting."
-        exit 1
+    # D-180: Check if there's an existing image on /boot that should be migrated
+    BOOT_IMAGE="/boot/config/plugins/unraid-aicliagents/aicli-agents.img"
+    if [ "$AGENT_STORAGE_PATH" != "/boot/config/plugins/unraid-aicliagents" ] && [ -f "$BOOT_IMAGE" ]; then
+        echo "    > Migrating agent storage from Flash to $AGENT_STORAGE_PATH..." >&3
+        cp --sparse=always "$BOOT_IMAGE" "$PERSIST_IMAGE_PATH"
+        if [ $? -eq 0 ]; then
+            ok "Agent storage migrated off Flash. Removing old Flash image..."
+            rm -f "$BOOT_IMAGE"
+        else
+            warn "Migration failed. Using existing Flash image."
+            PERSIST_IMAGE_PATH="$BOOT_IMAGE"
+            IMAGE_PATH="$PERSIST_IMAGE_PATH"
+        fi
+    else
+        echo "    > Creating new Btrfs storage container..." >&3
+        MNT_POINT=$(df -P "$AGENT_STORAGE_PATH" | tail -1 | awk '{print $6}')
+        AVAIL_FREE=$(df -m "$MNT_POINT" | tail -1 | awk '{print $4}')
+        if [ "$AVAIL_FREE" -lt 200 ]; then
+            fail "Insufficient space on target volume (${AVAIL_FREE} MB free). Aborting."
+            exit 1
+        fi
+        truncate -s 2G "$PERSIST_IMAGE_PATH"
+        mkfs.btrfs -m single -L AICLI_AGENTS "$PERSIST_IMAGE_PATH"
+        ok "Btrfs storage container created (2GB sparse)."
     fi
-    truncate -s 2G "$PERSIST_IMAGE_PATH"
-    mkfs.btrfs -m single -L AICLI_AGENTS "$PERSIST_IMAGE_PATH"
-    ok "Btrfs storage container created (2GB sparse)."
 else
     echo "    > Existing storage container found." >&3
 fi

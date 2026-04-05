@@ -27,7 +27,14 @@ pkill -9 -f 'node.*(gemini|opencode|nanocoder|claude|kilo|pi|codex|factory)' >/d
 
 # 2. Storage Layer Reset
 log_progress 20 "Clearing stale loopback states..."
-IMAGE_PATH="/boot/config/plugins/unraid-aicliagents/aicli-agents.img"
+# D-180: Resolve image path from config (defaults off-Flash)
+CONFIG_FILE="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+AGENT_STORAGE_PATH="/mnt/user/appdata/aicliagents"
+if [ -f "$CONFIG_FILE" ]; then
+    TMP_PATH=$(grep -oP '^agent_storage_path="\K[^"]+' "$CONFIG_FILE" || true)
+    [ -n "$TMP_PATH" ] && AGENT_STORAGE_PATH="$TMP_PATH"
+fi
+IMAGE_PATH="$AGENT_STORAGE_PATH/aicli-agents.img"
 AGENT_MNT="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
 
 # D-166: Use a lock to prevent race conditions with the PHP stabilizer
