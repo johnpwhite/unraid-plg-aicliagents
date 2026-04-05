@@ -419,13 +419,13 @@ $users = getUnraidUsers();
                         </dd>
                         <dt>Default workspace path: <i class="fa fa-info-circle" title="Base directory for project discovery. Standard Unraid path is /mnt/user"></i></dt>
                         <dd>
-                            <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>" data-pickroot="/mnt/" data-pickfilter="dir" style="width: 250px;">
+                            <input type="text" name="root_path" id="root_path" value="<?=$config['root_path']?>" style="width: 250px;" placeholder="/mnt/user">
                         </dd>
                         <dt>Home Backup Location: <i class="fa fa-info-circle" title="Where user data (chats, config) is permanently saved."></i></dt>
                         <dd>
                             <div style="display:flex; flex-direction:column; gap:4px;">
                                 <div style="display:flex; gap:10px; width: 100%;">
-                                    <input type="text" id="new_storage_path" name="persistence_base" value="<?=$config['persistence_base']?>" data-pickroot="/mnt/" data-pickfilter="dir" style="width: 250px;" oninput="toggleMigrateBtn('new_storage_path', 'btn-migrate-home', '<?=$config['persistence_base']?>')">
+                                    <input type="text" id="new_storage_path" name="persistence_base" value="<?=$config['persistence_base']?>" style="width: 250px;" placeholder="/mnt/user/appdata/aicliagents/persistence" oninput="toggleMigrateBtn('new_storage_path', 'btn-migrate-home', '<?=$config['persistence_base']?>')">
                                     <button type="button" id="btn-migrate-home" class="aicli-btn-slim" onclick="executeStorageMigration()" title="Migrate Home Storage" disabled style="opacity:0.5; cursor:not-allowed;"><i class="fa fa-exchange"></i> Migrate</button>
                                 </div>
                                 <label style="display:flex; align-items:center; gap:5px; font-size: 0.85em; cursor:pointer;" title="Run from blazing fast RAM, syncing down to storage backend array">
@@ -439,7 +439,7 @@ $users = getUnraidUsers();
                         <dd>
                             <div style="display:flex; flex-direction:column; gap:4px;">
                                 <div style="display:flex; gap:10px; width: 100%;">
-                                    <input type="text" id="agent_storage_path" name="agent_storage_path" value="<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>" data-pickroot="/mnt/" data-pickfilter="dir" style="width: 250px;" oninput="toggleMigrateBtn('agent_storage_path', 'btn-migrate-agents', '<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>')">
+                                    <input type="text" id="agent_storage_path" name="agent_storage_path" value="<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>" style="width: 250px;" placeholder="/mnt/user/appdata/aicliagents" oninput="toggleMigrateBtn('agent_storage_path', 'btn-migrate-agents', '<?=$config['agent_storage_path'] ?? '/mnt/user/appdata/aicliagents'?>')">
                                     <button type="button" id="btn-migrate-agents" class="aicli-btn-slim" onclick="executeAgentStorageMigration()" title="Migrate Agent Storage" disabled style="opacity:0.5; cursor:not-allowed;"><i class="fa fa-exchange"></i> Migrate</button>
                                 </div>
                                 <label style="display:flex; align-items:center; gap:5px; font-size: 0.85em; cursor:pointer;" title="Mounts the agent storage as Read-Only for Flash safety. (Temporarily unlocks for installs/resizes).">
@@ -731,16 +731,8 @@ var isGlobalLocked = false;
 var isUnloading = false;
 window.addEventListener('beforeunload', () => { isUnloading = true; });
 
-// Bind native Unraid file picker UI
-$(function() {
-    // D-65: Defensive check for fileTreeAttach to prevent TypeError if library is delayed
-    if ($.isFunction($.fn.fileTreeAttach)) {
-        $('input[data-pickroot]').fileTreeAttach(null, null, function(path) {
-            $(document).trigger('close.fileTree');
-            $(this).trigger('change');
-        });
-    }
-});
+// D-180: Removed fileTreeAttach file picker - it captures clicks/focus and obscures input.
+// Path inputs are now plain text fields.
 
 function openCreateUserModal() {
     window.open('/Users/UserAdd', '_blank');
