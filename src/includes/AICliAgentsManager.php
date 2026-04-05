@@ -887,7 +887,7 @@ function saveAICliConfig($newConfig, $notify = true) {
     $oldSyncMins = (int)($oldConfig['sync_interval_mins'] ?? 0) + ((int)($oldConfig['sync_interval_hours'] ?? 0) * 60);
 
     // 2. Handle Main Config
-    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version', 'debug_logging', 'sync_interval_hours', 'sync_interval_mins', 'log_level', 'agent_storage_path', 'load_home_ram', 'load_agents_ram', 'storage_opt_last_run', 'sync_last_run', 'write_protect_agents'];
+    $allowed = ['enable_tab', 'theme', 'font_size', 'history', 'home_path', 'user', 'root_path', 'version', 'debug_logging', 'sync_interval_hours', 'sync_interval_mins', 'log_level', 'agent_storage_path', 'persistence_base', 'load_home_ram', 'load_agents_ram', 'storage_opt_last_run', 'sync_last_run', 'write_protect_agents'];
     foreach ($newConfig as $key => $val) {
         if (strpos($key, 'preview_') === 0 || strpos($key, 'node_memory_') === 0) $allowed[] = $key;
     }
