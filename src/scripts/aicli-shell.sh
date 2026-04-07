@@ -164,12 +164,13 @@ EOF
 
     chmod +x "$RUN_SCRIPT"
     log_aicli "DEBUG" 3 "Launching tmux session $SESSION for script $RUN_SCRIPT"
-    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
+    tmux -u new-session -d -s "$SESSION" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
 fi
 
 log_aicli "DEBUG" 3 "Attaching to tmux session $SESSION..."
 
 tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
+tmux set-option -g mouse on 2>/dev/null
 tmux set-option -g status off 2>/dev/null
 tmux set-option -g set-clipboard on 2>/dev/null
 tmux set-option -g allow-passthrough on 2>/dev/null

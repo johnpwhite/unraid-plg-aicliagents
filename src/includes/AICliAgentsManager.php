@@ -2125,6 +2125,8 @@ function startAICliTerminal($id = 'default', $path = null, $chatSessionId = null
     // D-186: Cleanup stale socket and PID to prevent 502/Bind failures
     if (file_exists($sock)) @unlink($sock);
     if (file_exists($pidFile)) @unlink($pidFile);
+    // Aggressive cleanup for stale UNIX sockets
+    exec("if [ -S " . escapeshellarg($sock) . " ]; then rm -f " . escapeshellarg($sock) . "; fi");
 
     $log = "/tmp/unraid-aicliagents/ttyd-$id.log";
     @unlink($log);
