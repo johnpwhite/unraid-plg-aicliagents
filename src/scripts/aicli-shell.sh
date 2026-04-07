@@ -164,7 +164,7 @@ EOF
 
     chmod +x "$RUN_SCRIPT"
     log_aicli "DEBUG" 3 "Launching tmux session $SESSION for script $RUN_SCRIPT"
-    tmux -u new-session -d -s "$SESSION" -x 200 -y 80 "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
+    tmux -u new-session -d -s "$SESSION" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
 fi
 
 log_aicli "DEBUG" 3 "Attaching to tmux session $SESSION..."
