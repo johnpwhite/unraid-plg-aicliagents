@@ -170,6 +170,7 @@ fi
 log_aicli "DEBUG" 3 "Attaching to tmux session $SESSION..."
 
 tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
+tmux set-option -g mouse on 2>/dev/null
 tmux set-option -g status off 2>/dev/null
 tmux set-option -g set-clipboard on 2>/dev/null
 tmux set-option -g allow-passthrough on 2>/dev/null
