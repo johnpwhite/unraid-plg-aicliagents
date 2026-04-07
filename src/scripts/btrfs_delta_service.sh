@@ -30,6 +30,10 @@ case "$ACTION" in
         SIZE="${4:-128M}"
         [ -f "$TARGET_IMG" ] && exit 0
         status "Creating sparse Btrfs home image for $USER_NAME at $TARGET_IMG ($SIZE)..."
+        
+        # D-172: Ensure parent directory exists before attempting to truncate (Fixes missing persistence dir crash)
+        mkdir -p "$(dirname "$TARGET_IMG")"
+        
         truncate -s "$SIZE" "$TARGET_IMG" || { error "Failed to create sparse file $TARGET_IMG"; exit 1; }
         mkfs.btrfs -f "$TARGET_IMG" > /dev/null 2>&1 || { error "Failed to format Btrfs image $TARGET_IMG"; exit 1; }
         ;;
@@ -201,8 +205,12 @@ case "$ACTION" in
 
         # D-117: Existence and Size Validation (Fail-Safe)
         if [ ! -f "$PERSIST_IMG" ]; then
-            error "Fatal: Persistent image NOT found at $PERSIST_IMG"
-            exit 1
+            status "Target: Persistent image missing at $PERSIST_IMG. Auto-recreating..."
+            bash "$0" init "$USER_NAME" "$PERSIST_IMG"
+            if [ ! -f "$PERSIST_IMG" ]; then
+                error "Fatal: Persistent image NOT found at $PERSIST_IMG and auto-recreation failed."
+                exit 1
+            fi
         fi
         
         img_size=$(du -sh "$PERSIST_IMG" 2>/dev/null | awk '{print $1}' || echo "0")
