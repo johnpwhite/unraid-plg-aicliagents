@@ -72,6 +72,14 @@ perf_log env.setup.done
 
 # Freeze variables for tmux
 frozen_binary="$BINARY"
+# Fix A: freeze the two RAW binary paths (primary + fallback) so the run-loop
+# can re-resolve on every relaunch. BINARY is the *already-resolved* effective
+# path (primary if it existed at session-open, else fallback). An in-place
+# upgrade that drops cli.js and adds bin/claude.exe would leave frozen_binary
+# pointing at the deleted file; re-resolving from BINARY_PRIMARY / BINARY_FALLBACK
+# picks up the new layout without closing the workspace.
+frozen_binary_primary="${BINARY_PRIMARY:-$BINARY}"
+frozen_binary_fallback="${BINARY_FALLBACK:-}"
 frozen_resume_cmd="$RESUME_CMD"
 frozen_resume_latest="$RESUME_LATEST"
 frozen_agent_name="${AGENT_NAME:-$AGENT_ID}"
@@ -205,6 +213,10 @@ FUNCOEF
     fi
     
     printf 'export frozen_binary=%q\n' "$frozen_binary" >> "$RUN_SCRIPT"
+    # Fix A: export both raw paths so the run-loop can re-resolve frozen_binary
+    # on every iteration (survives cli.js → native-binary in-place upgrades).
+    printf 'export frozen_binary_primary=%q\n' "$frozen_binary_primary" >> "$RUN_SCRIPT"
+    printf 'export frozen_binary_fallback=%q\n' "$frozen_binary_fallback" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_cmd=%q\n' "$frozen_resume_cmd" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_latest=%q\n' "$frozen_resume_latest" >> "$RUN_SCRIPT"
     printf 'export frozen_chat_id=%q\n' "$frozen_chat_id" >> "$RUN_SCRIPT"
@@ -405,6 +417,29 @@ while true; do
              "$HOME_DIR/.local/share/${AGENT_ID}" \
              2>/dev/null
     
+    # Fix A: Re-resolve the effective binary on every relaunch iteration.
+    # An in-place agent upgrade (e.g. claude-code 2.1.x dropping cli.js and
+    # adding bin/claude.exe) leaves frozen_binary pointing at the deleted file.
+    # Re-checking primary → fallback each loop picks up the new layout without
+    # closing the workspace. Only re-resolves path-style binaries (contains /).
+    # Proxy commands (no /) are stable by name and need no re-resolution.
+    if [ -n "$frozen_binary_primary" ] && [[ "$frozen_binary_primary" == *"/"* ]]; then
+        if [ -f "$frozen_binary_primary" ] && [ -x "$frozen_binary_primary" ]; then
+            frozen_binary="$frozen_binary_primary"
+        elif [ -n "$frozen_binary_fallback" ] && [ -f "$frozen_binary_fallback" ]; then
+            frozen_binary="$frozen_binary_fallback"
+            log_aicli "WARN" 1 "Primary binary missing (${frozen_binary_primary}); using fallback (${frozen_binary_fallback})"
+        elif [ ! -f "$frozen_binary_primary" ]; then
+            log_aicli "ERROR" 1 "Agent binary not found at '${frozen_binary_primary}' or '${frozen_binary_fallback}' — the agent may need reinstalling via the Store card"
+            echo -e "\n\033[1;31m[Agent Binary Missing]\033[0m The agent binary was not found."
+            echo -e "Expected: ${frozen_binary_primary}"
+            [ -n "$frozen_binary_fallback" ] && echo -e "Fallback:  ${frozen_binary_fallback}"
+            echo -e "The agent may need reinstalling via the Store card."
+            echo -e "Press ENTER to retry..."
+            read -r
+        fi
+    fi
+
     # D-348: Modern Launch Logic (Proxy-Aware)
     # 1. We prefer the proxy command (e.g. 'gemini') stored in frozen_binary.
     # 2. If it's not a path (no /), it's a proxy. If it is a path, we check health.

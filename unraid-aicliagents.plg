@@ -1,8 +1,12 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.12.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.12.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.12.02
+- Fix: Upgrading an agent while one of its workspace sessions is open no longer strands that session. Some agents (e.g. Claude Code 2.1.x) have replaced their legacy "cli.js" entry point with a native binary; the launch now re-checks the agent's binary on every relaunch rather than using the path resolved when the session was opened, so an in-place upgrade is picked up automatically. (If a session was already stranded by such an upgrade, close and reopen that workspace once and it will pick up the new binary.)
+- Improve: After a plugin install or upgrade, the agent Store cards now show each uninstalled agent's available version straight away — a background version-cache refresh runs on install, so you no longer have to press "Check for Updates" first.
+
 ## 2026.05.12.01
 - Feat: Environment &amp; secrets management. Every agent's Store card and every workspace now has an "Environment" panel covering general env vars AND API keys/secrets, with full add / edit / delete for both. Secrets are masked and stored separately under tightened (0600) permissions; general vars are managed more loosely. Per-workspace values override the per-agent defaults, and values apply automatically to newly opened terminal sessions ("hot-apply") with no workspace rebuild. Agents that ship default env vars seed them on install as an editable starting set. Replaces the old hardcoded-only API-key vault (the Config-tab "Secrets Vault" card is removed); clearing a value via the UI now actually clears it.
 - Feat: Per-agent and per-workspace CLI arguments. A new "Args" panel on each Store card sets default extra flags for that agent (e.g. --max-turns 5), and a workspace can override them in its drawer. Arguments are validated against shell metacharacters. Changing args while a session is open offers "Apply now" — the agent is reloaded in place (Ctrl-C + relaunch) with the new flags, no destroy/recreate.
@@ -155,7 +159,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.12.01"
+export VERSION="2026.05.12.02"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -181,12 +185,12 @@ fi
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.12.01" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.12.02" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.12.01" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.12.01" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.12.02" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.12.02" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.12.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.12.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done
@@ -300,6 +304,19 @@ if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicl
     log_status "Starting storage durability supervisor..."
     mkdir -p /tmp/unraid-aicliagents
     setsid nohup bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start &gt;/tmp/unraid-aicliagents/supervisor.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- &amp;
+    disown
+fi
+
+# Fix B: Populate the available-version cache for ALL agents (installed AND
+# uninstalled) on every install/upgrade. Without this, Store cards for
+# uninstalled agents show "vunknown available" until the user clicks
+# "Check for Updates" or the daily 06:00 cron fires. version-check-bg.php
+# holds an advisory flock so concurrent calls are safe (extras return cached
+# results immediately without racing). setsid+nohup+4&gt;&amp;- so this never
+# blocks the installer regardless of invocation method (SSH, rc.local, UI).
+if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php ]; then
+    log_status "Running background agent version-cache refresh..."
+    setsid nohup /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php &gt;/tmp/unraid-aicliagents/version-check.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- &amp;
     disown
 fi
 

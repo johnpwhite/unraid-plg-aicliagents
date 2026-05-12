@@ -120,18 +120,25 @@ class TerminalService {
         }
 
         $env = [
-            'AICLI_SESSION_ID' => $id,
-            'AICLI_USER'       => $username,
-            'AGENT_ID'         => $agentId,
-            'AGENT_NAME'       => $agent['name'],
-            'BINARY'           => $effectiveBin,
-            'RESUME_CMD'       => $agent['resume_cmd'] ?? '',
-            'RESUME_LATEST'    => $agent['resume_latest'] ?? '',
-            'ENV_PREFIX'       => $agent['env_prefix'] ?? '',
-            'AICLI_HOME'       => UtilityService::getWorkDir($username) . "/home",
-            'AICLI_ROOT'       => $path ?: '/mnt',
+            'AICLI_SESSION_ID'  => $id,
+            'AICLI_USER'        => $username,
+            'AGENT_ID'          => $agentId,
+            'AGENT_NAME'        => $agent['name'],
+            'BINARY'            => $effectiveBin,
+            // Fix A: pass both raw paths so aicli-shell.sh can re-resolve on every
+            // relaunch iteration. This lets an in-place upgrade (e.g. claude-code
+            // 2.1.x swapping cli.js → native bin/claude.exe) be picked up without
+            // closing the workspace. The shell freezes these as frozen_binary /
+            // frozen_binary_fallback and re-evaluates existence before each launch.
+            'BINARY_PRIMARY'    => $primaryBin,
+            'BINARY_FALLBACK'   => $fallbackBin,
+            'RESUME_CMD'        => $agent['resume_cmd'] ?? '',
+            'RESUME_LATEST'     => $agent['resume_latest'] ?? '',
+            'ENV_PREFIX'        => $agent['env_prefix'] ?? '',
+            'AICLI_HOME'        => UtilityService::getWorkDir($username) . "/home",
+            'AICLI_ROOT'        => $path ?: '/mnt',
             'AICLI_CHAT_SESSION_ID' => $resolvedChatId ?: '',
-            'NODE_PATH'        => "/usr/local/emhttp/plugins/unraid-aicliagents/agents/$agentId/node_modules"
+            'NODE_PATH'         => "/usr/local/emhttp/plugins/unraid-aicliagents/agents/$agentId/node_modules"
         ];
 
         // Merge the full 5-tier effective env from EnvService — single source
