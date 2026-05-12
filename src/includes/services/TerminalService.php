@@ -50,6 +50,19 @@ class TerminalService {
         $pidFile = "/var/run/unraid-aicliagents-$id.pid";
         $logFile = "/tmp/ttyd-$id.log";
 
+        // Record this session's agent + workspace path to the parallel
+        // /var/run metadata files. ProcessManager::stopTerminal already
+        // unlinks them on clean shutdown; we need to be the writer. Without
+        // these files, listActiveSessionsForAgent (used by the agent-upgrade
+        // UX flow) cannot match sessions to agents.
+        AtomicWriteService::write(UtilityService::getAgentIdPath($id), (string)$agentId);
+        if (!empty($path)) {
+            AtomicWriteService::write(UtilityService::getWorkDirFilePath($id), (string)$path);
+        }
+        if (!empty($chatId) && $chatId !== 'auto' && $chatId !== '_fresh_') {
+            AtomicWriteService::write(UtilityService::getChatIdPath($id), (string)$chatId);
+        }
+
         // Verification
         if (!file_exists($shell)) {
             LogService::log("Warning: Shell script missing: $shell", LogService::LOG_WARN, "TerminalService");
@@ -88,28 +101,57 @@ class TerminalService {
         }
 
         // Environment Construction
+        // Resolve effective binary: prefer 'binary', fall back to 'binary_fallback'
+        // if the primary doesn't exist. Packages like Claude Code 2.1.x ship a
+        // native binary at bin/claude.exe and drop the legacy cli.js — but older
+        // installs may still have only cli.js. This keeps both paths working.
+        $primaryBin = $agent['binary'] ?? '';
+        $fallbackBin = $agent['binary_fallback'] ?? '';
+        $effectiveBin = ($primaryBin && is_file($primaryBin))
+            ? $primaryBin
+            : ($fallbackBin && is_file($fallbackBin) ? $fallbackBin : $primaryBin);
+
+        // If the UI asked to resume but didn't supply an explicit ID, look up
+        // the saved ID stored at clean-close for this (path, agent) pair.
+        $resolvedChatId = $chatId;
+        if ($resolvedChatId === 'auto' && $path) {
+            $resolvedChatId = ConfigService::getResumeId($path, $agentId);
+            LogService::log("Auto-resume: chatId=" . ($resolvedChatId ?: 'none') . " for $agentId at $path", LogService::LOG_INFO, "TerminalService");
+        }
+
         $env = [
             'AICLI_SESSION_ID' => $id,
             'AICLI_USER'       => $username,
             'AGENT_ID'         => $agentId,
             'AGENT_NAME'       => $agent['name'],
-            'BINARY'           => $agent['binary'] ?? '',
+            'BINARY'           => $effectiveBin,
             'RESUME_CMD'       => $agent['resume_cmd'] ?? '',
             'RESUME_LATEST'    => $agent['resume_latest'] ?? '',
             'ENV_PREFIX'       => $agent['env_prefix'] ?? '',
             'AICLI_HOME'       => UtilityService::getWorkDir($username) . "/home",
             'AICLI_ROOT'       => $path ?: '/mnt',
+            'AICLI_CHAT_SESSION_ID' => $resolvedChatId ?: '',
             'NODE_PATH'        => "/usr/local/emhttp/plugins/unraid-aicliagents/agents/$agentId/node_modules"
         ];
 
-        // Add workspace-specific ENVs
-        if ($path) {
-            $workspaceEnvs = ConfigService::getWorkspaceEnvs($path, $agentId);
-            if (!empty($workspaceEnvs)) {
-                foreach ($workspaceEnvs as $k => $v) {
-                    $env[$k] = $v;
-                }
-            }
+        // Merge the full 5-tier effective env from EnvService — single source
+        // of truth shared with aicli-shell.sh (which also re-reads it per loop
+        // iteration for hot-apply). Tier order (later wins per key):
+        //   1. agent['source']['env']           (registry/agents.json defaults)
+        //   2. SecretService::getAgentSecrets   (global agent vault — secrets.cfg)
+        //   3. SecretService::getWorkspaceSecrets  (per-workspace secrets — new)
+        //   4. EnvService::getAgentEnvs         (general agent vars — new)
+        //   5. EnvService::getWorkspaceEnvs     (general workspace vars — existing)
+        // Per WP #736: this also closes the latent dead-write gap where
+        // secrets.cfg was never injected at launch (verified 2026-05-11).
+        // Plugin-internal vars set above (AICLI_*, AGENT_ID, BINARY, etc.) must
+        // win over user-set vars regardless — EnvService rejects reserved names
+        // at save time; the explicit precedence here is belt-and-braces.
+        $effective = EnvService::buildEffectiveEnv($path ?: null, $agentId);
+        foreach ($effective as $k => $v) {
+            if (EnvService::isReservedKey($k)) continue;
+            if (array_key_exists($k, $env)) continue; // plugin-internal wins
+            $env[$k] = $v;
         }
 
         $envStrParts = [];
@@ -169,8 +211,8 @@ class TerminalService {
         if ($agentId === 'gemini-cli') {
             $config = ConfigService::getConfig();
             $user = $config['user'] ?? 'root';
-            if (empty($user) || $user === '0') $user = 'root';
-            
+            if (empty($user)) $user = 'root';
+
             $home = "/tmp/unraid-aicliagents/work/$user/home";
             $projectsFile = "$home/.gemini/projects.json";
             if (!file_exists($projectsFile)) return null;
@@ -205,6 +247,41 @@ class TerminalService {
 
         // Claude and OpenCode handle their own session persistence internally
         return null;
+    }
+
+    /**
+     * Enumerate active terminal sessions whose agent matches $agentId.
+     * Returns a list of {id, agentId, path, chatId, started_at} records so
+     * the UI can warn the user and the install flow can gracefully close
+     * them before clobbering the binary.
+     *
+     * Session metadata lives in parallel /var/run files keyed by session id:
+     *   aicliterm-<id>.sock                  — running-flag
+     *   unraid-aicliagents-<id>.agentid      — agent id
+     *   unraid-aicliagents-<id>.workdir      — workspace path
+     *   unraid-aicliagents-<id>.chatid       — last-known resume id
+     */
+    public static function listActiveSessionsForAgent(string $agentId): array
+    {
+        $out = [];
+        foreach (glob("/var/run/aicliterm-*.sock") ?: [] as $sock) {
+            if (!preg_match('/aicliterm-(.*)\.sock$/', $sock, $m)) continue;
+            $id = $m[1];
+            $agentFile = UtilityService::getAgentIdPath($id);
+            $sessionAgent = is_file($agentFile) ? trim((string)@file_get_contents($agentFile)) : '';
+            if ($sessionAgent !== $agentId) continue;
+
+            $workdirFile = UtilityService::getWorkDirFilePath($id);
+            $chatFile = UtilityService::getChatIdPath($id);
+            $out[] = [
+                'id'         => $id,
+                'agentId'    => $sessionAgent,
+                'path'       => is_file($workdirFile) ? trim((string)@file_get_contents($workdirFile)) : '',
+                'chatId'     => is_file($chatFile) ? trim((string)@file_get_contents($chatFile)) : '',
+                'started_at' => @filemtime($sock) ?: 0,
+            ];
+        }
+        return $out;
     }
 
     /**

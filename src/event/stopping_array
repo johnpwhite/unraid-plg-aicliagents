@@ -1,0 +1,163 @@
+#!/bin/bash
+# AICliAgents: Array Stop Handler
+# Fired by Unraid when the array is being stopped (not a full server shutdown).
+# The plugin may continue running if its storage lives on Flash — only sessions
+# whose workspace paths are on the array need to be evicted.
+#
+# For full-server shutdown, Unraid fires events/stopping which handles the
+# complete stop + flush sequence.
+
+EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+CLASSIFY="$EMHTTP_DEST/src/scripts/storage/classify-path.sh"
+SUPERVISOR_SCRIPT="$EMHTTP_DEST/src/scripts/supervisor/aicli-supervisor.sh"
+LOG="/tmp/unraid-aicliagents/debug.log"
+
+mkdir -p /tmp/unraid-aicliagents
+
+# Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
+source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+
+log() {
+    printf '[%s] [INFO] [EventStoppingArray] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"
+}
+warn() {
+    printf '[%s] [WARN] [EventStoppingArray] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"
+}
+
+log "Array stop detected."
+lifecycle_log "info" "event_stopping_array" "array_stop_received" "{}" 2>/dev/null || true
+
+# Publish storage status change to Nchan (Unix socket, not HTTP)
+nchan_notify() {
+    local home_avail="${1:-true}"
+    local agents_avail="${2:-true}"
+    local emergency="${3:-false}"
+    curl -s -X POST --unix-socket /var/run/nginx.socket \
+        "http://localhost/pub/aicli_storage_status?buffer_length=1" \
+        -H "Content-Type: application/json" \
+        -d "{\"home_available\":$home_avail,\"agents_available\":$agents_avail,\"emergency_mode\":$emergency}" \
+        --max-time 2 >/dev/null 2>&1 || true
+}
+
+classify() {
+    if [ -f "$CLASSIFY" ]; then
+        bash "$CLASSIFY" "$1" 2>/dev/null
+    else
+        case "$1" in
+            /boot|/boot/*) echo "flash" ;;
+            /tmp|/tmp/*) echo "ram" ;;
+            /mnt/user/*|/mnt/user0/*) echo "array" ;;
+            /mnt/disk[0-9]*) echo "array" ;;
+            /mnt/disks/*|/mnt/remotes/*) echo "unassigned" ;;
+            *) echo "unknown" ;;
+        esac
+    fi
+}
+
+needs_array() {
+    case "$1" in
+        array|pool:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Determine where storage lives
+PERSIST_PATH=$(agent_persist_path 2>/dev/null)
+[ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
+STORAGE_CLASS=$(classify "$PERSIST_PATH")
+log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
+
+if needs_array "$STORAGE_CLASS"; then
+    # Storage is on the array — must flush and stop everything before array unmounts
+    log "Storage depends on array/pool. Flushing all entities before array stops..."
+    lifecycle_log "info" "event_stopping_array" "supervisor_flush_start" "{\"budget_s\":60,\"reason\":\"storage_on_array\"}" 2>/dev/null || true
+
+    if [ -f "$SUPERVISOR_SCRIPT" ]; then
+        bash "$SUPERVISOR_SCRIPT" flush --all --timeout=60
+        FLUSH_RC=$?
+        if [ "$FLUSH_RC" -eq 0 ]; then
+            log "Supervisor flush complete before array stop."
+            lifecycle_log "info" "event_stopping_array" "supervisor_flush_done" "{\"result\":\"clean\"}" 2>/dev/null || true
+        else
+            warn "Supervisor flush timed out — array stopping anyway."
+            lifecycle_log "warn" "event_stopping_array" "supervisor_flush_done" "{\"result\":\"timeout\"}" 2>/dev/null || true
+        fi
+    fi
+
+    # Stop the supervisor (storage will be unavailable)
+    SUPERVISOR_PIDFILE="/var/run/aicli-supervisor.pid"
+    if [ -f "$SUPERVISOR_PIDFILE" ]; then
+        SUPERVISOR_PID="$(cat "$SUPERVISOR_PIDFILE" 2>/dev/null || echo 0)"
+        if [ "$SUPERVISOR_PID" -gt 0 ] 2>/dev/null; then
+            SUPERVISOR_CMDLINE="$(tr '\0' ' ' < "/proc/$SUPERVISOR_PID/cmdline" 2>/dev/null || echo '')"
+            if echo "$SUPERVISOR_CMDLINE" | grep -qF "$SUPERVISOR_SCRIPT"; then
+                log "Sending TERM to supervisor (pid $SUPERVISOR_PID)..."
+                kill -TERM "$SUPERVISOR_PID" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    nchan_notify false false true
+    touch /tmp/unraid-aicliagents/.emergency_mode
+    log "Emergency mode flag set (array stopped, plugin storage was on array)."
+
+else
+    # Storage is on Flash — flush dirty ZRAM for any sessions whose workspace
+    # was on the array, then evict only those sessions.
+    log "Storage on Flash. Enqueuing bakes for all dirty entities, then evicting array-path sessions."
+
+    if [ -f "$SUPERVISOR_SCRIPT" ]; then
+        # Flush with a short budget — we only need home/agent layers baked,
+        # not waiting for consolidation. 30s is sufficient for typical deltas.
+        bash "$SUPERVISOR_SCRIPT" flush --all --timeout=30
+        FLUSH_RC=$?
+        if [ "$FLUSH_RC" -eq 0 ]; then
+            log "Pre-eviction flush complete."
+            lifecycle_log "info" "event_stopping_array" "supervisor_flush_done" "{\"result\":\"clean\"}" 2>/dev/null || true
+        else
+            warn "Pre-eviction flush timed out (30s) — continuing with session eviction."
+            lifecycle_log "warn" "event_stopping_array" "supervisor_flush_done" "{\"result\":\"timeout\"}" 2>/dev/null || true
+        fi
+    fi
+
+    KILLED=0
+
+    if command -v tmux >/dev/null 2>&1; then
+        while IFS= read -r sess; do
+            [ -z "$sess" ] && continue
+
+            NEEDS_KILL=false
+            KILL_REASON=""
+            while IFS= read -r cwd; do
+                [ -z "$cwd" ] && continue
+                CWD_CLASS=$(classify "$cwd")
+                if needs_array "$CWD_CLASS"; then
+                    NEEDS_KILL=true
+                    KILL_REASON="$cwd ($CWD_CLASS)"
+                    break
+                fi
+            done < <(tmux list-panes -t "$sess" -F '#{pane_current_path}' 2>/dev/null)
+
+            if [ "$NEEDS_KILL" = true ]; then
+                log "  Killing session $sess — workspace: $KILL_REASON"
+                SESS_ID=$(echo "$sess" | sed 's/aicli-agent-[^-]*-//')
+                tmux kill-session -t "$sess" >/dev/null 2>&1
+                pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
+                KILLED=$((KILLED + 1))
+            else
+                log "  Keeping session $sess (not on array/pool)"
+            fi
+        done < <(tmux ls -F '#S' 2>/dev/null | grep '^aicli-agent-')
+    fi
+
+    if [ "$KILLED" -gt 0 ]; then
+        log "Evicted $KILLED session(s) with array/pool workspace paths."
+    else
+        log "No sessions with array/pool workspace paths. Nothing to evict."
+    fi
+
+    nchan_notify true true false
+fi
+
+lifecycle_log "info" "event_stopping_array" "array_stop_complete" "{\"storage_class\":\"$STORAGE_CLASS\"}" 2>/dev/null || true
+log "Array stop handler complete."

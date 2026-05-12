@@ -33,7 +33,28 @@ class ConfigService {
             'storage_opt_last_run' => '0',
             'enable_tab' => '1',
             'version_check_schedule' => '0 6 * * *',
-            'version_check_months' => '3'
+            'version_check_months' => '3',
+            // Storage Durability Supervisor (Phase 3)
+            'supervisor_enabled'                => '1',
+            'supervisor_tick_seconds'           => '5',
+            'bake_schedule_minutes'             => '30',
+            'dirty_threshold_soft_mb'           => '512',
+            'dirty_threshold_soft_pct'          => '12.5',
+            'dirty_threshold_hard_mb'           => '1024',
+            'dirty_threshold_hard_pct'          => '25',
+            'dirty_threshold_critical_mb'       => '2048',
+            'dirty_threshold_critical_pct'      => '50',
+            'consolidate_layer_threshold_flash' => '15',
+            'consolidate_layer_threshold_array' => '5',
+            'emergency_bake_compression'        => 'lz4',
+            // Boot Integrity (Phase 4b)
+            'boot_integrity_strict'             => '1',
+            'verify_sha256_on_boot'             => '0',
+            'lifecycle_log_max_bytes'           => '1048576',
+            // Bug #537: array-stop / shutdown supervisor flush budget. Default
+            // 60 s. Lift to 120-300 s if you have 100+ entities or run on slow
+            // USB / contended memory.
+            'event_stopping_flush_timeout_seconds' => '60',
         ];
 
         if (!file_exists(self::CONFIG_PATH)) {
@@ -90,11 +111,7 @@ class ConfigService {
             $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
         }
 
-        $dir = dirname(self::CONFIG_PATH);
-        if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        
-        $res = @file_put_contents(self::CONFIG_PATH, $content);
-        if ($res === false) {
+        if (!AtomicWriteService::write(self::CONFIG_PATH, $content)) {
             LogService::log("Error saving configuration to " . self::CONFIG_PATH, LogService::LOG_ERROR, "ConfigService");
             return false;
         }
@@ -170,11 +187,11 @@ class ConfigService {
      * Helper to get the base path for user-specific state (.aicli inside their home).
      * D-333: Forces mount of home storage to ensure data is written to ZRAM/SquashFS stack.
      */
-    private static function getUserStatePath() {
+    public static function getUserStatePath() {
         $config = self::getConfig();
         $user = $config['user'] ?? 'root';
-        if (empty($user) || $user === '0') $user = 'root';
-        
+        if (empty($user)) $user = 'root';
+
         // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
         StorageMountService::ensureHomeMounted($user);
         
@@ -199,11 +216,18 @@ class ConfigService {
      * Saves the list of workspaces (sessions).
      */
     public static function saveWorkspaces($data) {
-        LogService::log("Saving workspace manifest (" . count($data['sessions'] ?? []) . " sessions)", LogService::LOG_DEBUG, "ConfigService");
+        $count = count($data['sessions'] ?? []);
         $file = self::getUserStatePath() . "/workspaces.json";
-        $dir = dirname($file);
-        if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        return file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
+        // Diagnostic INFO (not DEBUG) so the boundary is visible in default-level
+        // logs. A reported workspace-loss had no audit trail because the prior
+        // log was DEBUG.
+        $ok = AtomicWriteService::writeJson($file, $data);
+        if (!$ok) {
+            LogService::log("saveWorkspaces FAILED: count=$count path=$file", LogService::LOG_ERROR, "ConfigService");
+            return false;
+        }
+        LogService::log("saveWorkspaces ok: count=$count path=$file", LogService::LOG_INFO, "ConfigService");
+        return true;
     }
 
     /**
@@ -240,17 +264,15 @@ class ConfigService {
         }
 
         $file = self::getEnvFilePath($path, $agentId);
-        $dir = dirname($file);
-        if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        $res = file_put_contents($file, json_encode($envs, JSON_PRETTY_PRINT));
+        $ok = AtomicWriteService::writeJson($file, $envs);
 
-        if ($res !== false) {
+        if ($ok) {
             LogService::log("Successfully updated environment variables for $agentId. Added: $added, Modified: $modified, Removed: $removed.", LogService::LOG_INFO, "ConfigService");
         } else {
             LogService::log("FAILED to save environment variables to $file", LogService::LOG_ERROR, "ConfigService");
         }
 
-        return ($res !== false);
+        return $ok;
     }
 
     /**
@@ -272,5 +294,64 @@ class ConfigService {
     private static function getEnvFilePath($path, $agentId) {
         $hash = md5($path . $agentId);
         return self::getUserStatePath() . "/envs/env_$hash.json";
+    }
+
+    /**
+     * Resume-ID persistence for the (workspace path, agent) pair.
+     * Captured at clean-close time from the agent's own exit screen
+     * (e.g. "claude --resume <uuid>"). Surfaced back to the UI so the
+     * next session on the same combo can offer a Resume button.
+     */
+    private static function getResumeFilePath($path, $agentId) {
+        $hash = md5($path . $agentId);
+        return self::getUserStatePath() . "/resumes/resume_$hash.json";
+    }
+
+    public static function getResumeId($path, $agentId) {
+        $file = self::getResumeFilePath($path, $agentId);
+        if (!file_exists($file)) return null;
+        $data = json_decode(file_get_contents($file), true);
+        return is_array($data) ? ($data['chat_id'] ?? null) : null;
+    }
+
+    public static function saveResumeId($path, $agentId, $chatId) {
+        $file = self::getResumeFilePath($path, $agentId);
+        $data = ['chat_id' => $chatId, 'saved_at' => time()];
+        return AtomicWriteService::writeJson($file, $data);
+    }
+
+    public static function clearResumeId($path, $agentId) {
+        $file = self::getResumeFilePath($path, $agentId);
+        return @unlink($file);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-launch preference persistence (per workspace+agent pair)
+    // -----------------------------------------------------------------------
+
+    private static function getAutoLaunchFilePath($path, $agentId): string
+    {
+        $hash = md5($path . $agentId);
+        return self::getUserStatePath() . "/autolaunch/autolaunch_$hash.json";
+    }
+
+    public static function getAutoLaunch($path, $agentId): array
+    {
+        $file = self::getAutoLaunchFilePath($path, $agentId);
+        if (!file_exists($file)) return ['autoLaunch' => false, 'freshIfNoResume' => false];
+        $data = json_decode(file_get_contents($file), true);
+        return is_array($data) ? $data : ['autoLaunch' => false, 'freshIfNoResume' => false];
+    }
+
+    public static function saveAutoLaunch($path, $agentId, bool $autoLaunch, bool $freshIfNoResume): bool
+    {
+        $file = self::getAutoLaunchFilePath($path, $agentId);
+        $data = ['autoLaunch' => $autoLaunch, 'freshIfNoResume' => $freshIfNoResume];
+        return AtomicWriteService::writeJson($file, $data);
+    }
+
+    public static function clearAutoLaunch($path, $agentId): void
+    {
+        @unlink(self::getAutoLaunchFilePath($path, $agentId));
     }
 }

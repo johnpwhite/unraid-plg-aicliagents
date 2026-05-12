@@ -31,6 +31,10 @@ require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/StorageHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AgentHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/UtilityHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/TmuxHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/ArgsHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AutoLaunchHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/EnvHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
@@ -79,25 +83,45 @@ if (isset($_GET['action'])) {
         } elseif ($action === 'get_install_status') {
             \AICliAgents\Handlers\AgentHandler::rawInstallStatus();
         } elseif ($action === 'get_task_status') {
-            // Task status file is already JSON - read and output directly
+            // Task status file is already JSON - read and output directly.
+            // SECURITY: $user gets interpolated into a filesystem path so
+            // validate before use. Accept only POSIX-ish usernames or the
+            // literal "agents" sentinel.
             $user = $_GET['user'] ?? '';
             if (empty($user)) {
                 $type = $_GET['type'] ?? 'agents';
                 $user = ($type === 'agents') ? 'agents' : getAICliConfig()['user'];
             }
-            $file = "/tmp/unraid-aicliagents/task-status-$user";
-            if (file_exists($file)) echo file_get_contents($file);
-            else echo json_encode(['progress' => 0, 'step' => 'Starting...']);
+            if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', (string)$user)) {
+                header('Content-Type: application/json');
+                echo json_encode(['progress' => 0, 'step' => 'invalid user']);
+            } else {
+                $file = "/tmp/unraid-aicliagents/task-status-$user";
+                header('Content-Type: application/json');
+                // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
+                if (file_exists($file)) echo file_get_contents($file);
+                else echo json_encode(['progress' => 0, 'step' => 'Starting...']);
+            }
         } else {
             // Standard JSON handlers
             $result = \AICliAgents\Handlers\TerminalHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\StorageHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\AgentHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\TmuxHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\ArgsHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\AutoLaunchHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\EnvHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
             if ($result !== null) {
+                // json_encode output served as application/json — no browser
+                // HTML parser involved. Not a user-controlled HTML sink.
+                // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
                 echo json_encode($result);
             } else {
+                // Same: JSON response, not HTML. $action has already reached
+                // the dispatcher's switch without matching a handler.
+                // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
                 echo json_encode(['status' => 'error', 'message' => "Unknown action: $action"]);
             }
         }
@@ -110,5 +134,6 @@ if (isset($_GET['action'])) {
         }
         echo json_encode($response);
     }
+
     exit;
 }

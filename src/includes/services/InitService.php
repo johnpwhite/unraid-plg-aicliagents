@@ -3,12 +3,15 @@
  * <module_context>
  *     <name>InitService</name>
  *     <description>Plugin initialization logic for AICliAgents.</description>
- *     <dependencies>LogService, ConfigService, StorageMountService, TaskService</dependencies>
+ *     <dependencies>LogService, ConfigService, StorageMountService</dependencies>
  *     <constraints>Under 150 lines. Focuses on scaffolding and state initialization.</constraints>
  * </module_context>
  */
 
 namespace AICliAgents\Services;
+
+// InitService uses BootIntegrityService which is loaded via AICliAgentsManager before this runs.
+// No separate require_once needed -- AICliAgentsManager.php handles the load order.
 
 class InitService {
     private static $initializing = false;
@@ -83,13 +86,20 @@ class InitService {
         // 1. Ensure Nginx configuration is updated and reloaded if necessary
         ConfigService::ensureNginxConfig();
 
+        // Phase 1: Ensure the durable layer manifest exists from first boot onwards (idempotent)
+        LayerManifestService::initEmpty();
+
+        // Phase 4a: Boot integrity sweep -- warn mode. Classifies every entity against the
+        // manifest, emits lifecycle log lines, and fires Unraid notifications for non-healthy
+        // states. Does NOT block mounts. Phase 4b adds halt-and-ask via boot_integrity_strict cfg.
+        // Guard: only run once per boot (cache file acts as sentinel).
+        if (!file_exists('/tmp/unraid-aicliagents/.boot_integrity_cache.json')) {
+            BootIntegrityService::runBootSweep();
+        }
+
         // 2. Cleanup stale sessions and temporary artifacts
         self::cleanupStaleState();
         
-        // 3. Manage Background Sync Daemon
-        $username = $config['user'] ?? 'root';
-        TaskService::manageSyncDaemon($username);
-
         self::$initialized = true;
         self::$initializing = false;
         LogService::log("Plugin initialization complete.", LogService::LOG_DEBUG);
@@ -100,11 +110,35 @@ class InitService {
      */
     public static function ensureInit($skipMount = false) {
         self::initPlugin();
-        
+
         if (StorageMountService::isMigrationInProgress()) {
             // D-301: Log that we are in a waiting state
             LogService::log("Request deferred: Storage migration is currently in progress.", LogService::LOG_DEBUG);
             return;
+        }
+
+        // Phase 3: Lazy backstop — if the supervisor died, re-spawn it on the next page
+        // load. Throttled: only attempt if isRunning() returns false, so a live supervisor
+        // is not disturbed on every request. start() is a no-op if the daemon is already up.
+        if (!SupervisorService::isRunning()) {
+            SupervisorService::start();
+        }
+
+        // Bug #521: one-shot per-boot autolaunch sweep. The disks_mounted event hook
+        // and the PLG INLINE block are the primary triggers, but a fresh boot or a
+        // crash-restart that skipped both leaves sessions dead until the user opens
+        // the tab. The marker is on tmpfs, so it self-clears across reboots; on the
+        // first ensureInit after boot we run the sweep and write the marker.
+        $bootMarker = '/tmp/unraid-aicliagents/.autolaunch_boot_done';
+        if (!file_exists($bootMarker)) {
+            @touch($bootMarker);
+            // Run after the marker write so a partial failure doesn't loop. The
+            // service is idempotent — already-running sessions are filtered.
+            try {
+                AutoLaunchService::launchAllPending(null, 'init_boot');
+            } catch (\Throwable $e) {
+                LogService::log("AutoLaunch boot sweep failed: " . $e->getMessage(), LogService::LOG_WARN);
+            }
         }
     }
 
@@ -128,7 +162,7 @@ class InitService {
 
         // Clean stale emergency mode state — only if HOME storage is back (not agent storage)
         if (file_exists(StorageMountService::EMERGENCY_FLAG)) {
-            $config = $config ?? ConfigService::getConfig();
+            $config = ConfigService::getConfig();
             $homePath = $config['home_storage_path'] ?? $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
             if (StorageMountService::isPathAvailable($homePath)) {
                 // Storage is back — kill emergency sessions, clean up artifacts, notify UI
@@ -147,8 +181,21 @@ class InitService {
                 foreach (glob("/tmp/unraid-aicliagents/work/*/home") as $link) {
                     if (is_link($link)) @unlink($link);
                 }
-                // Clean stale PID/socket files from killed sessions
-                foreach (glob("/var/run/unraid-aicliagents-*.pid") as $pid) @unlink($pid);
+                // Clean stale PID/socket files from killed sessions.
+                // Bug #541: only unlink pid files whose recorded PID is dead.
+                // Otherwise emergency cleanup can desync the registry from a
+                // recycled-PID process that the OS reused for an unrelated
+                // workload (we never SIGNAL the recycled PID — but the file
+                // disappearing fools listActiveSessionsForAgent into thinking
+                // no session exists when one actually does).
+                foreach (glob("/var/run/unraid-aicliagents-*.pid") as $pidFile) {
+                    $pid = (int)@file_get_contents($pidFile);
+                    if ($pid > 0 && UtilityService::isPidRunning($pid)) {
+                        // Process still alive — leave its pid file in place.
+                        continue;
+                    }
+                    @unlink($pidFile);
+                }
                 foreach (glob("/var/run/aicliterm-*.sock") as $sock) @unlink($sock);
 
                 // Remove emergency-installed agents from RAM (real sqsh agents will be mounted on demand)
@@ -172,25 +219,7 @@ class InitService {
                     'emergency_mode' => false,
                 ]);
 
-                // Restart sync daemon
-                $username = $config['user'] ?? 'root';
-                if (empty($username) || $username === '0') $username = 'root';
-                TaskService::manageSyncDaemon($username, true);
-
-                LogService::log("Emergency mode cleanup complete. Sync daemon restarted. UI notified.", LogService::LOG_INFO, "InitService");
-            }
-        }
-
-        // Kill stale sync daemons when storage path is unavailable
-        $config = $config ?? ConfigService::getConfig();
-        $persistPath = $persistPath ?? ($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents');
-        if (!StorageMountService::isPathAvailable($persistPath)) {
-            foreach (glob("/tmp/unraid-aicliagents/sync-daemon-*.pid") as $lockFile) {
-                $pid = trim(@file_get_contents($lockFile));
-                if ($pid && UtilityService::isPidRunning((int)$pid)) {
-                    exec("kill -9 $pid > /dev/null 2>&1");
-                }
-                @unlink($lockFile);
+                LogService::log("Emergency mode cleanup complete. UI notified.", LogService::LOG_INFO, "InitService");
             }
         }
 

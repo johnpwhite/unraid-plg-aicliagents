@@ -11,6 +11,15 @@ MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$(dirname "$0")/common.sh"
 
+# Source canonical path resolver and lifecycle log writer (Phase 1)
+source "$(dirname "$0")/resolve_paths.sh" 2>/dev/null || true
+
+# Source atomic layer writer (Phase 2)
+source "$(dirname "$0")/atomic_write_layer.sh" 2>/dev/null || {
+    echo "[CONSOLIDATE] FATAL: atomic_write_layer.sh missing — cannot consolidate safely" >&2
+    exit 1
+}
+
 [ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
 TASK_STATUS_FILE="/tmp/unraid-aicliagents/task-status-$ID"
 
@@ -45,6 +54,7 @@ update_task_status() {
 }
 
 # 1. Ensure stack is mounted to get merged view
+lifecycle_log "info" "consolidate_layers" "bash_consolidate_start" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
 update_task_status "Initializing..." 5 ""
 if ! mountpoint -q "$MNT_POINT"; then
     log "Stack not mounted. Attempting remount..."
@@ -68,57 +78,101 @@ fi
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; update_task_status "Failed" 0 "Invalid path"; exit 1; }
 guard_path "$MNT_POINT" "MNT_POINT" || { error "Mount point failed validation: $MNT_POINT"; update_task_status "Failed" 0 "Invalid mount"; exit 1; }
 
-# Check disk space (need at least 200MB for consolidation temp file)
-check_disk_space "/tmp/unraid-aicliagents/" 200 || { error "Insufficient disk space in /tmp for consolidation"; update_task_status "Failed" 0 "Low disk space"; exit 1; }
+# Check disk space in /tmp for the scratch verify mount used by atomic_write_layer (minimal — just a mountpoint)
+check_disk_space "/tmp/unraid-aicliagents/" 10 || { error "Insufficient disk space in /tmp for verification scratch mount"; update_task_status "Failed" 0 "Low disk space"; exit 1; }
 
-# 3. Bake Consolidated Volume(s)
-log "Baking consolidated volume..."
+# WP #271 guard: detect legacy nested 'home/' directory inside the home mount.
+# Some early plugin versions packaged user-home contents at sqsh-root/home/...
+# instead of sqsh-root/... directly. If left in place, mksquashfs re-packages
+# this nesting on every consolidate, and ConfigService (which reads from the
+# correct shallower path) silently sees stale/empty data. We detect early so
+# the user does not lose their workspaces / chat history to a silent re-pack.
+if [ "$TYPE" == "home" ] && [ -d "$MNT_POINT/home" ]; then
+    log "Detected legacy nested 'home/' directory at $MNT_POINT/home"
+    if [ -z "$(ls -A "$MNT_POINT/home" 2>/dev/null)" ]; then
+        log "Legacy 'home/' is empty — removing before bake"
+        rmdir "$MNT_POINT/home" 2>/dev/null || true
+    else
+        # Non-empty: refuse rather than silently shuffle data. Show a sample of
+        # the offending files so the user can manually merge if needed.
+        SAMPLE=$(find "$MNT_POINT/home" -type f 2>/dev/null | head -5 | tr '\n' ',' | sed 's/,$//')
+        error "Refusing to consolidate: legacy nested home/ contains files (e.g. $SAMPLE)."
+        error "Manual cleanup required — move data up one level into $MNT_POINT/ then rmdir $MNT_POINT/home."
+        update_task_status "Failed" 0 "Legacy nested home/ artifact detected — manual merge required"
+        exit 1
+    fi
+fi
+
+# 3. Bake Consolidated Volume (Phase 2 — atomic, closing findings D-partial and E)
+#
+# Step 3a: Snapshot existing layers BEFORE bake so we know exactly which files to remove
+#          after the new consolidated volume lands. This is the manifest-driven explicit
+#          cleanup that replaces the wildcard find-delete (finding D).
+log "Baking consolidated volume (atomic)..."
 update_task_status "Baking consolidated volume..." 40 ""
-TMP_SQSH="/tmp/unraid-aicliagents/consolidate_${ID}.sqsh"
-# Use a pipe to mksquashfs if we wanted real progress, but for now we'll just mark it at 40%
-if ! mksquashfs "$MNT_POINT" "$TMP_SQSH" \
-    -comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend > /dev/null 2>&1; then
-    error "SquashFS consolidation bake failed."
-    update_task_status "Failed" 0 "Bake failed"
-    exit 1
-fi
 
-SQSH_SIZE=$(stat -c%s "$TMP_SQSH")
-MAX_SIZE=$((3900 * 1024 * 1024)) # 3.9GB
+# Snapshot pre-bake layer list. nullglob ensures empty array when no layers present.
+shopt -s nullglob
+OLD_LAYERS=("$PERSIST_PATH/${TYPE}_${ID}_"*.sqsh)
+shopt -u nullglob
 
-if [ "$SQSH_SIZE" -gt "$MAX_SIZE" ]; then
-    error "Consolidated volume exceeds 3.9GB FAT32 limit."
-    update_task_status "Failed" 0 "Exceeds FAT32 limit"
-    rm "$TMP_SQSH"
-    exit 1
-fi
+# Record a marker BEFORE bake. Any writes to UPPER_DIR after this marker
+# won't be included in the baked volume — if we wipe the upper afterwards,
+# those writes are lost. Same protection pattern as commit_stack.sh.
+# This was the cause of a silent resume-file loss when gracefulClose ran
+# concurrently with auto-consolidation.
+CONSOLIDATE_MARKER="/tmp/unraid-aicliagents/.consolidate_marker_${TYPE}_${ID}"
+touch "$CONSOLIDATE_MARKER"
 
-# 4. Finalize
-update_task_status "Finalizing volume..." 80 ""
-VERSION=$(date +%s)
-FINAL_NAME="${TYPE}_${ID}_v${VERSION}_vol1.sqsh"
-log "Finalizing volume: $FINAL_NAME"
-
-# Check disk space on persistence target before moving
-check_disk_space "$PERSIST_PATH/$FINAL_NAME" "$((SQSH_SIZE / 1024 / 1024 + 50))" || {
+# Check disk space on persistence target (atomic_write_layer writes directly there, not /tmp)
+check_disk_space "$PERSIST_PATH/.diskcheck" 200 || {
     error "Insufficient disk space on persistence path for consolidated volume"
     update_task_status "Failed" 0 "Low disk space on Flash"
-    rm -f "$TMP_SQSH"
+    rm -f "$CONSOLIDATE_MARKER"
     exit 1
 }
 
-if ! mv "$TMP_SQSH" "$PERSIST_PATH/$FINAL_NAME"; then
-    error "Failed to move consolidated volume to persistence path. Old layers preserved."
-    update_task_status "Failed" 0 "Move to Flash failed"
-    rm -f "$TMP_SQSH"
+# Step 3b: Atomic bake — writes sibling tempfile, fsyncs, verifies, renames atomically.
+# We bake from the mounted stack (MNT_POINT = merged view of all layers), not from UPPER_DIR.
+# atomic_write_layer returns the basename on stdout; all progress goes to stderr.
+FINAL_NAME=""
+if ! FINAL_NAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$MNT_POINT" "consolidated"); then
+    error "Atomic consolidation bake failed."
+    update_task_status "Failed" 0 "Bake failed"
+    rm -f "$CONSOLIDATE_MARKER"
+    lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"atomic_write_layer_failed\"}" 2>/dev/null || true
     exit 1
 fi
 
-# 5. Cleanup Old Layers (only after successful mv)
+log "Consolidated volume written: $FINAL_NAME"
+update_task_status "Finalizing volume..." 80 ""
+
+# Sanity: check FAT32 size limit on the final file
+SQSH_SIZE=$(stat -c%s "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
+MAX_SIZE=$((3900 * 1024 * 1024)) # 3.9GB
+if [ "$SQSH_SIZE" -gt "$MAX_SIZE" ]; then
+    error "Consolidated volume exceeds 3.9GB FAT32 limit ($SQSH_SIZE bytes). Removing and keeping old layers."
+    update_task_status "Failed" 0 "Exceeds FAT32 limit"
+    rm -f "$PERSIST_PATH/$FINAL_NAME"
+    rm -f "$CONSOLIDATE_MARKER"
+    exit 1
+fi
+
+# 4 (was 5). Cleanup Old Layers — explicit per-file, never wildcard (closing finding D)
+# We only delete files that existed BEFORE this bake (OLD_LAYERS snapshot), and we
+# double-check each one is not the new file before removing. This ensures a concurrent
+# delta that landed during consolidation is never accidentally swept.
 log "Cleaning up old layers..."
 update_task_status "Cleaning up old layers..." 90 ""
 guard_path "$PERSIST_PATH" "PERSIST_PATH (cleanup)" || { error "Path guard failed before cleanup"; exit 1; }
-find "$PERSIST_PATH" -name "${TYPE}_${ID}_*.sqsh" ! -name "$FINAL_NAME" -delete
+for old_layer in "${OLD_LAYERS[@]}"; do
+    [ -f "$old_layer" ] || continue
+    # Belt-and-braces: never delete the new consolidated file
+    [ "$(basename "$old_layer")" = "$FINAL_NAME" ] && continue
+    rm -f "$old_layer"
+    lifecycle_log "info" "consolidate_layers" "old_layer_removed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"file\":\"$(basename "$old_layer")\"}" 2>/dev/null || true
+    log "Removed old layer: $(basename "$old_layer")"
+done
 
 # 6. Remount & Clear RAM
 log "Finalizing stack and clearing RAM..."
@@ -127,12 +181,28 @@ update_task_status "Finalizing stack..." 95 ""
 umount -l "$MNT_POINT" 2>/dev/null || true
 
 # D-353: Reset RAM layer after consolidation (since data is now in base volume)
+# BUT: skip the wipe if any writes arrived AFTER the bake marker — those
+# writes are NOT in the consolidated volume and would be silently lost.
+# Leave them in place; the next commit_stack will pick them up as a delta
+# on top of the new consolidated base.
+UPPER_CHANGED=""
+if [ -f "$CONSOLIDATE_MARKER" ] && [ -d "$UPPER_DIR" ]; then
+    UPPER_CHANGED=$(find "$UPPER_DIR" -newer "$CONSOLIDATE_MARKER" -type f 2>/dev/null | head -1)
+fi
+rm -f "$CONSOLIDATE_MARKER"
+
 if [ -d "$UPPER_DIR" ]; then
-    find "$UPPER_DIR" -mindepth 1 -delete
-    find "$WORK_DIR" -mindepth 1 -delete
-    sync
+    if [ -n "$UPPER_CHANGED" ]; then
+        log "Writes detected in upper layer during bake (e.g. $UPPER_CHANGED). Preserving upper to avoid data loss — next commit will delta them onto the consolidated base."
+    else
+        find "$UPPER_DIR" -mindepth 1 -delete
+        find "$WORK_DIR" -mindepth 1 -delete
+        sync
+    fi
 fi
 
 bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH"
 
+FINAL_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
+lifecycle_log "info" "consolidate_layers" "bash_consolidate_ok" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\",\"bytes\":$FINAL_BYTES}" 2>/dev/null || true
 update_task_status "Consolidation complete." 100 ""

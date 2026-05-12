@@ -1,1 +1,3 @@
-**AI Cli Agents** provides a native AI terminal for Unraid. Securely monitor, manage, and control your server using various CLI based coding tools directly from your web interface.
+**Unraid AI CLI Agents** puts Claude Code, Gemini CLI, OpenCode and more inside your WebUI.
+- **Agent Store**: browse, install, and upgrade AI CLIs in a click.
+- **Workspaces**: open terminals per project folder, switch agents at will.

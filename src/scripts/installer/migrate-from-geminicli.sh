@@ -38,6 +38,15 @@ rm -f /var/log/plugins/unraid-geminicli.plg
 rm -f /var/log/plugins/geminicli.plg
 rm -rf /usr/local/emhttp/plugins/unraid-geminicli
 rm -rf /usr/local/emhttp/plugins/geminicli
-rm -f /usr/local/bin/gemini
+# Only purge the gemini shell symlink if it still points at the LEGACY plugin.
+# runtime.sh (which runs earlier in install-engine.sh) already created a new
+# /usr/local/bin/gemini pointing at our own bin wrapper — we must not clobber it.
+if [ -L /usr/local/bin/gemini ]; then
+    _gemini_target=$(readlink /usr/local/bin/gemini 2>/dev/null)
+    if [[ "$_gemini_target" == *"unraid-geminicli"* ]] || [[ "$_gemini_target" == *"/plugins/geminicli/"* ]]; then
+        rm -f /usr/local/bin/gemini
+    fi
+    unset _gemini_target
+fi
 log_ok "Legacy registrations cleared."
 

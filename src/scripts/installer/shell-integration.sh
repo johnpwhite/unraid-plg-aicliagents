@@ -28,6 +28,9 @@ alias pi='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/pi-code
 alias codex='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/codex-cli/node_modules/.bin/codex'
 alias droid='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/factory-cli/node_modules/.bin/droid'
 alias nanocoder='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/nanocoder/node_modules/.bin/nanocoder'
+alias copilot='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/bin/copilot'
+alias goose='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/goose/bin/goose'
+alias qwen='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/qwen-code/node_modules/.bin/qwen'
 
 # Note: Any commands run via these aliases will have their data automatically
 # backed up to Flash by the plugin's background sync daemon.

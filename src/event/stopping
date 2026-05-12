@@ -17,6 +17,9 @@ CONFIG="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
 
 mkdir -p /tmp/unraid-aicliagents
 
+# Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventStopping] $1" >> "$LOG"
 }
@@ -65,16 +68,74 @@ nchan_notify() {
 
 log "Shutdown/Array stop detected."
 
+# Phase 3.3: Ask the supervisor to flush all dirty entities synchronously
+# (60-second budget), then stop it.  Path-anchored throughout.
+SUPERVISOR_PIDFILE="/var/run/aicli-supervisor.pid"
+SUPERVISOR_SCRIPT="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh"
+
+if [ -f "$SUPERVISOR_SCRIPT" ]; then
+    # Bug #537: budget is configurable. Users with deep layer stacks (100+
+    # entities) under memory pressure cannot bake everything in 60s; the
+    # default leaves dirty state on shutdown. Read from cfg, fall back to 60.
+    FLUSH_BUDGET=$(grep -oE '^event_stopping_flush_timeout_seconds="[0-9]+"' "$CONFIG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    [ -z "$FLUSH_BUDGET" ] && FLUSH_BUDGET=60
+    [ "$FLUSH_BUDGET" -lt 10 ] 2>/dev/null && FLUSH_BUDGET=10
+    log "Asking supervisor to flush all entities before shutdown (budget: ${FLUSH_BUDGET}s)..."
+    lifecycle_log "info" "event_stopping" "supervisor_flush_start" "{\"budget_s\":$FLUSH_BUDGET}" 2>/dev/null || true
+    bash "$SUPERVISOR_SCRIPT" flush --all --timeout=$FLUSH_BUDGET
+    FLUSH_RC=$?
+    if [ "$FLUSH_RC" -eq 0 ]; then
+        log "Supervisor flush complete (clean shutdown)."
+        lifecycle_log "info" "event_stopping" "supervisor_flush_done" "{\"result\":\"clean\"}" 2>/dev/null || true
+    else
+        log "Supervisor flush timed out — proceeding with shutdown anyway."
+        lifecycle_log "warn" "event_stopping" "supervisor_flush_done" "{\"result\":\"timeout\",\"budget_s\":$FLUSH_BUDGET}" 2>/dev/null || true
+    fi
+fi
+
+if [ -f "$SUPERVISOR_PIDFILE" ]; then
+    SUPERVISOR_PID="$(cat "$SUPERVISOR_PIDFILE" 2>/dev/null || echo 0)"
+    if [ "$SUPERVISOR_PID" -gt 0 ] 2>/dev/null; then
+        # Verify the PID actually belongs to the supervisor script (not a recycled PID)
+        SUPERVISOR_CMDLINE="$(tr '\0' ' ' < "/proc/$SUPERVISOR_PID/cmdline" 2>/dev/null || echo '')"
+        if echo "$SUPERVISOR_CMDLINE" | grep -qF "$SUPERVISOR_SCRIPT"; then
+            log "Sending TERM to supervisor (pid $SUPERVISOR_PID)..."
+            kill -TERM "$SUPERVISOR_PID" 2>/dev/null || true
+        else
+            log "Supervisor pidfile present but PID $SUPERVISOR_PID does not own the script (stale). Removing."
+            rm -f "$SUPERVISOR_PIDFILE" 2>/dev/null || true
+        fi
+    fi
+fi
+
 # Determine storage classification
-PERSIST_PATH=$(grep -oP 'agent_storage_path="\K[^"]+' "$CONFIG" 2>/dev/null || echo "")
+# Fix C: use agent_persist_path() from canonical resolver (not a bare grep on agent_storage_path).
+PERSIST_PATH=$(agent_persist_path 2>/dev/null)
 [ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
 STORAGE_CLASS=$(classify "$PERSIST_PATH")
 log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
+lifecycle_log "info" "event_stopping" "shutdown_event_received" "{\"storage_class\":\"$STORAGE_CLASS\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
 
-# Check if this is a full server shutdown vs just array stop
+# Check if this is a full server shutdown vs just array stop.
+# Bug #539: pgrep alone misses shutdowns initiated via systemd or the WebGUI
+# AJAX endpoint (powerdown calls into rc.local and friends, not /sbin/shutdown).
+# Cross-check runlevel and systemd state so the emergency_mode flag is set
+# correctly in both code paths.
 IS_SHUTDOWN=false
-if pgrep -f '(/sbin/shutdown|/sbin/reboot|/sbin/poweroff|/sbin/halt)' >/dev/null 2>&1; then
+if pgrep -f '(/sbin/shutdown|/sbin/reboot|/sbin/poweroff|/sbin/halt|/usr/sbin/powerdown)' >/dev/null 2>&1; then
     IS_SHUTDOWN=true
+fi
+if [ "$IS_SHUTDOWN" = false ] && command -v runlevel >/dev/null 2>&1; then
+    # Runlevels 0 (halt) and 6 (reboot) signal shutdown intent regardless of
+    # which binary triggered the transition.
+    _RL="$(runlevel 2>/dev/null | awk '{print $2}')"
+    case "$_RL" in 0|6) IS_SHUTDOWN=true ;; esac
+fi
+if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
+    # systemd-managed boxes (rare on Unraid 7.2 but possible on derivatives).
+    case "$(systemctl is-system-running 2>/dev/null)" in
+        stopping|halting) IS_SHUTDOWN=true ;;
+    esac
 fi
 
 # Helper: run the full stop script
@@ -158,17 +219,38 @@ else
             fi
         done
 
-        # Persist home to Flash (storage is on Flash so this works)
+        # Persist home to Flash via atomic writer (finding I/E/F closed).
+        # Bug #538: Source atomic_write_layer.sh here — distinguish "script
+        # missing" from "function fails" so the operator can tell from the log
+        # which failure path occurred. Previously || true masked the difference.
+        EMHTTP_DEST_STOP="/usr/local/emhttp/plugins/unraid-aicliagents"
+        AWL_SCRIPT="$EMHTTP_DEST_STOP/src/scripts/storage/atomic_write_layer.sh"
+        if ! declare -f atomic_write_layer >/dev/null 2>&1; then
+            if [ ! -f "$AWL_SCRIPT" ]; then
+                warn "atomic_write_layer.sh not deployed at $AWL_SCRIPT — home delta bake will be skipped this cycle."
+                lifecycle_log "warn" "event_stopping" "awl_missing" "{\"path\":\"$AWL_SCRIPT\"}" 2>/dev/null || true
+            elif ! source "$AWL_SCRIPT" 2>/dev/null; then
+                warn "atomic_write_layer.sh failed to source — home delta bake will be skipped this cycle."
+                lifecycle_log "warn" "event_stopping" "awl_source_failed" "{\"path\":\"$AWL_SCRIPT\"}" 2>/dev/null || true
+            fi
+        fi
         ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
-        if [ -d "$ZRAM_UPPER/homes" ] && [ -d "$PERSIST_PATH" ]; then
+        if [ -d "$ZRAM_UPPER/homes" ]; then
             for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
                 [ -d "$upper_dir" ] || continue
                 [ -z "$(ls -A "$upper_dir" 2>/dev/null)" ] && continue
                 user=$(basename "$(dirname "$upper_dir")")
-                DELTA="$PERSIST_PATH/home_${user}_delta_$(date +%s).sqsh"
+                HOME_PERSIST=$(home_persist_path "$user" 2>/dev/null || echo "")
+                [ -z "$HOME_PERSIST" ] && HOME_PERSIST="$PERSIST_PATH"
+                [ -d "$HOME_PERSIST" ] || continue
                 log "  Baking home delta for $user..."
-                mksquashfs "$upper_dir" "$DELTA" -comp xz -b 1M -no-exports -noappend > /dev/null 2>&1 && \
-                    log "  Saved $(du -h "$DELTA" 2>/dev/null | cut -f1) for $user."
+                lifecycle_log "info" "event_stopping" "shutdown_bake_attempted" "{\"user\":\"$user\"}" 2>/dev/null || true
+                DELTA_NAME=$(atomic_write_layer "home" "$user" "$HOME_PERSIST" "$upper_dir" "delta" 2>/dev/null)
+                if [ -n "$DELTA_NAME" ]; then
+                    log "  Saved $DELTA_NAME for $user."
+                else
+                    warn "  Home delta bake failed for $user."
+                fi
             done
         fi
 
@@ -178,4 +260,5 @@ else
     fi
 fi
 
+lifecycle_log "info" "event_stopping" "shutdown_complete" "{\"storage_class\":\"$STORAGE_CLASS\"}" 2>/dev/null || true
 log "Event handler complete."

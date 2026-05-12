@@ -10,6 +10,10 @@
 <!-- TAB 3: STORAGE -->
 <div id="tab-storage" class="aicli-tab-content aicli-layout">
     <div style="width: 100%;">
+
+        <!-- Phase 4a: Boot Integrity Banner (populated by JS on tab open) -->
+        <div id="aicli-boot-integrity-banner" style="display:none; margin-bottom:12px;"></div>
+
         <!-- System Resources -->
         <div class="aicli-card">
             <div class="aicli-card-header"><i class="fa fa-heartbeat text-orange-500"></i> System Resources</div>
@@ -29,14 +33,14 @@
         </div>
 
         <!-- Agent Storage Section -->
+        <!-- WP #269: Flash/RAM colour key removed from section header (was floating
+             far-right of the page title). The colours are self-evident now: Flash =
+             dark blue progress bar segment, RAM = orange. The ZRAM row in the layer
+             list (WP #267) carries the same orange marker so the legend is implicit. -->
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
             <div style="display:flex; align-items:center; gap:12px;">
                 <span style="font-size:13px; font-weight:700;">SquashFS Agent Storage</span>
                 <span id="agents-text-summary" style="font-size:11px; opacity:0.6;">...</span>
-            </div>
-            <div style="display:flex; gap:10px;">
-                <div class="legend-item"><div class="legend-box" style="background:#1e4976;"></div><span>Flash</span></div>
-                <div class="legend-item"><div class="legend-box" style="background:var(--orange, #ff8c00);"></div><span>RAM</span></div>
             </div>
         </div>
         <div id="agents-stats-container" class="storage-entity-grid">
@@ -48,10 +52,6 @@
             <div style="display:flex; align-items:center; gap:12px;">
                 <span style="font-size:13px; font-weight:700;">User Home Persistence</span>
                 <span id="homes-text-summary" style="font-size:11px; opacity:0.6;">...</span>
-            </div>
-            <div style="display:flex; gap:10px;">
-                <div class="legend-item"><div class="legend-box" style="background:#1e4976;"></div><span>Flash</span></div>
-                <div class="legend-item"><div class="legend-box" style="background:var(--orange, #ff8c00);"></div><span>RAM</span></div>
             </div>
         </div>
         <div id="home-stats-container" class="storage-entity-grid">

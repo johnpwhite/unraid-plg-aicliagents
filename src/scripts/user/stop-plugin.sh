@@ -12,7 +12,12 @@ ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
 
 # Ensure plugin binaries (mksquashfs, node, etc.) are in PATH
 export PATH="$EMHTTP_DEST/bin:$EMHTTP_DEST/src/scripts/storage:$PATH"
-PERSIST_PATH=$(grep -oP 'agent_storage_path="\K[^"]+' /boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg 2>/dev/null || echo "")
+
+# Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
+source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+source "$EMHTTP_DEST/src/scripts/storage/atomic_write_layer.sh" 2>/dev/null || true
+
+PERSIST_PATH=$(agent_persist_path 2>/dev/null)
 [ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
 
 status() {
@@ -24,18 +29,64 @@ warn() {
 
 status "--- AICliAgents Stop Sequence Start ---"
 
+# ── Step 0: Stop the Storage Durability Supervisor first ──
+# Path-anchored: only targets the supervisor script PID -- never a broad pkill.
+SUPERVISOR_PIDFILE="/var/run/aicli-supervisor.pid"
+SUPERVISOR_SCRIPT="$EMHTTP_DEST/src/scripts/supervisor/aicli-supervisor.sh"
+if [ -f "$SUPERVISOR_PIDFILE" ]; then
+    SUPERVISOR_PID="$(cat "$SUPERVISOR_PIDFILE" 2>/dev/null || echo 0)"
+    if [ "$SUPERVISOR_PID" -gt 0 ] 2>/dev/null; then
+        SUPERVISOR_CMDLINE="$(tr '\0' ' ' < "/proc/$SUPERVISOR_PID/cmdline" 2>/dev/null || echo '')"
+        if echo "$SUPERVISOR_CMDLINE" | grep -qF "$SUPERVISOR_SCRIPT"; then
+            status "Sending TERM to supervisor (pid $SUPERVISOR_PID)..."
+            kill -TERM "$SUPERVISOR_PID" 2>/dev/null || true
+            # Give it up to 5s to exit cleanly before we proceed
+            waited=0
+            while [ "$waited" -lt 5 ]; do
+                kill -0 "$SUPERVISOR_PID" 2>/dev/null || break
+                sleep 1
+                waited=$((waited + 1))
+            done
+            if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+                status "Supervisor did not exit in 5s -- sending KILL."
+                kill -KILL "$SUPERVISOR_PID" 2>/dev/null || true
+            fi
+        else
+            status "Supervisor pidfile present but PID $SUPERVISOR_PID does not own the script (stale). Removing."
+        fi
+        rm -f "$SUPERVISOR_PIDFILE" 2>/dev/null || true
+    fi
+fi
+
 # ── Step 1: Kill ALL our processes at once with SIGKILL ──
 # Previous approach (kill tmux first, then node) didn't work because:
 # - tmux kill-session sends SIGHUP which bash scripts can survive
 # - aicli-run-*.sh retry loop respawns the agent before our next pkill fires
 # Solution: SIGKILL everything simultaneously so nothing can respawn.
+# Safe kill helper: pkill but with an explicit exe-path exclusion for
+# hypervisor/init processes. Belt-and-braces — these patterns should never
+# match qemu/libvirt/init anyway, but the filter makes it guaranteed.
+safe_pkill() {
+    local pattern="$1"
+    local pids
+    pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
+    for pid in $pids; do
+        local exe
+        exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+        case "$exe" in
+            */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
+        esac
+        kill -9 "$pid" >/dev/null 2>&1 || true
+    done
+}
 status "Killing all AICliAgents processes..."
-pkill -9 -f 'aicli-run-' >/dev/null 2>&1          # Kill the retry loop scripts
-pkill -9 -f 'aicli-shell' >/dev/null 2>&1          # Kill shell wrappers
-pkill -9 -f 'node.*(gemini|opencode|nanocoder|claude|kilo|pi|codex|factory)' >/dev/null 2>&1
-pkill -9 -f 'ttyd.*(aicliterm|temp-terminal)-' >/dev/null 2>&1
-pkill -9 -f 'sync-daemon-.*\.sh' >/dev/null 2>&1
-pkill -9 -f 'Periodic sync triggered' >/dev/null 2>&1
+safe_pkill 'aicli-run-'                                    # Retry loop scripts
+safe_pkill 'aicli-shell'                                   # Shell wrappers
+# Path-anchored node pattern — requires the cmdline to carry a plugin-owned
+# path so we cannot accidentally match unrelated Node services running on the
+# host. The old agent-name regex would match e.g. `node /opt/factory-bot/…`.
+safe_pkill 'node .*(unraid-aicliagents|/\.aicli/)'
+safe_pkill 'ttyd.*(aicliterm|temp-terminal)-'
 # Now kill tmux sessions (the children are already dead)
 if command -v tmux >/dev/null 2>&1; then
     tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r sess; do
@@ -47,8 +98,8 @@ fi
 sleep 2
 
 # ── Step 3: Final sweep (catch anything that slipped through) ──
-pkill -9 -f 'aicli-run-' >/dev/null 2>&1
-pkill -9 -f 'node.*(gemini|opencode|nanocoder|claude|kilo|pi|codex|factory)' >/dev/null 2>&1
+safe_pkill 'aicli-run-'
+safe_pkill 'node .*(unraid-aicliagents|/\.aicli/)'
 
 # ── Step 6: Bake dirty ZRAM data to persistence (delta only, NO consolidation) ──
 if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
@@ -68,15 +119,14 @@ if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
             [ -d "$upper_dir" ] || continue
             has_real_files "$upper_dir" || continue
             user=$(basename "$(dirname "$upper_dir")")
-            DELTA="$PERSIST_PATH/home_${user}_delta_$(date +%s).sqsh"
+            home_path=$(home_persist_path "$user" 2>/dev/null || echo "$PERSIST_PATH")
             status "Baking home delta for $user..."
-            SQSH_ERR=$(mksquashfs "$upper_dir" "$DELTA" -comp xz -b 1M -no-exports -noappend 2>&1)
-            if [ $? -eq 0 ]; then
+            DELTA_NAME=$(atomic_write_layer "home" "$user" "$home_path" "$upper_dir" "delta" 2>>"$LOG_FILE")
+            if [ -n "$DELTA_NAME" ]; then
                 BAKED=$((BAKED + 1))
-                status "  Saved $(du -h "$DELTA" 2>/dev/null | cut -f1) for $user."
+                status "  Saved $DELTA_NAME for $user."
             else
-                warn "Home delta bake failed for $user: $SQSH_ERR"
-                rm -f "$DELTA"
+                warn "Home delta bake failed for $user."
             fi
         done
     fi
@@ -86,15 +136,14 @@ if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
             [ -d "$upper_dir" ] || continue
             has_real_files "$upper_dir" || continue
             agent=$(basename "$(dirname "$upper_dir")")
-            DELTA="$PERSIST_PATH/agent_${agent}_delta_$(date +%s).sqsh"
+            agent_path=$(agent_persist_path 2>/dev/null || echo "$PERSIST_PATH")
             status "Baking agent delta for $agent..."
-            SQSH_ERR=$(mksquashfs "$upper_dir" "$DELTA" -comp xz -b 1M -no-exports -noappend 2>&1)
-            if [ $? -eq 0 ]; then
+            DELTA_NAME=$(atomic_write_layer "agent" "$agent" "$agent_path" "$upper_dir" "delta" 2>>"$LOG_FILE")
+            if [ -n "$DELTA_NAME" ]; then
                 BAKED=$((BAKED + 1))
-                status "  Saved $(du -h "$DELTA" 2>/dev/null | cut -f1) for $agent."
+                status "  Saved $DELTA_NAME for $agent."
             else
-                warn "Agent delta bake failed for $agent: $SQSH_ERR"
-                rm -f "$DELTA"
+                warn "Agent delta bake failed for $agent."
             fi
         done
     fi
@@ -145,8 +194,6 @@ done
 mountpoint -q "$ZRAM_UPPER" 2>/dev/null && umount -l "$ZRAM_UPPER" 2>/dev/null
 
 # Clean runtime files
-rm -f /tmp/unraid-aicliagents/sync-daemon-*.sh
-rm -f /tmp/unraid-aicliagents/sync-daemon-*.pid
 rm -f /tmp/unraid-aicliagents/.init_done
 rm -f /var/run/aicliterm-*.sock
 rm -f /var/run/unraid-aicliagents-*.pid

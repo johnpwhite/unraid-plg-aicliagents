@@ -10,20 +10,39 @@
 
 // 1. Include Atomic Services
 require_once __DIR__ . '/services/LogService.php';
+require_once __DIR__ . '/services/AtomicWriteService.php';
 require_once __DIR__ . '/services/ConfigService.php';
 require_once __DIR__ . '/services/InitService.php';
 require_once __DIR__ . '/services/PermissionService.php';
 require_once __DIR__ . '/services/AgentRegistry.php';
 require_once __DIR__ . '/services/ProcessManager.php';
+require_once __DIR__ . '/services/StoragePathResolver.php';
+require_once __DIR__ . '/services/LifecycleLogService.php';
+require_once __DIR__ . '/services/LayerManifestService.php';
+require_once __DIR__ . '/services/BootIntegrityService.php';
+require_once __DIR__ . '/services/HaltService.php';
+require_once __DIR__ . '/services/SupervisorService.php';
 require_once __DIR__ . '/services/StorageMountService.php';
 require_once __DIR__ . '/services/StorageMetricsService.php';
 require_once __DIR__ . '/services/StorageMigrationService.php';
 require_once __DIR__ . '/services/TaskService.php';
 require_once __DIR__ . '/services/InstallerService.php';
 require_once __DIR__ . '/services/TerminalService.php';
+require_once __DIR__ . '/services/AutoLaunchService.php';
 require_once __DIR__ . '/services/UtilityService.php';
 require_once __DIR__ . '/services/NchanService.php';
+require_once __DIR__ . '/services/VersionClassifier.php';
 require_once __DIR__ . '/services/VersionCheckService.php';
+require_once __DIR__ . '/services/TmuxService.php';
+require_once __DIR__ . '/services/ArgsService.php';
+require_once __DIR__ . '/services/SecretService.php';
+require_once __DIR__ . '/services/EnvService.php';
+require_once __DIR__ . '/services/sources/AgentSource.php';
+require_once __DIR__ . '/services/sources/NpmSource.php';
+require_once __DIR__ . '/services/sources/GithubReleaseSource.php';
+require_once __DIR__ . '/services/sources/CurlInstallSource.php';
+require_once __DIR__ . '/services/sources/TarballSource.php';
+require_once __DIR__ . '/services/sources/SourceResolver.php';
 
 use AICliAgents\Services\LogService;
 use AICliAgents\Services\ConfigService;
@@ -136,11 +155,20 @@ function aicli_boot_resurrection() {
 }
 
 /**
- * Helper to check if a command exists in the system path.
+ * Helper to check if a command exists in the system path. Walks the PATH
+ * directly instead of shelling out to `command -v` — the prior wrapper
+ * called UtilityService::commandExists which was never implemented.
  */
 if (!function_exists('command_exists')) {
     function command_exists($cmd) {
-        return UtilityService::commandExists($cmd);
+        $name = (string)$cmd;
+        if ($name === '' || preg_match('#[/\\\\]#', $name)) return false;
+        $paths = explode(PATH_SEPARATOR, (string)getenv('PATH'));
+        foreach ($paths as $dir) {
+            $full = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . $name;
+            if (is_file($full) && is_executable($full)) return true;
+        }
+        return false;
     }
 }
 
@@ -220,10 +248,17 @@ function aicli_migrate_agent_storage($path) {
 }
 
 /**
- * Wrapper for legacy home path migration.
+ * Wrapper for legacy home path migration. The real service never had a
+ * migrateHomePath() method — the available migration entry points are
+ * migratePersistence() (user-home data) and migrateAgentStorage() (agent
+ * binaries). Route through migratePersistence with the current home dir as
+ * the target so existing callers (finalize.sh post-install PHP block) don't
+ * fatal. Returns a bool for caller inspection.
  */
 function aicli_migrate_home_path() {
-    StorageMigrationService::migrateHomePath();
+    $cfg = getAICliConfig();
+    $homePath = $cfg['home_storage_path'] ?? ($cfg['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents');
+    return StorageMigrationService::migratePersistence($homePath);
 }
 
 /**
@@ -300,7 +335,10 @@ function startAICliTerminal($id = 'default', $path = null, $chatId = null, $agen
  * Wrapper for finding a chat session.
  */
 function findAICliChatSession($path, $id = null, $agentId = 'gemini-cli') {
-    return TerminalService::findSession($path, $id, $agentId);
+    // TerminalService::findSession only accepts (path, agentId). The $id
+    // parameter was historically passed but ignored — keep the wrapper
+    // signature for backward compat while dropping the useless third arg.
+    return TerminalService::findSession($path, $agentId);
 }
 
 /**
@@ -355,12 +393,12 @@ function aicli_save_workspaces($data) {
 
     $config = getAICliConfig();
     $user = $config['user'] ?? 'root';
-    if ($user === '0' || $user === 0 || empty($user)) $user = 'root';
+    if (empty($user)) $user = 'root';
 
     // Non-blocking persist: try to bake, but don't wait if another bake is running.
     // The file is already written to the ZRAM overlay — it's safe. The bake is just
-    // an optimization to flush to Flash sooner. The periodic sync daemon or next
-    // idle persist will catch it if we skip here.
+    // an optimization to flush to Flash sooner. The supervisor's next idle-tick
+    // will catch it if we skip here.
     aicli_persist_home_nonblocking($user);
 
     return $res;
@@ -382,7 +420,7 @@ function saveWorkspaceEnvs($path, $agentId, $envs) {
     // D-350: Immediate Persistence
     $config = getAICliConfig();
     $user = $config['user'] ?? 'root';
-    if ($user === '0' || $user === 0 || empty($user)) $user = 'root';
+    if (empty($user)) $user = 'root';
     
     aicli_log("Workspace ENV changed ($agentId). Triggering immediate home persistence for $user.", AICLI_LOG_INFO, "AICliManager");
     aicli_persist_home($user, true);

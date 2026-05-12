@@ -47,6 +47,18 @@ try {
         aicli_log("Background Install Job FAILED for $agentId: " . ($result['message'] ?? $result['error'] ?? 'Unknown Error'), AICLI_LOG_ERROR);
     } else {
         aicli_log("Background Install Job Complete for: $agentId", AICLI_LOG_INFO);
+
+        // Enqueue a high-priority bake so the agent layer is durable on Flash
+        // before the user can launch a session against it (spec S0, step 2).
+        // No post-install consolidate enqueue — supervisor decides on its own
+        // schedule via the post-bake threshold trigger (Bug #512).
+        \AICliAgents\Services\SupervisorService::enqueue('agent', $agentId, 'bake', 'agent_install', 0);
+        aicli_log("Enqueued post-install bake for $agentId", AICLI_LOG_INFO, "InstallBG");
+
+        // After successful install: auto-launch any workspaces configured for this agent.
+        // Errors here are non-fatal — install itself already succeeded. The service
+        // wraps each per-workspace launch so one failure can't skip subsequent ones.
+        \AICliAgents\Services\AutoLaunchService::launchAllPending($agentId, 'agent_install');
     }
 } catch (\Throwable $e) {
     aicli_log("Background Install Job EXCEPTION for $agentId: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine(), AICLI_LOG_ERROR);

@@ -15,21 +15,26 @@ class StorageHandler {
     public static function handle($action, $id) {
         $result = null;
         switch ($action) {
-            case 'get_storage_status':      $result = self::getStatus(); break;
-            case 'persist_agent':            $result = self::persistAgent($id); break;
+            case 'get_storage_status':          $result = self::getStatus(); break;
+            case 'get_boot_integrity_status':   return self::getBootIntegrityStatus(); // read-only, no Nchan publish
+            case 'get_supervisor_status':       return self::getSupervisorStatus(); // read-only, no Nchan publish
+            case 'restore_from_sibling':        return self::restoreFromSibling(); // mutating, but no Nchan — integrity-only
+            case 'list_halts':                  return self::listHalts();           // read-only, no Nchan publish
+            case 'clear_halt':                  return self::clearHalt();           // mutating, invalidates boot cache
+            case 'persist_agent':               $result = self::persistAgent($id); break;
             // Note: get_task_status outputs raw JSON and is dispatched directly
-            case 'persist_home':             $result = self::persistHome(); break;
-            case 'consolidate_storage':      $result = self::consolidate(); break;
-            case 'expand_storage':           $result = self::expand(); break;
-            case 'shrink_storage':           $result = self::shrink(); break;
-            case 'repair_agent_storage':     $result = self::repairAgent($id); break;
-            case 'repair_home_storage':      $result = self::repairHome(); break;
-            case 'wipe_storage':             $result = self::wipe(); break;
-            case 'nuclear_rebuild_storage':  $result = self::wipe(); break;
-            case 'purge_artifacts':          $result = self::purgeArtifacts(); break;
-            case 'preflight_migrate':        return self::preflightMigrate();
-            case 'execute_migrate':          $result = self::executeMigrate(); break;
-            default:                         return null;
+            case 'persist_home':                $result = self::persistHome(); break;
+            case 'consolidate_storage':         $result = self::consolidate(); break;
+            case 'expand_storage':              $result = self::expand(); break;
+            case 'shrink_storage':              $result = self::shrink(); break;
+            case 'repair_agent_storage':        $result = self::repairAgent($id); break;
+            case 'repair_home_storage':         $result = self::repairHome(); break;
+            case 'wipe_storage':                $result = self::wipe(); break;
+            case 'nuclear_rebuild_storage':     $result = self::wipe(); break;
+            case 'purge_artifacts':             $result = self::purgeArtifacts(); break;
+            case 'preflight_migrate':           return self::preflightMigrate();
+            case 'execute_migrate':             $result = self::executeMigrate(); break;
+            default:                            return null;
         }
         // D-402: After any mutating storage action, publish updated stats via Nchan
         if ($action !== 'get_storage_status') {
@@ -40,7 +45,9 @@ class StorageHandler {
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['get_storage_status', 'get_task_status', 'persist_agent', 'persist_home',
+        return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_task_status',
+                'restore_from_sibling', 'list_halts', 'clear_halt',
+                'persist_agent', 'persist_home',
                 'consolidate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'wipe_storage',
                 'nuclear_rebuild_storage', 'purge_artifacts'];
@@ -50,17 +57,250 @@ class StorageHandler {
         return aicli_get_storage_status();
     }
 
+    /**
+     * Phase 4a: Return the cached boot integrity sweep result, or run the sweep
+     * if it hasn't run this boot yet.
+     *
+     * Response shape:
+     * {
+     *   "status": "ok",
+     *   "sweep": [{"entity": "home/root", "state": "healthy", "evidence": {...}}, ...],
+     *   "summary": {"healthy": N, "needs_attention": N, "fresh": N},
+     *   "any_critical": bool,
+     *   "any_warning": bool
+     * }
+     */
+    private static function getBootIntegrityStatus() {
+        $cached = \AICliAgents\Services\BootIntegrityService::readCachedSweep();
+        if ($cached === null) {
+            // No cache -- run the sweep now (synchronous but fast in warn mode)
+            $results = \AICliAgents\Services\BootIntegrityService::runBootSweep();
+            $cached  = \AICliAgents\Services\BootIntegrityService::readCachedSweep();
+            if ($cached === null) {
+                // Fallback if cache write failed
+                $summary = ['healthy' => 0, 'needs_attention' => 0, 'fresh' => 0];
+                $anyCritical = false;
+                $anyWarning  = false;
+                foreach ($results as $r) {
+                    $s = $r['state'];
+                    if ($s === 'healthy') {
+                        $summary['healthy']++;
+                    } elseif ($s === 'genuine_fresh') {
+                        $summary['fresh']++;
+                    } else {
+                        $summary['needs_attention']++;
+                        $criticalStates = ['total_loss', 'partial_loss', 'host_mismatch', 'corrupt_layers'];
+                        if (in_array($s, $criticalStates, true)) {
+                            $anyCritical = true;
+                        } else {
+                            $anyWarning = true;
+                        }
+                    }
+                }
+                return ['status' => 'ok', 'sweep' => $results, 'summary' => $summary,
+                        'any_critical' => $anyCritical, 'any_warning' => $anyWarning];
+            }
+        }
+        return array_merge(['status' => 'ok'], $cached);
+    }
+
+    /**
+     * Phase 3.3: Return the current supervisor daemon status for the React UI.
+     *
+     * Called via get_supervisor_status AJAX action. The React isSyncing overlay
+     * polls this every 2 s after a workspace close and clears when
+     * state=idle and queue_depth=0.
+     *
+     * Response shape:
+     * {
+     *   "running":     bool,
+     *   "tick_age_s":  int|null,
+     *   "work":        {state, op, entity, ...}|null,
+     *   "status":      {state, queue_depth, ...}|null,
+     *   "queue_depth": int,
+     *   "pressure":    {"level": "ok"|"soft"|"hard"|"critical", "bytes": int}
+     * }
+     */
+    private static function getSupervisorStatus(): array {
+        $running   = \AICliAgents\Services\SupervisorService::isRunning();
+        $tickAge   = \AICliAgents\Services\SupervisorService::getTickAge();
+        $workState = \AICliAgents\Services\SupervisorService::getWorkState();
+        $status    = \AICliAgents\Services\SupervisorService::getStatus();
+
+        $queueDepth = 0;
+        if (is_array($status) && isset($status['queue_depth'])) {
+            $queueDepth = (int)$status['queue_depth'];
+        } elseif (is_array($workState) && isset($workState['queue_depth'])) {
+            $queueDepth = (int)$workState['queue_depth'];
+        }
+
+        return [
+            'running'     => $running,
+            'tick_age_s'  => $tickAge,
+            'work'        => $workState,
+            'status'      => $status,
+            'queue_depth' => $queueDepth,
+            'pressure'    => self::_computeDirtyPressure(),
+        ];
+    }
+
+    /**
+     * Compute the dirty-pressure tier from ZRAM upper directory sizes.
+     * Path is built from known fixed constants — no user input in the shell arg.
+     *
+     * @return array{level: string, bytes: int}
+     */
+    private static function _computeDirtyPressure(): array {
+        $config = getAICliConfig();
+        $softMb = max(1, (int)($config['dirty_threshold_soft_mb']     ?? 512));
+        $hardMb = max(1, (int)($config['dirty_threshold_hard_mb']     ?? 1024));
+        $critMb = max(1, (int)($config['dirty_threshold_critical_mb'] ?? 2048));
+
+        $zramBase   = '/tmp/unraid-aicliagents/zram_upper';
+        $totalBytes = 0;
+
+        foreach (['homes', 'agents'] as $subdir) {
+            $root = "$zramBase/$subdir";
+            if (!is_dir($root)) {
+                continue;
+            }
+            $entries = @scandir($root);
+            if (!is_array($entries)) {
+                continue;
+            }
+            foreach ($entries as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+                $upperDir = "$root/$entry/upper";
+                if (!is_dir($upperDir)) {
+                    continue;
+                }
+                $raw = @shell_exec('du -sb ' . escapeshellarg($upperDir) . ' 2>/dev/null');
+                if ($raw !== null && $raw !== '') {
+                    $parts = explode("\t", trim($raw));
+                    $totalBytes += (int)$parts[0];
+                }
+            }
+        }
+
+        $totalMb = $totalBytes / 1048576;
+        $level   = 'ok';
+        if ($totalMb >= $critMb) {
+            $level = 'critical';
+        } elseif ($totalMb >= $hardMb) {
+            $level = 'hard';
+        } elseif ($totalMb >= $softMb) {
+            $level = 'soft';
+        }
+
+        return ['level' => $level, 'bytes' => $totalBytes];
+    }
+
+    /**
+     * Phase 4b: Return all currently-halted entities.
+     *
+     * Response shape:
+     * {
+     *   "status": "ok",
+     *   "halts": [
+     *     {"type": "home", "id": "root", "state": "legacy_unmanaged", "halted_at": "...",
+     *      "details": {...}, "recommended_action": "restore_from_sibling"},
+     *     ...
+     *   ]
+     * }
+     */
+    private static function listHalts(): array {
+        $halts = \AICliAgents\Services\HaltService::listAllHalts();
+        return ['status' => 'ok', 'halts' => $halts];
+    }
+
+    /**
+     * Phase 4b: Clear the halt for a single entity.
+     *
+     * GET parameters: type (home|agent), id, reason.
+     *
+     * Response shape:
+     * {"status": "ok"|"error", "message": "..."}
+     */
+    private static function clearHalt(): array {
+        $type   = trim((string)($_REQUEST['type']   ?? ''));
+        $id     = trim((string)($_REQUEST['id']     ?? ''));
+        $reason = trim((string)($_REQUEST['reason'] ?? 'user_action'));
+
+        if (!in_array($type, ['home', 'agent'], true) || $id === '') {
+            return ['status' => 'error', 'message' => 'type and id are required (type must be home or agent)'];
+        }
+        if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+            return ['status' => 'error', 'message' => 'Invalid id format'];
+        }
+        // Sanitize reason: strip anything that isn't safe for a log line
+        $reason = preg_replace('/[^a-zA-Z0-9._\- ]/', '', $reason);
+        $reason = $reason !== '' ? $reason : 'user_action';
+
+        $ok = \AICliAgents\Services\HaltService::clearHalt($type, $id, $reason);
+
+        // Invalidate boot integrity cache so next fetch reflects cleared state
+        @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+
+        return [
+            'status'  => $ok ? 'ok' : 'error',
+            'message' => $ok ? "Halt cleared for $type/$id." : "Failed to clear halt for $type/$id.",
+        ];
+    }
+
+    /**
+     * Phase 0: Restore sibling layers into the active persist path for an entity.
+     *
+     * POST parameters: type (home|agent), id (user or agent-id).
+     * CSRF already validated by the dispatcher (via $_REQUEST['csrf_token']).
+     *
+     * Response shape:
+     * {
+     *   "status": "ok"|"error",
+     *   "restored": int,
+     *   "skipped": int,
+     *   "errors": string[],
+     *   "message": string
+     * }
+     */
+    private static function restoreFromSibling() {
+        $type = trim((string)($_REQUEST['type'] ?? ''));
+        $id   = trim((string)($_REQUEST['id']   ?? ''));
+
+        if (!in_array($type, ['home', 'agent'], true) || $id === '') {
+            return ['status' => 'error', 'message' => 'type and id are required (type must be home or agent)'];
+        }
+
+        // Sanitize id: allow alphanumerics, hyphens, underscores, dots
+        if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+            return ['status' => 'error', 'message' => 'Invalid id format'];
+        }
+
+        $result = \AICliAgents\Services\BootIntegrityService::restoreFromSibling($type, $id);
+
+        // Invalidate the boot integrity cache so the next fetch reflects the restored state
+        @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+
+        $status  = $result['ok'] ? 'ok' : 'error';
+        $message = $result['ok']
+            ? 'Restored ' . $result['restored'] . ' layer(s) from sibling directory.'
+            : 'Restore completed with errors: ' . implode('; ', $result['errors']);
+
+        return array_merge(['status' => $status, 'message' => $message], $result);
+    }
+
     private static function persistAgent($id) {
-        $res = \AICliAgents\Services\StorageMountService::commitChanges('agent', $id);
-        $status = ($res === 0) ? 'ok' : (($res === 2) ? 'busy' : 'error');
-        $msg = ($res === 0) ? 'Persistence successful' : (($res === 2) ? 'Data baked to Flash, but ZRAM flush skipped (Mount Busy). Close terminals to clear RAM.' : 'Persistence (Bake) failed for agent ' . $id);
-        return ['status' => $status, 'message' => $msg];
+        // Enqueue a user-priority bake rather than blocking inline (Phase 3.3).
+        // Priority 5 = user-clicked, pre-empts schedule and dirty-pressure ops.
+        \AICliAgents\Services\SupervisorService::enqueue('agent', $id, 'bake', 'user_persist', 5);
+        return ['status' => 'ok', 'message' => 'Persistence queued. The supervisor will bake the agent layer shortly.', 'baking' => true];
     }
 
     private static function persistHome() {
         $config = getAICliConfig();
         $user = $config['user'] ?? 'root';
-        if ($user === '0' || $user === 0 || empty($user)) $user = 'root';
+        if (empty($user) || $user === '0' || $user === 0) $user = 'root';
         $result = aicli_persist_home($user, true);
         if (is_array($result)) return $result;
         return [
@@ -71,10 +311,16 @@ class StorageHandler {
 
     private static function consolidate() {
         $type = $_GET['type'] ?? 'agent';
-        $id = $_GET['id'] ?? 'default';
+        $id   = $_GET['id']   ?? 'default';
+        if ($type === 'home' && ($id === '0')) {
+            $id = 'root';
+        }
         aicli_log("AJAX Request: Consolidate storage for $type: $id", AICLI_LOG_INFO);
-        $res = \AICliAgents\Services\StorageMigrationService::consolidateEntity($type, $id);
-        return ['status' => $res ? 'ok' : 'error', 'message' => $res ? '' : 'Consolidation failed. Check debug log.'];
+        // Enqueue a user-priority consolidate so the AJAX handler returns immediately
+        // (Phase 3.3). Priority 5 = user-clicked; supervisor resets failure counter
+        // and skips the halt check for user-triggered consolidations.
+        \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5);
+        return ['status' => 'ok', 'message' => 'Consolidation queued. The supervisor will consolidate layers shortly.'];
     }
 
     private static function expand() {
@@ -197,7 +443,7 @@ class StorageHandler {
                 if ($key === 'csrf_token') continue;
                 $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
             }
-            @file_put_contents(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
+            \AICliAgents\Services\AtomicWriteService::write(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
             // Re-read to confirm revert took effect
             usleep(100000);
         }
@@ -207,15 +453,16 @@ class StorageHandler {
         aicli_log("Storage Migration: Evicting active sessions...", AICLI_LOG_INFO);
         \AICliAgents\Services\ProcessManager::evictAll();
 
-        // 2. Persist + consolidate at OLD paths to minimize what needs copying
+        // 2. Enqueue bakes at OLD paths before copying — supervisor flushes dirty ZRAM
+        //    so we copy the complete final state (Phase 3.3: no synchronous I/O in handler).
         $user = $config['user'] ?? 'root';
-        if (empty($user) || $user === '0') $user = 'root';
+        if (empty($user)) $user = 'root';
 
-        \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => 'Persisting and consolidating storage layers...', 'progress' => 10]);
-        aicli_log("Storage Migration: Persisting dirty ZRAM data...", AICLI_LOG_INFO);
-        aicli_persist_home($user, true);
+        \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => 'Flushing dirty ZRAM layers before migration...', 'progress' => 10]);
+        aicli_log("Storage Migration: Enqueuing pre-migration bakes via supervisor...", AICLI_LOG_INFO);
+        \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_migrate', 5);
 
-        // Consolidate agents at OLD path (skip if on Flash — avoid unnecessary USB writes)
+        // Enqueue pre-migration consolidations at OLD path (skip if on Flash)
         $oldAgentOnFlash = (strpos($oldAgentPath, '/boot/') === 0 || strpos($oldAgentPath, '/boot') === 0);
         if ($newAgentPath && $newAgentPath !== $oldAgentPath && !$oldAgentOnFlash) {
             $seenAgents = [];
@@ -225,18 +472,18 @@ class StorageHandler {
                     if (isset($seenAgents[$aid])) continue;
                     $seenAgents[$aid] = true;
                     if (count(glob("$oldAgentPath/agent_{$aid}_*.sqsh")) > 1) {
-                        \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => "Consolidating agent: $aid...", 'progress' => 15]);
-                        \AICliAgents\Services\StorageMountService::consolidate('agent', $aid);
+                        \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => "Queuing consolidation for agent: $aid...", 'progress' => 15]);
+                        \AICliAgents\Services\SupervisorService::enqueue('agent', $aid, 'consolidate', 'pre_migrate', 5);
                     }
                 }
             }
         }
-        // Consolidate home at OLD path (skip if on Flash)
+        // Enqueue pre-migration consolidation for home at OLD path (skip if on Flash)
         $oldHomeOnFlash = (strpos($oldHomePath, '/boot/') === 0 || strpos($oldHomePath, '/boot') === 0);
         if ($newHomePath && $newHomePath !== $oldHomePath && !$oldHomeOnFlash) {
             if (count(glob("$oldHomePath/home_{$user}_*.sqsh")) > 1) {
-                \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => 'Consolidating home layers...', 'progress' => 20]);
-                \AICliAgents\Services\StorageMountService::consolidate('home', $user);
+                \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => 'Queuing home layer consolidation...', 'progress' => 20]);
+                \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'consolidate', 'pre_migrate', 5);
             }
         }
 
@@ -310,13 +557,13 @@ class StorageHandler {
             if ($key === 'csrf_token') continue;
             $content .= "$key=\"" . addslashes($value) . "\"" . PHP_EOL;
         }
-        @file_put_contents(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
+        \AICliAgents\Services\AtomicWriteService::write(\AICliAgents\Services\ConfigService::CONFIG_PATH, $content);
 
         // Final consolidation at the new location (skip if target is Flash — avoid unnecessary USB writes)
         $newAgentOnFlash = !empty($newAgentPath) && (strpos($newAgentPath, '/boot/') === 0 || strpos($newAgentPath, '/boot') === 0);
         $newHomeOnFlash = !empty($newHomePath) && (strpos($newHomePath, '/boot/') === 0 || strpos($newHomePath, '/boot') === 0);
         $user = $config['user'] ?? 'root';
-        if (empty($user) || $user === '0') $user = 'root';
+        if (empty($user)) $user = 'root';
 
         $needsConsolidation = false;
         if ($newAgentPath && $newAgentPath !== $oldAgentPath && !$newAgentOnFlash) {
@@ -332,7 +579,9 @@ class StorageHandler {
         }
 
         if ($needsConsolidation) {
-            \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => 'Final consolidation at new location...', 'progress' => 95]);
+            // Enqueue post-migration consolidations via supervisor (Phase 3.3).
+            // The handler returns immediately; supervisor consolidates in the background.
+            \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => 'Queuing final consolidation at new location...', 'progress' => 95]);
             if ($newAgentPath && $newAgentPath !== $oldAgentPath && !$newAgentOnFlash) {
                 $seenAgents = [];
                 foreach (glob("$newAgentPath/agent_*.sqsh") as $sqsh) {
@@ -341,14 +590,14 @@ class StorageHandler {
                         if (isset($seenAgents[$aid])) continue;
                         $seenAgents[$aid] = true;
                         if (count(glob("$newAgentPath/agent_{$aid}_*.sqsh")) > 1) {
-                            \AICliAgents\Services\StorageMountService::consolidate('agent', $aid);
+                            \AICliAgents\Services\SupervisorService::enqueue('agent', $aid, 'consolidate', 'post_migrate', 5);
                         }
                     }
                 }
             }
             if ($newHomePath && $newHomePath !== $oldHomePath && !$newHomeOnFlash) {
                 if (count(glob("$newHomePath/home_{$user}_*.sqsh")) > 1) {
-                    \AICliAgents\Services\StorageMountService::consolidate('home', $user);
+                    \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'consolidate', 'post_migrate', 5);
                 }
             }
         }

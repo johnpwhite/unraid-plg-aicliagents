@@ -28,4 +28,7 @@
         </div>
     </div>
 </div>
-</form>
+<!-- Bug #710: outer aicli-settings-form is now closed at the end of
+     ManagerConfigTab.php. The closing </form> that used to live here was
+     wrapping store/storage/debug tabs inside the config form, breaking
+     inner forms (secrets, args, tmux). -->

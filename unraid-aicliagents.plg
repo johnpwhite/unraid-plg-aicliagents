@@ -1,8 +1,24 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.04.16.27" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.12.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.12.01
+- Feat: Environment &amp; secrets management. Every agent's Store card and every workspace now has an "Environment" panel covering general env vars AND API keys/secrets, with full add / edit / delete for both. Secrets are masked and stored separately under tightened (0600) permissions; general vars are managed more loosely. Per-workspace values override the per-agent defaults, and values apply automatically to newly opened terminal sessions ("hot-apply") with no workspace rebuild. Agents that ship default env vars seed them on install as an editable starting set. Replaces the old hardcoded-only API-key vault (the Config-tab "Secrets Vault" card is removed); clearing a value via the UI now actually clears it.
+- Feat: Per-agent and per-workspace CLI arguments. A new "Args" panel on each Store card sets default extra flags for that agent (e.g. --max-turns 5), and a workspace can override them in its drawer. Arguments are validated against shell metacharacters. Changing args while a session is open offers "Apply now" — the agent is reloaded in place (Ctrl-C + relaunch) with the new flags, no destroy/recreate.
+- Feat: Auto-launch workspaces. A per-workspace toggle in the Terminal panel marks a workspace to start its session automatically — on page load, and after an agent install or upgrade — so your usual workspaces come back without clicking through.
+- Feat: Agent Store cards redesigned. Each agent is now one card with five progressive-disclosure panels: Channel, Environment/Secrets, Runtime (RAM, storage stats), Terminal (tmux), and Storage. tmux settings have four tiers of precedence — built-in then agent default then workspace override then a .conf escape hatch — with only divergent keys persisted. Per-agent secret schemas can carry multiple fields (Goose, for instance, registers Provider / Model / provider keys).
+- Feat: Two new agents — Goose (Block) and Qwen Code — plus a new agent-source framework so the plugin can manage tools that aren't published to npm (GitHub-release binaries, curl-installers, tarballs), not just npm packages.
+- Feat: Workspace resume. Closing a workspace from the drawer now captures the agent's resume id — a printed UUID, a named session, or, for agents like OpenCode that print nothing, the most recent id from their own session database — and offers a "Resume" button next to "Start Fresh" the next time you open a session on that path. Wide tmux capture plus retries so long resume lines aren't truncated.
+- Feat: Graceful agent upgrades. Installing or upgrading an agent now enumerates and cleanly closes the active workspace sessions for that agent first (preserving each session's resume id) before swapping the binary, instead of yanking it out from under running terminals. The install/upgrade button warns you with the list of sessions that will be closed; the New Workspace overlay greys out agents whose install is in progress; the install-progress panel appears immediately on click.
+- Feat: Cold-start loading overlay. The terminal shows a spinner, the agent icon and a "Starting [agent]..." message for the whole cold-start window (most of which is the agent's own startup) instead of a blank terminal, dismissing as soon as the agent produces output.
+- Improve: Storage robustness overhaul. A background storage daemon now owns all SquashFS bake/consolidate work, so the UI never blocks on storage I/O and the "syncing..." indicator clears reliably (it polls real state instead of guessing on a timer). Every layer write is atomic and checksum-verified. On boot your persisted layers are integrity-checked: corruption, missing layers, or a path/host mismatch is detected, you're notified, workspace access is held until it's resolved, and — where a copy survives in a backup/migrated sibling directory — a one-click "Restore" rebuilds from it. Un-baked data is monitored with graduated thresholds. Fixed a class of silent data loss where resume ids, workspace records or agent credentials written during a consolidation cycle could be discarded when the in-memory layer was wiped after the bake. Auto-consolidation now defers while the terminal is busy and runs when idle, so deltas no longer pile up indefinitely on the home stack. Writes to the Flash drive — API keys, plugin config, layer manifests — are forced to disk on every change so they survive an abrupt reboot instead of lingering in the OS page cache. The old per-user sync daemon is retired.
+- Fix: ZRAM storage initialisation now works on Unraid 7.2.x and other kernels where zram is built in — a capability probe (/sys/class/zram-control, /dev/zram0) replaces the fatal modprobe zram, with an mkfs.xfs fallback when mkfs.ext4-on-block-device isn't available. Resolves the install failure reported in GitHub issue #5.
+- Fix: Agent version display. The Plugins "Update" card and the Store-card version badge showed v0.0.0 / "v?" for most installed agents on a fresh boot, because version discovery was reading package.json from an overlay that wasn't mounted yet. It now mounts on demand and reads the real semver, and a one-shot backfill repairs the registry on upgrade. The version picker also now filters pre-release tags out of the Stable channel correctly and reliably installs the version you pick — downgrade, reinstall and pick-specific-version were no-ops on the redesigned cards.
+- Fix: Persistence paths on custom Unraid pools (ZFS pools, user-named cache pools) are accepted instead of rejected with a misleading "outside allowed prefixes" error; stopping the array is no longer blocked by terminals holding a working directory under /mnt/user (the array-stop event is handled, not just full shutdown); installed agents resolve on the main Unraid shell and web terminal (goose, qwen etc. wrappers in /usr/local/bin, and the workspace terminal PATH includes every installed agent's bin directory).
+- Fix: UI polish — web fonts now load (the @import was mid-stylesheet, which browsers silently drop); Chrome no longer autofills the agent search box with "root" and hides every card; the "Leave site?" dialog no longer pops when navigating away from the terminal tab; the Plugins page now shows the support-thread link and a plugin description.
+- Fix: Per-agent launch reliability — Claude Code's native binary layout, Codex-CLI's vendored Rust binary, OpenCode's cache-directory creation, Goose's first-run TUI prompt, Qwen Code's binary path, and fast-exit handling so a mis-configured agent shows its error instead of relaunch-looping; Node and npm caches are kept on tmpfs and never written to the Flash drive; broadened post-install cleanup of stale /tmp artifacts; XML-escaping fixes in the installer/uninstaller hooks.
+
 ## 2026.04.16.27
 - Fix: Migration script wrote home sqsh to agent_storage_path instead of home_storage_path. When paths differ (common for users with persistence_base configured), the home sqsh was placed where only agents are expected, causing mount failure. Now reads home_storage_path and persistence_base from config separately. Also searches all relevant paths for legacy IMG files and raw folders.
 
@@ -139,7 +155,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.04.16.27"
+export VERSION="2026.05.12.01"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -153,6 +169,27 @@ export UPGRADE_MODE="0"
 if [ -d "$EMHTTP_DEST" ] || [ -f "/var/log/plugins/$NAME.plg" ]; then
     export UPGRADE_MODE="1"
 fi
+
+# OP #429: Clean orphan name-new.plg files left behind by prior aborted
+# installs. Unraid's plugin manager downloads updates to name-new.plg, runs
+# install, and atomic-renames -new.plg to .plg on success. Any abort before
+# the rename (e.g. the FD 4 hang fixed in OP #419) strands the -new.plg, and
+# Unraid's UI then renders a duplicate plugin row indefinitely.
+# Conservative: only remove -new.plg if its embedded version is OLDER than
+# our currently-installing version. Never touches a -new.plg whose version is
+# newer than ours (could be a real in-flight install we're racing).
+for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
+    [ -f "$_orphan" ] || continue
+    _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.12.01" ]; then
+        # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.12.01" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.12.01" ]; then
+            rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.12.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+        fi
+    fi
+done
 
 # D-230: Define authoritative logging helpers (Aligned with LogService.php)
 get_ts() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -208,12 +245,116 @@ if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/migra
     log_status "Initiating background storage migration (Btrfs -&gt; SquashFS)..."
     mkdir -p /tmp/unraid-aicliagents
     touch /tmp/unraid-aicliagents/migration.lock
-    nohup bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/migrate-btrfs-to-squashfs.sh &gt; /tmp/unraid-aicliagents/migration.log 2&gt;&amp;1 &lt; /dev/null &amp;
+    nohup bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/migrate-btrfs-to-squashfs.sh &gt; /tmp/unraid-aicliagents/migration.log 2&gt;&amp;1 &lt; /dev/null 4&gt;&amp;- &amp;
     disown
 fi
 
-# Cleanup installer scripts from /tmp
-rm -f /tmp/aicli-*.sh
+# Phase 3: Start the Storage Durability Supervisor daemon.
+# Full daemonisation: setsid creates a new session ID so the supervisor is
+# detached from the installer's controlling TTY. nohup + disown is not enough
+# over SSH — descriptors stay coupled to the session and the SSH wrapper
+# hangs at session-exit waiting for the supervisor's heartbeat loop. setsid
+# severs the link cleanly so plugin install returns immediately.
+# 4&gt;&amp;- closes the installer progress pipe FD so PHP installer can exit at boot
+# (rc.local installs don't use SSH TTY but still inherit non-stdio FDs).
+if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh ]; then
+    # Defensive stop-and-wait: cleanup.sh stops the old supervisor at the start
+    # of the upgrade, but if cleanup was skipped (fresh install) or the old
+    # supervisor respawned mid-install via the lazy backstop, ensure no
+    # instance is alive before launching. Otherwise the new supervisor's
+    # _pidfile_valid check sees the old PID and bails silently.
+    if [ -f /var/run/aicli-supervisor.pid ]; then
+        _OLD_SUP_PID=$(cat /var/run/aicli-supervisor.pid 2&gt;/dev/null || echo "")
+        if [ -n "$_OLD_SUP_PID" ] &amp;&amp; kill -0 "$_OLD_SUP_PID" 2&gt;/dev/null; then
+            log_status "Old supervisor (pid $_OLD_SUP_PID) still alive — stopping before launch..."
+            bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh stop &gt;/dev/null 2&gt;&amp;1 || true
+            for _i in $(seq 1 15); do
+                kill -0 "$_OLD_SUP_PID" 2&gt;/dev/null || break
+                sleep 1
+            done
+            if kill -0 "$_OLD_SUP_PID" 2&gt;/dev/null; then
+                kill -9 "$_OLD_SUP_PID" 2&gt;/dev/null || true
+                rm -f /var/run/aicli-supervisor.pid 2&gt;/dev/null || true
+            fi
+        elif [ -n "$_OLD_SUP_PID" ]; then
+            rm -f /var/run/aicli-supervisor.pid 2&gt;/dev/null || true
+        fi
+    fi
+
+    # Bug 513 / 578 orphan supervisor sweep. Pattern includes " start" so the
+    # pgrep matches ONLY the long-running daemon subcommand and skips one-shot
+    # CLI invocations (cleanup-phantoms / status / stop) that may be running
+    # concurrently — those used to add 5+ s to the reap window for nothing.
+    _ORPHAN_PIDS=$(pgrep -f "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start" 2&gt;/dev/null | grep -v "^$$\$" || true)
+    if [ -n "$_ORPHAN_PIDS" ]; then
+        log_status "Orphan supervisor process detected — terminating before launch"
+        echo "$_ORPHAN_PIDS" | xargs -r kill -15 2&gt;/dev/null || true
+        sleep 2
+        _ORPHAN_PIDS=$(pgrep -f "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start" 2&gt;/dev/null | grep -v "^$$\$" || true)
+        if [ -n "$_ORPHAN_PIDS" ]; then
+            echo "$_ORPHAN_PIDS" | xargs -r kill -9 2&gt;/dev/null || true
+        fi
+        rm -f /var/run/aicli-supervisor.pid 2&gt;/dev/null || true
+    fi
+
+    log_status "Starting storage durability supervisor..."
+    mkdir -p /tmp/unraid-aicliagents
+    setsid nohup bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start &gt;/tmp/unraid-aicliagents/supervisor.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- &amp;
+    disown
+fi
+
+# Bug 521 - autolaunch sweep on plugin upgrade. Sessions were evicted by
+# cleanup.sh at the start of the upgrade; flagged workspaces should resume
+# in the background BEFORE the user opens the tab. setsid+nohup so this
+# never blocks the installer; 4 close prevents any inherited progress pipe
+# from holding the install hostage.
+if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php ]; then
+    log_status "Running auto-launch sweep for flagged workspaces..."
+    setsid nohup /usr/bin/php -r "
+        require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+        \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'plugin_upgrade');
+    " &gt;&gt;/tmp/unraid-aicliagents/debug.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- &amp;
+    disown
+
+    # Backfill versions.json for installed agents stuck at the 0.0.0 sentinel.
+    # 2026-05-09 production bug: agents installed by older plugin versions, or
+    # with overlay unmounted at the time of last getRegistry call, were stuck
+    # at version=0.0.0 forever (10 of 11 agents on John's box).
+    #
+    # SYNCHRONOUS rather than detached: smoke A108 runs immediately after the
+    # PLG completes and asserts no installed agent is at the sentinel version.
+    # Detaching would race the smoke. Per-agent mount+read+unmount in series
+    # is acceptable on upgrade.
+    log_status "Backfilling missing agent versions..."
+    /usr/bin/php -r "
+        require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+        \$r = \AICliAgents\Services\AgentRegistry::recoverMissingVersions();
+        aicli_log('recoverMissingVersions: recovered=' . \$r['recovered'] . ' skipped=' . \$r['skipped'] . ' failed=' . implode(',', \$r['failed']), AICLI_LOG_INFO, 'PLG_INLINE');
+        echo \"recovered={\$r['recovered']} skipped={\$r['skipped']} failed=\" . implode(',', \$r['failed']) . PHP_EOL;
+    " 2&gt;&amp;1 | tee -a /tmp/unraid-aicliagents/debug.log
+
+    # WP #736: seed manifest-declared default_envs into every installed agent's
+    # general-env store. Additive only — never overwrites a user value, never
+    # auto-removes, honours user deletions via the seeded sidecar. Each plugin
+    # upgrade picks up any newly-declared defaults (e.g. the first ship of this
+    # feature seeds GEMINI_CLI_ENABLE_AUTO_UPDATE=false for installed gemini-cli).
+    log_status "Seeding agent default envs..."
+    /usr/bin/php -r "
+        require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+        \$s = \AICliAgents\Services\EnvService::seedAllInstalledAgentDefaults();
+        \$touched = implode(',', \$s['agents_touched']);
+        aicli_log('seedAllInstalledAgentDefaults: agents=' . \$s['agents'] . ' seeded_total=' . \$s['seeded_total'] . ' agents_touched=' . \$touched, AICLI_LOG_INFO, 'PLG_INLINE');
+        echo \"seed: agents={\$s['agents']} seeded_total={\$s['seeded_total']} touched={\$touched}\" . PHP_EOL;
+    " 2&gt;&amp;1 | tee -a /tmp/unraid-aicliagents/debug.log
+fi
+
+# Cleanup ALL staged installer artifacts from /tmp — scripts, .page files,
+# src.tar.gz. Previous versions only rm'd *.sh, which meant /tmp/aicli-stop-
+# warning.page and /tmp/aicli-src.tar.gz persisted across installs and triggered
+# plugin-manager "skipping: already exists" log lines on every subsequent
+# install. The skip isn't fatal but it means stale staged content can silently
+# survive an upgrade. Broad glob keeps /tmp clean.
+rm -f /tmp/aicli-*.sh /tmp/aicli-*.page /tmp/aicli-src.tar.gz
 
 </INLINE>
 </FILE>
@@ -246,16 +387,16 @@ if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
     for user_mnt in /tmp/unraid-aicliagents/work/*/home; do
         if mountpoint -q "$user_mnt"; then
             user=$(basename "$(dirname "$user_mnt")")
-            log_status "  > Detected active SquashFS home for $user..."
+            log_status "  &gt; Detected active SquashFS home for $user..."
             
             # 1. Check for TaskService (Modern 2026.04+)
             if grep -q "TaskService" "$EMHTTP_DEST/src/includes/AICliAgentsManager.php"; then
-                log_status "    > Using TaskService::persistHome..."
+                log_status "    &gt; Using TaskService::persistHome..."
                 /usr/bin/php -r "require_once '$EMHTTP_DEST/src/includes/AICliAgentsManager.php'; \AICliAgents\Services\TaskService::persistHome('$user', true);" &gt; /dev/null 2&gt;&amp;1
             
             # 2. Check for legacy procedural sync (Early 2026)
             elif grep -q "function aicli_sync_home" "$EMHTTP_DEST/src/includes/AICliAgentsManager.php"; then
-                log_status "    > Using legacy aicli_sync_home..."
+                log_status "    &gt; Using legacy aicli_sync_home..."
                 /usr/bin/php -r "require_once '$EMHTTP_DEST/src/includes/AICliAgentsManager.php'; aicli_sync_home('$user');" &gt; /dev/null 2&gt;&amp;1
             fi
         fi
@@ -267,24 +408,43 @@ fi
 # handled by 'umount', but we ensure any known RAM shims are flushed if applicable.
 # (Most Era 2 plugins synced on every write, but we perform a safety sync)
 if mount | grep -q "aicliagents.*\.img"; then
-    log_status "  > Flushing legacy Btrfs loop mounts..."
+    log_status "  &gt; Flushing legacy Btrfs loop mounts..."
     sync
 fi
 
 # 2. Kill Active Processes &amp; Runtime Files
-# We call the modular script for the heavy lifting of process killing
-UNINSTALL_SCRIPT="$EMHTTP_DEST/scripts/uninstaller/cleanup.sh"
+# We call the modular script for the heavy lifting of process killing. Path
+# corrected: the file lives under src/scripts/uninstaller, not scripts/uninstaller.
+# The old wrong path caused the unsafe fallback below to run on EVERY plugin
+# upgrade — which killed a users DevBox VM (its qemu cmdline contained
+# "gemini" as a substring and matched the old broad regex).
+UNINSTALL_SCRIPT="$EMHTTP_DEST/src/scripts/uninstaller/cleanup.sh"
 if [ -f "$UNINSTALL_SCRIPT" ]; then
     export NAME EMHTTP_DEST CONFIG_DIR
     bash "$UNINSTALL_SCRIPT"
 else
-    # Fallback if script missing
+    # Fallback if script missing. Hardened so it can NEVER kill a VM/libvirt
+    # process even if its cmdline happens to share a substring with one of our
+    # patterns. Two protections: (a) kill patterns are anchored to plugin-owned
+    # paths so they cannot match qemu/libvirt cmdlines, (b) an exe-path filter
+    # drops any pid whose /proc/PID/exe is under qemu/libvirt/kvm/init.
     log_status "Cleaning up active processes..."
-    pgrep -f "ttyd.*(aicliterm|geminiterm)-" | xargs kill -9 &gt; /dev/null 2&gt;&amp;1 || true
+    _fb_safe_kill() {
+        local pattern="$1"
+        local pid exe
+        for pid in $(pgrep -f "$pattern" 2&gt;/dev/null | grep -v "$$" || true); do
+            exe=$(readlink "/proc/$pid/exe" 2&gt;/dev/null)
+            case "$exe" in
+                */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
+            esac
+            kill -9 "$pid" &gt;/dev/null 2&gt;&amp;1 || true
+        done
+    }
+    _fb_safe_kill 'ttyd.*aicliterm-'
     if command -v tmux &gt;/dev/null 2&gt;&amp;1; then
         tmux ls -F '#S' 2&gt;/dev/null | grep -E "^aicli-agent-" | xargs -I {} tmux kill-session -t "{}" &gt; /dev/null 2&gt;&amp;1 || true
     fi
-    pgrep -f "node.*(aicli|gemini).mjs" | xargs kill -9 &gt; /dev/null 2&gt;&amp;1 || true
+    _fb_safe_kill 'node .*(unraid-aicliagents|/\.aicli/)'
 fi
 
 # MANDATORY: Clear stale installation states and runtime logs
@@ -324,14 +484,14 @@ log_status "  [DONE] Runtime processes terminated"
 log_status "  [DONE] Agent package caches pruned"
 log_status " "
 log_status "  [NOTE] YOUR SETTINGS HAVE BEEN PRESERVED:"
-log_status "  > Config:     $CONFIG_DIR/*.cfg"
-log_status "  > Persistence: $CONFIG_DIR/persistence/"
+log_status "  &gt; Config:     $CONFIG_DIR/*.cfg"
+log_status "  &gt; Persistence: $CONFIG_DIR/persistence/"
 log_status " "
 log_status "  [LOGS] Detailed uninstall trace preserved at:"
-log_status "  > $LOG_FILE"
+log_status "  &gt; $LOG_FILE"
 log_status " "
 log_status "  [TIP] To fully remove all data, manually delete:"
-log_status "  > rm -rf $CONFIG_DIR"
+log_status "  &gt; rm -rf $CONFIG_DIR"
 log_status "==========================================================="
 
 echo "Uninstall of $NAME complete."

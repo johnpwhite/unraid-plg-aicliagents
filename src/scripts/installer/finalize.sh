@@ -18,23 +18,40 @@ log_ok "Permissions applied."
 rm -rf /tmp/node-extract-* /tmp/fd-extract-* /tmp/ripgrep-extract-*
 
 # --- Unraid Event Hooks ---
-# Unraid's event system (run-parts) may skip symlinks, so deploy real wrapper scripts.
+# Unraid fires events via run-parts into /usr/local/emhttp/plugins/dynamix/events/<event>/.
+# The full list (from emhttpd binary): stopping, stopping_array, stopping_svcs,
+# stopping_docker, stopping_libvirt, disks_mounted, svcs_restarting, svcs_restarted.
+#
+# We need `stopping_array` — fires RIGHT BEFORE the user-share unmount, which is
+# exactly when our tmux/ttyd sessions (CWDs under /mnt/user) would block the array.
+# `stopping` only fires at full server shutdown (wrong for array-stop case), so we
+# hook both for belt-and-suspenders: array-stop uses stopping_array, server-shutdown
+# still works via stopping.
+#
+# run-parts skips symlinks, so we write real wrapper scripts that exec our handler.
 log_step "Registering Unraid event hooks..."
 EVENT_DIR_STOPPING="/usr/local/emhttp/plugins/dynamix/events/stopping"
+EVENT_DIR_STOPPING_ARRAY="/usr/local/emhttp/plugins/dynamix/events/stopping_array"
 EVENT_DIR_MOUNTED="/usr/local/emhttp/plugins/dynamix/events/disks_mounted"
-mkdir -p "$EVENT_DIR_STOPPING" "$EVENT_DIR_MOUNTED"
-# Remove old symlinks if present
-rm -f "$EVENT_DIR_STOPPING/aicli_sync" "$EVENT_DIR_MOUNTED/aicli_restore"
-cat > "$EVENT_DIR_STOPPING/aicli_sync" <<HOOK
+mkdir -p "$EVENT_DIR_STOPPING" "$EVENT_DIR_STOPPING_ARRAY" "$EVENT_DIR_MOUNTED"
+# Remove old hooks if present (including legacy symlinks)
+rm -f "$EVENT_DIR_STOPPING/aicli_sync" \
+      "$EVENT_DIR_STOPPING_ARRAY/aicli_sync" \
+      "$EVENT_DIR_MOUNTED/aicli_restore"
+# Write the dispatcher — same handler script, same logic; it detects scenario internally.
+for dir in "$EVENT_DIR_STOPPING" "$EVENT_DIR_STOPPING_ARRAY"; do
+    cat > "$dir/aicli_sync" <<HOOK
 #!/bin/bash
 exec bash "$EMHTTP_DEST/src/event/stopping"
 HOOK
+    chmod 755 "$dir/aicli_sync"
+done
 cat > "$EVENT_DIR_MOUNTED/aicli_restore" <<HOOK
 #!/bin/bash
 exec bash "$EMHTTP_DEST/src/event/disks_mounted"
 HOOK
-chmod 755 "$EVENT_DIR_STOPPING/aicli_sync" "$EVENT_DIR_MOUNTED/aicli_restore"
-log_ok "Event hooks registered (stopping + disks_mounted)."
+chmod 755 "$EVENT_DIR_MOUNTED/aicli_restore"
+log_ok "Event hooks registered (stopping + stopping_array + disks_mounted)."
 
 # --- Global Shell Integration ---
 log_step "Applying global shell integration (aliases & PATH)..."

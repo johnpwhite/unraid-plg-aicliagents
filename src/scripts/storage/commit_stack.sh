@@ -10,6 +10,15 @@ PERSIST_PATH="${3:-}"
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$(dirname "$0")/common.sh"
 
+# Source canonical path resolver and lifecycle log writer (Phase 1)
+source "$(dirname "$0")/resolve_paths.sh" 2>/dev/null || true
+
+# Source atomic layer writer (Phase 2)
+source "$(dirname "$0")/atomic_write_layer.sh" 2>/dev/null || {
+    error "atomic_write_layer.sh missing — cannot bake safely"
+    exit 1
+}
+
 UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
 WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
 
@@ -29,11 +38,9 @@ if [ ! -d "$UPPER_DIR" ] || [ -z "$(ls -A "$UPPER_DIR" 2>/dev/null)" ]; then
     exit 0
 fi
 
-# 1. Define New Delta Layer
-TIMESTAMP=$(date +%s)
-NEW_SQSH="$PERSIST_PATH/${TYPE}_${ID}_delta_${TIMESTAMP}.sqsh"
+lifecycle_log "info" "commit_stack" "bash_bake_start" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
 
-# 2. Bake SquashFS (High Compression)
+# 1. Prune caches before bake
 log "Pruning caches before bake..."
 # D-317: Remove redundant caches from ZRAM upper layer to minimize Flash footprint
 # IMPORTANT: Remove CONTENTS only, not the directory itself. Removing a directory in
@@ -47,25 +54,28 @@ log "Pruning caches before bake..."
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; exit 1; }
 
 # Check disk space (need at least 100MB free for a delta)
-check_disk_space "$NEW_SQSH" 100 || { error "Insufficient disk space on $(dirname "$NEW_SQSH")"; exit 1; }
+check_disk_space "$PERSIST_PATH/.diskcheck" 100 || { error "Insufficient disk space on $PERSIST_PATH"; exit 1; }
 
 # Record a marker timestamp BEFORE baking. Any writes to the upper dir after this
 # point will not be in the delta and must NOT be flushed.
 MARKER="/tmp/unraid-aicliagents/.commit_marker_${TYPE}_${ID}"
 touch "$MARKER"
 
-log "Baking changes to $NEW_SQSH..."
-if ! mksquashfs "$UPPER_DIR" "$NEW_SQSH" \
-    -comp xz \
-    -Xbcj x86 \
-    -Xdict-size 100% \
-    -b 1M \
-    -no-exports \
-    -noappend > /dev/null 2>&1; then
-    error "SquashFS bake failed."
+# 2. Atomic bake via atomic_write_layer (Phase 2 — closing finding F)
+# atomic_write_layer writes to a sibling tempfile, fsyncs, verifies, then renames atomically.
+# mksquashfs never writes directly to the final path; a power loss cannot leave a partial layer.
+log "Baking changes to $PERSIST_PATH/ (atomic delta)..."
+NEW_BASENAME=""
+if ! NEW_BASENAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$UPPER_DIR" "delta"); then
+    error "Atomic bake failed."
     rm -f "$MARKER"
+    lifecycle_log "error" "commit_stack" "bash_bake_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
     exit 1
 fi
+
+# NEW_SQSH is the final path of the just-written layer
+NEW_SQSH="$PERSIST_PATH/$NEW_BASENAME"
+log "Bake complete: $NEW_BASENAME"
 
 # 3. Check if ZRAM can be safely flushed
 MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
@@ -78,6 +88,8 @@ if fuser -sm "$MNT_POINT" 2>/dev/null; then
     log "Mount is BUSY (open files detected). Skipping ZRAM flush."
     log "Data persisted to Flash. ZRAM dirty stats remain until sessions close."
     rm -f "$MARKER"
+    SQSH_BYTES=$(stat -c '%s' "$NEW_SQSH" 2>/dev/null || echo 0)
+    lifecycle_log "info" "commit_stack" "bash_bake_busy" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$(basename "$NEW_SQSH")\",\"bytes\":$SQSH_BYTES}" 2>/dev/null || true
     exit 2
 fi
 
@@ -89,6 +101,8 @@ rm -f "$MARKER"
 if [ -n "$UPPER_CHANGED" ]; then
     log "New writes detected in upper layer during bake. Skipping ZRAM flush to preserve data."
     log "Data persisted to Flash. New changes will be captured in next persist cycle."
+    SQSH_BYTES=$(stat -c '%s' "$NEW_SQSH" 2>/dev/null || echo 0)
+    lifecycle_log "info" "commit_stack" "bash_bake_busy" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$(basename "$NEW_SQSH")\",\"bytes\":$SQSH_BYTES,\"reason\":\"concurrent_write\"}" 2>/dev/null || true
     exit 2
 fi
 
@@ -102,3 +116,5 @@ sync
 # 4. Remount Stack (Will pick up new delta)
 log "Refreshing mount stack..."
 bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH"
+SQSH_BYTES=$(stat -c '%s' "$NEW_SQSH" 2>/dev/null || echo 0)
+lifecycle_log "info" "commit_stack" "bash_bake_ok" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$(basename "$NEW_SQSH")\",\"bytes\":$SQSH_BYTES}" 2>/dev/null || true

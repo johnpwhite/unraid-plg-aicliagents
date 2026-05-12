@@ -34,6 +34,7 @@
         overlay.fadeOut(200, function() {
             previewArea.hide(); dropZone.show(); confirmBtn.hide();
             pendingBlob = null; $('#upload-progress-container').hide(); $('#upload-bar').css('width', '0%');
+            $('#file-input').val('');
         });
     }
 
@@ -80,6 +81,8 @@
             pendingBlob = this.files[0];
             logUpload('File selected: ' + pendingBlob.name + ' (' + pendingBlob.size + ' bytes)');
             handleInputFile(pendingBlob, false);
+            // Reset so re-selecting the same file fires change again
+            $(this).val('');
         }
     });
 

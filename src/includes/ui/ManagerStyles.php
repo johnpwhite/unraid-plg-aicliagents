@@ -8,6 +8,13 @@
  */
 ?>
 <style>
+    /* Google Fonts — MUST be the first rule: CSS @import directives are only
+       valid at the top of a stylesheet. Placed mid-file they're silently
+       dropped by the browser. Fraunces is the mockup's display serif;
+       JetBrains Mono is the values/mono-token face. display=swap so the
+       fallback stack paints instantly while the custom faces load. */
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=JetBrains+Mono:wght@400;500&display=swap');
+
     /* Tab Navigation */
     .aicli-tabs { display: flex; gap: 2px; margin-bottom: 0; border-bottom: 1px solid var(--border-color, #333); padding-left: 10px; }
     .aicli-tab-btn {
@@ -345,4 +352,632 @@
     }
     .pp-btn-confirm:hover { background: #e67e00; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(255, 140, 0, 0.5); }
     .pp-btn-confirm:active { transform: translateY(0); box-shadow: 0 1px 4px rgba(255, 140, 0, 0.3); }
+
+    /* =====================================================================
+       Agent Card v2 — refined-technical aesthetic. Distinctive display serif
+       (Fraunces) for agent names, monospaced values (JetBrains Mono), subtle
+       ambient gradients on the grid surface. All loaded via Google Fonts with
+       display=swap so the fallback stack paints immediately and the custom
+       faces slot in when ready (no FOUT jank, no license concerns).
+       Scoped to .av2- prefix so the existing .agent-item block can coexist
+       until the rewrite is verified, then removed in a follow-up cleanup.
+       Theme-safe: uses Unraid CSS vars with conservative fallbacks.
+       ===================================================================== */
+
+    /* Ambient atmosphere behind the agent grid — two oversized soft radial
+       gradients in opposite corners create depth without competing with card
+       content. Low alpha so both Unraid dark and light themes look intentional. */
+    .av2-grid {
+        position: relative;
+        padding: 2px;
+    }
+    .av2-grid::before {
+        content: ''; position: absolute; inset: -20px; pointer-events: none; z-index: 0;
+        background:
+            radial-gradient(1000px 500px at 8% -8%, rgba(124,223,255,0.045), transparent 55%),
+            radial-gradient(900px 480px at 108% 5%, rgba(255,140,0,0.04), transparent 55%);
+    }
+    .av2-grid > * { position: relative; z-index: 1; }
+    .av2-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+        gap: 18px; width: 100%;
+        /* Don't stretch siblings to match the tallest card — when one card
+           expands a panel, only that card should grow. Otherwise every card
+           in the row gets empty filler space below its foot. */
+        align-items: start;
+    }
+    .av2-card {
+        /* overflow: visible so the (i) info tooltip can escape the card bounds
+           on hover. The left rail pseudo-element below gets a matching border-
+           radius so it doesn't visibly poke past the rounded corners. */
+        position: relative; overflow: visible;
+        background: var(--background-color, #1b1e25);
+        border: 1px solid var(--border-color, #262a33);
+        border-radius: 10px;
+        min-height: 260px;
+        display: flex; flex-direction: column;
+        transition: border-color .2s ease, box-shadow .2s ease;
+    }
+    /* Foot sinks to the bottom so cards in the same row line up regardless of
+       which panel is open or whether the card is installed vs not-installed. */
+    .av2-card .av2-foot { margin-top: auto; }
+    .av2-card::before {
+        content: ''; position: absolute; inset: 0 auto 0 0; width: 3px;
+        background: var(--border-color, #353a46); transition: background .25s ease;
+        border-radius: 10px 0 0 10px;
+    }
+    .av2-card.state-ready::before       { background: #4ade80; }
+    .av2-card.state-warn::before        { background: #f5b041; }
+    .av2-card.state-info::before        { background: #60a5fa; }
+    /* Not-installed gets a visible-but-muted gray rail — the default
+       var(--border-color) often blends into the card border and reads as
+       "no rail at all", which loses the signal. */
+    .av2-card.state-notinstalled::before{ background: #6b7280; opacity: 0.55; }
+    .av2-card:hover { border-color: var(--text-color, rgba(255,255,255,0.25)); }
+
+    .av2-head {
+        display: grid; grid-template-columns: 52px 1fr auto; gap: 14px;
+        padding: 18px 20px 12px; align-items: start;
+    }
+    .av2-icon {
+        width: 52px; height: 52px; border-radius: 11px;
+        /* Uniform near-white pill — many vendor icons are black-on-transparent
+           (codex, factory, nanocoder) and disappear against dark card bg without
+           a light tile. The pill also normalises branding across agents. */
+        background: rgba(255, 255, 255, 0.94);
+        display: grid; place-items: center; overflow: hidden;
+        border: 1px solid var(--border-color, #262a33);
+        padding: 5px; box-sizing: border-box;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    .av2-icon img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+    /* Agent name: distinctive display serif. Fraunces's 400-weight optical size
+       9 variant lends an editorial/refined tone that separates the agent
+       identity from the rest of the mono/sans-styled card content. Letter-
+       spacing tightens slightly for display-scale elegance. */
+    .av2-title {
+        font-family: 'Fraunces', Georgia, 'Times New Roman', serif;
+        font-optical-sizing: auto;
+        font-size: 22px; font-weight: 400; letter-spacing: -0.015em;
+        line-height: 1.1; color: var(--text-color, #e7e9ef);
+    }
+    .av2-desc {
+        margin-top: 6px; font-size: 12.5px; line-height: 1.5;
+        color: var(--text-color, #9a9fae); opacity: 0.75; max-width: 48ch;
+        /* Hard-cap at 2 lines with ellipsis so long descriptions don't push
+           card-head heights out of sync across the grid. Agents with shorter
+           copy still get the breathing room of their natural 1-2 lines. */
+        display: -webkit-box; -webkit-line-clamp: 2;
+        line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    /* Badge: top row is dot + installed version. When an upgrade/downgrade is
+       available the arrow indicator stacks on a second row — keeps the badge
+       compact horizontally so the description text alongside it has more room.
+       Not-installed cards use the second row for the "available" qualifier. */
+    .av2-badge {
+        justify-self: end; display: inline-flex; flex-direction: column;
+        align-items: flex-end; gap: 3px;
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 11.5px; padding: 5px 9px; border-radius: 6px;
+        background: rgba(127,127,127,0.06);
+        border: 1px solid var(--border-color, #262a33);
+        color: var(--text-color, #e7e9ef); white-space: nowrap;
+        line-height: 1.15;
+    }
+    .av2-badge .av2-badge-row {
+        display: inline-flex; align-items: center; gap: 6px;
+    }
+    .av2-badge .av2-dot {
+        width: 6px; height: 6px; border-radius: 50%;
+        background: var(--border-color, #646978);
+    }
+    .av2-badge .av2-badge-upgrade {
+        font-size: 10.5px; color: #60a5fa; font-weight: 500;
+    }
+    .state-ready .av2-badge .av2-dot        { background: #4ade80; box-shadow: 0 0 8px rgba(74,222,128,0.55); }
+    .state-warn  .av2-badge .av2-dot        { background: #f5b041; animation: av2-pulse 1.8s ease-in-out 2; box-shadow: 0 0 8px rgba(245,176,65,0.55); }
+    .state-info  .av2-badge .av2-dot        { background: #60a5fa; box-shadow: 0 0 8px rgba(96,165,250,0.55); }
+    /* Warn dot pulses twice on page load to draw attention to cards needing
+       config — one of those high-impact moments (per frontend-design guidance)
+       where a single well-timed motion beats scattered micro-interactions. */
+    @keyframes av2-pulse {
+        0%,100% { box-shadow: 0 0 0 0 rgba(245,176,65,0.7), 0 0 8px rgba(245,176,65,0.55); }
+        50%     { box-shadow: 0 0 0 8px rgba(245,176,65,0),   0 0 8px rgba(245,176,65,0.55); }
+    }
+
+    /* Spec strip: 5 chips that open panels below */
+    .av2-strip {
+        display: flex; flex-wrap: wrap; gap: 2px;
+        padding: 0 18px 14px; margin-top: 2px;
+    }
+    .av2-chip {
+        flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; gap: 7px;
+        padding: 7px 9px; cursor: pointer; user-select: none;
+        background: transparent; border: 1px solid transparent;
+        border-bottom: 1px solid var(--border-color, #262a33);
+        color: var(--text-color, #9a9fae); font-size: 11.5px; line-height: 1;
+        transition: background .12s ease, color .12s ease, border-color .12s ease, box-shadow .12s ease;
+        overflow: hidden;
+    }
+    .av2-chip:hover { color: var(--text-color, #e7e9ef); background: rgba(127,127,127,0.06); }
+    /* Disabled chips (pre-install state on not-installed cards) — dimmed, no
+       hover feedback, not focusable. Rendered as <span> so they can't receive
+       click events. Only the Channel chip is active pre-install. */
+    .av2-chip.disabled {
+        cursor: default; opacity: 0.5; pointer-events: none;
+    }
+    .av2-chip.disabled:hover { background: transparent; color: inherit; }
+    /* Active chip fills Unraid brand orange so open state reads like the
+       "Check for Updates" button family — instantly obvious which panel
+       is in focus, same UX vocabulary across buttons and chips. */
+    .av2-chip[aria-expanded="true"] {
+        background: var(--orange, #ff8c00); color: #fff;
+        border-color: var(--orange, #ff8c00);
+        border-top-left-radius: 6px; border-top-right-radius: 6px;
+        box-shadow: 0 2px 6px rgba(255,140,0,0.25);
+    }
+    .av2-chip[aria-expanded="true"] .av2-k,
+    .av2-chip[aria-expanded="true"] .av2-v { color: #fff; opacity: 1; }
+    .av2-chip[aria-expanded="true"] .av2-v.warn,
+    .av2-chip[aria-expanded="true"] .av2-v.ok,
+    .av2-chip[aria-expanded="true"] .av2-v.bad {
+        color: #fff; border-color: rgba(255,255,255,0.55);
+        background: rgba(255,255,255,0.12);
+    }
+    /* Icon dropped from chips. */
+    .av2-chip svg { display: none; }
+    /* Single-line label — chips are nav only. State lives inside the panel.
+       A small trailing dot indicates "needs config" (warn) / "configured" (ok)
+       for at-a-glance signal without crowding the label. */
+    .av2-chip .av2-label {
+        display: block; text-align: center; font-size: 11px; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.13em;
+        color: var(--text-color, #9a9fae);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .av2-chip {
+        justify-content: center;
+    }
+    .av2-chip[aria-expanded="true"] .av2-label { color: #fff; }
+    /* State dot: anchored to the top-right corner of the chip. Doesn't consume
+       horizontal space so labels stay centered. */
+    .av2-chip.has-warn::after,
+    .av2-chip.has-ok::after,
+    .av2-chip.has-custom::after {
+        content: ''; position: absolute; top: 6px; right: 7px;
+        width: 6px; height: 6px; border-radius: 50%;
+    }
+    .av2-chip.has-warn::after   { background: #f5b041; box-shadow: 0 0 6px rgba(245,176,65,0.6); }
+    .av2-chip.has-ok::after     { background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
+    .av2-chip.has-custom::after { background: #7cdfff; box-shadow: 0 0 6px rgba(124,223,255,0.6); }
+    .av2-chip[aria-expanded="true"]::after { background: #fff !important; box-shadow: none; }
+    /* Ensure the chip can position the state dot */
+    .av2-chip { position: relative; }
+    /* State-coloured chip values get a subtle pill behind them so "NOT SET" etc
+       read as intentional status, not afterthoughts. Transparent bg + coloured
+       border keeps contrast on both light and dark themes. */
+    .av2-chip .av2-v.warn,
+    .av2-chip .av2-v.ok,
+    .av2-chip .av2-v.bad {
+        padding: 2px 7px; border-radius: 10px; border: 1px solid currentColor;
+        background: color-mix(in srgb, currentColor 10%, transparent);
+        letter-spacing: 0.04em; font-weight: 600; font-size: 10px;
+        text-transform: uppercase;
+    }
+    .av2-chip .av2-v.warn  { color: #f5b041; }
+    .av2-chip .av2-v.ok    { color: #4ade80; }
+    .av2-chip .av2-v.bad   { color: #ef4444; }
+    .av2-chip .av2-v.muted { color: var(--text-color, #646978); opacity: 0.6; }
+
+    /* Panels */
+    .av2-panels {
+        background: rgba(0,0,0,0.08); border-top: 1px solid var(--border-color, #262a33);
+    }
+    .av2-panel {
+        display: none; padding: 16px 18px; border-top: 1px solid var(--border-color, #262a33);
+    }
+    .av2-panel.open {
+        display: block;
+        animation: av2-reveal .22s ease-out;
+    }
+    @keyframes av2-reveal {
+        from { opacity: 0; transform: translateY(-3px); }
+        to   { opacity: 1; transform: none; }
+    }
+    .av2-panel h4 {
+        margin: 0 0 10px;
+        font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.18em;
+        color: var(--text-color, #646978); opacity: 0.7;
+        display: flex; align-items: center; gap: 10px; font-weight: 700;
+    }
+    .av2-panel h4::after {
+        content: ''; flex: 1; height: 1px;
+        background: var(--border-color, #262a33);
+    }
+
+    /* Form rows — diff-detect visual language */
+    .av2-row {
+        display: grid; grid-template-columns: 120px 1fr 20px; gap: 8px;
+        align-items: center; padding: 0; margin: 0; position: relative;
+        min-height: 26px;
+    }
+    /* Secrets panel uses a wrapper around the control so input + inline help
+       stack cleanly inside the middle grid cell. Without this, the help text
+       was claiming a separate grid row and pushing the input out of the
+       expected column alignment. */
+    .av2-row > .av2-row-control {
+        display: flex; flex-direction: column; gap: 4px; min-width: 0;
+    }
+    .av2-row > .av2-row-control > input,
+    .av2-row > .av2-row-control > select { width: 100%; }
+    .av2-row > .av2-row-control > .av2-help {
+        margin-top: 0; font-size: 10.5px; line-height: 1.4;
+    }
+    /* Auto-save feedback note in the Terminal panel footer. Slots in where the
+       manual Save button used to live. Transient "Saved ✓" / "Saving…" states. */
+    .av2-save-note {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10.5px; color: var(--text-color, #646978); opacity: 0.65;
+        letter-spacing: 0.05em; margin-right: auto;
+    }
+    .av2-save-note.ok  { color: #4ade80; opacity: 1; }
+    .av2-save-note.bad { color: #ef4444; opacity: 1; }
+    .av2-row + .av2-row { margin-top: 1px; }
+    .av2-row > label {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--text-color, #9a9fae); opacity: 0.8;
+        line-height: 1.1;
+    }
+    /* When a row uses the .av2-row-control stack (input + inline help text below),
+       the row's effective height grows past the 24px input. Default align-items:center
+       then centres the label against the FULL row — visually BELOW the input, because
+       the help text is taller than the label. Anchor such labels to the top of the
+       row and nudge down to the 24px input's vertical centre (~7px from top). Rows
+       without the control wrapper keep the original centred behaviour, so PROVIDER
+       and MODEL rows stay pixel-identical. */
+    .av2-row:has(> .av2-row-control) > label {
+        align-self: start;
+        padding-top: 7px;
+    }
+    .av2-row::before {
+        content: ''; position: absolute; left: -14px; top: 50%; width: 4px; height: 4px;
+        border-radius: 50%; transform: translateY(-50%);
+        background: transparent; transition: background .15s ease;
+    }
+    .av2-row.modified::before         { background: #f5b041; box-shadow: 0 0 6px rgba(245,176,65,0.5); }
+    .av2-row.modified input,
+    .av2-row.modified select          { border-color: #f5b041 !important; }
+    .av2-row.modified > label         { color: #f5b041 !important; opacity: 1; }
+
+    .av2-row input, .av2-row select {
+        width: 100%; box-sizing: border-box; height: 24px; line-height: 22px;
+        background: var(--background-color, #0f1013);
+        color: var(--text-color, #e7e9ef);
+        border: 1px solid var(--border-color, #262a33); border-radius: 4px;
+        padding: 0 8px; margin: 0;
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 11px;
+    }
+    /* Selects get an explicit chevron — default browser caret disappears when
+       the select is reset into input-like styling, making the field read as an
+       empty text input (observed for GOOSE_PROVIDER in the Secrets panel). */
+    .av2-row select {
+        appearance: none; -webkit-appearance: none; -moz-appearance: none;
+        padding-right: 28px;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239a9fae' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+    }
+    .av2-row input:focus, .av2-row select:focus {
+        outline: none; border-color: var(--orange, #ff8c00);
+    }
+
+    .av2-reset-btn {
+        opacity: 0; padding: 4px 6px; background: transparent; border: none;
+        color: var(--text-color, #9a9fae); font-size: 13px; cursor: pointer;
+        border-radius: 4px; transition: opacity .15s ease, background .15s ease;
+    }
+    /* Info (i) icon — replaces the per-row revert button. Hover surfaces a
+       CSS-driven tooltip via the data-tip attribute. We don't rely on the
+       native title tooltip because it's subject to OS delay and can be
+       intercepted by legacy Unraid tooltip plugins. Muted circle that reads
+       as help without competing with the field for attention. */
+    .av2-info {
+        position: relative;
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; border-radius: 50%; cursor: help;
+        font-family: 'Fraunces', Georgia, serif;
+        font-size: 10px; font-style: italic; font-weight: 500;
+        color: var(--text-color, #9a9fae);
+        border: 1px solid rgba(127,127,127,0.35);
+        background: transparent;
+        opacity: 0.55; transition: opacity .15s ease, border-color .15s ease, color .15s ease;
+        line-height: 1; user-select: none;
+    }
+    .av2-info:hover, .av2-info:focus-visible {
+        opacity: 1; border-color: var(--orange, #ff8c00); color: var(--orange, #ff8c00);
+        outline: none;
+    }
+    /* Tooltip body: absolutely positioned above the icon, right-aligned so it
+       stays within the card's right edge. Pointer triangle below. */
+    .av2-info[data-tip]::after {
+        content: attr(data-tip);
+        position: absolute; bottom: calc(100% + 8px); right: -4px;
+        max-width: 280px; width: max-content;
+        padding: 7px 10px; border-radius: 6px;
+        background: #0d0e12; color: #e7e9ef;
+        border: 1px solid rgba(255,140,0,0.45);
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10.5px; font-style: normal; font-weight: 400;
+        letter-spacing: 0.01em; line-height: 1.5;
+        text-transform: none;
+        white-space: normal; text-align: left;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+        opacity: 0; transform: translateY(4px);
+        pointer-events: none; z-index: 40;
+        transition: opacity .12s ease, transform .12s ease;
+    }
+    .av2-info[data-tip]::before {
+        content: ''; position: absolute; bottom: calc(100% + 2px); right: 4px;
+        border: 6px solid transparent;
+        border-top-color: rgba(255,140,0,0.55);
+        opacity: 0; transition: opacity .12s ease;
+        pointer-events: none; z-index: 41;
+    }
+    .av2-info:hover::after, .av2-info:focus-visible::after,
+    .av2-info:hover::before, .av2-info:focus-visible::before {
+        opacity: 1; transform: translateY(0);
+    }
+    .av2-row.modified .av2-reset-btn { opacity: 0.7; }
+    .av2-row.modified .av2-reset-btn:hover {
+        opacity: 1; background: rgba(127,127,127,0.08);
+    }
+
+    /* Panel footer */
+    .av2-panel-footer {
+        display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;
+    }
+    .av2-help {
+        font-size: 11px; color: var(--text-color, #9a9fae); opacity: 0.6;
+        margin-top: 10px; font-style: italic; line-height: 1.5;
+    }
+    .av2-help code {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        background: rgba(127,127,127,0.08); padding: 1px 4px; border-radius: 3px;
+        font-size: 10.5px; font-style: normal;
+    }
+
+    /* ---------- Auto-launch panel (Terminal chip subsection) ----------
+       Per-workspace arm/disarm. Mirrors the .av2-row diff-detect language:
+       a 4px state dot on the left edge, mono-letterspaced eyebrow heading,
+       green when armed (parallels the orange .modified dot used above). */
+    .av2-al-section {
+        margin-top: 14px; padding-top: 12px;
+        border-top: 1px solid var(--border-color, #262a33);
+    }
+    .av2-al-eyebrow {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--text-color, #9a9fae); opacity: 0.85;
+        margin: 0 0 4px;
+    }
+    .av2-al-caption {
+        font-size: 11px; line-height: 1.45;
+        color: var(--text-color, #9a9fae); opacity: 0.7;
+        margin: 0 0 10px; font-style: normal;
+    }
+    .av2-al-row {
+        position: relative;
+        display: grid; grid-template-columns: 1fr auto; align-items: center;
+        gap: 10px; padding: 8px 10px 8px 16px;
+        border: 1px solid var(--border-color, #262a33);
+        border-radius: 4px;
+        background: rgba(127,127,127,0.03);
+        transition: border-color .15s ease, background .15s ease;
+    }
+    .av2-al-row + .av2-al-row { margin-top: 6px; }
+    .av2-al-row:hover { border-color: rgba(127,127,127,0.4); }
+    .av2-al-row::before {
+        content: ''; position: absolute; left: 6px; top: 14px;
+        width: 4px; height: 4px; border-radius: 50%;
+        background: rgba(127,127,127,0.35);
+        transition: background .15s ease, box-shadow .15s ease;
+    }
+    .av2-al-row.armed {
+        border-color: rgba(74,222,128,0.35);
+        background: rgba(74,222,128,0.04);
+    }
+    .av2-al-row.armed::before {
+        background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.6);
+    }
+    .av2-al-id { display: flex; flex-direction: column; min-width: 0; }
+    .av2-al-name {
+        font-size: 12px; font-weight: 600; color: var(--text-color, #e7e9ef);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        line-height: 1.25;
+    }
+    .av2-al-row.armed .av2-al-name { color: #4ade80; }
+    .av2-al-path {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10px; color: var(--text-color, #9a9fae); opacity: 0.55;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        margin-top: 2px;
+    }
+    .av2-al-toggle {
+        display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--text-color, #9a9fae); opacity: 0.7;
+        user-select: none; margin: 0;
+    }
+    .av2-al-row.armed .av2-al-toggle { color: #4ade80; opacity: 1; }
+    .av2-al-toggle input[type=checkbox] { margin: 0; cursor: pointer; }
+
+    .av2-al-fresh {
+        display: none;
+        grid-column: 1 / -1;
+        margin-top: 8px; padding-top: 8px;
+        border-top: 1px dashed rgba(127,127,127,0.18);
+        align-items: center; gap: 6px;
+        font-size: 11px; line-height: 1.3;
+        color: var(--text-color, #9a9fae); opacity: 0.85;
+    }
+    .av2-al-row.armed .av2-al-fresh { display: flex; }
+    .av2-al-fresh input[type=checkbox] { margin: 0; cursor: pointer; }
+    .av2-al-fresh label { cursor: pointer; margin: 0; font-weight: normal; }
+
+    /* Buttons shared across panels */
+    .av2-btn {
+        font-size: 11.5px; font-weight: 600; padding: 6px 12px; border-radius: 6px;
+        cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+        border: 1px solid var(--border-color, #353a46);
+        background: var(--background-color, #16181d); color: var(--text-color, #e7e9ef);
+        transition: all .15s ease;
+        line-height: 1; /* kill inherited line-height so text centers vertically */
+    }
+    .av2-btn:hover { border-color: var(--orange, #ff8c00); color: var(--orange, #ff8c00); }
+    .av2-btn.primary {
+        background: var(--orange, #ff8c00); color: #fff; border-color: transparent;
+    }
+    .av2-btn.primary:hover { background: #ffa433; color: #fff; }
+    .av2-btn.ghost { background: transparent; border-color: transparent; opacity: 0.7; }
+    .av2-btn.ghost:hover { opacity: 1; color: var(--text-color, #e7e9ef); }
+
+    /* WP #736 — free-form Variables / Secrets sub-sections in the ENVS panel. */
+    .av2-ff-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(128,128,128,0.18); }
+    .av2-ff-block h4 { margin: 0 0 8px; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.85; }
+    .av2-ff-hint { display: block; margin-top: 2px; font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: 0.55; }
+    .av2-ff-list { display: flex; flex-direction: column; gap: 6px; }
+    .av2-ff-row { display: flex; align-items: center; gap: 6px; }
+    .av2-ff-row .av2-ff-name { flex: 0 0 38%; }
+    .av2-ff-row .av2-ff-val  { flex: 1 1 auto; }
+    .av2-ff-row input {
+        font-size: 12px; padding: 5px 8px; border-radius: 4px;
+        border: 1px solid var(--border-color, rgba(128,128,128,0.35));
+        background: var(--input-bg-color, rgba(255,255,255,0.03)); color: inherit;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .av2-ff-row input:focus { outline: none; border-color: var(--orange, #ff8c00); }
+    .av2-ff-eq { opacity: 0.5; font-size: 12px; }
+    .av2-ff-del {
+        flex: 0 0 auto; background: transparent; border: none; cursor: pointer;
+        color: var(--text-color, #e7e9ef); opacity: 0.45; font-size: 12px; padding: 4px 6px;
+    }
+    .av2-ff-del:hover { opacity: 1; color: var(--bad, #d65b5b); }
+    .av2-ff-empty { font-size: 11px; opacity: 0.5; padding: 4px 2px; }
+    /* Uninstall / Reset — bordered-red button. Idle state shows a clearly
+       defined red border and soft red-tinted background so the button reads
+       as a real interactive element, not a text link. Hover fills solid.
+       Works against both Unraid light and dark themes because --bad is a
+       brand token. The danger-ghost variant (transparent at idle) was too
+       ambiguous — removed. */
+    .av2-btn.danger {
+        background: rgba(239,68,68,0.08); color: #ef4444;
+        border-color: rgba(239,68,68,0.55); font-weight: 600;
+    }
+    .av2-btn.danger:hover {
+        background: #ef4444; color: #fff; border-color: #ef4444;
+        box-shadow: 0 2px 8px rgba(239,68,68,0.35);
+    }
+
+    /* Footer row: install progress + install/uninstall actions */
+    .av2-foot {
+        padding: 12px 18px; display: flex; justify-content: space-between; align-items: center;
+        border-top: 1px solid var(--border-color, #262a33);
+        background: linear-gradient(to bottom, transparent, rgba(0,0,0,0.1));
+    }
+    .av2-foot .av2-meta {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 10.5px; color: var(--text-color, #646978); opacity: 0.6;
+    }
+    .av2-foot .av2-actions { display: flex; gap: 8px; }
+
+    /* Channel panel — segmented control with inset shadow + sharper active pill */
+    .av2-seg {
+        display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+        width: 100%; max-width: 360px;
+        background: var(--background-color, #0f1013);
+        border: 1px solid var(--border-color, #262a33); border-radius: 7px;
+        padding: 3px; gap: 2px;
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11.5px;
+    }
+    .av2-seg input { display: none; }
+    .av2-seg label {
+        text-align: center; padding: 6px 10px; cursor: pointer; border-radius: 5px;
+        color: var(--text-color, #9a9fae); opacity: 0.7;
+        transition: background .12s ease, color .12s ease, opacity .12s ease;
+        letter-spacing: 0.04em; font-weight: 600;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .av2-seg label:hover { opacity: 1; background: rgba(127,127,127,0.08); }
+    .av2-seg input:checked + label {
+        background: var(--orange, #ff8c00); color: #fff; opacity: 1;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.25), inset 0 -1px 0 rgba(0,0,0,0.15);
+    }
+
+    /* Stacked section inside the Channel panel — label (h4) above the control,
+       matching the Release Channel header/seg-control pattern above. */
+    .av2-chan-section { margin-top: 16px; }
+    .av2-chan-section > h4 { margin-bottom: 8px; }
+    .av2-chan-select {
+        width: 100%; box-sizing: border-box; height: 32px;
+        background: var(--background-color, #0f1013);
+        color: var(--text-color, #e7e9ef);
+        border: 1px solid var(--border-color, #262a33); border-radius: 6px;
+        padding: 0 10px;
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 12px;
+        appearance: none; -webkit-appearance: none; -moz-appearance: none;
+        padding-right: 30px;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239a9fae' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+    }
+    .av2-chan-select:focus { outline: none; border-color: var(--orange, #ff8c00); }
+
+    /* Channel stats — card-in-card treatment so the stats read as a result panel
+       distinct from the control above it. */
+    .av2-chan-stat {
+        display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: center;
+        margin: 12px 0 0; padding: 10px 12px;
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
+        background: rgba(127,127,127,0.04);
+        border: 1px solid var(--border-color, #262a33); border-radius: 6px;
+    }
+    .av2-chan-stat dt {
+        font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--text-color, #646978); opacity: 0.7;
+    }
+    .av2-chan-stat dd { margin: 0; color: var(--text-color, #e7e9ef); }
+
+    /* Install progress — full-width panel in the card body area (not squished
+       into the footer actions row). When active, the chip strip and panels
+       are hidden and this takes over the space between head and foot. */
+    .av2-install-panel {
+        display: none; padding: 18px 20px;
+        border-top: 1px solid var(--border-color, #262a33);
+        background: rgba(255,140,0,0.04);
+        flex-direction: column; gap: 10px;
+    }
+    .av2-install-panel.active { display: flex; }
+    .av2-install-panel .av2-install-status {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 11.5px; color: var(--text-color, #e7e9ef);
+        letter-spacing: 0.02em; line-height: 1.3;
+    }
+    .av2-install-bar {
+        height: 6px; background: var(--border-color, #262a33); border-radius: 4px; overflow: hidden;
+    }
+    .av2-install-bar span {
+        display: block; height: 100%;
+        background: linear-gradient(90deg, var(--orange, #ff8c00), #ffa433);
+        transition: width .25s ease;
+        box-shadow: 0 0 8px rgba(255,140,0,0.35);
+    }
+    /* When the install panel is active, collapse the chip strip and panels so
+       the progress has the full body region. */
+    .av2-card:has(.av2-install-panel.active) .av2-strip,
+    .av2-card:has(.av2-install-panel.active) .av2-panels { display: none; }
 </style>

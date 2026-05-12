@@ -15,6 +15,8 @@ CONFIG_FILE="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
 # Source shared storage functions (guard_path, check_disk_space, get_ts, etc.)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../storage/common.sh"
+# Source canonical path resolver (Phase 5 — replaces inline cfg greps)
+source "$SCRIPT_DIR/../storage/resolve_paths.sh" 2>/dev/null || true
 
 mkdir -p "$(dirname "$LOCK_FILE")"
 
@@ -59,18 +61,10 @@ if ! command -v mksquashfs >/dev/null 2>&1; then
     exit 1
 fi
 
-# 1. Determine Persistence Paths (agent and home may differ)
+# 1. Determine Persistence Paths via canonical resolver (Phase 5 — no inline cfg greps)
 PLUGIN_BASE="/boot/config/plugins/unraid-aicliagents"
-AGENT_PERSIST_PATH="$PLUGIN_BASE"
-HOME_PERSIST_PATH="$PLUGIN_BASE/persistence"
-if [ -f "$CONFIG_FILE" ]; then
-    CFG_AGENT=$(grep -oP '^agent_storage_path="\K[^"]+' "$CONFIG_FILE") || true
-    [ -n "${CFG_AGENT:-}" ] && AGENT_PERSIST_PATH="$CFG_AGENT"
-    # Home path: try home_storage_path, then persistence_base, then fall back to agent path
-    CFG_HOME=$(grep -oP '^home_storage_path="\K[^"]+' "$CONFIG_FILE") || true
-    [ -z "${CFG_HOME:-}" ] && CFG_HOME=$(grep -oP '^persistence_base="\K[^"]+' "$CONFIG_FILE") || true
-    [ -n "${CFG_HOME:-}" ] && HOME_PERSIST_PATH="$CFG_HOME"
-fi
+AGENT_PERSIST_PATH=$(agent_persist_path 2>/dev/null || echo "$PLUGIN_BASE")
+HOME_PERSIST_PATH=$(home_persist_path root 2>/dev/null || echo "$PLUGIN_BASE/persistence")
 # Legacy compat: PERSIST_PATH used for agent operations and monolithic image search
 PERSIST_PATH="$AGENT_PERSIST_PATH"
 MIGRATED_DIR="$AGENT_PERSIST_PATH/migrated_legacy_data"

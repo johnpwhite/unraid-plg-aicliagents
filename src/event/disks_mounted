@@ -1,7 +1,7 @@
 #!/bin/bash
 # AICliAgents: Array Start Restoration
 # Fires when Unraid disks are mounted (array started).
-# Cleans up emergency mode, restarts sync daemon, and publishes UI refresh.
+# Cleans up emergency mode and publishes UI refresh.
 
 EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 LOG="/tmp/unraid-aicliagents/debug.log"
@@ -22,7 +22,21 @@ if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
     if command -v tmux >/dev/null 2>&1; then
         tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -I {} tmux kill-session -t {} >/dev/null 2>&1
     fi
-    pkill -f 'ttyd.*(aicliterm|temp-terminal)-' >/dev/null 2>&1
+    # Bug #533: replace bare pkill with cmdline-anchored kill. The pgrep pattern
+    # matches the session-id substrings (aicliterm- / temp-terminal-) which are
+    # plugin-specific in practice, but per memory feedback_kill_patterns_vm_safety
+    # we must also verify the process's full cmdline contains this plugin's
+    # install path before signalling. Belt-and-braces: also exclude hypervisor
+    # exe paths (qemu/libvirt/init) so a future cmdline rename can't cause a
+    # repeat of the VM-killed incident.
+    for _pid in $(pgrep -f 'ttyd.*(aicliterm|temp-terminal)-' 2>/dev/null); do
+        _cmdline="$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || echo '')"
+        case "$_cmdline" in *"unraid-aicliagents"*) ;; *) continue ;; esac
+        case "$(readlink "/proc/$_pid/exe" 2>/dev/null)" in
+            */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
+        esac
+        kill -9 "$_pid" >/dev/null 2>&1 || true
+    done
 
     # Remove emergency home and flag
     rm -rf /tmp/unraid-aicliagents/emergency_home
@@ -49,19 +63,20 @@ if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
     log "Emergency mode cleaned up."
 fi
 
-# 2. Restart sync daemon and publish UI refresh (delegate to PHP for config awareness)
+# 2. Publish UI refresh via PHP (config-aware storage status) and run an
+# autolaunch sweep so workspaces flagged for auto-launch are running before
+# the user opens the AICliAgents tab. Bug #521: previously the page-load
+# trigger was the only post-array-start path, so users always paid the start
+# latency on their first click.
 if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
-    timeout 30 /usr/bin/php -r "
+    timeout 60 /usr/bin/php -r "
         require_once '$EMHTTP_DEST/src/includes/AICliAgentsManager.php';
         \$config = getAICliConfig();
         \$persistPath = \$config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
         if (\AICliAgents\Services\StorageMountService::isPathAvailable(\$persistPath)) {
-            aicli_log('disks_mounted: Storage path available. Restarting sync daemon.', AICLI_LOG_INFO, 'EventDisks');
-            \$username = \$config['user'] ?? 'root';
-            if (\$username === '0') \$username = 'root';
-            \AICliAgents\Services\TaskService::manageSyncDaemon(\$username, true);
-            // Notify UI to refresh
+            aicli_log('disks_mounted: Storage path available. Notifying UI.', AICLI_LOG_INFO, 'EventDisks');
             \AICliAgents\Services\NchanService::publish('storage_status', aicli_get_storage_status());
+            \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'array_started');
         } else {
             aicli_log('disks_mounted: Storage path still not available. Will retry on next access.', AICLI_LOG_WARN, 'EventDisks');
         }

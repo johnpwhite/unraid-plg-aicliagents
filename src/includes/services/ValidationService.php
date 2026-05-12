@@ -14,9 +14,7 @@ class ValidationService {
 
     /** Allowed base directories for filesystem operations. */
     private static $ALLOWED_PATH_BASES = [
-        '/mnt/user',
-        '/mnt/cache',
-        '/mnt/disk',
+        '/mnt',
         '/home',
         '/root',
         '/boot/config/plugins/unraid-aicliagents',

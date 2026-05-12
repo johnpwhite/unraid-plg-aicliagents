@@ -16,6 +16,46 @@ document.documentElement.classList.add('aicli-terminal-page');
 // The React UI manages its own persistence — Unraid's form tracker is not applicable.
 // Intercepts addEventListener and jQuery.on to block ALL beforeunload registration.
 (function() {
+    // D-404 hardening: neuter the CANCELLATION mechanism so any beforeunload
+    // handler — ours, Unraid's, or third-party — cannot trigger the dialog.
+    //
+    // Three layers, in order:
+    //   1. Lock Event.prototype.preventDefault to no-op when type==='beforeunload'.
+    //      defineProperty with writable:false beats plain re-assignment by libs
+    //      that load after us and try to restore the native preventDefault.
+    //   2. Lock BeforeUnloadEvent.prototype.returnValue setter to swallow writes.
+    //      Covers both the legacy `e.returnValue = ''` pattern AND the case
+    //      where a handler returns a string (browser writes it to returnValue
+    //      via the internal slot, which a prototype-level setter intercepts).
+    //   3. Capture-phase stopImmediatePropagation on window as defence-in-depth
+    //      for any handler registered via channels we can't intercept.
+    //
+    // Type gate ('beforeunload') keeps other events intact — React SyntheticEvent
+    // uses preventDefault + returnValue for non-beforeunload events.
+    try {
+        var _origPD_term = Event.prototype.preventDefault;
+        Object.defineProperty(Event.prototype, 'preventDefault', {
+            value: function() {
+                if (this && this.type === 'beforeunload') return;
+                return _origPD_term.apply(this, arguments);
+            },
+            writable: false, configurable: false, enumerable: false
+        });
+    } catch(e) {}
+    try {
+        if (window.BeforeUnloadEvent) {
+            Object.defineProperty(BeforeUnloadEvent.prototype, 'returnValue', {
+                get: function() { return ''; },
+                set: function(_v) { /* swallow — never prompt */ },
+                configurable: false
+            });
+        }
+    } catch(e) {}
+    try {
+        EventTarget.prototype.addEventListener.call(window, 'beforeunload', function(e) {
+            e.stopImmediatePropagation();
+        }, true);
+    } catch(e) {}
     try { window.formHasUnsavedChanges = false; } catch(e) {}
     try {
         Object.defineProperty(window, 'formHasUnsavedChanges', { get: function() { return false; }, set: function() {}, configurable: false });

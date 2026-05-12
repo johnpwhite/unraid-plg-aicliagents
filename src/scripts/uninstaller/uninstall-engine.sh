@@ -13,15 +13,34 @@ LOG_FILE="$CONFIG_DIR/uninstall.log"
 log_status() { echo "$1" >&3; echo "[$(date +%T)] $1" >> "$LOG_FILE" 2>/dev/null; }
 export -f log_status
 
+# Safe PID filter — drops any pid whose /proc/PID/exe resolves to a
+# hypervisor/init binary. Belt-and-braces guard so a pattern cross-match
+# (e.g. a VM whose cmdline happens to contain "gemini") can never take down
+# user VMs during plugin uninstall.
+_safe_filter_pids() {
+    local out=""
+    for pid in $1; do
+        [ -z "$pid" ] && continue
+        local exe
+        exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+        case "$exe" in
+            */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
+        esac
+        out+="$pid "
+    done
+    echo "$out"
+}
 # Graceful process termination: SIGTERM first, wait, then SIGKILL if needed
 graceful_kill() {
     local pattern="$1"
     local pids
     pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
+    pids=$(_safe_filter_pids "$pids")
     if [ -n "$pids" ]; then
         echo "$pids" | xargs -r kill -15 > /dev/null 2>&1 || true
         sleep 2
         pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
+        pids=$(_safe_filter_pids "$pids")
         if [ -n "$pids" ]; then
             echo "$pids" | xargs -r kill -9 > /dev/null 2>&1 || true
         fi
@@ -31,11 +50,14 @@ graceful_kill() {
 # 1. Terminate Active Processes & Sessions
 # -----------------------------------------------------------------
 log_status "  [1/4] Terminating AI Agent Sessions..."
-graceful_kill "ttyd.*(aicliterm|geminiterm)-"
+graceful_kill "ttyd.*aicliterm-"
 if command -v tmux >/dev/null 2>&1; then
     tmux ls -F '#S' 2>/dev/null | grep -E "^aicli-agent-" | xargs -I {} tmux kill-session -t "{}" > /dev/null 2>&1 || true
 fi
-graceful_kill "node.*(aicli|gemini).mjs"
+# Path-anchored: requires a plugin-owned path in the cmdline so we cannot
+# cross-match unrelated host node services or — critically — qemu VM cmdlines
+# that share a substring with one of our agent names.
+graceful_kill "node .*(unraid-aicliagents|/\\.aicli/)"
 
 # 2. Cleanup Runtime Bloat
 # -----------------------------------------------------------------
@@ -59,6 +81,7 @@ fi
 # -----------------------------------------------------------------
 log_status "  [4/4] Removing plugin from WebGUI..."
 rm -f /usr/local/emhttp/plugins/dynamix/events/stopping/aicli_sync
+rm -f /usr/local/emhttp/plugins/dynamix/events/stopping_array/aicli_sync
 rm -f /usr/local/emhttp/plugins/dynamix/events/disks_mounted/aicli_restore
 rm -f /etc/cron.d/unraid-aicliagents.agent-check
 /usr/local/sbin/update_cron 2>/dev/null || true

@@ -167,8 +167,14 @@ function openPathPicker(id) {
         $('#pp-dir-list').html('<div style="padding:20px; text-align:center; opacity:0.5;"><i class="fa fa-spinner fa-spin"></i></div>');
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=list_dir&path=' + encodeURIComponent(path) + '&csrf_token=' + csrf, function(data) {
             if (data.status !== 'ok') {
-                // Invalid path — reset to the current settings value
-                browse(startPath);
+                // Path unreadable or missing — walk up to the nearest readable ancestor
+                // so the overlay still opens when the saved setting points at a deleted dir.
+                const parent = path.replace(/\/+[^\/]+\/*$/, '') || '/';
+                if (parent === path) {
+                    $('#pp-dir-list').html('<div style="padding:30px; text-align:center; opacity:0.5;"><i class="fa fa-exclamation-triangle" style="font-size:24px; display:block; margin-bottom:8px;"></i>Cannot read directory</div>');
+                    return;
+                }
+                browse(parent);
                 return;
             }
             currentDir = data.path;

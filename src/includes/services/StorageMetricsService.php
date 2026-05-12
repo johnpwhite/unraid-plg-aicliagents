@@ -23,9 +23,11 @@ class StorageMetricsService {
         $homes = [];
         $artifacts = [];
 
-        // 1. Discover Agents from Agent Storage Path
+        // 1. Discover Agents from Agent Storage Path.
+        // Matches legacy (vol1, delta_<epoch>) and canonical (_delta_<dt>, _consolidated_<dt>) formats.
+        $agentKindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z)';
         foreach (glob("$agentPath/agent_*.sqsh") as $file) {
-            if (preg_match('/agent_(.*?)_(v\d+_vol\d+|vol\d+|delta_\d+)\.sqsh/', basename($file), $m)) {
+            if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/", basename($file), $m)) {
                 $id = $m[1];
                 if (isset($agents[$id])) continue;
                 $mnt = StorageMountService::AGENT_MNT_BASE . "/$id";
@@ -144,10 +146,12 @@ class StorageMetricsService {
         
         $total = count($images);
         foreach ($images as $base => $path) {
-            // Check if a corresponding .sqsh exists
+            // Check if a corresponding .sqsh exists (legacy *_vol1 or canonical *_consolidated_<dt>).
             $pattern = str_replace('home_', '', $base);
             $pattern = str_replace('aicli-agents', 'agent_*', $pattern);
-            if (count(glob("$persistPath/*{$pattern}*_vol1.sqsh")) > 0) {
+            $hasLegacy     = count(glob("$persistPath/*{$pattern}*_vol1.sqsh")) > 0;
+            $hasCanonical  = count(glob("$persistPath/*{$pattern}*_consolidated_*.sqsh")) > 0;
+            if ($hasLegacy || $hasCanonical) {
                 $done++;
             }
         }
@@ -175,17 +179,23 @@ class StorageMetricsService {
         }
 
         // Calculate Physical Size (sum of all .sqsh volumes for this entity)
-        // D-405: Order layers by stack position — newest delta first, base vol1 last
+        // D-405: Order layers by stack position — newest delta first, base last.
+        // Timestamp is a STRING so legacy epoch ("1776318800") and canonical dt
+        // ("20260506T143022Z") sort correctly together via lex compare.
         $physicalSize = 0;
         $layerFiles = [];
         foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $sqsh) {
             $fsize = @filesize($sqsh);
             $physicalSize += $fsize;
             $bname = basename($sqsh);
-            // Extract epoch from delta_<epoch> or v<epoch> patterns
-            $ts = 0;
-            if (preg_match('/delta_(\d+)/', $bname, $m)) $ts = (int)$m[1];
-            elseif (preg_match('/_v(\d+)_/', $bname, $m)) $ts = (int)$m[1];
+            $ts = '00000000T000000Z';
+            if (preg_match('/_(?:delta|consolidated)_(\d{8}T\d{6}Z)/', $bname, $m)) {
+                $ts = $m[1];
+            } elseif (preg_match('/_delta_(\d{10,})/', $bname, $m)) {
+                $ts = $m[1];
+            } elseif (preg_match('/_v(\d{10,})_/', $bname, $m)) {
+                $ts = $m[1];
+            }
             $layerFiles[] = [
                 'path' => $sqsh,
                 'name' => $bname,
@@ -196,21 +206,26 @@ class StorageMetricsService {
         }
         // Sort: newest delta first, base volumes last
         usort($layerFiles, function($a, $b) {
-            // Deltas above base volumes
             if ($a['is_delta'] && !$b['is_delta']) return -1;
             if (!$a['is_delta'] && $b['is_delta']) return 1;
-            // Within same type, newest first
-            return $b['timestamp'] - $a['timestamp'];
+            return strcmp($b['timestamp'], $a['timestamp']);
         });
 
+        // WP #271 follow-up: surface the deferred-consolidation status so the
+        // UI can render a "Awaiting idle" badge while the queue is non-empty
+        // for this entity.
+        $pendingSince = StorageMountService::getConsolidatePendingSince($type, $id);
+
         return [
-            'mounted'      => $mounted,
-            'mount_point'  => $mnt,
-            'dirty_mb'     => $dirtyMB,
-            'physical_mb'  => round($physicalSize / 1024 / 1024, 2),
-            'layers'       => count($layerFiles),
-            'layer_files'  => $layerFiles,
-            'percent'      => min(100, round(($dirtyMB / 1024) * 100)),
+            'mounted'              => $mounted,
+            'mount_point'          => $mnt,
+            'dirty_mb'             => $dirtyMB,
+            'physical_mb'          => round($physicalSize / 1024 / 1024, 2),
+            'layers'               => count($layerFiles),
+            'layer_files'          => $layerFiles,
+            'percent'              => min(100, round(($dirtyMB / 1024) * 100)),
+            'consolidate_pending'  => ($pendingSince !== null),
+            'consolidate_pending_since' => $pendingSince,
         ];
     }
 

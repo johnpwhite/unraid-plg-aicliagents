@@ -24,7 +24,7 @@
     <div class="aicli-tabs" style="margin-bottom:0; border-bottom:none;">
         <div class="aicli-tab-btn active" onclick="switchMainTab('config', this)">Configuration</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('store', this)">Agent Store</div>
-        <div class="aicli-tab-btn" onclick="switchMainTab('storage', this)">Storage</div>
+        <div class="aicli-tab-btn" onclick="switchMainTab('storage', this)">Home Storage</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('debug', this)">Debug Console</div>
     </div>
 </div>

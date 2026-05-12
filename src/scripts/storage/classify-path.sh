@@ -75,9 +75,12 @@ esac
 # Check if it's a known pool by reading disks.ini
 DISKS_INI="/var/local/emhttp/disks.ini"
 if [ -f "$DISKS_INI" ]; then
-    # Extract pool names: entries with type="Cache", strip trailing digits for pool name
+    # Extract pool names: entries with type="Cache", strip trailing digits for pool name.
+    # disks.ini section headers are ["cache"] / ["storage"] etc. (Unraid quotes the
+    # name inside the brackets) so the gsub strips ALL of [, ], and " — leaving
+    # bare names that match $MNT_NAME from /mnt/<name>/...
     POOL_NAMES=$(awk -F'=' '
-        /^\[/ { section=$0; gsub(/[\[\]]/, "", section) }
+        /^\[/ { section=$0; gsub(/[\[\]"]/, "", section) }
         /^type=/ && $2 == "\"Cache\"" {
             name=section; gsub(/[0-9]+$/, "", name); print name
         }

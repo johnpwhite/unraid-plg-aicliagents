@@ -145,27 +145,17 @@ $autoSave = 'onchange="autoSaveConfig()"';
                 </div>
             </div>
 
-            <div class="aicli-card">
-                <div class="aicli-card-header" style="justify-content:space-between;">
-                    <span><i class="fa fa-key text-orange-500"></i> Secrets Vault</span>
-                    <button type="button" class="aicli-btn-slim" onclick="saveAICliAgentsManager(document.getElementById('aicli-settings-form'), true)"><i class="fa fa-save"></i> Save Keys</button>
-                </div>
-                <div class="aicli-card-body">
-                    <p class="help-text" style="margin-bottom:12px; opacity:0.7;">Stored in <code>secrets.cfg</code> and injected as environment variables.</p>
-                    <dl>
-                        <?php
-                        $vaultFile = "/boot/config/plugins/unraid-aicliagents/secrets.cfg";
-                        $vault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
-                        foreach ($registry as $agent):
-                            if ($agent['id'] === 'terminal') continue;
-                            if (!$agent['is_installed']) continue;
-                            $keyName = ($agent['env_prefix'] ?? 'AGENT') . "_API_KEY";
-                            ?>
-                            <dt><?= htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8') ?></dt>
-                            <dd><input type="password" name="<?= htmlspecialchars($keyName, ENT_QUOTES, 'UTF-8') ?>" value="<?= !empty($vault[$keyName] ?? '') ? '••••••••' : '' ?>" data-has-value="<?= !empty($vault[$keyName] ?? '') ? '1' : '0' ?>" placeholder="Enter API Key" style="flex: 1; min-width: 0;"></dd>
-                        <?php endforeach; ?>
-                    </dl>
-                </div>
-            </div>
+            <!-- Secrets Vault moved to per-agent Store cards (Secrets panel). See AGENT_LEVEL_TMUX_CONF.md
+                 and the av2 card mockup. Single-key-per-agent agents (env_prefix + _API_KEY) still
+                 work unchanged; the new Secrets panel also supports multi-field agents like Goose. -->
     </div>
 </div>
+</form>
+<!-- Bug #710: outer aicli-settings-form opened in ManagerLayout.php scopes
+     ONLY the Configuration tab. Earlier the closing tag was at the end of
+     ManagerLogTab.php, which made store/storage/debug content nested under
+     the form — browsers flatten nested forms, so inner Save buttons (e.g.
+     av2-secrets-form) were silently submitting the OUTER form (action=save)
+     instead of running their onsubmit handlers (action=save_vault). Closing
+     the outer form here keeps each tab's forms independent. -->
+

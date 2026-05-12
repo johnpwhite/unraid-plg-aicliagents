@@ -16,15 +16,28 @@ echo "--- AICliAgents Repair Engine Start ---"
 log_progress 5 "Initializing Repair Engine..."
 
 # 1. Force-Kill Active Processes
+# Safe-kill helper: exe-path filter drops any pid under qemu/libvirt/kvm/init.
+# Belt-and-braces guard so a pattern cross-match (e.g. a VM whose cmdline
+# happens to contain "gemini") can never take down user VMs.
+_rp_safe_kill() {
+    local pattern="$1"
+    local pid exe
+    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true); do
+        exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+        case "$exe" in
+            */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
+        esac
+        kill -9 "$pid" >/dev/null 2>&1 || true
+    done
+}
 log_progress 10 "Stopping active agent processes..."
-pkill -9 -f 'Periodic sync triggered' >/dev/null 2>&1
-pkill -9 -f 'sync-daemon-.*\.sh' >/dev/null 2>&1
-pkill -9 -f 'install-bg.php' >/dev/null 2>&1
-pkill -9 -f 'ttyd.*aicliterm-' >/dev/null 2>&1
+_rp_safe_kill 'install-bg.php'
+_rp_safe_kill 'ttyd.*aicliterm-'
 if command -v tmux >/dev/null 2>&1; then
     tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -I {} tmux kill-session -t {} >/dev/null 2>&1
 fi
-pkill -9 -f 'node.*(gemini|opencode|nanocoder|claude|kilo|pi|codex|factory)' >/dev/null 2>&1
+# Path-anchored: only match node processes carrying a plugin-owned path.
+_rp_safe_kill 'node .*(unraid-aicliagents|/\.aicli/)'
 
 # 2. Storage Layer Reset
 log_progress 20 "Clearing stale loopback states..."

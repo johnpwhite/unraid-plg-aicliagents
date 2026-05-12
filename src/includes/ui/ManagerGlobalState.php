@@ -30,6 +30,34 @@ window.aicli_storage_classification = <?= json_encode(\AICliAgents\Services\Stor
 // re-binds the beforeunload handler every time any form input fires onchange.
 // Nuclear fix: intercept addEventListener and jQuery.on to BLOCK all beforeunload registration.
 (function() {
+    // D-404 hardening: neuter the CANCELLATION mechanism itself (see the twin
+    // comment in TerminalGlobalState.php for the full rationale — same three
+    // layers: Event.preventDefault lock, BeforeUnloadEvent.returnValue lock,
+    // capture-phase silencer as defence-in-depth).
+    try {
+        var _origPD_mgr = Event.prototype.preventDefault;
+        Object.defineProperty(Event.prototype, 'preventDefault', {
+            value: function() {
+                if (this && this.type === 'beforeunload') return;
+                return _origPD_mgr.apply(this, arguments);
+            },
+            writable: false, configurable: false, enumerable: false
+        });
+    } catch(e) {}
+    try {
+        if (window.BeforeUnloadEvent) {
+            Object.defineProperty(BeforeUnloadEvent.prototype, 'returnValue', {
+                get: function() { return ''; },
+                set: function(_v) { /* swallow — never prompt */ },
+                configurable: false
+            });
+        }
+    } catch(e) {}
+    try {
+        EventTarget.prototype.addEventListener.call(window, 'beforeunload', function(e) {
+            e.stopImmediatePropagation();
+        }, true);
+    } catch(e) {}
     // 1. Trap formHasUnsavedChanges so it always returns false
     try { window.formHasUnsavedChanges = false; } catch(e) {}
     try {

@@ -255,8 +255,10 @@ create_proxy "pi" "pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.
 create_proxy "codex" "codex-cli/node_modules/.bin/codex"
 create_proxy "droid" "factory-cli/node_modules/.bin/droid"
 create_proxy "nanocoder" "nanocoder/node_modules/.bin/nanocoder"
+create_proxy "goose" "goose/bin/goose"
+create_proxy "qwen" "qwen-code/node_modules/@qwen-code/qwen-code/cli.js"
 
-log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder)."
+log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen)."
 
 # --- 6. Docker Tool Wrappers ---
 # Tools that require Docker containers. The wrapper either proxies to the container

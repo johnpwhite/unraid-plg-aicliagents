@@ -132,6 +132,34 @@ class VersionCheckService {
                 }
             }
 
+            // Populate cache for non-npm agents that implement populateCache (e.g.
+            // github_release source for goose). NpmSource handles npm-package
+            // agents above; this second pass picks up the rest.
+            foreach ($registry as $id => $agent) {
+                if ($id === 'terminal') continue;
+                if (!empty($agent['npm_package'])) continue;  // npm already handled above
+                if ((time() - $startTime) > self::TOTAL_TIMEOUT) break;
+
+                $source = \AICliAgents\Services\Sources\SourceResolver::resolve($agent);
+                if ($source === null || !method_exists($source, 'populateCache')) continue;
+
+                LogService::log("Populating cache for $id (non-npm source)...", LogService::LOG_DEBUG, "VersionCheck");
+                try {
+                    $entry = $source->populateCache($id, $agent);
+                    if (!empty($entry['versions'])) {
+                        // Caller metadata last so it can't be overwritten by a future
+                        // populateCache that accidentally emits checked_at/check_error.
+                        $cache[$id] = array_merge(
+                            $entry,
+                            ['checked_at' => time(), 'check_error' => null]
+                        );
+                        $updated = true;
+                    }
+                } catch (\Throwable $e) {
+                    LogService::log("populateCache for $id threw: " . $e->getMessage(), LogService::LOG_WARN, "VersionCheck");
+                }
+            }
+
             // Atomic cache write
             if ($updated || empty(self::getCachedResults())) {
                 self::writeCacheAtomic($cache);
@@ -149,55 +177,50 @@ class VersionCheckService {
 
     /**
      * Get filtered version list for dropdown display.
+     * @param string      $agentId
+     * @param string|null $channel  'latest' (default — stable) or 'beta'. Other values map to 'latest'.
+     * @param int         $monthsBack  How far back to include untagged stable releases.
      * @return array Sorted versions for the dropdown (max MAX_DROPDOWN_ENTRIES)
      */
-    public static function getAvailableVersions(string $agentId, int $monthsBack = 3): array {
+    public static function getAvailableVersions(string $agentId, ?string $channel = null, int $monthsBack = 3): array {
         $cache = self::getCachedResults();
         $agentCache = $cache[$agentId] ?? null;
         if (!$agentCache || empty($agentCache['versions'])) return [];
 
-        $cutoff = strtotime("-{$monthsBack} months");
+        $channel = ($channel === 'beta') ? 'beta' : 'latest';
+        $cutoff   = strtotime("-{$monthsBack} months");
         $distTags = $agentCache['dist_tags'] ?? [];
         $versions = $agentCache['versions'];
 
-        // Build set of tagged versions (latest version per tag)
-        $taggedVersions = array_flip(array_values($distTags));
-
         $result = [];
-        $taggedIncluded = [];
 
         foreach (array_reverse($versions) as $entry) { // newest first (npm returns ascending)
-            $ver = $entry['version'];
-            $ts = $entry['timestamp'] ?? 0;
-            $tags = $entry['tags'] ?? [];
+            $class = VersionClassifier::classify($entry, $distTags, $agentId);
 
-            // Always include tagged versions (latest of each tag)
-            if (!empty($tags)) {
-                foreach ($tags as $tag) {
-                    if (!isset($taggedIncluded[$tag])) {
-                        $taggedIncluded[$tag] = true;
-                        $result[] = $entry;
-                        break; // Only add once even if multiple tags
-                    }
-                }
+            if ($class === 'platform_variant') continue;
+
+            if ($channel === 'beta') {
+                if ($class !== 'prerelease') continue;
+                $result[] = $entry;
                 continue;
             }
 
-            // Skip pre-release versions without a tag
-            if (preg_match('/[-+]/', $ver) && empty($tags)) continue;
+            // Stable channel.
+            if ($class !== 'stable') continue;
 
-            // Include stable versions within time window
-            if ($ts >= $cutoff) {
+            if (!empty($entry['tags'])) {
                 $result[] = $entry;
+                continue;
             }
+
+            $ts = $entry['timestamp'] ?? 0;
+            if ($ts >= $cutoff) $result[] = $entry;
         }
 
-        // Sort by timestamp descending (newest first)
         usort($result, function($a, $b) {
             return ($b['timestamp'] ?? 0) - ($a['timestamp'] ?? 0);
         });
 
-        // Cap at max entries
         return array_slice($result, 0, self::MAX_DROPDOWN_ENTRIES);
     }
 
@@ -356,7 +379,9 @@ class VersionCheckService {
         if (empty($content)) { @unlink(self::LOCK_FILE); return; }
 
         $parts = explode(':', $content, 2);
-        $pid = (int)($parts[0] ?? 0);
+        // explode always returns a non-empty list for a non-empty input, so
+        // $parts[0] is defined. $parts[1] may be missing for a 1-field input.
+        $pid = (int)$parts[0];
         $ts = (int)($parts[1] ?? 0);
 
         // Stale if PID is dead or lock is older than threshold

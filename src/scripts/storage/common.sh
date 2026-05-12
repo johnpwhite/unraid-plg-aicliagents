@@ -32,17 +32,32 @@ guard_path() {
         return 1
     fi
 
-    # Must start with an allowed prefix (match both exact dir and children)
+    # Allowlist of plugin-internal prefixes (work / cache / config / staging dirs).
+    # These are hardcoded because they must always be writable and the user can't
+    # relocate them.
     local allowed=0
     case "$path" in
         /tmp/unraid-aicliagents/zram_upper|/tmp/unraid-aicliagents/zram_upper/*) allowed=1 ;;
         /tmp/unraid-aicliagents|/tmp/unraid-aicliagents/*) allowed=1 ;;
         /usr/local/emhttp/plugins/unraid-aicliagents|/usr/local/emhttp/plugins/unraid-aicliagents/*) allowed=1 ;;
         /boot/config/plugins/unraid-aicliagents|/boot/config/plugins/unraid-aicliagents/*) allowed=1 ;;
-        /mnt/user/*) allowed=1 ;;
-        /mnt/cache/*) allowed=1 ;;
-        /mnt/disk[0-9]*) allowed=1 ;;
     esac
+
+    # User-configurable persistence paths under /mnt/. Allow any pool except the
+    # known-system tmpfs mounts that aren't real persistence (sized 1024k by
+    # Unraid for plugins like unassigned-devices). Rejecting only the explicit
+    # system mounts means Unraid user-pools (e.g. /mnt/cache, /mnt/cache_nvme,
+    # /mnt/scratch_old, /mnt/zfs_pool, custom names from disks.ini) all work.
+    if [ "$allowed" -ne 1 ]; then
+        case "$path" in
+            /mnt/disks|/mnt/disks/*)       : ;;  # unassigned-devices tmpfs
+            /mnt/remotes|/mnt/remotes/*)   : ;;  # network shares tmpfs
+            /mnt/rootshare|/mnt/rootshare/*) : ;;
+            /mnt/addons|/mnt/addons/*)     : ;;
+            /mnt/*/*)                       allowed=1 ;;  # any pool: /mnt/<name>/<sub>
+            /mnt/disk[0-9]*)                allowed=1 ;;  # array disks: /mnt/disk1, /mnt/disk2, ...
+        esac
+    fi
 
     if [ "$allowed" -ne 1 ]; then
         echo "[$(get_ts)] [ERR!] [guard_path] $label outside allowed prefixes: $path" >> "$DEBUG_LOG"

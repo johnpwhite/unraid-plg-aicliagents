@@ -10,6 +10,8 @@
 
 namespace AICliAgents\Services;
 
+use AICliAgents\Services\Sources\SourceResolver;
+
 class InstallerService {
     /**
      * Installs an agent via NPM.
@@ -50,58 +52,40 @@ class InstallerService {
 
         // D-328: Remove version AFTER we have the agent config to avoid re-discovery loops
         AgentRegistry::removeVersion($agentId);
-        
-        $package = $agent['npm_package'];
+
         $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
-        $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
 
-        $versionSpec = $targetVersion ? "@$targetVersion" : "@latest";
-        LogService::log("Preparing to install $package$versionSpec into $agentDir", LogService::LOG_INFO, "InstallerService");
-        setInstallStatus("Starting NPM install...", 20, $agentId);
-
-        // 2.A: Setup streaming command
-        // We use --prefix to ensure it installs into the ZRAM-mounted /agents/ID folder
-        $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir) . " && npm install " . escapeshellarg($package . $versionSpec) . " --no-audit --no-fund --loglevel info 2>&1";
-        
-        $currentProgress = 20;
-        $res = UtilityService::execStreaming($cmd, function($line, $isError) use ($agentId, &$currentProgress) {
-            // Log major NPM steps to INFO, everything else to DEBUG
-            if (strpos($line, 'npm http fetch') !== false || strpos($line, 'npm WARN') !== false || $isError) {
-                LogService::log("[NPM] $line", LogService::LOG_INFO, "InstallerService");
-            } else {
-                LogService::log("[NPM] $line", LogService::LOG_DEBUG, "InstallerService");
-            }
-            
-            // Increment progress slowly for every 5 lines to show activity
-            if ($currentProgress < 75) {
-                $currentProgress += 0.5; // High granularity
-                
-                // Extract meaningful step from NPM logs if possible
-                $msg = "Installing: $line";
-                if (strlen($msg) > 60) $msg = substr($msg, 0, 57) . "...";
-                
-                // Add "Estimated time" hint every few steps
-                if ($currentProgress > 30 && $currentProgress < 35) $msg = "Fetching packages... (Est. 45s)";
-                if ($currentProgress > 50 && $currentProgress < 55) $msg = "Linking dependencies... (Est. 20s)";
-
-                setInstallStatus($msg, (int)$currentProgress, $agentId);
-                
-                // D-328: Small delay to prevent AJAX polling from hitting an empty file during rapid writes
-                usleep(100000); 
-            }
-        });
-
-        if ($res !== 0) {
-            LogService::log("NPM Install failed for $agentId (Exit: $res)", LogService::LOG_ERROR, "InstallerService");
-            setInstallStatus("NPM Install failed", 0, $agentId, "Check logs for details");
-            return ['status' => 'error', 'message' => 'NPM install failed'];
+        // D-400 (#54): Dispatch on source type. NPM is handled by NpmSource; non-NPM agents
+        // go through GithubReleaseSource / CurlInstallSource / TarballSource. SourceResolver
+        // synthesises a {type:npm} source when the legacy top-level npm_package field is the
+        // only thing set, so existing default-agent entries and user agents.json keep working.
+        $source = SourceResolver::resolve($agent);
+        if ($source === null) {
+            LogService::log("Installation aborted: agent $agentId has no resolvable install source.", LogService::LOG_ERROR, "InstallerService");
+            setInstallStatus("No install source", 0, $agentId, "Agent entry missing source or npm_package");
+            return ['status' => 'error', 'message' => 'No install source'];
         }
+
+        $desc = SourceResolver::descriptor($agent);
+        LogService::log("Using source type '" . ($desc['type'] ?? '?') . "' for $agentId (target=" . ($targetVersion ?? 'latest') . ")", LogService::LOG_INFO, "InstallerService");
+        setInstallStatus("Starting install...", 20, $agentId);
+
+        $ok = $source->fetch($agentId, $agent, $targetVersion, function(string $msg, int $pct) use ($agentId) {
+            setInstallStatus($msg, $pct, $agentId);
+        });
+        if (!$ok) {
+            LogService::log("Fetch failed for $agentId (source=" . ($desc['type'] ?? '?') . ")", LogService::LOG_ERROR, "InstallerService");
+            setInstallStatus("Install failed", 0, $agentId, "Check logs for details");
+            return ['status' => 'error', 'message' => 'Fetch failed'];
+        }
+
+        $source->stage($agentId, $agent);
 
         // 3. Set version and permissions
         setInstallStatus("Finalizing permissions...", 80, $agentId);
-        
-        // D-323: Discover version from package.json (Offline/Robust)
-        $installedVer = AgentRegistry::discoverVersion($agentId, $agent['binary'], $agent['binary_fallback'] ?? '');
+
+        // D-323: Discover version via source-specific probe (package.json / --version / VERSION file).
+        $installedVer = $source->discoverVersion($agentId, $agent);
         if ($installedVer) {
             AgentRegistry::saveVersion($agentId, $installedVer);
         } else {
@@ -109,12 +93,18 @@ class InstallerService {
             AgentRegistry::saveVersion($agentId, 'installed');
         }
 
-        PermissionService::enforcePluginPermissions(); 
-        exec("chmod -R 755 " . escapeshellarg($agentDir));
+        PermissionService::enforcePluginPermissions();
+        @exec("chmod -R 755 " . escapeshellarg($agentDir));
 
         setInstallStatus("Baking SquashFS delta...", 90, $agentId);
-        
-        // 5. Commit changes from ZRAM to SquashFS to persist on Flash
+
+        // 5. Commit changes from ZRAM to SquashFS to persist on Flash.
+        // No install-time consolidate — supervisor handles consolidation on its
+        // own schedule via the post-bake threshold trigger in commitChanges
+        // (StorageMountService) once layer count crosses the configured ceiling.
+        // Bug #512: previously a sync StorageMigrationService::consolidateEntity
+        // call ran here (D-332 phase 6), redundant with the post-bake trigger
+        // and a source of install-time mount races.
         $res = StorageMountService::commitChanges('agent', $agentId);
         if ($res === 1) {
             LogService::log("Installer: Critical error during persistence bake for $agentId.", LogService::LOG_ERROR, "InstallerService");
@@ -122,21 +112,29 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Persistence bake failed'];
         }
 
-        // 6. D-332: Auto-Consolidation Phase
-        // Merge deltas and prune non-essential files to optimize Flash storage.
-        setInstallStatus("Optimizing storage (Consolidating)...", 95, $agentId);
-        LogService::log("Installer: Starting auto-consolidation for $agentId...", LogService::LOG_INFO, "InstallerService");
-        $conRes = StorageMigrationService::consolidateEntity('agent', $agentId);
-        
-        if (!$conRes) {
-            LogService::log("Installer: Auto-consolidation failed for $agentId, but installation is functional.", LogService::LOG_WARN, "InstallerService");
-        }
-
         setInstallStatus("Installation complete", 100, $agentId);
 
         // Post-install: invalidate version cache and clear update notifications
         VersionCheckService::invalidateAgent($agentId);
         VersionCheckService::clearNotification($agentId);
+
+        // Seed manifest-declared `default_envs` into the user's agent-env file
+        // (additive; never overwrites a user value; sidecar-tracks seeded keys
+        // so the next plugin upgrade doesn't resurrect a key the user deleted).
+        // Per WP #736 ENV_AND_SECRETS_TIERS — runs on every successful install /
+        // reinstall; the PLG-INLINE upgrade hook handles already-installed
+        // agents picking up newly-declared defaults across plugin versions.
+        try {
+            $seed = EnvService::seedAgentDefaults($agentId);
+            if (!empty($seed['seeded'])) {
+                LogService::log("Installer: seeded default_envs for $agentId — " . implode(',', $seed['seeded']),
+                    LogService::LOG_INFO, "InstallerService");
+            }
+        } catch (\Throwable $e) {
+            // Seeding must never fail an install — log and continue.
+            LogService::log("Installer: default_envs seed failed for $agentId: " . $e->getMessage(),
+                LogService::LOG_WARN, "InstallerService");
+        }
 
         return ['status' => 'ok'];
     }
@@ -153,6 +151,15 @@ class InstallerService {
         $registry = AgentRegistry::getRegistry();
         $agent = $registry[$agentId] ?? null;
         if (!$agent) return ['status' => 'error', 'message' => 'Agent not found in registry'];
+
+        // Emergency install bypasses the storage stack; only NPM agents are supported here
+        // because GitHub/curl-based agents typically need a staging layout we'd then lose
+        // on reboot anyway. Non-NPM agents should wait for array-start and do a normal install.
+        if (empty($agent['npm_package'])) {
+            LogService::log("Emergency install refused for $agentId: non-NPM agents are not supported in emergency mode.", LogService::LOG_ERROR, "InstallerService");
+            setInstallStatus("Emergency install not available", 0, $agentId, "Non-NPM agent — start the array and try again");
+            return ['status' => 'error', 'message' => 'Non-NPM agents cannot be emergency-installed'];
+        }
 
         $package = $agent['npm_package'];
         $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
