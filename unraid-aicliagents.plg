@@ -1,8 +1,11 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.12.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.12.05" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.12.05
+- Improve: Reduced Flash-drive (USB stick) write wear. The storage layer now syncs to Flash on a gentler cadence (a ~2-hour default window instead of 30 minutes), consolidates its SquashFS layers far less often, and no longer writes regenerable agent caches to Flash at all — the npm cache, `~/.cache`, agent temp/telemetry directories, etc. are excluded from the bake. Net effect: the plugin writes a lot less to your USB stick. Storage that's currently carrying that cache cruft is slimmed down automatically on the next layer consolidation. (Migrated/backup data is never touched by this — clear that via the storage tab's recovery card if you want it gone.)
+
 ## 2026.05.12.02
 - Fix: Upgrading an agent while one of its workspace sessions is open no longer strands that session. Some agents (e.g. Claude Code 2.1.x) have replaced their legacy "cli.js" entry point with a native binary; the launch now re-checks the agent's binary on every relaunch rather than using the path resolved when the session was opened, so an in-place upgrade is picked up automatically. (If a session was already stranded by such an upgrade, close and reopen that workspace once and it will pick up the new binary.)
 - Improve: After a plugin install or upgrade, the agent Store cards now show each uninstalled agent's available version straight away — a background version-cache refresh runs on install, so you no longer have to press "Check for Updates" first.
@@ -159,7 +162,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.12.02"
+export VERSION="2026.05.12.05"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -185,12 +188,12 @@ fi
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.12.02" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.12.05" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.12.02" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.12.02" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.12.05" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.12.05" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.12.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.12.05)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done
@@ -363,7 +366,52 @@ if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsMan
         aicli_log('seedAllInstalledAgentDefaults: agents=' . \$s['agents'] . ' seeded_total=' . \$s['seeded_total'] . ' agents_touched=' . \$touched, AICLI_LOG_INFO, 'PLG_INLINE');
         echo \"seed: agents={\$s['agents']} seeded_total={\$s['seeded_total']} touched={\$touched}\" . PHP_EOL;
     " 2&gt;&amp;1 | tee -a /tmp/unraid-aicliagents/debug.log
+
+    # WP #748 Phase 1 (A/B/C): migrate cadence defaults for existing installs.
+    # Existing .cfg files have the OLD defaults written into them literally, so
+    # changing ConfigService defaults alone is a no-op for those users. For each
+    # key: if the stored value equals the OLD default exactly, rewrite it to the
+    # NEW default. If the user customised it (value differs from both old AND new),
+    # leave it untouched. Uses ConfigService::saveConfig for atomic, safe writes.
+    log_status "Migrating Flash-wear cadence defaults (WP #748)..."
+    /usr/bin/php -r "
+        require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+        \$cfg = \AICliAgents\Services\ConfigService::getConfig();
+        \$migrations = [
+            'bake_schedule_minutes'             =&gt; ['old' =&gt; '30',   'new' =&gt; '120'],
+            'dirty_threshold_soft_mb'           =&gt; ['old' =&gt; '512',  'new' =&gt; '1024'],
+            'dirty_threshold_hard_mb'           =&gt; ['old' =&gt; '1024', 'new' =&gt; '2048'],
+            'dirty_threshold_critical_mb'       =&gt; ['old' =&gt; '2048', 'new' =&gt; '4096'],
+            'consolidate_layer_threshold_flash' =&gt; ['old' =&gt; '15',   'new' =&gt; '30'],
+        ];
+        \$updates = [];
+        foreach (\$migrations as \$key =&gt; \$m) {
+            \$stored = (string)(\$cfg[\$key] ?? '');
+            if (\$stored === \$m['old']) {
+                \$updates[\$key] = \$m['new'];
+                aicli_log(\"cfg-migrate: \$key \$stored -&gt; {\$m['new']} (was old default)\", AICLI_LOG_INFO, 'PLG_INLINE');
+            } elseif (\$stored === \$m['new']) {
+                aicli_log(\"cfg-migrate: \$key already at new default {\$m['new']} — skip\", AICLI_LOG_INFO, 'PLG_INLINE');
+            } else {
+                aicli_log(\"cfg-migrate: \$key=\$stored is user-customised — skip\", AICLI_LOG_INFO, 'PLG_INLINE');
+            }
+        }
+        if (!empty(\$updates)) {
+            \AICliAgents\Services\ConfigService::saveConfig(\$updates, false);
+            echo 'cfg-migrate: updated ' . implode(', ', array_keys(\$updates)) . PHP_EOL;
+        } else {
+            echo 'cfg-migrate: nothing to update' . PHP_EOL;
+        }
+    " 2&gt;&amp;1 | tee -a /tmp/unraid-aicliagents/debug.log
 fi
+    # NOTE (2026-05-12, Fix #1): WP #748 Phase 1 (F) originally enqueued a home consolidate
+    # (reason=wear_cleanup) here so cache junk in lower layers would be shed promptly.
+    # REVERTED: on the test box a consolidate triggered during the chaotic post-deploy window
+    # (multiple supervisor instances spawning simultaneously) got SIGTERM'd mid-flight, after
+    # deleting the old layer files but before updating the manifest, corrupting the manifest.
+    # The accumulated cache junk is shed at the next NATURAL consolidate instead —
+    # consolidate_layers.sh already has the home-overlay prune from WP #748 F. The
+    # prune-on-natural-consolidate path is safe; a forced-on-upgrade consolidate is not.
 
 # Cleanup ALL staged installer artifacts from /tmp — scripts, .page files,
 # src.tar.gz. Previous versions only rm'd *.sh, which meant /tmp/aicli-stop-

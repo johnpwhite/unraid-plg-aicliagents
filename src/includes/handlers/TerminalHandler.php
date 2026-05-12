@@ -346,23 +346,30 @@ class TerminalHandler {
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
         aicli_log("gracefulClose: DONE $resumeStr | $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
-        // Session ended — enqueue a bake via the supervisor so the home
-        // directory reaches Flash durably. The supervisor handles this
-        // asynchronously; the AJAX response does not block on storage I/O.
+        // WP #748 Phase 1 (E): workspace close does NOT enqueue an immediate bake.
+        // Instead it writes a lightweight "wants-bake" flag file under
+        // /tmp/unraid-aicliagents/supervisor/wants-bake/ so the supervisor's
+        // next tick detects it and bakes — even if we're not yet past the
+        // bake_schedule_minutes window. One flag file, one eventual write.
+        // This collapses rapid workspace-flips into a single bake and removes
+        // a redundant Flash write per close.
         $config = getAICliConfig();
         $user = $config['user'] ?? 'root';
         if (empty($user)) {
             $user = 'root';
         }
-        \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'workspace_close', 10);
+        $wantsBakeDir = '/tmp/unraid-aicliagents/supervisor/wants-bake';
+        @mkdir($wantsBakeDir, 0755, true);
+        $safeUser = preg_replace('/[^a-zA-Z0-9_-]/', '_', $user);
+        @file_put_contents("$wantsBakeDir/home_$safeUser", (string) time());
         \AICliAgents\Services\LifecycleLogService::log(
             \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
             'gracefulClose',
-            'workspace_close_bake_enqueued',
+            'workspace_close_wants_bake_flagged',
             ['user' => $user, 'session' => $safeId]
         );
 
-        return ['status' => 'ok', 'resume_id' => $capturedId, 'baking' => true];
+        return ['status' => 'ok', 'resume_id' => $capturedId, 'baking' => false];
     }
 
     /**

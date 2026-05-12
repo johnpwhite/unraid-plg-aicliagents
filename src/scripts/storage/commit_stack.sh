@@ -33,14 +33,10 @@ error() {
     echo "$msg" >> "$DEBUG_LOG"
 }
 
-if [ ! -d "$UPPER_DIR" ] || [ -z "$(ls -A "$UPPER_DIR" 2>/dev/null)" ]; then
-    log "No changes to commit for $TYPE $ID"
-    exit 0
-fi
-
 lifecycle_log "info" "commit_stack" "bash_bake_start" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
 
-# 1. Prune caches before bake
+# 1. Prune caches before bake (H: emptiness check MUST come after this prune so a
+#    prune that empties the upper correctly short-circuits the bake).
 log "Pruning caches before bake..."
 # D-317: Remove redundant caches from ZRAM upper layer to minimize Flash footprint
 # IMPORTANT: Remove CONTENTS only, not the directory itself. Removing a directory in
@@ -49,6 +45,26 @@ log "Pruning caches before bake..."
 [ -d "$UPPER_DIR/.npm" ] && find "$UPPER_DIR/.npm" -mindepth 1 -delete 2>/dev/null
 [ -d "$UPPER_DIR/.cache" ] && find "$UPPER_DIR/.cache" -mindepth 1 -delete 2>/dev/null
 [ -d "$UPPER_DIR/tmp" ] && find "$UPPER_DIR/tmp" -mindepth 1 -delete 2>/dev/null
+
+# WP #748 Phase 1 (F): expand pre-bake prune to additional regenerable dirs in home overlay.
+# Only applies to home bakes — agent overlays don't have these dirs.
+# HARD CONSTRAINT: never touch snap_*/migrated_legacy_data/*backup*/SAFE_BACKUP — those are
+# user-owned recovery artefacts managed by the storage-tab UI, not ours to delete.
+if [ "$TYPE" = "home" ]; then
+    [ -d "$UPPER_DIR/.bun/install" ] && rm -rf "$UPPER_DIR/.bun/install" 2>/dev/null || true
+    [ -d "$UPPER_DIR/.gemini/tmp" ] && rm -rf "$UPPER_DIR/.gemini/tmp" 2>/dev/null || true
+    [ -d "$UPPER_DIR/.claude/cache" ] && rm -rf "$UPPER_DIR/.claude/cache" 2>/dev/null || true
+    [ -d "$UPPER_DIR/.claude/shell-snapshots" ] && rm -rf "$UPPER_DIR/.claude/shell-snapshots" 2>/dev/null || true
+    [ -d "$UPPER_DIR/.claude/telemetry" ] && rm -rf "$UPPER_DIR/.claude/telemetry" 2>/dev/null || true
+fi
+
+# H: Skip bake entirely if the upper is empty (or became empty after prune).
+# This prevents writing a zero-content delta to Flash.
+if [ ! -d "$UPPER_DIR" ] || [ -z "$(ls -A "$UPPER_DIR" 2>/dev/null)" ]; then
+    log "No changes to commit for $TYPE $ID (upper empty after prune)"
+    lifecycle_log "info" "commit_stack" "bash_bake_skipped_empty" "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+    exit 0
+fi
 
 # Validate persistence path before writing
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; exit 1; }

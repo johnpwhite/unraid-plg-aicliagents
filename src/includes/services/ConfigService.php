@@ -37,14 +37,21 @@ class ConfigService {
             // Storage Durability Supervisor (Phase 3)
             'supervisor_enabled'                => '1',
             'supervisor_tick_seconds'           => '5',
-            'bake_schedule_minutes'             => '30',
-            'dirty_threshold_soft_mb'           => '512',
+            // WP #748 Phase 1 (A/B/C): raised cadence defaults to reduce Flash wear.
+            // OLD defaults: bake_schedule_minutes=30, dirty_threshold_soft_mb=512,
+            // dirty_threshold_hard_mb=1024, dirty_threshold_critical_mb=2048,
+            // consolidate_layer_threshold_flash=15.
+            // Migration: PLG INLINE upgrade block rewrites these keys in existing
+            // .cfg files when the stored value matches the OLD default exactly
+            // (meaning the user never customised it). Customised values are left alone.
+            'bake_schedule_minutes'             => '120',
+            'dirty_threshold_soft_mb'           => '1024',
             'dirty_threshold_soft_pct'          => '12.5',
-            'dirty_threshold_hard_mb'           => '1024',
+            'dirty_threshold_hard_mb'           => '2048',
             'dirty_threshold_hard_pct'          => '25',
-            'dirty_threshold_critical_mb'       => '2048',
+            'dirty_threshold_critical_mb'       => '4096',
             'dirty_threshold_critical_pct'      => '50',
-            'consolidate_layer_threshold_flash' => '15',
+            'consolidate_layer_threshold_flash' => '30',
             'consolidate_layer_threshold_array' => '5',
             'emergency_bake_compression'        => 'lz4',
             // Boot Integrity (Phase 4b)

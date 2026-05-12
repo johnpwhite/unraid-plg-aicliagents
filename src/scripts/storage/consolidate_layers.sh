@@ -74,6 +74,22 @@ if [ "$TYPE" == "agent" ]; then
     rm -rf "$MNT_POINT/tmp/npm_cache"/* 2>/dev/null || true
 fi
 
+# WP #748 Phase 1 (F): expand pre-consolidate prune for home overlays.
+# Operates on the MERGED mount path ($MNT_POINT) so the consolidated layer
+# doesn't carry regenerable caches from lower layers either.
+# HARD CONSTRAINT: never touch snap_*/migrated_legacy_data/*backup*/SAFE_BACKUP.
+if [ "$TYPE" = "home" ]; then
+    log "Pruning regenerable caches from merged home view before consolidation..."
+    update_task_status "Pruning caches..." 18 ""
+    [ -d "$MNT_POINT/.npm" ] && find "$MNT_POINT/.npm" -mindepth 1 -delete 2>/dev/null || true
+    [ -d "$MNT_POINT/.cache" ] && find "$MNT_POINT/.cache" -mindepth 1 -delete 2>/dev/null || true
+    [ -d "$MNT_POINT/.bun/install" ] && rm -rf "$MNT_POINT/.bun/install" 2>/dev/null || true
+    [ -d "$MNT_POINT/.gemini/tmp" ] && rm -rf "$MNT_POINT/.gemini/tmp" 2>/dev/null || true
+    [ -d "$MNT_POINT/.claude/cache" ] && rm -rf "$MNT_POINT/.claude/cache" 2>/dev/null || true
+    [ -d "$MNT_POINT/.claude/shell-snapshots" ] && rm -rf "$MNT_POINT/.claude/shell-snapshots" 2>/dev/null || true
+    [ -d "$MNT_POINT/.claude/telemetry" ] && rm -rf "$MNT_POINT/.claude/telemetry" 2>/dev/null || true
+fi
+
 # Validate paths before destructive operations
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; update_task_status "Failed" 0 "Invalid path"; exit 1; }
 guard_path "$MNT_POINT" "MNT_POINT" || { error "Mount point failed validation: $MNT_POINT"; update_task_status "Failed" 0 "Invalid mount"; exit 1; }
@@ -158,10 +174,45 @@ if [ "$SQSH_SIZE" -gt "$MAX_SIZE" ]; then
     exit 1
 fi
 
-# 4 (was 5). Cleanup Old Layers — explicit per-file, never wildcard (closing finding D)
-# We only delete files that existed BEFORE this bake (OLD_LAYERS snapshot), and we
-# double-check each one is not the new file before removing. This ensures a concurrent
-# delta that landed during consolidation is never accidentally swept.
+# 4 (was 5). Update manifest BEFORE deleting old layer files (Fix #4a).
+#
+# Order matters for crash safety:
+#   • manifest update first → if killed between manifest write and file deletes, the old
+#     files linger on disk UNTRACKED. Reconcile finds them as "untracked" → recovers them
+#     harmlessly (mounts RO, sample-reads, re-adds to manifest as 'recovered').
+#   • file deletes first (old order) → if killed between deletes and manifest write, the
+#     manifest still lists now-deleted layers → reconcile finds them as "missing" → halts
+#     the entity with corrupt_layers. This is what caused the test-box corruption.
+#
+# The manifest is written atomically (tmp+fsync+rename inside LayerManifestService::replaceLayers).
+log "Updating manifest to list only the new consolidated layer (before file deletes)..."
+update_task_status "Updating manifest..." 85 ""
+ENTITY="${TYPE}/${ID}"
+NOW_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
+SQSH_SHA256=$(sha256sum "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null | awk '{print $1}' || echo "")
+SQSH_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
+if command -v php >/dev/null 2>&1; then
+    php -d display_errors=0 -r "
+        \$_SERVER['DOCUMENT_ROOT']='/usr/local/emhttp';
+        require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+        \AICliAgents\Services\LayerManifestService::replaceLayers('$ENTITY', [
+            [
+                'filename'   => '$FINAL_NAME',
+                'sha256'     => '$SQSH_SHA256',
+                'bytes'      => (int)'$SQSH_BYTES',
+                'kind'       => 'consolidated',
+                'created_at' => '$NOW_TS',
+            ],
+        ], '$PERSIST_PATH');
+    " 2>/dev/null || true
+    lifecycle_log "info" "consolidate_layers" "manifest_updated_before_delete" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\"}" 2>/dev/null || true
+else
+    log "WARNING: php not available — manifest not updated before old-layer delete. Reconcile will recover."
+fi
+
+# 4b. Delete old layer files — now safe because manifest no longer references them.
+#     If SIGTERM fires here, the old files are untracked (reconcile recovers),
+#     not missing (reconcile halts).
 log "Cleaning up old layers..."
 update_task_status "Cleaning up old layers..." 90 ""
 guard_path "$PERSIST_PATH" "PERSIST_PATH (cleanup)" || { error "Path guard failed before cleanup"; exit 1; }

@@ -38,16 +38,17 @@ ORPHAN_LOCK_DIR="/var/run"
 DAEMON_VERSION="3.2.0"
 
 # Config key — defaults (overridden by sourcing the cfg below)
+# WP #748 Phase 1 (A/B/C): raised cadence defaults to reduce Flash wear.
 SUPERVISOR_TICK="${supervisor_tick_seconds:-5}"
-BAKE_SCHEDULE_MINUTES="${bake_schedule_minutes:-30}"
-DIRTY_SOFT_MB="${dirty_threshold_soft_mb:-512}"
+BAKE_SCHEDULE_MINUTES="${bake_schedule_minutes:-120}"
+DIRTY_SOFT_MB="${dirty_threshold_soft_mb:-1024}"
 DIRTY_SOFT_PCT="${dirty_threshold_soft_pct:-12.5}"
-DIRTY_HARD_MB="${dirty_threshold_hard_mb:-1024}"
+DIRTY_HARD_MB="${dirty_threshold_hard_mb:-2048}"
 DIRTY_HARD_PCT="${dirty_threshold_hard_pct:-25}"
-DIRTY_CRITICAL_MB="${dirty_threshold_critical_mb:-2048}"
+DIRTY_CRITICAL_MB="${dirty_threshold_critical_mb:-4096}"
 DIRTY_CRITICAL_PCT="${dirty_threshold_critical_pct:-50}"
 EMERGENCY_BAKE_COMP="${emergency_bake_compression:-lz4}"
-CONSOLIDATE_THRESHOLD_FLASH="${consolidate_layer_threshold_flash:-15}"
+CONSOLIDATE_THRESHOLD_FLASH="${consolidate_layer_threshold_flash:-30}"
 CONSOLIDATE_THRESHOLD_ARRAY="${consolidate_layer_threshold_array:-5}"
 
 # Notify script path
@@ -1042,6 +1043,46 @@ _check_schedule_trigger() {
 }
 
 # ---------------------------------------------------------------------------
+# WP #748 Phase 1 (E): wants-bake flag check
+# gracefulClose writes /tmp/unraid-aicliagents/supervisor/wants-bake/home_<user>
+# instead of enqueuing an immediate bake. This function consumes those flags on
+# every tick — enqueuing a bake for each flagged home entity (bypassing the
+# schedule-window check so the next tick bakes even if recently baked) — then
+# deletes each flag atomically. Missed ticks are fine: the flag just accumulates
+# until the next tick; the bake deduplicates via the queue.
+# ---------------------------------------------------------------------------
+_check_wants_bake_flags() {
+    local wants_bake_dir="${STATUS_DIR}/supervisor/wants-bake"
+    [ -d "$wants_bake_dir" ] || return 0
+
+    local flag_file
+    for flag_file in "$wants_bake_dir"/home_*; do
+        [ -f "$flag_file" ] || continue
+        local fname
+        fname="$(basename "$flag_file")"
+        # Extract id: flag name is home_<safeUser>
+        local user_id="${fname#home_}"
+        [ -n "$user_id" ] || continue
+
+        # Consume the flag first (atomic remove) so we don't double-enqueue on crash
+        rm -f "$flag_file" 2>/dev/null || true
+
+        # Only enqueue if there are dirty bytes — same guard as schedule trigger
+        local upper_dir
+        upper_dir="$(zram_upper "home" "$user_id" 2>/dev/null || true)"
+        if [ -d "$upper_dir" ] && [ -n "$(ls -A "$upper_dir" 2>/dev/null)" ]; then
+            queue_enqueue 20 "home" "$user_id" "bake" "workspace_close" 2>/dev/null || true
+            lifecycle_log "info" "supervisor" "wants_bake_flag_consumed" \
+                "{\"entity\":\"home/$user_id\",\"reason\":\"workspace_close\"}" 2>/dev/null || true
+            log_info "wants-bake flag consumed for home/$user_id — bake enqueued"
+        else
+            lifecycle_log "info" "supervisor" "wants_bake_flag_skipped_empty" \
+                "{\"entity\":\"home/$user_id\"}" 2>/dev/null || true
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
 _work_tick() {
@@ -1056,6 +1097,9 @@ _work_tick() {
 
     # Step 3: Check schedule trigger (may enqueue bakes)
     _check_schedule_trigger
+
+    # Step 3a: WP #748 Phase 1 (E) — consume wants-bake flags from workspace closes
+    _check_wants_bake_flags
 
     # Step 4: Pop and process one queue item
     local qdepth
