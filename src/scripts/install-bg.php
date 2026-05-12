@@ -48,12 +48,11 @@ try {
     } else {
         aicli_log("Background Install Job Complete for: $agentId", AICLI_LOG_INFO);
 
-        // Enqueue a high-priority bake so the agent layer is durable on Flash
-        // before the user can launch a session against it (spec S0, step 2).
-        // No post-install consolidate enqueue — supervisor decides on its own
-        // schedule via the post-bake threshold trigger (Bug #512).
-        \AICliAgents\Services\SupervisorService::enqueue('agent', $agentId, 'bake', 'agent_install', 0);
-        aicli_log("Enqueued post-install bake for $agentId", AICLI_LOG_INFO, "InstallBG");
+        // Bug #716: do NOT enqueue a second bake here.
+        // InstallerService::installAgent already calls StorageMountService::commitChanges
+        // (see InstallerService.php ~line 108), which runs commit_stack.sh synchronously.
+        // A redundant SupervisorService::enqueue('bake') was the second concurrent bake
+        // that raced the install bake's remount step, causing "Install Failed (Bake Error)".
 
         // After successful install: auto-launch any workspaces configured for this agent.
         // Errors here are non-fatal — install itself already succeeded. The service

@@ -22,6 +22,27 @@ source "$(dirname "$0")/atomic_write_layer.sh" 2>/dev/null || {
 UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
 WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
 
+# Bug #716: per-entity bake flock — serialise concurrent bakes of the same entity.
+# All bake paths (InstallerService::commitChanges, supervisor _op_bake,
+# event/stopping direct bake, installer/cleanup.sh pre-upgrade bake) funnel
+# through this script, so the lock here covers every caller.
+# Sanitise $ID to keep the lock filename shell-safe (alphanumeric + hyphen).
+_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
+_BAKE_LOCK="/var/run/aicli-bake-${TYPE}-${_LOCK_ID}.lock"
+exec 9>"$_BAKE_LOCK"
+if ! flock -n 9; then
+    # Another bake for this entity is already running.  The in-progress bake
+    # will capture the current upper-dir state when it finishes, so there is
+    # nothing to do here.  Exit 0 so the caller doesn't treat this as an error.
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)] [INFO] [COMMIT] bake for $TYPE/$ID already in progress — skipping; its changes will be captured by the in-progress bake"
+    # Write lifecycle entry without sourcing common.sh (may not be available yet)
+    lifecycle_log "info" "commit_stack" "bake_skipped_concurrent" "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+    exit 0
+fi
+# Lock is held on fd 9 for the remainder of the script (bake + remount +
+# post-bake consolidate-threshold check).  The kernel releases it on exit
+# (clean or crash) so there is no risk of a stale-lock deadlock.
+
 log() {
     local msg="[$(get_ts)] [INFO] [COMMIT] $1"
     echo "$msg"
