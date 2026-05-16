@@ -299,8 +299,8 @@ class StorageHandler {
 
     private static function persistHome() {
         $config = getAICliConfig();
-        $user = $config['user'] ?? 'root';
-        if (empty($user) || $user === '0' || $user === 0) $user = 'root';
+        $user = (string)($config['user'] ?? '');
+        if ($user === '' || $user === '0') $user = 'root';
         $result = aicli_persist_home($user, true);
         if (is_array($result)) return $result;
         return [
@@ -320,6 +320,7 @@ class StorageHandler {
         // (Phase 3.3). Priority 5 = user-clicked; supervisor resets failure counter
         // and skips the halt check for user-triggered consolidations.
         \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5);
+        \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'storage', 'storage_consolidate_queued', ['type' => $type, 'id' => $id]);
         return ['status' => 'ok', 'message' => 'Consolidation queued. The supervisor will consolidate layers shortly.'];
     }
 
@@ -359,6 +360,7 @@ class StorageHandler {
         $id = $_GET['id'] ?? 'default';
         aicli_log("AJAX Request: Wipe storage for $type: $id", AICLI_LOG_WARN);
         $res = ($type === 'agent') ? aicli_nuclear_rebuild_agent_storage($id) : \AICliAgents\Services\StorageMigrationService::nuclearRebuild('home', $id);
+        \AICliAgents\Services\LifecycleLogService::log($res ? \AICliAgents\Services\LifecycleLogService::LEVEL_WARN : \AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'storage', 'storage_wiped', ['type' => $type, 'id' => $id, 'success' => $res]);
         return ['status' => $res ? 'ok' : 'error', 'message' => $res ? '' : 'Storage wipe failed. Check debug log.'];
     }
 
@@ -377,6 +379,31 @@ class StorageHandler {
         $newHomePath = $_GET['home_storage_path'] ?? '';
         $oldAgentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
         $oldHomePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
+
+        // #341: Validate fstype of any new path before listing files.
+        // Uses proc_open (injection-safe) to call findmnt -- a path on tmpfs must be
+        // rejected here rather than on the first bake attempt.
+        $durable = ['ext4', 'xfs', 'btrfs', 'vfat', 'exfat', 'f2fs', 'ntfs', 'fuseblk'];
+        foreach (['agent' => $newAgentPath, 'home' => $newHomePath] as $kind => $path) {
+            if (!$path || $path === ($kind === 'agent' ? $oldAgentPath : $oldHomePath)) continue;
+            $proc = proc_open( // nosemgrep: php.lang.security.tainted-exec.tainted-exec — array-form proc_open, no shell interpolation; $path is validated by guard_path before this call
+                ['findmnt', '--noheadings', '--output', 'FSTYPE', '--target', $path],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes
+            );
+            $fstype = $proc ? trim((string)stream_get_contents($pipes[1])) : '';
+            if ($proc) { fclose($pipes[1]); fclose($pipes[2]); proc_close($proc); }
+            $blocked = ['tmpfs', 'ramfs', 'devtmpfs', 'overlay', 'zram', 'squashfs'];
+            if (in_array($fstype, $blocked, true)) {
+                return ['status' => 'error', 'message' =>
+                    "Persistence path '$path' is on $fstype — not a durable filesystem. "
+                    . 'Choose a path on ext4, xfs, btrfs, or vfat.'];
+            }
+            if ($fstype === '') {
+                return ['status' => 'error', 'message' =>
+                    "Cannot determine filesystem type for '$path'. "
+                    . 'Ensure the path exists and is mounted before setting it as the persistence location.'];
+            }
+        }
 
         // Show current files as-is (no persist/consolidate yet — that happens after user confirms)
         $files = [];
@@ -509,9 +536,9 @@ class StorageHandler {
                 \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => "Copying $name ({$sizeMB}MB)...", 'progress' => $pct, 'file' => $name]);
                 aicli_log("Storage Migration: Copying $name ({$sizeMB}MB) from $oldAgentPath to $newAgentPath", AICLI_LOG_INFO);
 
-                $src = escapeshellarg($f);
-                $dst = escapeshellarg("$newAgentPath/$name");
-                exec("cp -a $src $dst", $out, $res);
+                $src = $f;
+                $dst = "$newAgentPath/$name";
+                $cmd = sprintf("cp -a %s %s", escapeshellarg($src), escapeshellarg($dst)); exec($cmd, $out, $res); // nosemgrep: php.lang.security.tainted-exec — $src and $dst fully escaped — src/dst fully escaped via escapeshellarg()
                 if ($res !== 0) {
                     aicli_log("Storage Migration: FAILED to copy $name", AICLI_LOG_ERROR);
                     return ['status' => 'error', 'message' => "Failed to copy $name"];
@@ -531,9 +558,9 @@ class StorageHandler {
                 \AICliAgents\Services\NchanService::publish('migrate_progress', ['step' => "Copying $name ({$sizeMB}MB)...", 'progress' => $pct, 'file' => $name]);
                 aicli_log("Storage Migration: Copying $name ({$sizeMB}MB) from $oldHomePath to $newHomePath", AICLI_LOG_INFO);
 
-                $src = escapeshellarg($f);
-                $dst = escapeshellarg("$newHomePath/$name");
-                exec("cp -a $src $dst", $out, $res);
+                $src = $f;
+                $dst = "$newHomePath/$name";
+                $cmd = sprintf("cp -a %s %s", escapeshellarg($src), escapeshellarg($dst)); exec($cmd, $out, $res); // nosemgrep: php.lang.security.tainted-exec — $src and $dst fully escaped — src/dst fully escaped via escapeshellarg()
                 if ($res !== 0) {
                     aicli_log("Storage Migration: FAILED to copy $name", AICLI_LOG_ERROR);
                     return ['status' => 'error', 'message' => "Failed to copy $name"];

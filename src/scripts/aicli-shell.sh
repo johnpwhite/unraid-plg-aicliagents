@@ -220,6 +220,7 @@ FUNCOEF
     printf 'export frozen_resume_cmd=%q\n' "$frozen_resume_cmd" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_latest=%q\n' "$frozen_resume_latest" >> "$RUN_SCRIPT"
     printf 'export frozen_chat_id=%q\n' "$frozen_chat_id" >> "$RUN_SCRIPT"
+    printf 'export AICLI_ENV_HASH=%q\n'  "$ENV_HASH"       >> "$RUN_SCRIPT"
     printf 'export frozen_effective_args=%q\n' "$frozen_effective_args" >> "$RUN_SCRIPT"
     # WP #273: export the args file paths too so the run-loop can re-read
     # them on every Ctrl-C relaunch without re-computing the md5(path) hash.
@@ -615,6 +616,37 @@ while true; do
         rm -f "/tmp/unraid-aicliagents/auto-reload-$AICLI_SESSION_ID.flag" 2>/dev/null
         log_aicli "INFO" 2 "Auto-reload sentinel observed — skipping reload prompt, relaunching immediately."
         continue
+    fi
+
+    # Post-exit GUID sync: when the user /resume's inside the TUI and selects a
+    # different chat, the agent's on-disk session file changes but the shell's
+    # frozen_chat_id (baked at session start) doesn't. Scan the agent's session
+    # store after every exit and update both frozen_chat_id (for the next relaunch)
+    # and the durable resume file (for the next workspace open). Only runs when
+    # neither sentinel fired — graceful-close is handled by PHP, auto-reload does
+    # not need a GUID update.
+    if [ -n "$AICLI_ENV_HASH" ]; then
+        _discovered_chat=""
+        if [ "$AGENT_ID" == "claude-code" ]; then
+            for _cc_sessions_dir in "$HOME_DIR/.claude/projects" "$HOME_DIR/.claude/sessions"; do
+                if [ -d "$_cc_sessions_dir" ]; then
+                    _newest_jsonl=$(find "$_cc_sessions_dir" -name "*.jsonl" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+                    if [ -n "$_newest_jsonl" ]; then
+                        _discovered_chat=$(basename "$_newest_jsonl" .jsonl)
+                        break
+                    fi
+                fi
+            done
+        fi
+        if [ -n "$_discovered_chat" ] && [ "$_discovered_chat" != "$frozen_chat_id" ]; then
+            log_aicli "INFO" 2 "Post-exit GUID sync: $frozen_chat_id -> $_discovered_chat"
+            frozen_chat_id="$_discovered_chat"
+            _resume_dir="$HOME_DIR/.aicli/resumes"
+            _resume_file="${_resume_dir}/resume_${AICLI_ENV_HASH}.json"
+            mkdir -p "$_resume_dir" 2>/dev/null
+            printf '{"chat_id":"%s","saved_at":%d}\n' "$_discovered_chat" "$(date +%s)" > "${_resume_file}.tmp" \
+                && mv "${_resume_file}.tmp" "$_resume_file" 2>/dev/null
+        fi
     fi
 
     # D-403 (#55): Fast-exit guard. Agents that exit in under 3 seconds are almost

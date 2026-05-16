@@ -22,8 +22,9 @@
         storageSub.on('message', function(msg) {
             try {
                 var data = JSON.parse(msg);
-                if (data && typeof renderAgentStats === 'function') {
-                    renderAgentStats(data.agents);
+                // WP #748 J / Phase B: per-agent storage cards removed from the
+                // Storage tab; only the home + system surfaces need live updates.
+                if (data && typeof renderHomeStats === 'function') {
                     renderHomeStats(data.homes);
                     renderCleanupCard(data.artifacts);
                     if (data.rootfs) {

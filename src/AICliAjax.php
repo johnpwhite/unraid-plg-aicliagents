@@ -7,6 +7,7 @@
  *     <constraints>Under 100 lines. Shared middleware only: CSRF, error handling, time limits.</constraints>
  * </module_context>
  */
+ob_start(); // Absorb any stray output from included files before JSON is emitted
 error_reporting(E_ALL);
 ini_set('display_errors', '0');
 set_time_limit(30);
@@ -35,6 +36,8 @@ require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/ArgsHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AutoLaunchHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/EnvHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/SshKeyService.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/SshHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
@@ -47,7 +50,10 @@ if (isset($_GET['action'])) {
     $rawId = $_GET['id'] ?? 'default';
     $id = ValidationService::validateId($rawId) ?: 'default';
 
-    // CSRF Validation (Unraid uses GET with csrf_token in query string - Lesson 5)
+    // CSRF Validation — see PLUGIN_STANDARDS.md Lesson 3.
+    // local_prepend.php (auto_prepend_file) validates CSRF from $_POST or X-CSRF-TOKEN
+    // header for POST requests, then unsets them. We re-check here from $_REQUEST
+    // (which retains the GET copy) so GET-based callers also pass.
     $var = @parse_ini_file("/var/local/emhttp/var.ini");
     $expected = trim((string)($var['csrf_token'] ?? ''));
     $received = $_REQUEST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
@@ -56,6 +62,7 @@ if (isset($_GET['action'])) {
 
     if (empty($expected) || $received !== $expected) {
         aicli_log("CSRF FAILED! Action: $action (Received: $received, Expected: $expected)", AICLI_LOG_ERROR, "AICliAjax");
+        ob_end_clean();
         echo json_encode(['status' => 'error', 'message' => 'Invalid CSRF Token']);
         exit;
     }
@@ -79,8 +86,10 @@ if (isset($_GET['action'])) {
 
         // Route to handler - raw output actions first
         if ($action === 'filetree') {
+            ob_end_clean();
             \AICliAgents\Handlers\UtilityHandler::rawFiletree();
         } elseif ($action === 'get_install_status') {
+            ob_end_clean();
             \AICliAgents\Handlers\AgentHandler::rawInstallStatus();
         } elseif ($action === 'get_task_status') {
             // Task status file is already JSON - read and output directly.
@@ -92,6 +101,7 @@ if (isset($_GET['action'])) {
                 $type = $_GET['type'] ?? 'agents';
                 $user = ($type === 'agents') ? 'agents' : getAICliConfig()['user'];
             }
+            ob_end_clean();
             if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/', (string)$user)) {
                 header('Content-Type: application/json');
                 echo json_encode(['progress' => 0, 'step' => 'invalid user']);
@@ -111,8 +121,10 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\ArgsHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\AutoLaunchHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\EnvHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\SshHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
+            ob_end_clean();
             if ($result !== null) {
                 // json_encode output served as application/json — no browser
                 // HTML parser involved. Not a user-controlled HTML sink.
@@ -132,6 +144,7 @@ if (isset($_GET['action'])) {
         if (($config['log_level'] ?? 2) >= 3) {
             $response['trace'] = $e->getTraceAsString();
         }
+        ob_end_clean();
         echo json_encode($response);
     }
 

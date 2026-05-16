@@ -28,15 +28,16 @@ class UtilityHandler {
             case 'upload_chunk':     return self::uploadChunk();
             case 'save_file':        return self::saveFile();
             case 'save_pasted_image': return self::savePastedImage();
-            case 'perf_log':         return self::perfLog();
-            default:                 return null;
+            case 'perf_log':          return self::perfLog();
+            case 'log_client_error':  return self::clientError();
+            default:                  return null;
         }
     }
 
     /** Actions handled by this handler. */
     public static function actions() {
         return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'get_env', 'save_env',
-                'filetree', 'list_dir', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log'];
+                'filetree', 'list_dir', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log', 'log_client_error'];
     }
 
     /**
@@ -58,6 +59,29 @@ class UtilityHandler {
         $ms = (int)floor(microtime(true) * 1000);
         $line = "$ms $stage $agent $session\n";
         @file_put_contents('/tmp/unraid-aicliagents/perf.log', $line, FILE_APPEND);
+        return ['status' => 'ok'];
+    }
+
+    /**
+     * Browser-side error sink. Accepts uncaught JS errors and unhandled promise
+     * rejections, logs them via LogService so they appear in the plugin log.
+     * Inputs are stripped/truncated to prevent log injection.
+     */
+    private static function clientError() {
+        $type = $_POST['type'] ?? $_REQUEST['type'] ?? '';
+        if (!in_array($type, ['uncaught', 'unhandled_rejection'], true)) {
+            return ['status' => 'error', 'message' => 'invalid type'];
+        }
+        $message = substr($_POST['message'] ?? $_REQUEST['message'] ?? '', 0, 500);
+        $detail  = substr($_POST['detail']  ?? $_REQUEST['detail']  ?? '', 0, 2000);
+        // Strip control characters to prevent log injection
+        $message = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', '', $message);
+        $detail  = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', '', $detail);
+        \AICliAgents\Services\LogService::log(
+            "Client $type: $message | $detail",
+            \AICliAgents\Services\LogService::LOG_ERROR,
+            'ClientError'
+        );
         return ['status' => 'ok'];
     }
 

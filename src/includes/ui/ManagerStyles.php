@@ -130,7 +130,7 @@
         background: var(--orange, #ff8c00) !important; border: none !important; color: #fff !important;
         display: inline-flex !important; align-items: center; justify-content: center;
         font-size: 10px !important; font-weight: 800; text-transform: uppercase; gap: 5px;
-        flex-shrink: 0 !important; transition: all 0.15s ease;
+        flex-shrink: 0 !important; transition: all 0.15s ease; margin: 0 !important;
     }
     .aicli-btn-slim:hover { background: #e67e00 !important; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.3); }
     .aicli-btn-slim:active { transform: translateY(0); box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
@@ -881,6 +881,17 @@
         background: #ef4444; color: #fff; border-color: #ef4444;
         box-shadow: 0 2px 8px rgba(239,68,68,0.35);
     }
+    /* WP #748 J / Phase B follow-up (b): contextual Repair button in the foot.
+       Amber so it's visually distinct from the orange Upgrade (primary) and the
+       red Uninstall (danger). Same outlined-on-rest, filled-on-hover treatment. */
+    .av2-btn.warn {
+        background: rgba(230,126,34,0.08); color: #e67e22;
+        border-color: rgba(230,126,34,0.55); font-weight: 600;
+    }
+    .av2-btn.warn:hover {
+        background: #e67e22; color: #fff; border-color: #e67e22;
+        box-shadow: 0 2px 8px rgba(230,126,34,0.35);
+    }
 
     /* Footer row: install progress + install/uninstall actions */
     .av2-foot {
@@ -980,4 +991,133 @@
        the progress has the full body region. */
     .av2-card:has(.av2-install-panel.active) .av2-strip,
     .av2-card:has(.av2-install-panel.active) .av2-panels { display: none; }
+    /* ------------------------------------------------------------------------
+       Mobile responsive overrides (≤ 600 px viewport — phone portrait + most
+       phone landscape). Targets the three surfaces that overflowed in the
+       2026-05-13 mobile shots: the Settings sub-tab strip (Configuration /
+       Agent Store / Home Storage / Debug Console), the Agent Store cards
+       (icon-title-badge head grid + 5-chip strip + foot meta+buttons), and
+       the version badge stack (badge truncating because column 3 of the head
+       grid got pushed off-screen). See docs/specs/MOBILE_RESPONSIVE.md.
+       ------------------------------------------------------------------------ */
+    @media (max-width: 600px) {
+        /* ROOT CAUSE of the 2026-05-14 card-overhang report: the Agent Store
+           grid is `repeat(auto-fill, minmax(460px, 1fr))` and the Config grid
+           is `repeat(auto-fill, minmax(400px, 1fr))` — at any sub-460 px / sub-
+           400 px viewport (every phone) the grid track is wider than the
+           viewport and the cards bleed off the right edge. Collapse to a
+           single-column grid on mobile so each card fills the viewport width
+           minus the page's natural padding, and belt-and-brace each card with
+           max-width:100% + min-width:0 so a child can never re-introduce
+           overflow. */
+        .av2-grid,
+        .aicli-config-grid {
+            grid-template-columns: minmax(0, 1fr) !important;
+            gap: 12px !important;
+        }
+        .av2-card,
+        .aicli-card {
+            max-width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+        }
+        /* The state-stripe ::before bar (left edge of every av2-card) is 4 px
+           on desktop — shrink to 3 px on mobile so it doesn't steal width
+           from the head grid's middle column. */
+        .av2-card::before { width: 3px !important; }
+
+        /* Tab strip — horizontal scroll instead of overflow-clip. -webkit-
+           overflow-scrolling for momentum on iOS Safari. flex-wrap:nowrap is
+           explicit to override any framework default; the tab buttons keep
+           their natural width and the user swipes to reach the rightmost ones. */
+        .aicli-tabs {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: thin;
+            padding-left: 6px; padding-right: 6px;
+        }
+        .aicli-tab-btn {
+            padding: 8px 14px; font-size: 10px;
+            flex: 0 0 auto; letter-spacing: 0.04em;
+        }
+
+        /* Agent card — keep the desktop [icon | title-desc | badge top-right]
+           grid; just shrink each column so it fits at mobile width. Title +
+           desc get smaller fonts and the title clamps to one line; the badge
+           stays in column 3 with tighter padding and smaller font so it can't
+           push off-screen. minmax(0, 1fr) on the middle column lets the
+           title/desc shrink-to-fit instead of forcing the badge column to
+           wrap. */
+        .av2-head {
+            grid-template-columns: 40px minmax(0, 1fr) auto;
+            gap: 8px;
+            padding: 12px 12px 10px;
+        }
+        .av2-icon {
+            width: 40px; height: 40px; border-radius: 8px; padding: 3px;
+        }
+        .av2-title {
+            font-size: 15px; line-height: 1.15;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .av2-desc {
+            font-size: 11px; line-height: 1.4; max-width: 100%;
+            -webkit-line-clamp: 2; line-clamp: 2;
+        }
+        .av2-badge {
+            padding: 4px 7px; font-size: 10px;
+            gap: 2px;
+        }
+        .av2-badge .av2-badge-row { gap: 5px; font-size: 10px; }
+        .av2-badge .av2-badge-upgrade { font-size: 9.5px; }
+        .av2-badge .av2-dot { width: 5px; height: 5px; }
+        .av2-health-pill {
+            /* WP #748 J Phase B pill — when the stacked badge surfaces a
+               non-healthy state alongside the version, keep its little chip
+               compact so the badge column doesn't grow. */
+            font-size: 8px !important;
+            padding: 1px 5px !important;
+            margin-top: 2px !important;
+        }
+
+        /* Chip strip — fit all 5 in a single row at mobile. With 5 chips at
+           flex: 1 1 0 the row distributes available width evenly; the labels
+           shrink to fit via overflow:hidden + ellipsis (chips were already
+           overflow:hidden on desktop). Tighter padding + smaller letter-
+           spacing keeps "TERMINAL" / "RESOURCES" readable instead of wrapping
+           ARGS onto its own row like before. */
+        .av2-strip {
+            padding: 0 10px 10px;
+            gap: 2px;
+            flex-wrap: nowrap;
+        }
+        .av2-chip {
+            flex: 1 1 0; min-width: 0;
+            padding: 7px 3px;
+        }
+        .av2-chip .av2-label {
+            font-size: 9.5px; letter-spacing: 0.04em;
+        }
+
+        /* Foot — stack the meta line over the action buttons. Buttons take the
+           full row and share width 50/50 (or 33/33/33 when Repair/Clear-halt
+           are surfaced under Phase B). Stops UNINSTALL being clipped right. */
+        .av2-foot {
+            flex-direction: column; align-items: stretch; gap: 10px;
+            padding: 12px 14px;
+        }
+        .av2-foot .av2-meta {
+            font-size: 10px; line-height: 1.45; word-break: break-all;
+            white-space: normal;
+        }
+        .av2-foot .av2-actions { width: 100%; }
+        .av2-foot .av2-buttons {
+            width: 100%; flex-wrap: wrap !important;
+        }
+        .av2-foot .av2-buttons .av2-btn {
+            flex: 1 1 calc(50% - 4px); min-width: 0;
+            padding: 8px 6px; font-size: 11px;
+        }
+    }
 </style>

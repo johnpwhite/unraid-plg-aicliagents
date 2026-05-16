@@ -116,22 +116,52 @@ class StorageMountService {
 
     /**
      * Ensures the user home storage is mounted.
+     *
+     * Mirrors the agent-mount health-check pattern: verifies the path is
+     * genuinely an overlay mount (not a phantom proc entry), and serializes
+     * concurrent callers with a per-user flock so two simultaneous PHP
+     * requests cannot both invoke mount_stack.sh.
      */
     public static function ensureHomeMounted($user) {
         if (self::isMigrationInProgress()) return false;
 
         $workDir = UtilityService::getWorkDir($user);
         $mnt = "$workDir/home";
-        if (self::isMounted($mnt)) return true;
 
         // Emergency mode: home is a symlink to the temp RAM dir — treat as mounted
         if (is_link($mnt) && self::isEmergencyMode()) return true;
+
+        // Fast path: already a healthy overlay mount
+        if (self::isMounted($mnt) && self::isHomeMountHealthy($user)) return true;
+
+        // Serialize concurrent mounts for the same user with an advisory lock.
+        // Losers block until the winner finishes, then re-check before mounting.
+        $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
+        $lockFile = "/tmp/unraid-aicliagents/home_mount_{$safeUser}.lock";
+        $lock = @fopen($lockFile, 'c');
+        if ($lock !== false) {
+            flock($lock, LOCK_EX);
+            if (self::isMounted($mnt) && self::isHomeMountHealthy($user)) {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+                return true;
+            }
+        }
 
         $persistPath = StoragePathResolver::homePersistPath($user);
 
         if (!self::isPathAvailable($persistPath)) {
             LogService::log("Home mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
             return false;
+        }
+
+        // Phantom mount: stale /proc/mounts entry but not a healthy overlay.
+        // Lazy-unmount to clear it, then reassemble the stack cleanly.
+        if (self::isMounted($mnt)) {
+            LogService::log("Stale home mount detected for '$user' (not a healthy overlay). Unmounting to rebuild.", LogService::LOG_WARN, "StorageMountService");
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            @shell_exec("umount -l " . escapeshellarg($mnt) . " 2>&1");
         }
 
         LogService::log("Mounting Home Stack for $user", LogService::LOG_INFO, "StorageMountService");
@@ -144,7 +174,18 @@ class StorageMountService {
             LogService::log("Mount script FAILED for home $user: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
         }
 
+        if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
         return ($res === 0);
+    }
+
+    /**
+     * Verifies the home overlay mount is genuinely an OverlayFS, not a phantom
+     * proc entry. A healthy home mount reads "overlay <mnt> overlay ..." in /proc/mounts.
+     */
+    public static function isHomeMountHealthy(string $user): bool {
+        $mnt = rtrim(UtilityService::getWorkDir($user) . "/home", '/');
+        $mounts = file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '';
+        return (bool)preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts);
     }
 
     /**
@@ -188,10 +229,28 @@ class StorageMountService {
     }
 
     /**
-     * Commits changes from ZRAM to a new SquashFS delta.
-     * Returns the exit code: 0=Success, 1=Fail, 2=Busy(Baked but RAM not cleared)
+     * Commits changes from ZRAM to SquashFS.
+     *
+     * For $type === 'home': delta bake via commit_stack.sh + post-bake threshold
+     * auto-consolidate (the historic behaviour — home is a delta-stack).
+     *
+     * For $type === 'agent' (WP #748 J, 2026-05-13): routes directly to
+     * consolidate(), which bakes the merged mount view (the just-installed
+     * package) as a single fresh `_consolidated_` layer, atomically replaces
+     * the layer set, and remounts with a single lowerdir. One layer per agent,
+     * no delta accumulation, no later consolidate. See
+     * docs/specs/STORAGE_DURABILITY_SUPERVISOR.md §"Agent storage — single
+     * layer, always persisted".
+     *
+     * Returns the exit code: 0=Success, 1=Fail, 2=Busy(Baked but RAM not cleared).
      */
     public static function commitChanges($type, $id) {
+        // WP #748 J — agents always collapse to a single layer on every install
+        // /upgrade. Bypass commit_stack.sh's delta path entirely.
+        if ($type === 'agent') {
+            return self::consolidate($type, $id) ? 0 : 1;
+        }
+
         $persistPath = ($type === 'home')
             ? StoragePathResolver::homePersistPath($id)
             : StoragePathResolver::agentPersistPath();
@@ -261,7 +320,12 @@ class StorageMountService {
         // (ttyd + tmux + agents), so deltas piled up to ~7-8 before users
         // noticed. Lowered to 5 to match idle — users see slightly more
         // remounts during sustained activity but Flash wear stays bounded.
-        if ($res === 0 || $res === 2) {
+        //
+        // WP #748 J: home-only. Agents never reach this code path (the agent
+        // branch at the top returns early via consolidate()), but the explicit
+        // type guard documents the invariant: under J, agents collapse to one
+        // layer per install — no layer-count-driven consolidate ever applies.
+        if ($type === 'home' && ($res === 0 || $res === 2)) {
             $layerCount = count(glob("$persistPath/{$type}_{$id}_*.sqsh"));
             $threshold = 5;
             if ($layerCount >= $threshold) {
@@ -272,9 +336,7 @@ class StorageMountService {
                 // Now: if any process holds the mount, mark a pending intent and
                 // run later when the mount goes idle (hooked into gracefulClose
                 // and the AJAX dispatcher's lazy backstop).
-                $mnt = ($type === 'home')
-                    ? StoragePathResolver::homeMount($id)
-                    : StoragePathResolver::agentMount($id);
+                $mnt = StoragePathResolver::homeMount($id);
                 if (self::isMountBusy($mnt)) {
                     self::markConsolidatePending($type, $id);
                     LogService::log("Auto-consolidation deferred for $type $id ($layerCount layers >= $threshold). Mount busy — will run when idle.", LogService::LOG_INFO, "StorageMountService");

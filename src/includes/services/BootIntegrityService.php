@@ -126,7 +126,7 @@ class BootIntegrityService {
             if (empty($activeFiles) && empty($siblingFiles)) {
                 return ['state' => self::STATE_GENUINE_FRESH, 'evidence' => $evidence];
             }
-            if (empty($activeFiles) && !empty($siblingFiles)) {
+            if (empty($activeFiles)) {
                 return ['state' => self::STATE_LEGACY_UNMANAGED, 'evidence' => $evidence];
             }
             return ['state' => self::STATE_UNTRACKED, 'evidence' => $evidence];
@@ -264,7 +264,7 @@ class BootIntegrityService {
 
         $config = ConfigService::getConfig();
         $user   = $config['user'] ?? 'root';
-        if (empty($user) || $user === '0') {
+        if (empty($user)) {
             $user = 'root';
         }
         $entities["home/$user"] = true;

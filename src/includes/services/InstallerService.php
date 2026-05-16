@@ -50,9 +50,15 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Agent not found in registry'];
         }
 
-        // D-328: Remove version AFTER we have the agent config to avoid re-discovery loops
-        AgentRegistry::removeVersion($agentId);
-
+        // Do NOT pre-remove the saved version. Keeping the old version while
+        // the install is in-flight prevents the "v?" badge UX glitch when the
+        // Store page renders during an upgrade (e.g. a parallel agent's
+        // upgrade completes and refreshes the page while claude-code is still
+        // baking). saveVersion at the end of the success path atomically
+        // replaces the old version with the new one. Bonus: a failed install
+        // also preserves the prior saved version so the user can keep using
+        // the previous install — the install-status panel already surfaces the
+        // failure, no need to also nuke the version metadata.
         $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
 
         // D-400 (#54): Dispatch on source type. NPM is handled by NpmSource; non-NPM agents
@@ -285,6 +291,7 @@ class InstallerService {
         AgentRegistry::removeVersion($agentId);
 
         LogService::log("Successfully uninstalled $agentId and purged $oldSizeMB MB of associated storage.", LogService::LOG_INFO, "InstallerService");
+        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_uninstalled', ['agent' => $agentId, 'purged_mb' => $oldSizeMB]);
         return ['status' => 'ok'];
     }
 

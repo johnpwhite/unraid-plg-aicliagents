@@ -19,8 +19,16 @@ source "$(dirname "$0")/atomic_write_layer.sh" 2>/dev/null || {
     exit 1
 }
 
-UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
-WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
+# #342: derive UPPER_DIR from persistence fstype (vfat→ZRAM, else→disk direct).
+# Must match the logic in mount_stack.sh so we bake from the correct upper layer.
+_CS_FSTYPE=$(findmnt --noheadings --output FSTYPE --target "$PERSIST_PATH" 2>/dev/null || echo '')
+if [ "$_CS_FSTYPE" = "vfat" ] || [ -z "$_CS_FSTYPE" ]; then
+    UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
+    WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
+else
+    UPPER_DIR="$PERSIST_PATH/_upper/${TYPE}s/$ID"
+    WORK_DIR="$PERSIST_PATH/_work/${TYPE}s/$ID"
+fi
 
 # Bug #716: per-entity bake flock — serialise concurrent bakes of the same entity.
 # All bake paths (InstallerService::commitChanges, supervisor _op_bake,
@@ -89,6 +97,7 @@ fi
 
 # Validate persistence path before writing
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; exit 1; }
+_assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non-durable filesystem — bake refused"; exit 1; }
 
 # Check disk space (need at least 100MB free for a delta)
 check_disk_space "$PERSIST_PATH/.diskcheck" 100 || { error "Insufficient disk space on $PERSIST_PATH"; exit 1; }

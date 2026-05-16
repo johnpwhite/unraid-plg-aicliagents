@@ -464,6 +464,30 @@ class TerminalHandler {
             return null;
         }
 
+        if ($agentId === 'claude-code') {
+            // Claude Code writes sessions as <uuid>.jsonl under ~/.claude/projects/<hash>/
+            // or ~/.claude/sessions/ (older layout). Return the basename of the most
+            // recently modified file — that is the session the user was last working in.
+            $newestMtime = 0;
+            $newestId    = null;
+            foreach (["$homeDir/.claude/projects", "$homeDir/.claude/sessions"] as $dir) {
+                if (!is_dir($dir)) continue;
+                $it = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS)
+                );
+                foreach ($it as $file) {
+                    if ($file->getExtension() !== 'jsonl') continue;
+                    $mtime = $file->getMTime();
+                    if ($mtime > $newestMtime) {
+                        $newestMtime = $mtime;
+                        $newestId    = $file->getBasename('.jsonl');
+                    }
+                }
+            }
+            if ($newestId !== null && preg_match('/^[A-Za-z0-9_-]{20,}$/', $newestId)) return $newestId;
+            return null;
+        }
+
         return null;
     }
 

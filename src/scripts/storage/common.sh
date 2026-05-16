@@ -67,6 +67,34 @@ guard_path() {
     return 0
 }
 
+# _assert_persist_durable: Validate that a persistence path is on a durable filesystem.
+# Uses findmnt to resolve the actual fstype — immune to tmpfs bind-mounts that look like
+# valid paths. Spec #341.
+# Usage: _assert_persist_durable "/some/persist/path"
+# Returns 1 (and logs) if non-durable or findmnt fails; caller must exit on failure.
+_assert_persist_durable() {
+    local path="$1"
+    if ! command -v findmnt >/dev/null 2>&1; then
+        echo "[$(get_ts)] [ERR!] [_assert_persist_durable] findmnt not found — cannot validate fstype for: $path" >> "$DEBUG_LOG"
+        return 1
+    fi
+    local fstype
+    fstype=$(findmnt --noheadings --output FSTYPE --target "$path" 2>/dev/null) || {
+        echo "[$(get_ts)] [ERR!] [_assert_persist_durable] findmnt failed or path not mounted: $path" >> "$DEBUG_LOG"
+        return 1
+    }
+    case "$fstype" in
+        ext4|xfs|btrfs|vfat|exfat|f2fs|ntfs|fuseblk)
+            return 0 ;;
+        tmpfs|ramfs|devtmpfs|overlay|zram|squashfs)
+            echo "[$(get_ts)] [ERR!] [_assert_persist_durable] path '$path' is on $fstype (non-durable) — bake refused" >> "$DEBUG_LOG"
+            return 1 ;;
+        *)
+            echo "[$(get_ts)] [WARN] [_assert_persist_durable] unknown fstype '$fstype' for '$path' — treating as durable" >> "$DEBUG_LOG"
+            return 0 ;;
+    esac
+}
+
 # check_disk_space: Ensure sufficient space before writing.
 # Usage: check_disk_space "/target/path" <required_mb>
 # Returns 1 if insufficient space.

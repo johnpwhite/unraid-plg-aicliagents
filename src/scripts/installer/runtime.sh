@@ -227,18 +227,41 @@ create_proxy() {
     cat <<'PROXYEOF' | sed -e "s|__BIN_DEST__|${bin_dest}|g" -e "s|__TARGET__|${target}|g" -e "s|__CMD__|${cmd}|g" -e "s|__PKG_PATH__|${pkg_path}|g" > "$wrapper"
 #!/bin/bash
 # AICliAgents Proxy Wrapper for __CMD__
+# The entry point is baked at plugin-install time, but npm packages occasionally
+# restructure (e.g. claude-code 2.1.x dropped cli.js for a native bin/claude.exe).
+# If the baked path is gone, re-resolve it from the package's package.json "bin"
+# field at runtime so the wrapper self-heals across in-place agent upgrades — Bug #761.
 export PATH="__BIN_DEST__:$PATH"
-if [[ "__PKG_PATH__" == *.js ]]; then
+NODE="__BIN_DEST__/node"
+TARGET="__TARGET__"
+
+if [ ! -e "$TARGET" ]; then
+    d=$(dirname "$TARGET")
+    while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "." ]; do
+        [ "$(basename "$d")" = "node_modules" ] && break
+        if [ -f "$d/package.json" ]; then
+            entry=$("$NODE" -e 'try{var b=require(process.argv[1]+"/package.json").bin;process.stdout.write(typeof b==="string"?b:((b&&(b[process.argv[2]]||Object.values(b)[0]))||""))}catch(e){}' "$d" "__CMD__" 2>/dev/null)
+            [ -n "$entry" ] && [ -e "$d/$entry" ] && TARGET="$d/$entry"
+            break
+        fi
+        d=$(dirname "$d")
+    done
+fi
+
+if [ "${TARGET%.js}" != "$TARGET" ] && [ -e "$TARGET" ]; then
     # Direct JS entry point
-    "__BIN_DEST__/node" "__TARGET__" "$@"
-elif [ -f "__TARGET__" ] && head -c 4 "__TARGET__" | grep -q 'ELF'; then
-    # ELF Binary
-    "__TARGET__" "$@"
-else
+    "$NODE" "$TARGET" "$@"
+elif [ -f "$TARGET" ] && head -c 4 "$TARGET" 2>/dev/null | grep -q 'ELF'; then
+    # ELF binary
+    "$TARGET" "$@"
+elif [ -e "$TARGET" ]; then
     # Script or symlink - try native execution first, fallback to node
-    if ! "__TARGET__" "$@" 2>/dev/null; then
-        "__BIN_DEST__/node" "__TARGET__" "$@"
+    if ! "$TARGET" "$@" 2>/dev/null; then
+        "$NODE" "$TARGET" "$@"
     fi
+else
+    echo "AICliAgents: '__CMD__' entry point not found at $TARGET — is the agent installed?" >&2
+    exit 127
 fi
 PROXYEOF
     chmod +x "$wrapper"
@@ -248,7 +271,10 @@ PROXYEOF
 # Proxy mapping: cmd -> relative path from /agents/ to entry
 create_proxy "gemini" "gemini-cli/node_modules/@google/gemini-cli/bundle/gemini.js"
 create_proxy "copilot" "gh-copilot/node_modules/@github/copilot/index.js"
-create_proxy "claude" "claude-code/node_modules/@anthropic-ai/claude-code/cli.js"
+# claude-code 2.1.x ships the CLI as a native ELF at bin/claude.exe (older 2.0.x had
+# cli.js at the package root — the wrapper's self-heal block falls back to whatever
+# package.json "bin" points at if this path is ever absent). Bug #761.
+create_proxy "claude" "claude-code/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 create_proxy "opencode" "opencode/node_modules/opencode-ai/bin/opencode"
 create_proxy "kilo" "kilocode/node_modules/@kilocode/cli/bin/kilo"
 create_proxy "pi" "pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"

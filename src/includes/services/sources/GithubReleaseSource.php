@@ -180,7 +180,7 @@ class GithubReleaseSource implements AgentSource {
         }
 
         // npm cache stores ascending; mirror that for consistency.
-        usort($entries, fn($a, $b) => ($a['timestamp'] ?? 0) - ($b['timestamp'] ?? 0));
+        usort($entries, fn($a, $b) => $a['timestamp'] - $b['timestamp']);
 
         $distTags = [];
         if ($latestStable !== null) $distTags['latest']     = $latestStable;

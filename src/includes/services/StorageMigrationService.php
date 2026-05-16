@@ -43,7 +43,9 @@ class StorageMigrationService {
 
     public static function nuclearRebuild($type, $id) {
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
+        $persistPath = ($type === 'home')
+            ? ($config['home_storage_path']  ?? "/boot/config/plugins/unraid-aicliagents")
+            : ($config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents");
         
         $flashOld = 0;
         foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) $flashOld += filesize($f);

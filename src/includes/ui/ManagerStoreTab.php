@@ -9,10 +9,40 @@
 
 use AICliAgents\Services\TmuxService;
 use AICliAgents\Services\ArgsService;
+use AICliAgents\Services\BootIntegrityService;
+use AICliAgents\Services\HaltService;
 
 $vaultFile = '/boot/config/plugins/unraid-aicliagents/secrets.cfg';
 $vault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
 $versionCache = \AICliAgents\Services\VersionCheckService::getCachedResults();
+
+// WP #748 J / Phase B: per-agent Flash footprint for the Store card foot.
+// Resolve the persist path once; size each agent via glob+filesize inside the
+// foreach. Negligible cost (a few filesize() calls per page render) and avoids
+// a JS round-trip / render flicker.
+$agentPersistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+
+// WP #748 J / Phase B follow-ups: per-agent storage-health surfacing in the
+// card head + foot. Pull the cached boot-integrity sweep once and key it by
+// entity so the per-agent lookup inside the foreach is O(1). HaltService is a
+// cheap file-existence check per call — we call it inline.
+$bootSweepCache = BootIntegrityService::readCachedSweep();
+$bootSweepByEntity = [];
+if (is_array($bootSweepCache) && !empty($bootSweepCache['sweep']) && is_array($bootSweepCache['sweep'])) {
+    foreach ($bootSweepCache['sweep'] as $entry) {
+        if (!empty($entry['entity'])) $bootSweepByEntity[$entry['entity']] = $entry;
+    }
+}
+// Compact pill labels for non-healthy states. Anything not listed renders no pill.
+$av2HealthLabels = [
+    'halted'           => 'halted',
+    'legacy_unmanaged' => 'unmanaged layers',
+    'path_drift'       => 'path drift',
+    'partial_loss'     => 'missing layer',
+    'total_loss'       => 'missing',
+    'corrupt_layers'   => 'corrupt',
+    'host_mismatch'    => 'host mismatch',
+];
 
 $av2_chip_icons = [
     'channel'  => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M5 10l7-7 7 7"/></svg>',
@@ -143,6 +173,44 @@ function av2_secrets_schema(array $agent): array {
                             $sourceLabel = 'npm · ' . $agent['npm_package'];
                         }
 
+                        // WP #748 J / Phase B: render the per-agent Flash footprint
+                        // alongside the source label in the foot. Only for installed
+                        // agents; rounds to the nearest MB; suppresses zero-size
+                        // (uninstalled or never-baked).
+                        $agentSizeBytes = 0;
+                        if ($agent['is_installed']) {
+                            foreach (glob("$agentPersistPath/agent_{$id}_*.sqsh") ?: [] as $sqshFile) {
+                                $agentSizeBytes += (int)@filesize($sqshFile);
+                            }
+                        }
+                        $agentSizeMB = $agentSizeBytes > 0 ? (int)round($agentSizeBytes / 1024 / 1024) : 0;
+
+                        // WP #748 J / Phase B follow-ups: per-agent storage-health.
+                        // Pulled from the cached boot-integrity sweep + a quick halt-
+                        // marker check. Drives an in-head pill plus contextual
+                        // Repair / Clear-halt buttons in the foot.
+                        $agentBoot          = $bootSweepByEntity["agent/$id"] ?? null;
+                        $agentHealthState   = is_array($agentBoot) ? ($agentBoot['state'] ?? 'healthy') : 'healthy';
+                        $agentSiblingsCount = is_array($agentBoot) ? (int)($agentBoot['evidence']['siblings_count'] ?? 0) : 0;
+                        $agentIsHalted      = $agent['is_installed'] ? HaltService::isHalted('agent', $id) : false;
+                        // The pill is shown for the halt OR any boot-integrity state in $av2HealthLabels.
+                        // Halt takes priority in the label (it's the user-actionable state).
+                        $agentPillState = '';
+                        $agentPillLabel = '';
+                        if ($agentIsHalted) {
+                            $agentPillState = 'halted';
+                            $agentPillLabel = $av2HealthLabels['halted'];
+                        } elseif (isset($av2HealthLabels[$agentHealthState])) {
+                            $agentPillState = $agentHealthState;
+                            $agentPillLabel = $av2HealthLabels[$agentHealthState];
+                        }
+                        // Repair routing — when offered:
+                        //   restore_from_sibling  if a SAFE_BACKUP sibling exists
+                        //   install_agent         (re-install at current channel) otherwise, for missing/corrupt
+                        $agentShowRestore   = $agentPillState !== '' && $agentSiblingsCount > 0;
+                        $agentShowReinstall = !$agentShowRestore && in_array($agentHealthState, ['partial_loss','total_loss','corrupt_layers'], true);
+                        $agentShowClearHalt = $agentIsHalted;
+
                         // Channels supported per install type. Tarball has no prerelease concept
                         // (TarballSource::checkUpdates logs WARN on beta and falls back to latest),
                         // so hide Beta for tarball-backed agents. curl_install delegates to
@@ -169,7 +237,11 @@ function av2_secrets_schema(array $agent): array {
                             // Stacked badge: installed version top row + upgrade indicator below.
                             // Keeps the header column narrow so description text has more horizontal
                             // room. Collapsed to a single row when no upgrade/downgrade indicator.
-                            $badgeStacked = ($agent['is_installed'] && $versionKnown && ($hasUpdate || $hasDowngrade));
+                            // WP #748 J / Phase B follow-ups: also stack when there's a health pill.
+                            $badgeStacked = (
+                                ($agent['is_installed'] && $versionKnown && ($hasUpdate || $hasDowngrade))
+                                || $agentPillState !== ''
+                            );
                             ?>
                             <span class="av2-badge <?=$badgeStacked ? 'stacked' : ''?>">
                                 <span class="av2-badge-row">
@@ -177,7 +249,7 @@ function av2_secrets_schema(array $agent): array {
                                     <?php if ($agent['is_installed'] && $versionKnown): ?>
                                         v<?=htmlspecialchars($installedVer, ENT_QUOTES, 'UTF-8')?>
                                     <?php elseif ($agent['is_installed']): ?>
-                                        <span title="Agent has a SquashFS volume on Flash but version isn't discovered yet (binary not mounted). Open the agent or run a check to refresh.">v?</span>
+                                        <span title="Agent has a SquashFS volume on storage but version isn't discovered yet (binary not mounted). Open the agent or run a check to refresh.">v?</span>
                                     <?php else: ?>
                                         v<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?>
                                     <?php endif; ?>
@@ -188,6 +260,18 @@ function av2_secrets_schema(array $agent): array {
                                     <span class="av2-badge-upgrade">↓ <?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?></span>
                                 <?php elseif (!$agent['is_installed']): ?>
                                     <span class="av2-badge-upgrade" style="color: var(--text-color); opacity: 0.55;">available</span>
+                                <?php endif; ?>
+                                <?php if ($agentPillState !== ''): ?>
+                                    <!-- WP #748 J / Phase B follow-up (a): storage-health pill.
+                                         Shown only when health ≠ healthy. State drives colour;
+                                         tooltip carries the long-form classification name. -->
+                                    <span class="av2-health-pill"
+                                          data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>"
+                                          data-state="<?=htmlspecialchars($agentPillState, ENT_QUOTES, 'UTF-8')?>"
+                                          title="Storage health: <?=htmlspecialchars($agentPillState, ENT_QUOTES, 'UTF-8')?><?=$agentSiblingsCount > 0 ? ' · ' . $agentSiblingsCount . ' sibling layer(s) available for restore' : ''?>"
+                                          style="display:inline-block; align-self:flex-end; margin-top:4px; padding:2px 8px; border-radius:9px; font-size:9px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:#fff; background:#c0392b; white-space:nowrap;">
+                                        ⚠ <?=htmlspecialchars($agentPillLabel, ENT_QUOTES, 'UTF-8')?>
+                                    </span>
                                 <?php endif; ?>
                             </span>
                         </div>
@@ -309,7 +393,7 @@ function av2_secrets_schema(array $agent): array {
                                      from the schema fields above only in that the user names them;
                                      same secrets.cfg store. Leave a •••••••• value untouched to keep it. -->
                                 <div class="av2-ff-block">
-                                    <h4>Secrets <span class="av2-ff-hint">masked · stored 0600 on Flash · leave •••••••• to keep</span></h4>
+                                    <h4>Secrets <span class="av2-ff-hint">masked · stored 0600 on storage · leave •••••••• to keep</span></h4>
                                     <form class="av2-ff-form" data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>" data-kind="secret" onsubmit="return av2SaveAgentSecrets(this, event)">
                                         <div class="av2-ff-list">
                                             <?php foreach ($agentFfSecrets as $k => $hasVal): ?>
@@ -443,10 +527,40 @@ function av2_secrets_schema(array $agent): array {
                         </div>
 
                         <div class="av2-foot">
-                            <span class="av2-meta"><?=htmlspecialchars($sourceLabel ?: '', ENT_QUOTES, 'UTF-8')?></span>
+                            <span class="av2-meta">
+                                <?=htmlspecialchars($sourceLabel ?: '', ENT_QUOTES, 'UTF-8')?><?php if ($agentSizeMB > 0): ?><span class="av2-meta-size" data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>" title="On-storage footprint of this agent's SquashFS layer (WP #748 J — single layer per agent).">&nbsp;·&nbsp;<?=$agentSizeMB?>&nbsp;MB</span><?php endif; ?>
+                            </span>
                             <div class="av2-actions">
                                 <div class="av2-buttons" id="buttons-<?=$id?>" style="display:flex; gap:8px; <?=$isInstalling ? 'visibility:hidden; pointer-events:none;' : ''?>">
                                     <?php if ($agent['is_installed']): ?>
+                                        <?php /* WP #748 J / Phase B follow-up (b): contextual storage-repair buttons.
+                                                 Smart Repair: restore_from_sibling when a SAFE_BACKUP sibling exists
+                                                 (fast, no download); else install_agent (re-install at the current
+                                                 channel — which under J re-bakes to a single fresh layer). Clear-halt
+                                                 only when the entity is currently halted. */ ?>
+                                        <?php if ($agentShowRestore): ?>
+                                            <button type="button" class="av2-btn warn av2-agent-repair-btn"
+                                                    data-agent="<?=$id?>" data-mode="restore"
+                                                    onclick="av2RepairAgent('<?=$id?>', 'restore', this)"
+                                                    title="<?=$agentSiblingsCount?> sibling layer(s) found in a backup directory — restore them.">
+                                                <i class="fa fa-reply"></i> Restore
+                                            </button>
+                                        <?php elseif ($agentShowReinstall): ?>
+                                            <button type="button" class="av2-btn warn av2-agent-repair-btn"
+                                                    data-agent="<?=$id?>" data-mode="reinstall"
+                                                    onclick="av2RepairAgent('<?=$id?>', 'reinstall', this)"
+                                                    title="No SAFE_BACKUP siblings — re-install the agent at the current channel to rebuild its single-layer storage footprint.">
+                                                <i class="fa fa-wrench"></i> Re-install
+                                            </button>
+                                        <?php endif; ?>
+                                        <?php if ($agentShowClearHalt): ?>
+                                            <button type="button" class="av2-btn av2-agent-clearhalt-btn"
+                                                    data-agent="<?=$id?>"
+                                                    onclick="av2ClearAgentHalt('<?=$id?>', this)"
+                                                    title="Accept the current state and clear the halt — the entity will mount normally on next boot.">
+                                                <i class="fa fa-check-circle"></i> Clear halt
+                                            </button>
+                                        <?php endif; ?>
                                         <?php if ($hasUpdate): ?>
                                             <button type="button" class="av2-btn primary agent-action-btn" data-agent="<?=$id?>" onclick="installVersionAgent('<?=$id?>', this, '<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?>')"><i class="fa fa-arrow-circle-up"></i> Upgrade</button>
                                         <?php endif; ?>

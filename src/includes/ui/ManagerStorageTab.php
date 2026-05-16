@@ -32,20 +32,15 @@
             </div>
         </div>
 
-        <!-- Agent Storage Section -->
-        <!-- WP #269: Flash/RAM colour key removed from section header (was floating
-             far-right of the page title). The colours are self-evident now: Flash =
-             dark blue progress bar segment, RAM = orange. The ZRAM row in the layer
-             list (WP #267) carries the same orange marker so the legend is implicit. -->
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <div style="display:flex; align-items:center; gap:12px;">
-                <span style="font-size:13px; font-weight:700;">SquashFS Agent Storage</span>
-                <span id="agents-text-summary" style="font-size:11px; opacity:0.6;">...</span>
-            </div>
-        </div>
-        <div id="agents-stats-container" class="storage-entity-grid">
-            <!-- Dynamically populated by renderAgentStats() -->
-        </div>
+        <!-- Agent Storage section removed in v2026.05.13.05 (WP #748 J / Phase B):
+             under single-layer-per-agent, the per-agent storage cards were vestigial
+             — layer-count is always 1, dirty upper is always 0, "Persist Now" /
+             "Consolidate Now" are meaningless, and the only remaining state worth
+             showing (storage footprint) is now in the Store card foot. Repair /
+             Restore actions remain accessible via the boot-integrity banner above
+             when a real layer issue is detected. See
+             docs/specs/STORAGE_DURABILITY_SUPERVISOR.md §"Storage-tab redesign
+             under J". -->
 
         <!-- Home Storage Section -->
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; margin-top:24px;">

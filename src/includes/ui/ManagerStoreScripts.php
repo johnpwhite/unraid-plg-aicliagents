@@ -507,6 +507,7 @@ function uninstallAgent(id, btn) {
 
 function setAgentFilter(filter, el) {
     agentFilter = filter;
+    localStorage.setItem('aicli_agent_filter', filter);
     $('.filter-btn').removeClass('active');
     $(el).addClass('active');
     filterAgents();
@@ -533,12 +534,36 @@ $(function() {
         // Record user-typed values so the autofill killer doesn't wipe them.
         this.dataset.userTyped = this.value;
     });
+
+    // Restore filter button visual state (agentFilter itself is already seeded
+    // from localStorage in ManagerGlobalState.php on page load).
+    if (agentFilter !== 'all') {
+        $('.filter-btn').removeClass('active');
+        $('.filter-btn').each(function() {
+            var m = ($(this).attr('onclick') || '').match(/setAgentFilter\('([^']+)'/);
+            if (m && m[1] === agentFilter) { $(this).addClass('active'); return false; }
+        });
+    }
+    // Restore search input — set userTyped so killAutofill won't clear it.
+    var savedSearch = localStorage.getItem('aicli_agent_search') || '';
+    if (savedSearch) {
+        var si = document.getElementById('agent-search-input');
+        if (si) { si.value = savedSearch; si.dataset.userTyped = savedSearch; }
+    }
+    if (agentFilter !== 'all' || savedSearch) filterAgents();
 });
 
 function filterAgents() {
     const search = ($('#agent-search-input').val() || '').trim().toLowerCase();
+    localStorage.setItem('aicli_agent_search', search);
     const cards = $('.av2-card');
     // v2 selector: .av2-card. installed/update state lives on data-* attrs.
+    // Count match decisions inline — `cards.filter(':visible').length` polls
+    // the DOM's computed visibility which can return 0 during initial render
+    // (before CSS grid layout assigns offsetWidth/Height to the cards), so
+    // the empty-state banner could appear even when every card matches the
+    // filter. Counting from our own show/hide flag is layout-agnostic.
+    let visible = 0;
     cards.each(function() {
         const item = $(this);
         const name = (item.data('name') || '').toLowerCase();
@@ -549,12 +574,11 @@ function filterAgents() {
             if (agentFilter === 'installed' && !isInstalled) show = false;
             if (agentFilter === 'updates' && !hasUpdate) show = false;
         }
-        if (show) item.show(); else item.hide();
+        if (show) { item.show(); visible++; } else { item.hide(); }
     });
     // Safety net: if the filter matched zero visible cards but there are cards
     // in the DOM (e.g. Chrome autofill put junk in the search input), surface a
     // one-off clear button rather than leaving the user staring at an empty grid.
-    const visible = cards.filter(':visible').length;
     var $banner = $('#agent-search-empty-banner');
     if (visible === 0 && cards.length > 0 && (search || agentFilter !== 'all')) {
         if (!$banner.length) {
@@ -1170,6 +1194,115 @@ function av2LoadStoragePanel(panelOrBody, agentIdMaybe) {
     }).fail(function() {
         body.textContent = '';
         body.appendChild(av2mkel('div', {class: 'av2-help'}, ['Storage stats unavailable.']));
+    });
+}
+
+// WP #748 J / Phase B follow-up (b): contextual repair / clear-halt actions
+// fired from the Store card foot. The card itself is PHP-rendered with the
+// state pre-baked (boot-integrity cache + halt-marker check), so these
+// handlers just gate the action behind a confirm modal and call the
+// pre-existing AJAX endpoints (restore_from_sibling / install_agent /
+// clear_halt). On success they safeReload() so the card re-renders with
+// fresh state instead of trying to surgically update the DOM.
+
+// Internal: GET-clear any halt for an agent, idempotently. Promise-style.
+// Returns a jQuery-deferred that always resolves (never rejects) so callers
+// can chain without conditional logic — clear_halt is a no-op when no halt
+// marker exists, and we shouldn't block a recovery click on a non-halt case.
+function _av2ClearHaltIdempotent(id, reason) {
+    var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+    return $.ajax({
+        url: '/plugins/unraid-aicliagents/AICliAjax.php',
+        type: 'GET',
+        data: { action: 'clear_halt', type: 'agent', id: id, reason: reason, csrf_token: token },
+        dataType: 'json'
+    }).always(function() { /* swallow — idempotent precursor */ });
+}
+
+function av2RepairAgent(id, mode, btn) {
+    var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+    if (mode === 'restore') {
+        swal({
+            title: 'Restore ' + id + '?',
+            text: 'Move the SAFE_BACKUP sibling layer file(s) into the active persist path and re-register them in the manifest. Recovers the agent without a re-download.',
+            type: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Restore',
+            showLoaderOnConfirm: true,
+            closeOnConfirm: false
+        }, function() {
+            $.ajax({
+                url: '/plugins/unraid-aicliagents/AICliAjax.php',
+                type: 'GET',
+                data: { action: 'restore_from_sibling', type: 'agent', id: id, csrf_token: token },
+                dataType: 'json'
+            }).done(function(r) {
+                if (r && r.status === 'ok') {
+                    // Restore succeeded — also clear any halt so the agent
+                    // mounts normally on next boot without a second click.
+                    _av2ClearHaltIdempotent(id, 'restore_from_sibling_storecard').always(function() {
+                        swal({ title: 'Restored', text: r.message || 'Sibling layer(s) restored.', type: 'success', timer: 1800, showConfirmButton: false });
+                        setTimeout(function() { safeReload(); }, 1200);
+                    });
+                } else {
+                    swal('Restore failed', (r && r.message) ? r.message : 'Check lifecycle log.', 'error');
+                }
+            }).fail(function() {
+                swal('Restore failed', 'AJAX request failed. Check debug.log.', 'error');
+            });
+        });
+        return;
+    }
+    if (mode === 'reinstall') {
+        // Re-install at the current channel. Under J this re-bakes to a single
+        // fresh `_consolidated_<dt>.sqsh` (commitChanges for $type === 'agent'
+        // routes to consolidate). Pass no explicit version so the backend uses
+        // @latest on whatever channel is currently saved.
+        //
+        // Clear any halt FIRST: installAgent → ensureAgentMounted → mount_stack.sh
+        // in strict mode exits 1 on any non-healthy classification, which would
+        // make a Re-install on a halted+corrupt agent fail with "Could not mount
+        // agent storage". Clearing the halt up-front lets the re-install path
+        // do its own classification on the fresh layer it's about to bake.
+        // installVersionAgent has its own confirm modal, so we don't add one.
+        if (typeof installVersionAgent !== 'function') {
+            swal('Error', 'Re-install entry point not available — refresh the page and retry.', 'error');
+            return;
+        }
+        _av2ClearHaltIdempotent(id, 'reinstall_precursor_storecard').always(function() {
+            installVersionAgent(id, btn);
+        });
+        return;
+    }
+    swal('Error', 'Unknown repair mode: ' + mode, 'error');
+}
+
+function av2ClearAgentHalt(id, btn) {
+    var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+    swal({
+        title: 'Clear halt for ' + id + '?',
+        text: "Accept the current state. The mount halt will be removed and the agent will mount normally on next boot. Use this when you've understood the warning and want to proceed.",
+        type: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Clear halt',
+        showLoaderOnConfirm: true,
+        closeOnConfirm: false
+    }, function() {
+        $.ajax({
+            url: '/plugins/unraid-aicliagents/AICliAjax.php',
+            type: 'GET',
+            data: { action: 'clear_halt', type: 'agent', id: id, reason: 'user_manual_override_storecard', csrf_token: token },
+            dataType: 'json'
+        }).done(function(r) {
+            if (r && r.status === 'ok') {
+                swal({ title: 'Halt cleared', text: 'The agent will mount normally on next boot.', type: 'success', timer: 1800, showConfirmButton: false });
+                setTimeout(function() { safeReload(); }, 1200);
+            } else {
+                swal('Failed', (r && r.message) ? r.message : 'Check lifecycle log.', 'error');
+            }
+        }).fail(function() {
+            swal('Failed', 'AJAX request failed. Check debug.log.', 'error');
+        });
     });
 }
 

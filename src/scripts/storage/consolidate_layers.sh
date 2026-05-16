@@ -23,8 +23,15 @@ source "$(dirname "$0")/atomic_write_layer.sh" 2>/dev/null || {
 [ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
 TASK_STATUS_FILE="/tmp/unraid-aicliagents/task-status-$ID"
 
-UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
-WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
+# #342: derive UPPER_DIR from persistence fstype — must match mount_stack.sh.
+_CL_FSTYPE=$(findmnt --noheadings --output FSTYPE --target "$PERSIST_PATH" 2>/dev/null || echo '')
+if [ "$_CL_FSTYPE" = "vfat" ] || [ -z "$_CL_FSTYPE" ]; then
+    UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
+    WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
+else
+    UPPER_DIR="$PERSIST_PATH/_upper/${TYPE}s/$ID"
+    WORK_DIR="$PERSIST_PATH/_work/${TYPE}s/$ID"
+fi
 
 log() {
     local msg="[$(get_ts)] [INFO] [CONSOLIDATE] $1"
@@ -52,6 +59,11 @@ update_task_status() {
     printf '{"step":"%s","progress":%d,"completed":%s,"timestamp":%d,"reason":"%s"}' \
         "$step" "$progress" "$completed" "$(date +%s)" "$reason" > "$TASK_STATUS_FILE"
 }
+
+# Validate paths before any mount or destructive operations
+guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; update_task_status "Failed" 0 "Invalid path"; exit 1; }
+_assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non-durable filesystem — consolidation refused"; update_task_status "Failed" 0 "Non-durable path"; exit 1; }
+guard_path "$MNT_POINT" "MNT_POINT" || { error "Mount point failed validation: $MNT_POINT"; update_task_status "Failed" 0 "Invalid mount"; exit 1; }
 
 # 1. Ensure stack is mounted to get merged view
 lifecycle_log "info" "consolidate_layers" "bash_consolidate_start" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
@@ -89,10 +101,6 @@ if [ "$TYPE" = "home" ]; then
     [ -d "$MNT_POINT/.claude/shell-snapshots" ] && rm -rf "$MNT_POINT/.claude/shell-snapshots" 2>/dev/null || true
     [ -d "$MNT_POINT/.claude/telemetry" ] && rm -rf "$MNT_POINT/.claude/telemetry" 2>/dev/null || true
 fi
-
-# Validate paths before destructive operations
-guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; update_task_status "Failed" 0 "Invalid path"; exit 1; }
-guard_path "$MNT_POINT" "MNT_POINT" || { error "Mount point failed validation: $MNT_POINT"; update_task_status "Failed" 0 "Invalid mount"; exit 1; }
 
 # Check disk space in /tmp for the scratch verify mount used by atomic_write_layer (minimal — just a mountpoint)
 check_disk_space "/tmp/unraid-aicliagents/" 10 || { error "Insufficient disk space in /tmp for verification scratch mount"; update_task_status "Failed" 0 "Low disk space"; exit 1; }

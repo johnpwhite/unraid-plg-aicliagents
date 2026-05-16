@@ -13,6 +13,7 @@ namespace AICliAgents\Handlers;
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/TmuxService.php';
 
 use AICliAgents\Services\TmuxService;
+use AICliAgents\Services\LifecycleLogService;
 
 class TmuxHandler {
 
@@ -125,6 +126,7 @@ class TmuxHandler {
         $settings = json_decode($raw, true);
         if (!is_array($settings)) return ['status' => 'error', 'message' => 'settings must be a JSON object'];
         $ok = TmuxService::saveAgentDefaults($agentId, $settings);
+        if ($ok) LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'tmux', 'agent_tmux_defaults_saved', ['agent' => $agentId, 'settings' => $settings]);
         return $ok ? ['status' => 'ok'] : ['status' => 'error', 'message' => 'Failed to persist agent defaults'];
     }
 

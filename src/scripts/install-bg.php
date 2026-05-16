@@ -45,8 +45,10 @@ try {
     $result = \AICliAgents\Services\InstallerService::installAgent($agentId, $targetVersion);
     if (isset($result['status']) && $result['status'] === 'error') {
         aicli_log("Background Install Job FAILED for $agentId: " . ($result['message'] ?? $result['error'] ?? 'Unknown Error'), AICLI_LOG_ERROR);
+        \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'installer', 'agent_install_failed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest', 'error' => $result['message'] ?? $result['error'] ?? 'Unknown Error']);
     } else {
         aicli_log("Background Install Job Complete for: $agentId", AICLI_LOG_INFO);
+        \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer', 'agent_installed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest']);
 
         // Bug #716: do NOT enqueue a second bake here.
         // InstallerService::installAgent already calls StorageMountService::commitChanges

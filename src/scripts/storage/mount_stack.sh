@@ -35,16 +35,24 @@ fi
 
 # Validate persistence path
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; exit 1; }
+_assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non-durable filesystem — mount refused"; exit 1; }
 
-# 1. Ensure ZRAM is ready
-bash "$PLUGIN_ROOT/src/scripts/storage/initialize_zram.sh" || { error "ZRAM initialization failed"; exit 1; }
+# 1. Detect persistence fstype and derive upper-layer location (#342: auto-detect).
+# vfat (USB flash) → ZRAM upper (buffers writes, prevents flash wear).
+# Any other durable fstype (ext4/xfs/btrfs/…) → direct disk upper (no RAM cost).
+_PERSIST_FSTYPE=$(findmnt --noheadings --output FSTYPE --target "$PERSIST_PATH" 2>/dev/null || echo '')
+if [ "$_PERSIST_FSTYPE" = "vfat" ] || [ -z "$_PERSIST_FSTYPE" ]; then
+    bash "$PLUGIN_ROOT/src/scripts/storage/initialize_zram.sh" || { error "ZRAM initialization failed"; exit 1; }
+    UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
+    WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
+else
+    UPPER_DIR="$PERSIST_PATH/_upper/${TYPE}s/$ID"
+    WORK_DIR="$PERSIST_PATH/_work/${TYPE}s/$ID"
+fi
 
-# 2. Define Paths
+# 2. Define mount point
 MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 [ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
-
-UPPER_DIR="$ZRAM_BASE/${TYPE}s/$ID/upper"
-WORK_DIR="$ZRAM_BASE/${TYPE}s/$ID/work"
 
 # Remove stale emergency symlink if present (emergency mode leaves a symlink at the mount point)
 [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
@@ -92,7 +100,7 @@ for sqsh in "${FILES[@]}"; do
     SQSH_MNT="/tmp/unraid-aicliagents/mnt/$SQSH_NAME"
     mkdir -p "$SQSH_MNT"
     if ! mountpoint -q "$SQSH_MNT"; then
-        mount -o loop,ro "$sqsh" "$SQSH_MNT" || { error "Failed to mount $sqsh"; continue; }
+        mount -o loop,ro "$sqsh" "$SQSH_MNT" || { error "Failed to mount $sqsh"; exit 1; }
     fi
     [ -n "$LOWERS" ] && LOWERS="$LOWERS:"
     LOWERS="$LOWERS$SQSH_MNT"

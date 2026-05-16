@@ -24,6 +24,18 @@ PIDFILE="/var/run/aicli-supervisor.pid"
 TICKFILE="/var/run/aicli-supervisor.tick"
 WORKFILE="/var/run/aicli-supervisor.work.json"
 
+# Bug #757: dedicated single-instance lock file. NEVER unlinked (it's on tmpfs,
+# so a reboot clears it — which is correct). flock-on-an-fd of this file is the
+# ONLY mutex; the pidfile is just the "who is the active PID" record. The lock fd
+# ($SUP_LOCK_FD, assigned by `exec {SUP_LOCK_FD}>"$LOCKFILE"` in _do_start) is
+# inherited by forked children — the heartbeat subshell and the spawned
+# commit_stack.sh/consolidate_layers.sh work children MUST close it (else an
+# orphaned child of a crashed supervisor keeps the lock held and no new
+# supervisor can take over — the deadlock that v2026.05.12.04 hit and got
+# reverted for).
+LOCKFILE="/var/run/aicli-supervisor.lock"
+SUP_LOCK_FD=""
+
 # Status file lives in tmpfs — read by React UI.
 STATUS_DIR="/tmp/unraid-aicliagents"
 STATUSFILE="${STATUS_DIR}/supervisor.status.json"
@@ -435,6 +447,11 @@ _on_term() {
 # Heartbeat loop — runs as a background subshell, independent of work loop
 # ---------------------------------------------------------------------------
 _run_heartbeat() {
+    # CRITICAL (Bug #757): drop the inherited single-instance lock fd so an
+    # orphaned heartbeat (its parent supervisor crashed) does NOT keep the lock
+    # held — a fresh `start` must be able to acquire it and take over. This is
+    # exactly what the reverted v2026.05.12.04 flock attempt missed.
+    [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
     while true; do
         touch "$TICKFILE" 2>/dev/null || true
         sleep 5
@@ -753,9 +770,16 @@ _op_bake() {
     lifecycle_log "info" "supervisor" "bake_start" \
         "{\"entity\":\"$entity\",\"reason\":\"$reason\",\"compression\":\"$compression\"}" 2>/dev/null || true
 
-    # Spawn child
-    MKSQUASHFS_ARGS="-comp $compression" \
-        bash "${STORAGE_DIR}/commit_stack.sh" "$type" "$id" "$persist_path" >/dev/null 2>&1 &
+    # Spawn child — in a subshell that drops the inherited single-instance lock
+    # fd FIRST (Bug #757): if the supervisor crashes mid-bake, the orphaned bake
+    # must not keep the lock held (a bake can run for minutes). The `exec`
+    # replaces the subshell with commit_stack.sh, so $! and the watchdog's
+    # kill -0/-TERM/-KILL still target the right PID.
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        export MKSQUASHFS_ARGS="-comp $compression"
+        exec bash "${STORAGE_DIR}/commit_stack.sh" "$type" "$id" "$persist_path" >/dev/null 2>&1
+    ) &
     local child_pid=$!
 
     _CHILD_PID="$child_pid"
@@ -828,8 +852,13 @@ _op_consolidate() {
     lifecycle_log "info" "supervisor" "consolidate_start" \
         "{\"entity\":\"$entity\",\"reason\":\"$reason\"}" 2>/dev/null || true
 
-    # Spawn child
-    bash "${STORAGE_DIR}/consolidate_layers.sh" "$type" "$id" "$persist_path" >/dev/null 2>&1 &
+    # Spawn child — subshell drops the inherited single-instance lock fd FIRST
+    # (Bug #757); see _op_bake. A consolidate can run for many minutes; an
+    # orphaned one must not block a fresh supervisor.
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        exec bash "${STORAGE_DIR}/consolidate_layers.sh" "$type" "$id" "$persist_path" >/dev/null 2>&1
+    ) &
     local child_pid=$!
 
     _CHILD_PID="$child_pid"
@@ -894,13 +923,15 @@ _check_dirty_pressure() {
     local total_bytes=0
     local entity_sizes=()  # "bytes:type:id" tuples
 
-    # Sum all upper dirs
+    # WP #748 J — agents are single-layer-per-install under J; their ZRAM upper
+    # is always empty outside an install (which bakes via consolidate, not the
+    # supervisor). So the dirty-pressure walk is home-only — if dirt ever does
+    # appear in an agent's upper, the supervisor should NOT paper over it by
+    # enqueueing a delta-bake (that would re-introduce multi-layer agents).
     local upper_root
-    for upper_root in "$zram_base/homes" "$zram_base/agents"; do
+    for upper_root in "$zram_base/homes"; do
         [ -d "$upper_root" ] || continue
-        local entity_type
-        entity_type="home"
-        [ "$(basename "$upper_root")" = "agents" ] && entity_type="agent"
+        local entity_type="home"
 
         local entity_dir
         for entity_dir in "$upper_root"/*/; do
@@ -1030,6 +1061,14 @@ _check_schedule_trigger() {
             id=$(echo "$entity" | cut -d/ -f2-)
             [ -n "$type" ] && [ -n "$id" ] || continue
 
+            # WP #748 J — schedule-bake is home-only. Agents bake on install
+            # /upgrade via consolidate; the scheduled cadence is a safety-net for
+            # the home overlay's accumulated dirty writes, not for immutable
+            # agent layers. Skipping agents structurally (vs. relying on the
+            # empty-upper guard below) prevents an out-of-band agent-dirty state
+            # from ever triggering a delta-bake.
+            [ "$type" = "home" ] || continue
+
             # Check if there are any dirty bytes for this entity (only bake if needed)
             local upper_dir
             upper_dir="$(zram_upper "$type" "$id" 2>/dev/null || true)"
@@ -1086,6 +1125,15 @@ _check_wants_bake_flags() {
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
 _work_tick() {
+    # Step 0a (Bug #757): respawn the heartbeat if it died — otherwise the main
+    # loop stays alive but $TICKFILE goes stale and the box looks supervisor-less.
+    if [ -n "${_HEARTBEAT_PID:-}" ] && ! _pid_alive "$_HEARTBEAT_PID" 2>/dev/null; then
+        _run_heartbeat &
+        _HEARTBEAT_PID="$!"
+        log_warn "Heartbeat process died — respawned (pid $_HEARTBEAT_PID)."
+        lifecycle_log "warn" "supervisor" "heartbeat_respawned" "{\"pid\":$_HEARTBEAT_PID}" 2>/dev/null || true
+    fi
+
     # Step 0: Check for wedged child (watchdog)
     _watchdog_check_child
 
@@ -1184,91 +1232,108 @@ _do_start() {
     mkdir -p "$CONSOLIDATE_FAILS_DIR" 2>/dev/null || true
     mkdir -p "$QUEUE_DIR" 2>/dev/null || true
 
-    # Check for existing live instance via pidfile (canonical check)
+    # ---- Single-instance mutex (Bug #757) ---------------------------------
+    # The dedicated lock file ($LOCKFILE) is the ONLY mutex. flock-on-an-fd is
+    # auto-released by the kernel when this process AND every fd-inheriting
+    # descendant exits — that is why the heartbeat subshell and the spawned
+    # commit_stack.sh/consolidate_layers.sh work children close $SUP_LOCK_FD
+    # (see _run_heartbeat / _op_bake / _op_consolidate). A previous attempt that
+    # forgot that deadlocked the stop->start cycle (v2026.05.12.04, reverted).
+    #
+    # Fast path: if the pidfile already names a live supervisor, skip even
+    # opening the lock (no pointless 10 s flock -w wait when a backstop fires
+    # while a supervisor is obviously up). A live supervisor ALWAYS holds the
+    # lock, so once past the flock below, any pidfile we find is from a DEAD
+    # predecessor.
     if _pidfile_valid 2>/dev/null; then
         local existing_pid
         existing_pid="$(_read_pidfile)"
         log_warn "Another supervisor instance is running (pid $existing_pid). Exiting."
-        lifecycle_log "warn" "supervisor" "supervisor_lock_held" "{\"existing_pid\":$existing_pid}" 2>/dev/null || true
+        lifecycle_log "info" "supervisor" "supervisor_lock_held" "{\"existing_pid\":$existing_pid}" 2>/dev/null || true
         exit 0
     fi
 
-    # Stale pidfile detection
+    exec {SUP_LOCK_FD}>"$LOCKFILE" 2>/dev/null || {
+        log_error "Cannot open lock file $LOCKFILE — exiting (degraded)."
+        exit 1
+    }
+    # flock -w 10 (blocking, 10 s) not -n: if the holder is a live supervisor
+    # that is staying up, we give up after 10 s and exit 0 (a harmless,
+    # backgrounded loser). If the holder is being stopped (cleanup.sh stop, then
+    # a racing PLG-INLINE start), it releases within a few seconds and we take
+    # over — this is what makes the upgrade hand-off and stop->start race robust.
+    if ! flock -w 10 "$SUP_LOCK_FD" 2>/dev/null; then
+        log_warn "Another supervisor holds the lock (waited 10 s). Exiting cleanly."
+        lifecycle_log "info" "supervisor" "supervisor_lock_held" "{\"reason\":\"flock_busy\"}" 2>/dev/null || true
+        exit 0
+    fi
+    # --- We are THE supervisor from here. $SUP_LOCK_FD stays open for life. --
+
+    # Stale pidfile: if present it is from a DEAD supervisor (a live one would
+    # hold the lock above, so we would have exited). Just take ownership.
     if [ -f "$PIDFILE" ]; then
         local stale_pid
         stale_pid="$(cat "$PIDFILE" 2>/dev/null || echo 0)"
-        log_warn "Stale pidfile detected (pid $stale_pid not running). Removing."
-        lifecycle_log "warn" "supervisor" "supervisor_pidfile_stale" "{\"stale_pid\":$stale_pid}" 2>/dev/null || true
-        rm -f "$PIDFILE" 2>/dev/null || true
+        log_warn "Stale pidfile (pid $stale_pid). Taking ownership."
+        lifecycle_log "info" "supervisor" "supervisor_pidfile_stale" "{\"stale_pid\":$stale_pid}" 2>/dev/null || true
     fi
-
-    # Acquire exclusive lock via flock on pidfile, BEFORE the orphan check.
-    # Order matters: writing our pid to the pidfile here makes us visible to
-    # SupervisorService::isRunning(), which the InitService lazy backstop
-    # uses to decide whether to spawn a sibling supervisor on AJAX traffic.
-    # If we did the orphan reap first, an Unraid WebGUI poll during the
-    # 5-second SIGKILL wait would respawn a fresh supervisor that we then
-    # mistake for a stubborn orphan. Writing the pidfile up-front closes
-    # that window — concurrent ensureInit calls see us alive and skip start.
-    exec 9>"$PIDFILE"
-    if ! flock -n 9; then
-        log_warn "Could not acquire flock on $PIDFILE. Another instance may be starting."
-        lifecycle_log "warn" "supervisor" "supervisor_lock_held" "{\"reason\":\"flock_failed\"}" 2>/dev/null || true
-        exit 1
-    fi
-
-    printf '%d\n' "$$" >&9
+    printf '%d\n' "$$" > "$PIDFILE" 2>/dev/null || true
 
     trap '_on_term' TERM INT
 
-    # Bug #513 + #578: orphan supervisor reaper.
-    # Pattern is path + " start" so the pgrep matches ONLY long-running daemon
-    # invocations — not the cleanup-phantoms / status / stop one-shots that
-    # PLG INLINE and operators can run concurrently. Without the suffix the
-    # reaper waited up to 6 s on whichever one-shot was mid-exit, blowing
-    # smoke A48's 8 s drain budget every time.
-    local _orphan_pattern="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start"
-    _find_orphan_supervisors() {
-        # PIDs running the daemon mode of this script that are not us, not our
-        # parent, and not in zombie state (zombies are already exiting — kernel
-        # cannot signal them; SIGKILL "fails" and we waste 6 s of orphan-reap).
-        pgrep -f "$_orphan_pattern" 2>/dev/null | while read -r _pid; do
+    # ---- Reap orphaned children of a crashed predecessor (Bug #513/#578/#757)
+    # A LIVE full supervisor cannot coexist (it would hold the lock above, so we
+    # would be the loser and have exited). The only things to clean up are
+    # ORPHANS of a *crashed* predecessor: its heartbeat subshell (its cmdline
+    # still shows "...aicli-supervisor.sh start") and any in-flight
+    # commit_stack.sh / consolidate_layers.sh work child. We identify orphans by
+    # PPid==1 (reparented to init) — never touch a process with a live parent.
+    # Path-anchored cmdline match only (VM-safety guard: never a bare agent-name
+    # pgrep that could match a qemu cmdline). This REPLACES the old "kill every
+    # ...aicli-supervisor.sh start that is not me" reaper, whose dueling-reaper
+    # failure class (two starters SIGKILLing each other) is now impossible. Benign
+    # side-effect: a sibling `start` currently blocked in `flock -w 10` is also
+    # PPid==1 and may be reaped here instead of timing out — fine, it was going to
+    # exit as a loser anyway.
+    local _self_script="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh"
+    _find_orphan_children() {
+        { pgrep -f "$_self_script start" 2>/dev/null
+          pgrep -f "/src/scripts/storage/commit_stack.sh " 2>/dev/null
+          pgrep -f "/src/scripts/storage/consolidate_layers.sh " 2>/dev/null
+        } | sort -un | while read -r _pid; do
+            [ -n "$_pid" ] || continue
             [ "$_pid" = "$$" ] && continue
-            [ "$_pid" = "${PPID}" ] && continue
-            local _state
-            _state="$(awk '/^State:/{print $2; exit}' "/proc/$_pid/status" 2>/dev/null)"
+            local _ppid _state
+            _ppid="$(awk '/^PPid:/{print $2; exit}' "/proc/$_pid/status" 2>/dev/null || echo '')"
+            [ "$_ppid" = "1" ] || continue          # only TRUE orphans
+            _state="$(awk '/^State:/{print $2; exit}' "/proc/$_pid/status" 2>/dev/null || echo '')"
             [ "$_state" = "Z" ] && continue
             echo "$_pid"
         done
     }
     local _orphans
-    _orphans="$(_find_orphan_supervisors)"
+    _orphans="$(_find_orphan_children)"
     if [ -n "$_orphans" ]; then
-        log_warn "Orphan supervisor process(es) detected outside pidfile: $_orphans. Reaping."
+        log_warn "Orphan supervisor child process(es) detected: $_orphans. Reaping before start."
         lifecycle_log "warn" "supervisor" "supervisor_orphan_detected" \
             "{\"orphan_pids\":\"$(echo "$_orphans" | tr '\n' ' ')\"}" 2>/dev/null || true
         echo "$_orphans" | xargs -r kill -15 2>/dev/null || true
         local _waited=0
         while [ "$_waited" -lt 5 ]; do
-            local _still
-            _still="$(_find_orphan_supervisors)"
-            [ -z "$_still" ] && break
+            [ -z "$(_find_orphan_children)" ] && break
             sleep 1
             _waited=$((_waited + 1))
         done
         local _stubborn
-        _stubborn="$(_find_orphan_supervisors)"
+        _stubborn="$(_find_orphan_children)"
         if [ -n "$_stubborn" ]; then
             echo "$_stubborn" | xargs -r kill -9 2>/dev/null || true
             sleep 1
         fi
         local _final
-        _final="$(_find_orphan_supervisors)"
+        _final="$(_find_orphan_children)"
         if [ -n "$_final" ]; then
-            # We hold the pidfile lock and are the registered supervisor — no
-            # need to abdicate over a stubborn unkillable process. Log it but
-            # continue so the box has a working supervisor.
-            log_warn "Stubborn orphan supervisor(s) survived SIGKILL: $_final. Continuing as registered owner."
+            log_warn "Stubborn orphan child(ren) survived SIGKILL: $_final. Continuing as registered owner."
             lifecycle_log "warn" "supervisor" "supervisor_orphan_unkillable" \
                 "{\"stubborn_pids\":\"$(echo "$_final" | tr '\n' ' ')\"}" 2>/dev/null || true
         fi
@@ -1356,7 +1421,9 @@ _do_start() {
     lifecycle_log "info" "supervisor" "supervisor_stopped" "{\"pid\":$$}" 2>/dev/null || true
 
     rm -f "$PIDFILE" 2>/dev/null || true
-    flock -u 9 2>/dev/null || true
+    # $SUP_LOCK_FD (the single-instance lock) is released automatically when this
+    # process exits — closing it explicitly here just makes intent clear.
+    [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
 
     log_info "Supervisor stopped cleanly."
     exit 0

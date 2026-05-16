@@ -128,6 +128,7 @@ class ConfigService {
                 LogService::log("Plugin configuration saved with no logical changes.", LogService::LOG_INFO, "ConfigService");
             } else {
                 LogService::log("Successfully updated plugin configuration. Changed keys: " . implode(", ", $changedKeys), LogService::LOG_INFO, "ConfigService");
+                LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'config', 'config_saved', ['changed_keys' => $changedKeys]);
             }
         }
 
@@ -200,8 +201,10 @@ class ConfigService {
         if (empty($user)) $user = 'root';
 
         // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
-        StorageMountService::ensureHomeMounted($user);
-        
+        if (!StorageMountService::ensureHomeMounted($user)) {
+            LogService::log("getUserStatePath: home mount unavailable for '$user' — reads/writes will target bare tmpfs and may be lost", LogService::LOG_WARN, "ConfigService");
+        }
+
         $homeDir = "/tmp/unraid-aicliagents/work/$user/home";
         return "$homeDir/.aicli";
     }

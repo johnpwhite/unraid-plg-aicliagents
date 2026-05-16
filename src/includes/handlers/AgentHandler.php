@@ -384,6 +384,7 @@ class AgentHandler {
         \AICliAgents\Services\AgentRegistry::setChannel($agentId, $channel, $pinned);
         // Clear old notification for this agent since channel changed
         \AICliAgents\Services\VersionCheckService::clearNotification($agentId);
+        \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'agent_registry', 'agent_channel_set', ['agent' => $agentId, 'channel' => $channel, 'pinned' => $pinned]);
 
         return ['status' => 'ok', 'channel' => $channel, 'pinned' => $pinned];
     }

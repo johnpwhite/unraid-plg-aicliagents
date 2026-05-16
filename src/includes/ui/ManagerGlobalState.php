@@ -15,7 +15,7 @@ window.csrf_token = csrf;
 const activeTerminalUser = '<?= ($config['user'] === '0' || $config['user'] === 0) ? 'root' : $config['user'] ?>';
 let statsInterval = 5000;
 let statsTimer = null;
-let agentFilter = 'all';
+let agentFilter = localStorage.getItem('aicli_agent_filter') || 'all';
 <?php
     $agentPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
     $homePath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';

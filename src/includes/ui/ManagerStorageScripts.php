@@ -38,7 +38,10 @@ function refreshStats() {
             $('#rootfs-percent').text(data.rootfs.percent + '%');
             $('#rootfs-text').text(data.rootfs.used_mb + 'MB / ' + data.rootfs.total_mb + 'MB');
         }
-        renderAgentStats(data.agents);
+        // WP #748 J / Phase B: per-agent cards removed from the Storage tab.
+        // Agent storage state is now surfaced in the Store card foot (size only;
+        // health remains in the boot-integrity banner). data.agents is still
+        // consumed by av2RefreshStoreCardSizes() driven by the Store-tab poll.
         renderHomeStats(data.homes);
         renderCleanupCard(data.artifacts);
     });
@@ -111,44 +114,13 @@ function renderLayerList(layers, dirtyMb) {
     return html;
 }
 
-function renderAgentStats(agents) {
-    let html = '';
-    let totalPhysical = 0;
-    const ids = Object.keys(agents || {});
-    if (ids.length === 0) {
-        html = '<div class="storage-empty-state"><i class="fa fa-cube" style="font-size:24px; display:block; margin-bottom:8px; opacity:0.3;"></i>No active agent stacks</div>';
-    } else {
-        $.each(agents, function(id, a) {
-            totalPhysical += a.physical_mb;
-            const canConsolidate = a.layers >= 2;
-            const cardClass = 'storage-entity-card' + (a.percent > 0 ? ' has-dirty' : '');
-            html += '<div class="' + cardClass + '">' +
-                '<div class="se-header">' +
-                    '<div><div class="se-title"><i class="fa fa-cube" style="color:var(--orange, #e68a00); margin-right:6px;"></i>' + id + '</div>' +
-                    '<div class="se-meta">' + a.physical_mb + ' MB on Flash &middot; ' + a.layers + ' Layer' + (a.layers !== 1 ? 's' : '') + '</div></div>' +
-                    '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">' +
-                        '<div style="font-size:11px; font-weight:700; color:' + (a.percent > 0 ? 'var(--orange, #ff8c00)' : '#4caf50') + ';">' + (a.percent > 0 ? a.dirty_mb + ' MB Dirty' : 'Synced') + '</div>' +
-                        // WP #271 follow-up: pending-consolidation badge
-                        (a.consolidate_pending ? '<div style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="Auto-consolidation deferred — waiting for the agent mount to go idle.">⧗ Awaiting idle</div>' : '') +
-                    '</div>' +
-                '</div>' +
-                '<div class="se-body">' +
-                    '<div class="stat-bar-wrap" style="height:12px;"><div class="stat-bar-base" style="width:' + (100 - a.percent) + '%;"></div><div class="stat-bar-dirty" style="width:' + a.percent + '%;"></div><div class="stat-bar-text">' + (a.percent > 0 ? a.percent + '% Uncommitted' : 'Synced') + '</div></div>' +
-                    '<div class="se-mount-label"><i class="fa fa-hdd-o"></i> ' + a.mount_point + '</div>' +
-                    renderLayerList(a.layer_files, a.dirty_mb) +
-                '</div>' +
-                '<div class="se-actions">' +
-                    '<a href="#" class="stat-icon-btn" onclick="persistEntity(\'agent\', \'' + id + '\'); return false;" title="Persist RAM to Flash"><i class="fa fa-save"></i></a>' +
-                    '<a href="#" class="stat-icon-btn" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate ? 'consolidateStorage(\'agent\', \'' + id + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate Layers' : 'Requires 2+ layers') + '"><i class="fa fa-compress"></i></a>' +
-                    '<a href="#" class="stat-icon-btn" onclick="repairStorage(\'agent\', \'' + id + '\'); return false;" title="Repair Mount"><i class="fa fa-wrench"></i></a>' +
-                    '<a href="#" class="stat-icon-btn" onclick="wipeStorage(\'agent\', \'' + id + '\'); return false;" title="Wipe Data" style="color:#f44336;"><i class="fa fa-trash"></i></a>' +
-                '</div>' +
-                '</div>';
-        });
-    }
-    $('#agents-stats-container').html(html);
-    $('#agents-text-summary').text(totalPhysical.toFixed(2) + ' MB Total');
-}
+// renderAgentStats() removed in v2026.05.13.05 (WP #748 J / Phase B). Under
+// single-layer-per-agent the per-agent storage cards were vestigial; agent
+// storage size is now surfaced in the Store card foot (av2RefreshStoreCardSizes
+// in ManagerStoreScripts.php), and repair/restore actions remain on the
+// boot-integrity banner. The persist_agent / consolidate_storage / wipe_storage
+// AJAX handlers stay registered (home flows still use them; advanced/admin
+// paths can hit them directly) but lose their UI entry point on this tab.
 
 function renderHomeStats(homes) {
     let html = '';
@@ -164,7 +136,7 @@ function renderHomeStats(homes) {
             html += '<div class="' + cardClass + '">' +
                 '<div class="se-header">' +
                     '<div><div class="se-title"><i class="fa fa-home" style="color:var(--orange, #e68a00); margin-right:6px;"></i>' + u + '</div>' +
-                    '<div class="se-meta">' + h.physical_mb + ' MB on Flash &middot; ' + h.layers + ' Layer' + (h.layers !== 1 ? 's' : '') + '</div></div>' +
+                    '<div class="se-meta">' + h.physical_mb + ' MB persisted &middot; ' + h.layers + ' Layer' + (h.layers !== 1 ? 's' : '') + '</div></div>' +
                     '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">' +
                         '<div style="font-size:11px; font-weight:700; color:' + (!h.mounted ? '#888' : (h.percent > 0 ? 'var(--orange, #ff8c00)' : '#4caf50')) + ';">' + (!h.mounted ? 'OFFLINE' : (h.percent > 0 ? h.dirty_mb + ' MB Dirty' : 'Synced')) + '</div>' +
                         // WP #271 follow-up: pending-consolidation badge
@@ -177,7 +149,7 @@ function renderHomeStats(homes) {
                     renderLayerList(h.layer_files, h.dirty_mb) +
                 '</div>' +
                 '<div class="se-actions">' +
-                    '<a href="#" class="stat-icon-btn" onclick="persistEntity(\'home\', \'' + u + '\'); return false;" title="Persist RAM to Flash"><i class="fa fa-save"></i></a>' +
+                    '<a href="#" class="stat-icon-btn" onclick="persistEntity(\'home\', \'' + u + '\'); return false;" title="Persist to storage"><i class="fa fa-save"></i></a>' +
                     '<a href="#" class="stat-icon-btn" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate Layers' : 'Requires 2+ layers') + '"><i class="fa fa-compress"></i></a>' +
                     '<a href="#" class="stat-icon-btn" onclick="repairStorage(\'home\', \'' + u + '\'); return false;" title="Repair Mount"><i class="fa fa-wrench"></i></a>' +
                 '</div>' +
@@ -229,7 +201,7 @@ function renderCleanupCard(artifacts) {
 
 function persistEntity(type, id) {
     const title = type === 'agent' ? "Persist Agent Updates?" : "Persist Home Changes?";
-    const text = type === 'agent' ? "Commit NPM updates/changes in RAM to Flash for " + id + "." : "Commit current RAM session data to SquashFS layers for " + id + ".";
+    const text = type === 'agent' ? "Commit changes in RAM to storage for " + id + "." : "Commit current RAM session data to SquashFS layers for " + id + ".";
     
     swal({ title: title, text: text, type: "info", showCancelButton: true, confirmButtonText: "Persist Now", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
         const token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
@@ -242,7 +214,7 @@ function persistEntity(type, id) {
         
         $.getJSON(url, function(r) {
             if (r && r.status === 'ok') { 
-                swal({ title: "Persisted", text: "Data committed to flash.", type: "success", timer: 2000, showConfirmButton: false }); 
+                swal({ title: "Persisted", text: "Data persisted.", type: "success", timer: 2000, showConfirmButton: false });
                 clearChanged();
                 refreshStats(); 
             }
@@ -347,6 +319,43 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
             if (entry.state === 'healthy' || entry.state === 'genuine_fresh') return;
             var ev = entry.evidence || {};
 
+            var entitySafe = entry.entity.replace(/[^a-zA-Z0-9/_-]/g, '');
+            var typeSafe   = entitySafe.split('/')[0] || '';
+            var idSafe     = entitySafe.split('/')[1] || '';
+
+            // WP #748 J / Phase B follow-up (c): for agent entities, the banner
+            // becomes navigational — surface a "Show on Agent Store" deep-link
+            // that switches to the Store tab and scrolls to the affected card,
+            // where the pill + Repair / Clear-halt buttons live. The inline
+            // Restore button stays for home entities (no Store card for homes).
+            if (typeSafe === 'agent') {
+                var agentStateLabel = (entry.state || '').replace(/_/g, ' ');
+                var sibLine = '';
+                if (ev.siblings_count) {
+                    sibLine = ' &nbsp;|&nbsp; <span style="opacity:0.85;">' + ev.siblings_count + ' sibling layer(s) available to restore</span>';
+                }
+                recoveryCards +=
+                    '<div style="border:1px solid ' + color + '; border-radius:6px; padding:12px 16px; margin-top:8px;">' +
+                        '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                            '<div>' +
+                                '<div style="font-size:12px; font-weight:700; font-family:monospace; margin-bottom:4px;">' + entry.entity + '</div>' +
+                                '<div style="font-size:10px; text-transform:uppercase; letter-spacing:0.5px; color:' + color + ';">' + agentStateLabel + sibLine + '</div>' +
+                            '</div>' +
+                            '<button type="button" ' +
+                                'class="aicli-btn-slim aicli-show-on-store-btn" ' +
+                                'data-agent="' + idSafe + '" ' +
+                                'style="background:' + color + '; white-space:nowrap; margin-left:16px;" ' +
+                                'title="Switch to the Agent Store tab and scroll to this agent — Repair / Clear-halt actions live on the card.">' +
+                                '<i class="fa fa-external-link"></i> Show on Agent Store →' +
+                            '</button>' +
+                        '</div>' +
+                    '</div>';
+                return;
+            }
+
+            // Home entities: existing two-mode rendering — recovery card with
+            // inline Restore-from-sibling for legacy_unmanaged / path_drift,
+            // text-only detail row for everything else.
             if (recoveryStates.indexOf(entry.state) !== -1) {
                 // Build a recovery card for this entity.
                 var sibCount = ev.siblings_count || 0;
@@ -359,10 +368,6 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
                     var lastSlash = sp.lastIndexOf('/');
                     sibDir = (lastSlash > 0) ? sp.substring(0, lastSlash) : sp;
                 }
-
-                var entitySafe = entry.entity.replace(/[^a-zA-Z0-9/_-]/g, '');
-                var typeSafe   = entitySafe.split('/')[0] || '';
-                var idSafe     = entitySafe.split('/')[1] || '';
 
                 var stateLabel = entry.state === 'legacy_unmanaged'
                     ? 'Unmanaged layers found in sibling directory'
@@ -430,6 +435,28 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
 
         banner.html(html).show();
     }
+
+    // WP #748 J / Phase B follow-up (c): "Show on Agent Store" deep-link.
+    // Switches to the Store tab and scrolls/flashes the affected card. The
+    // pill + Repair / Clear-halt buttons live there; this is purely navigational.
+    $('#aicli-boot-integrity-banner').on('click', '.aicli-show-on-store-btn', function() {
+        var agentId  = $(this).data('agent');
+        var storeBtn = document.querySelector('.aicli-tab-btn[onclick*="\'store\'"]');
+        if (storeBtn) storeBtn.click();
+        setTimeout(function() {
+            var card = document.querySelector('.av2-card[data-agent="' + agentId + '"]');
+            if (!card) return;
+            card.scrollIntoView({behavior: 'smooth', block: 'center'});
+            var prevTransition = card.style.transition;
+            var prevShadow     = card.style.boxShadow;
+            card.style.transition = 'box-shadow 0.4s';
+            card.style.boxShadow  = '0 0 0 3px #e67e22, 0 0 24px rgba(230,126,34,0.55)';
+            setTimeout(function() {
+                card.style.boxShadow  = prevShadow;
+                setTimeout(function() { card.style.transition = prevTransition; }, 450);
+            }, 2200);
+        }, 220);
+    });
 
     // Single delegated click handler for all Restore buttons in the banner.
     // Never opens a modal from within another modal callback (no nested swal).
