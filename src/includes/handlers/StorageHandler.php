@@ -21,6 +21,7 @@ class StorageHandler {
             case 'restore_from_sibling':        return self::restoreFromSibling(); // mutating, but no Nchan — integrity-only
             case 'list_halts':                  return self::listHalts();           // read-only, no Nchan publish
             case 'clear_halt':                  return self::clearHalt();           // mutating, invalidates boot cache
+            case 'auto_heal_agent_install':     return self::autoHealAgentInstall(); // WP #916 — self-heal agent total_loss via reinstall
             case 'persist_agent':               $result = self::persistAgent($id); break;
             // Note: get_task_status outputs raw JSON and is dispatched directly
             case 'persist_home':                $result = self::persistHome(); break;
@@ -46,7 +47,7 @@ class StorageHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_task_status',
-                'restore_from_sibling', 'list_halts', 'clear_halt',
+                'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'wipe_storage',
@@ -288,6 +289,88 @@ class StorageHandler {
             : 'Restore completed with errors: ' . implode('; ', $result['errors']);
 
         return array_merge(['status' => $status, 'message' => $message], $result);
+    }
+
+    /**
+     * WP #916: self-heal an agent total_loss halt by reinstalling the agent.
+     *
+     * Agent storage is pure npm code — nothing to wipe, nothing to lose. When
+     * the boot-integrity sweep finds total_loss on an agent entity, the right
+     * recovery is to npm-reinstall the binary, not to nag the user with a
+     * destructive confirmation. The UI auto-triggers this in place of the
+     * old "Start fresh and abandon data" button for agent/* total_loss halts.
+     *
+     * GET parameters: id (agent-id).
+     *
+     * Response shape:
+     *   { "status": "ok"|"error", "agent": "<id>", "version": "<v|null>",
+     *     "message": "<human-readable>" }
+     */
+    private static function autoHealAgentInstall(): array {
+        $id = trim((string)($_REQUEST['id'] ?? ''));
+        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+            return ['status' => 'error', 'message' => 'Invalid or missing agent id'];
+        }
+
+        // Sanity: agent must be in the registry. If not, the halt is stale —
+        // clear it and remove the manifest entry; don't try to reinstall a
+        // non-existent agent.
+        $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
+        if (!isset($registry[$id])) {
+            \AICliAgents\Services\LayerManifestService::removeEntity("agent/$id");
+            \AICliAgents\Services\HaltService::clearHalt('agent', $id, 'auto_heal_stale_registry');
+            @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+            return [
+                'status'  => 'ok',
+                'agent'   => $id,
+                'version' => null,
+                'message' => "Agent '$id' is not in the registry — cleared the stale halt and manifest entry.",
+            ];
+        }
+
+        // Pull recorded version from the manifest's most recent layer entry,
+        // if any. installAgent($id, null) means "latest" — that's fine when
+        // we can't recover the pinned version.
+        $version = self::_recordedAgentVersion($id);
+
+        $result = \AICliAgents\Services\InstallerService::installAgent($id, $version);
+        $ok = is_array($result) && (($result['status'] ?? '') !== 'error');
+
+        if ($ok) {
+            \AICliAgents\Services\HaltService::clearHalt('agent', $id, 'auto_heal_reinstalled');
+            @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+                'storage_handler', 'agent_auto_healed',
+                ['agent' => $id, 'version' => $version]
+            );
+            return [
+                'status'  => 'ok',
+                'agent'   => $id,
+                'version' => $version,
+                'message' => "Reinstalled agent '$id'" . ($version ? " (version $version)" : ' (latest)') . " and cleared the halt.",
+            ];
+        }
+
+        return [
+            'status'  => 'error',
+            'agent'   => $id,
+            'version' => $version,
+            'message' => 'Auto-heal install failed: ' . (string)($result['message'] ?? $result['error'] ?? 'unknown error'),
+        ];
+    }
+
+    /** WP #916: look up the version of the most recent recorded layer for an agent. */
+    private static function _recordedAgentVersion(string $agentId): ?string {
+        $entity = \AICliAgents\Services\LayerManifestService::getEntity("agent/$agentId");
+        if (!is_array($entity)) return null;
+        $layers = $entity['expected_layers'] ?? [];
+        if (!is_array($layers) || empty($layers)) return null;
+        $last = end($layers);
+        if (is_array($last) && isset($last['version']) && is_string($last['version'])) {
+            return $last['version'];
+        }
+        return null;
     }
 
     private static function persistAgent($id) {

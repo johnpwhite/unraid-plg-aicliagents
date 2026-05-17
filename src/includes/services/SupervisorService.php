@@ -210,6 +210,80 @@ class SupervisorService {
         return $ret === 0;
     }
 
+    /**
+     * Wait until any in-flight supervisor op for $type/$id has drained and the
+     * queue holds no further work for that entity. Used by install-bg.php to
+     * gate the agent binary swap on completion of a pre-install home bake
+     * (WP #859 / AGENT_UPGRADE_HOME_BAKE_SYNC).
+     *
+     * Returns an array with:
+     *   status      : 'completed' | 'no_pending_work' | 'timeout'
+     *   waited_s    : seconds spent waiting (0 if no_pending_work returned fast)
+     *
+     * 'completed' means we observed a queued or running op for this entity
+     * and watched it drain. 'no_pending_work' means we waited at least
+     * $heartbeatGraceSec without ever seeing one queued or running (the normal
+     * case when no sessions were close-required, or the supervisor is down).
+     * 'timeout' means we hit $timeoutSec while an op for our entity was still
+     * running — caller should proceed; commit_stack.sh's marker-timestamp
+     * guard still protects against data loss.
+     *
+     * Polls at 500 ms; bounded by $timeoutSec. Heartbeat grace must be less
+     * than the timeout; default 6 s covers the worst-case supervisor pickup
+     * latency (5 s heartbeat + 1 s slack).
+     */
+    public static function waitForOpsToDrain(
+        string $type,
+        string $id,
+        int $timeoutSec = 30,
+        int $heartbeatGraceSec = 6
+    ): array {
+        $startedAt = microtime(true);
+        $deadline = $startedAt + max(1, $timeoutSec);
+        $entity = $type . '/' . $id;
+        $sawAction = false;
+
+        while (microtime(true) < $deadline) {
+            $work = self::getWorkState();
+            $busyForOurs = is_array($work)
+                && ($work['state'] ?? '') === 'running'
+                && ($work['entity'] ?? '') === $entity;
+
+            $queuedForOurs = self::isQueuedFor($type, $id);
+
+            if ($busyForOurs || $queuedForOurs) {
+                $sawAction = true;
+            } else {
+                $elapsed = microtime(true) - $startedAt;
+                if ($sawAction) {
+                    return ['status' => 'completed', 'waited_s' => (int) round($elapsed)];
+                }
+                if ($elapsed >= $heartbeatGraceSec) {
+                    return ['status' => 'no_pending_work', 'waited_s' => (int) round($elapsed)];
+                }
+            }
+
+            usleep(500000);
+        }
+
+        return ['status' => 'timeout', 'waited_s' => $timeoutSec];
+    }
+
+    /**
+     * Returns true if at least one queue request file targets $type/$id.
+     * Filename convention (queue_helpers.sh): <prio>_<epoch>_<type>_<id>_<op>.req
+     */
+    private static function isQueuedFor(string $type, string $id): bool {
+        if (!is_dir(self::QUEUE_DIR)) {
+            return false;
+        }
+        $safeType = preg_replace('/[^a-z]/', '', $type);
+        $safeId   = preg_replace('/[^A-Za-z0-9._\-]/', '_', $id);
+        $pattern  = self::QUEUE_DIR . '/*_*_' . $safeType . '_' . $safeId . '_*.req';
+        $matches  = @glob($pattern);
+        return is_array($matches) && !empty($matches);
+    }
+
     // -------------------------------------------------------------------------
     // Public API — halts
     // -------------------------------------------------------------------------

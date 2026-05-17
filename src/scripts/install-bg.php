@@ -40,6 +40,23 @@ if (empty($agentId)) {
 $verLabel = $targetVersion ? " (version: $targetVersion)" : " (latest)";
 aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmypid() . ")", AICLI_LOG_INFO);
 
+// WP #859: gate the binary swap on the pre-install home bake completing.
+// AgentHandler::install enqueued a home bake before spawning this script;
+// wait for the supervisor to pick it up and drain. Bounded by 30s; on
+// timeout we proceed anyway (commit_stack.sh's marker-timestamp guard
+// still protects against data loss — see AGENT_UPGRADE_HOME_BAKE_SYNC.md).
+$cfg = function_exists('getAICliConfig') ? getAICliConfig() : [];
+$user = $cfg['user'] ?? 'root';
+if (empty($user)) $user = 'root';
+$wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user, 30, 6);
+aicli_log("Pre-install bake wait: {$wait['status']} (waited {$wait['waited_s']}s, user=$user)", AICLI_LOG_INFO);
+\AICliAgents\Services\LifecycleLogService::log(
+    \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+    'installer',
+    'pre_install_bake_wait',
+    ['agent' => $agentId, 'user' => $user, 'status' => $wait['status'], 'waited_s' => $wait['waited_s']]
+);
+
 // 4. Run the install
 try {
     $result = \AICliAgents\Services\InstallerService::installAgent($agentId, $targetVersion);

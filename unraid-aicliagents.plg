@@ -1,8 +1,15 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.15.16" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.17.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.17.02
+- Improve: Out of beta. The plugin now ships as a regular Community Applications release — the Beta flag in the CA template has been removed.
+- Fix: Codex CLI launches correctly after install. From `@openai/codex` v0.99, OpenAI split the native binary into a per-platform optional dependency, so the previous expected binary path was wrong and Codex crashed immediately with "Agent Binary Missing". The path is now correct, and a fallback preserves pre-v0.99 installs that haven't been reinstalled.
+- Improve: Agent-storage halts now self-heal silently. If the boot integrity check finds an agent's binary layers missing, the plugin automatically re-runs the install (agent storage is just npm code — there's nothing to lose) instead of presenting a scary "Storage Unavailable — start fresh and abandon data" prompt. Real user-data halts (home storage) keep their destructive confirmation, but the WIPE dialog now actually has an input box (previously the gate was decorative, and Cancel looped back to the same overlay with no escape). Every halt card also gains a Retry-integrity-check button and a Dismiss-for-24h button, so the destructive path is never the only escape.
+- Improve: Halt overlay follows the active Unraid theme (light / dark / auto) instead of forcing a dark+orange palette that didn't blend with the rest of the UI.
+- Fix: Uninstalling an agent now cleans up its layer-manifest entry and clears any pending halt sentinel. Without this, the next reboot's integrity sweep treated the just-uninstalled agent as "all expected layers missing" and surfaced a phantom Storage Unavailable halt for an agent that wasn't even on disk anymore.
+
 ## 2026.05.15.16
 - Feat: Connect to workspace terminals from your local SSH client. A new "SSH Keys" card in Settings registers a public key for tmux-attach access; clicking the key icon on any workspace row copies a ready-to-paste `ssh user@host -t "tmux attach …"` command (UTF-8 locale prefixed so agent status glyphs render correctly). Recommended on Windows: Windows Terminal, not the legacy "Windows PowerShell" host. A key registered in one browser is recognised across every browser pointed at the same Unraid box.
 - Fix: Agent Marketplace no longer shows "No agents match the current filter" while matching cards are visible above (an empty-state race during the initial grid render).
@@ -171,7 +178,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.15.16"
+export VERSION="2026.05.17.02"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -197,12 +204,12 @@ fi
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.15.16" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.17.02" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.15.16" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.15.16" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.17.02" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.17.02" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.15.16)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.17.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

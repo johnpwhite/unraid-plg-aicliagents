@@ -553,13 +553,37 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
         return STATE_LABELS[state] || state;
     }
 
-    // Build the action buttons for a single halt record
+    // localStorage-backed "dismiss until" so the overlay doesn't re-block on
+    // every refresh for a halt the user has decided to deal with later.
+    var DISMISSED_KEY  = 'aicli_halt_dismissed_until';
+    var DISMISS_HOURS  = 24;
+    function _readDismissed() {
+        if (!window.localStorage) return {};
+        try { return JSON.parse(localStorage.getItem(DISMISSED_KEY) || '{}') || {}; }
+        catch (e) { return {}; }
+    }
+    function isDismissed(entity) {
+        var d = _readDismissed();
+        var until = d[entity];
+        return typeof until === 'number' && until > Date.now();
+    }
+    function dismissFor(entity, hours) {
+        if (!window.localStorage) return;
+        var d = _readDismissed();
+        d[entity] = Date.now() + (hours || DISMISS_HOURS) * 3600 * 1000;
+        try { localStorage.setItem(DISMISSED_KEY, JSON.stringify(d)); } catch (e) {}
+    }
+
+    // Build the action buttons for a single halt record (WP #916: theme-friendly,
+    // Dismiss + Retry always available, no agent/total_loss destructive prompt —
+    // that case is auto-healed before the overlay even renders).
     function buildActionButtons(halt) {
-        var type    = halt.type;
-        var id      = halt.id;
-        var state   = halt.state;
-        var action  = halt.recommended_action || '';
-        var btns    = '';
+        var type   = halt.type;
+        var id     = halt.id;
+        var state  = halt.state;
+        var action = halt.recommended_action || '';
+        var btns   = '';
+        var BTN    = 'aicli-btn-slim';                // base class — Unraid-themed via CSS below
 
         if (action === 'restore_from_sibling' || state === 'legacy_unmanaged' || state === 'path_drift') {
             var sibDir = '';
@@ -570,72 +594,130 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
                 var sl = p.lastIndexOf('/');
                 sibDir = (sl > 0) ? p.substring(0, sl) : p;
             }
-            btns += '<button type="button" class="aicli-btn-slim aicli-halt-restore" ' +
-                'data-type="' + type + '" data-id="' + id + '" data-sibling-dir="' + (sibDir || 'sibling directory') + '" ' +
-                'style="background:#e67e22;">' +
+            btns += '<button type="button" class="' + BTN + ' aicli-halt-btn-primary aicli-halt-restore" ' +
+                'data-type="' + type + '" data-id="' + id + '" data-sibling-dir="' + (sibDir || 'sibling directory') + '">' +
                 '<i class="fa fa-reply"></i> Restore from ' + (sibDir ? '<code>' + sibDir + '</code>' : 'sibling') +
                 '</button> ';
         }
-        if (action === 'use_emergency_mode' || state === 'total_loss' || state === 'partial_loss') {
-            btns += '<button type="button" class="aicli-btn-slim aicli-halt-abandon" ' +
-                'data-type="' + type + '" data-id="' + id + '" ' +
-                'style="background:#c0392b;">' +
+        // WP #916: agent/total_loss never reaches buildActionButtons — it's
+        // auto-healed in checkAndRenderOverlay. Only home/total_loss (real
+        // user data) shows the destructive button.
+        if ((action === 'use_emergency_mode' || state === 'total_loss' || state === 'partial_loss') && type === 'home') {
+            btns += '<button type="button" class="' + BTN + ' aicli-halt-btn-danger aicli-halt-abandon" ' +
+                'data-type="' + type + '" data-id="' + id + '">' +
                 '<i class="fa fa-exclamation-triangle"></i> Start fresh and abandon data' +
                 '</button> ';
         }
         if (state === 'host_mismatch') {
-            btns += '<button type="button" class="aicli-btn-slim aicli-halt-confirm-host" ' +
-                'data-type="' + type + '" data-id="' + id + '" ' +
-                'style="background:#27ae60;">' +
+            btns += '<button type="button" class="' + BTN + ' aicli-halt-btn-confirm aicli-halt-confirm-host" ' +
+                'data-type="' + type + '" data-id="' + id + '">' +
                 '<i class="fa fa-check"></i> Confirm: this is the correct machine' +
                 '</button> ';
         }
         if (action === 'configure_path' || (state === 'path_drift' && action === 'configure_path')) {
-            btns += '<a href="#tab-config" class="aicli-btn-slim" style="background:#2980b9;">' +
+            btns += '<a href="#tab-config" class="' + BTN + ' aicli-halt-btn-info">' +
                 '<i class="fa fa-cog"></i> Open Settings</a> ';
         }
         if (action === 'review_manifest' && state !== 'host_mismatch') {
-            btns += '<button type="button" class="aicli-btn-slim aicli-halt-override" ' +
-                'data-type="' + type + '" data-id="' + id + '" ' +
-                'style="background:#7f8c8d; margin-left:8px;">' +
+            btns += '<button type="button" class="' + BTN + ' aicli-halt-btn-neutral aicli-halt-override" ' +
+                'data-type="' + type + '" data-id="' + id + '">' +
                 '<i class="fa fa-unlock"></i> Override and start fresh' +
-                '</button>';
+                '</button> ';
         }
+        // WP #916: always-available non-destructive options. Retry re-runs
+        // the boot sweep (good if user fixed the underlying issue outside
+        // the UI, e.g. plugged a disk back in). Dismiss hides the overlay
+        // for 24h on this device.
+        btns += '<button type="button" class="' + BTN + ' aicli-halt-btn-neutral aicli-halt-retry" ' +
+            'data-type="' + type + '" data-id="' + id + '">' +
+            '<i class="fa fa-refresh"></i> Retry integrity check' +
+            '</button> ';
+        btns += '<button type="button" class="' + BTN + ' aicli-halt-btn-neutral aicli-halt-dismiss" ' +
+            'data-type="' + type + '" data-id="' + id + '">' +
+            '<i class="fa fa-clock-o"></i> Dismiss for ' + DISMISS_HOURS + 'h' +
+            '</button>';
         return btns;
+    }
+
+    // WP #916: theme-friendly stylesheet for the overlay. Loads once on first
+    // overlay render. Uses Unraid theme CSS variables so the overlay matches
+    // light/dark/auto themes instead of forcing a dark+orange palette. All
+    // selectors are .aicli-halt-* so they don't leak; the inner .unapi class
+    // on the root prevents Unraid's global button styling from bleeding into
+    // our buttons on Unraid 7.3+ (7.2 falls back to the !important rules).
+    var STYLE_ID = 'aicli-halt-overlay-styles';
+    function injectStylesOnce() {
+        if (document.getElementById(STYLE_ID)) return;
+        var st = document.createElement('style');
+        st.id = STYLE_ID;
+        st.textContent =
+            '#' + OVERLAY_ID + '{position:fixed;inset:0;z-index:10002;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:32px 24px;box-sizing:border-box;overflow-y:auto;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-header{max-width:720px;width:100%;text-align:center;margin-bottom:20px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6);}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-title{font-size:22px;font-weight:700;margin-bottom:8px;color:var(--orange,#e68a00);}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-subtitle{font-size:13px;opacity:.85;margin-bottom:4px;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-note{font-size:11px;opacity:.7;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-cards{width:100%;display:flex;flex-direction:column;align-items:center;gap:14px;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-card{background:var(--background-color,#fff);color:var(--text-color,#222);border:1px solid var(--border-color,#ddd);border-radius:8px;padding:16px 20px;max-width:680px;width:100%;box-shadow:0 16px 48px rgba(0,0,0,.25);}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-card-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-entity{font-size:13px;font-weight:700;font-family:monospace;color:var(--orange,#e68a00);margin-bottom:4px;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-state{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--alt-text-color,#888);margin-bottom:6px;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-when{font-size:10px;opacity:.55;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-badge{font-size:10px;background:var(--orange,#e68a00);color:#fff;padding:3px 8px;border-radius:4px;font-weight:700;white-space:nowrap;margin-left:12px;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-badge.healing{background:var(--alt-text-color,#888);}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-buttons{display:flex;flex-wrap:wrap;gap:8px;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim{all:unset !important;display:inline-flex !important;align-items:center !important;gap:6px !important;padding:6px 12px !important;font-size:12px !important;font-weight:600 !important;border-radius:4px !important;cursor:pointer !important;border:1px solid var(--border-color,#ddd) !important;background:var(--mild-background-color,#f7f9f9) !important;color:var(--text-color,#222) !important;text-decoration:none !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim:hover{background:var(--border-color,rgba(0,0,0,.08)) !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-primary{background:var(--orange,#e68a00) !important;color:#fff !important;border-color:var(--orange,#e68a00) !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-confirm{background:#2ecc71 !important;color:#fff !important;border-color:#27ae60 !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-info{background:#3498db !important;color:#fff !important;border-color:#2980b9 !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-danger{background:#c0392b !important;color:#fff !important;border-color:#a93226 !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-neutral{background:transparent !important;color:var(--text-color,#222) !important;}' +
+            '#' + OVERLAY_ID + ' .aicli-heal-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--alt-text-color,#888);border-top-color:transparent;border-radius:50%;animation:aicli-halt-spin 0.9s linear infinite;margin-right:8px;vertical-align:middle;}' +
+            '@keyframes aicli-halt-spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(st);
     }
 
     function buildOverlayHtml(halts) {
         var cards = '';
         $.each(halts, function(i, halt) {
             cards +=
-                '<div style="background:rgba(0,0,0,0.6); border:1px solid #c0392b; border-radius:8px; padding:16px 20px; margin-bottom:16px; max-width:680px; width:100%;">' +
-                    '<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">' +
+                '<div class="aicli-halt-card" data-entity="' + halt.type + '/' + halt.id + '">' +
+                    '<div class="aicli-halt-card-head">' +
                         '<div>' +
-                            '<div style="font-size:13px; font-weight:700; font-family:monospace; color:#e74c3c; margin-bottom:4px;">' + halt.type + '/' + halt.id + '</div>' +
-                            '<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:#e67e22; margin-bottom:6px;">' + stateLabel(halt.state) + '</div>' +
-                            (halt.halted_at ? '<div style="font-size:10px; opacity:0.55;">Halted at: ' + halt.halted_at + '</div>' : '') +
+                            '<div class="aicli-halt-entity">' + halt.type + '/' + halt.id + '</div>' +
+                            '<div class="aicli-halt-state">' + stateLabel(halt.state) + '</div>' +
+                            (halt.halted_at ? '<div class="aicli-halt-when">Halted at: ' + halt.halted_at + '</div>' : '') +
                         '</div>' +
-                        '<div style="font-size:10px; background:#c0392b; color:#fff; padding:3px 8px; border-radius:4px; font-weight:700; white-space:nowrap; margin-left:12px;">HALTED</div>' +
+                        '<div class="aicli-halt-badge">HALTED</div>' +
                     '</div>' +
-                    '<div style="font-size:11px; opacity:0.75; margin-bottom:12px;">' + (stateLabel(halt.state)) + '</div>' +
-                    '<div style="display:flex; flex-wrap:wrap; gap:8px;">' + buildActionButtons(halt) + '</div>' +
+                    '<div class="aicli-halt-buttons">' + buildActionButtons(halt) + '</div>' +
                 '</div>';
         });
 
-        return '<div id="' + OVERLAY_ID + '" style="' +
-            'position:fixed; top:0; left:0; width:100%; height:100%; z-index:10002;' +
-            'background:rgba(0,0,0,0.88); display:flex; flex-direction:column; align-items:center;' +
-            'justify-content:center; padding:24px; box-sizing:border-box; overflow-y:auto;">' +
-            '<div style="max-width:720px; width:100%; text-align:center; margin-bottom:24px;">' +
-                '<div style="font-size:22px; font-weight:700; color:#e74c3c; margin-bottom:8px;">' +
-                    '<i class="fa fa-exclamation-circle" style="margin-right:8px;"></i>Storage Unavailable' +
-                '</div>' +
-                '<div style="font-size:13px; opacity:0.8; margin-bottom:4px;">' +
-                    'Boot integrity check detected problems that must be resolved before the plugin can start.' +
-                '</div>' +
-                '<div style="font-size:11px; opacity:0.55;">The plugin will not overwrite your data without explicit consent.</div>' +
+        return '<div id="' + OVERLAY_ID + '" class="unapi">' +
+            '<div class="aicli-halt-header">' +
+                '<div class="aicli-halt-title"><i class="fa fa-exclamation-circle" style="margin-right:8px;"></i>Storage Attention Needed</div>' +
+                '<div class="aicli-halt-subtitle">Boot integrity check found something worth your attention. The plugin won\'t overwrite your data without explicit consent.</div>' +
+                '<div class="aicli-halt-note">Tip: you can Dismiss to deal with this later, or click Retry after fixing the underlying issue.</div>' +
             '</div>' +
-            '<div id="aicli-halt-cards" style="width:100%; display:flex; flex-direction:column; align-items:center;">' + cards + '</div>' +
+            '<div class="aicli-halt-cards">' + cards + '</div>' +
+        '</div>';
+    }
+
+    // WP #916: build an inline "auto-healing" card for an agent halt that's
+    // being silently reinstalled. Shown briefly via toast OR inline if the
+    // overlay is otherwise visible. Replaced with success/failure state when
+    // the auto_heal_agent_install AJAX returns.
+    function buildHealingCardHtml(halt) {
+        return '<div class="aicli-halt-card" data-entity="' + halt.type + '/' + halt.id + '" data-healing="1">' +
+            '<div class="aicli-halt-card-head">' +
+                '<div>' +
+                    '<div class="aicli-halt-entity">' + halt.type + '/' + halt.id + '</div>' +
+                    '<div class="aicli-halt-state"><span class="aicli-heal-spinner"></span>Reinstalling agent…</div>' +
+                '</div>' +
+                '<div class="aicli-halt-badge healing">HEALING</div>' +
+            '</div>' +
+            '<div style="font-size:11px;opacity:.75;">Agent storage is npm-managed binaries; reinstalling restores them without any data loss.</div>' +
         '</div>';
     }
 
@@ -694,18 +776,30 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
     }
 
     function doAbandon(type, id) {
+        // WP #916: real input field — SweetAlert v1's `type: 'input'` mode.
+        // Previously the dialog asked the user to "Type WIPE to confirm" but
+        // rendered no input box — clicking CONFIRM proceeded regardless,
+        // clicking CANCEL looped back to the same halt overlay with no
+        // escape. Now you must literally type WIPE; CANCEL returns to the
+        // overlay where Dismiss and Retry are also offered.
         swal({
-            title: 'Start fresh and abandon data for ' + type + '/' + id + '?',
-            text: 'Type WIPE to confirm. This will permanently discard all existing layers for this entity.',
-            type: 'error',
+            title: 'Wipe ' + type + '/' + id + ' and start fresh?',
+            text: 'This permanently discards all existing layers for this entity (user data lives here — this IS a destructive action).\n\nType WIPE in the box below to confirm.',
+            type: 'input',
+            inputPlaceholder: 'Type WIPE to confirm',
             showCancelButton: true,
+            closeOnConfirm: false,
+            animation: 'slide-from-top',
             confirmButtonColor: '#c0392b',
-            confirmButtonText: 'Confirm',
+            confirmButtonText: 'Wipe and start fresh',
             cancelButtonText: 'Cancel'
-        }, function(confirmed) {
-            if (!confirmed) return;
+        }, function(inputValue) {
+            if (inputValue === false) return;          // Cancel: just close, halt overlay still visible
+            if (inputValue !== 'WIPE') {
+                swal.showInputError('Type WIPE exactly (uppercase) to confirm — or Cancel to back out.');
+                return false;
+            }
             var token = getToken();
-            // Clear the halt and proceed with empty mount
             $.ajax({
                 url: AJAX_BASE,
                 type: 'GET',
@@ -717,6 +811,90 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
                 dismissOverlayIfEmpty();
             });
         });
+    }
+
+    // WP #916: silently auto-heal an agent/total_loss halt by re-running the
+    // npm install for that agent. Agent storage is pure code from npm — there
+    // is nothing to lose. Called from checkAndRenderOverlay before the
+    // overlay is shown.
+    function doAutoHealAgent(halt, opts) {
+        var type = halt.type, id = halt.id;
+        var token = getToken();
+        var quiet = !!(opts && opts.quiet);
+        $.ajax({
+            url: AJAX_BASE,
+            type: 'GET',
+            data: { action: 'auto_heal_agent_install', type: type, id: id, csrf_token: token },
+            dataType: 'json',
+            timeout: 180000
+        }).done(function(r) {
+            if (r && r.status === 'ok') {
+                if (!quiet) {
+                    swal({ title: 'Agent restored', text: r.message || ('Reinstalled ' + id + '.'), type: 'success', timer: 3500, showConfirmButton: false });
+                }
+                // Remove the healing card if present
+                $('#aicli-halt-cards .aicli-halt-card[data-entity="' + type + '/' + id + '"]').remove();
+                dismissOverlayIfEmpty();
+            } else {
+                // Heal failed — surface a non-blocking error and fall back to
+                // the destructive option by re-rendering the overlay so the
+                // user sees the standard halt card.
+                swal({ title: 'Auto-heal failed', text: (r && r.message) || 'Could not reinstall the agent automatically.', type: 'error', confirmButtonText: 'OK' });
+            }
+        }).fail(function() {
+            swal({ title: 'Auto-heal failed', text: 'AJAX request failed — check debug.log.', type: 'error', confirmButtonText: 'OK' });
+        });
+    }
+
+    // WP #916: re-run the boot-integrity sweep and re-evaluate halts. Useful
+    // when the user fixed the underlying issue outside the UI (plugged a
+    // disk back in, restored a backup, etc.) and wants the overlay to clear
+    // without a page reload.
+    function doRetry(type, id) {
+        var token = getToken();
+        var $card = $('#aicli-halt-cards .aicli-halt-card[data-entity="' + type + '/' + id + '"]');
+        $card.css('opacity', '0.5');
+        $.ajax({
+            url: AJAX_BASE,
+            type: 'GET',
+            data: { action: 'get_boot_integrity_status', csrf_token: token, _t: Date.now() },
+            dataType: 'json',
+            timeout: 30000
+        }).always(function() {
+            // Re-fetch halts and re-render
+            $.ajax({
+                url: AJAX_BASE,
+                type: 'GET',
+                data: { action: 'list_halts', csrf_token: token, _t: Date.now() },
+                dataType: 'json'
+            }).done(function(data) {
+                var halts = (data && data.halts) || [];
+                var stillHalted = false;
+                $.each(halts, function(i, h) {
+                    if (h.type === type && h.id === id) { stillHalted = true; return false; }
+                });
+                if (!stillHalted) {
+                    $card.remove();
+                    swal({ title: 'Cleared', text: type + '/' + id + ' is no longer halted.', type: 'success', timer: 2500, showConfirmButton: false });
+                    dismissOverlayIfEmpty();
+                } else {
+                    $card.css('opacity', '1');
+                    swal({ title: 'Still halted', text: 'The integrity check still flags ' + type + '/' + id + '.', type: 'info', timer: 3000, showConfirmButton: false });
+                }
+            }).fail(function() {
+                $card.css('opacity', '1');
+            });
+        });
+    }
+
+    // WP #916: hide the overlay for this entity for ~24h. Doesn't clear the
+    // halt — the underlying state remains; we just stop blocking the page.
+    function doDismiss(type, id) {
+        var entity = type + '/' + id;
+        dismissFor(entity, DISMISS_HOURS);
+        $('#aicli-halt-cards .aicli-halt-card[data-entity="' + entity + '"]').remove();
+        swal({ title: 'Dismissed', text: 'Hidden for ' + DISMISS_HOURS + 'h on this device. Reload the page after ' + DISMISS_HOURS + 'h or click Retry to re-check.', type: 'info', timer: 3500, showConfirmButton: false });
+        dismissOverlayIfEmpty();
     }
 
     function doConfirmHost(type, id) {
@@ -760,25 +938,10 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
         });
     }
 
-    function attachCardDataAttributes() {
-        // Tag each card div with a data-entity attribute for removal
-        $('#aicli-halt-cards > div').each(function(i) {
-            var restoreBtn = $(this).find('.aicli-halt-restore, .aicli-halt-abandon, .aicli-halt-confirm-host, .aicli-halt-override').first();
-            if (restoreBtn.length) {
-                var t = restoreBtn.data('type') || '';
-                var d = restoreBtn.data('id')   || '';
-                if (t && d) $(this).attr('data-entity', t + '/' + d);
-            }
-        });
-    }
-
     function wireOverlayButtons() {
         $(document).on('click', '#' + OVERLAY_ID + ' .aicli-halt-restore', function() {
             var btn  = $(this);
-            var type = btn.data('type');
-            var id   = btn.data('id');
-            var dir  = btn.data('sibling-dir') || 'sibling directory';
-            doRestoreFromSibling(type, id, dir);
+            doRestoreFromSibling(btn.data('type'), btn.data('id'), btn.data('sibling-dir') || 'sibling directory');
         });
         $(document).on('click', '#' + OVERLAY_ID + ' .aicli-halt-abandon', function() {
             var btn  = $(this);
@@ -791,6 +954,15 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
         $(document).on('click', '#' + OVERLAY_ID + ' .aicli-halt-override', function() {
             var btn  = $(this);
             doOverride(btn.data('type'), btn.data('id'));
+        });
+        // WP #916: always-available non-destructive actions.
+        $(document).on('click', '#' + OVERLAY_ID + ' .aicli-halt-retry', function() {
+            var btn = $(this);
+            doRetry(btn.data('type'), btn.data('id'));
+        });
+        $(document).on('click', '#' + OVERLAY_ID + ' .aicli-halt-dismiss', function() {
+            var btn = $(this);
+            doDismiss(btn.data('type'), btn.data('id'));
         });
     }
 
@@ -806,9 +978,51 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
                 return; // No halts — nothing to do
             }
             if ($('#' + OVERLAY_ID).length) return; // Already rendered
-            $('body').append(buildOverlayHtml(data.halts));
-            attachCardDataAttributes();
-            wireOverlayButtons();
+
+            // WP #916: split halts into (a) auto-healable agent halts and
+            // (b) ones that need user attention. Filter out anything the
+            // user has dismissed in localStorage.
+            var autoHeal = [];
+            var blocking = [];
+            $.each(data.halts, function(i, halt) {
+                var entity = halt.type + '/' + halt.id;
+                if (isDismissed(entity)) return; // skip
+                // Agent storage with no surviving layers → just reinstall
+                // it. No data loss, no user prompt. Other states (corrupt,
+                // host_mismatch, partial_loss for agent, anything for home)
+                // still need user attention.
+                if (halt.type === 'agent' && halt.state === 'total_loss') {
+                    autoHeal.push(halt);
+                } else {
+                    blocking.push(halt);
+                }
+            });
+
+            // Kick off auto-heal in the background. If there are also blocking
+            // halts, the overlay will render and include a healing-state card
+            // for each in-flight reinstall so the user knows what's happening.
+            $.each(autoHeal, function(i, halt) {
+                doAutoHealAgent(halt, { quiet: blocking.length > 0 });
+            });
+
+            if (blocking.length === 0 && autoHeal.length === 0) {
+                return; // every halt was dismissed
+            }
+
+            injectStylesOnce();
+            if (blocking.length > 0) {
+                $('body').append(buildOverlayHtml(blocking));
+                // Add inline healing cards for the agents currently being healed.
+                if (autoHeal.length > 0) {
+                    var $cards = $('#aicli-halt-cards');
+                    $.each(autoHeal, function(i, halt) {
+                        $cards.prepend(buildHealingCardHtml(halt));
+                    });
+                }
+                wireOverlayButtons();
+            }
+            // If ONLY auto-heals were pending, no overlay — the toast on
+            // success/failure is the user feedback.
         });
         // Non-fatal on failure — banner just stays hidden
     }

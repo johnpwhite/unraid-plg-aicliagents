@@ -208,13 +208,21 @@ class AgentRegistry {
                 'description' => 'OpenAI Codex-powered agent for translating natural language to code and shell commands.',
                 'npm_package' => '@openai/codex',
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/codex.png',
-                // The @openai/codex npm package has NO `bin` field in its
-                // package.json — it's a native-binary-wrapped-in-npm pattern
-                // (Rust binary shipped via per-arch vendor/ subdirs). npm
-                // therefore never creates node_modules/.bin/codex, so we
-                // point directly at the vendored binary. Unraid is always
-                // x86_64 Linux, which matches the package's `cpu`/`os` gate.
-                'binary' => "$agentBase/codex-cli/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex",
+                // @openai/codex v0.99+ split the native binary out of the main
+                // package into a per-platform optionalDependency
+                // (@openai/codex-linux-x64, aliased via npm:@openai/codex@<ver>-linux-x64).
+                // npm installs that optional dep alongside the main package, so the
+                // Rust binary now lives under node_modules/@openai/codex-linux-x64/
+                // rather than node_modules/@openai/codex/vendor/.
+                // The main package's bin/codex.js does require.resolve(
+                // '@openai/codex-linux-x64/package.json') and derives the vendor path
+                // from there — so invoking bin/codex.js (Node) works as fallback, but
+                // we prefer the Rust binary for speed and to avoid the JS wrapper.
+                // binary_fallback covers pre-v0.99 installs that still have the old
+                // bundled-vendor layout (node_modules/@openai/codex/vendor/...) which
+                // is now the wrong primary path.
+                'binary' => "$agentBase/codex-cli/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex",
+                'binary_fallback' => "$agentBase/codex-cli/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex",
                 'resume_cmd' => "{binary} {args}",
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'CODEX',

@@ -290,6 +290,18 @@ class InstallerService {
         // 8. Remove version registration
         AgentRegistry::removeVersion($agentId);
 
+        // 9. Remove the agent's manifest entry (WP #916). Without this, the
+        // boot-integrity sweep on the next reboot finds `expected_layers > 0,
+        // active_count == 0` and creates a total_loss halt for an agent the
+        // user just deliberately uninstalled — surfacing a scary "Storage
+        // Unavailable / drive may be disconnected" overlay for a ghost.
+        @\AICliAgents\Services\LayerManifestService::removeEntity("agent/$agentId");
+
+        // 10. Clear any pending halt for the agent. If uninstall is happening
+        // BECAUSE the agent was halted, the halt sentinel survives the
+        // uninstall and would gate the next page load.
+        @\AICliAgents\Services\HaltService::clearHalt('agent', $agentId, 'agent_uninstalled');
+
         LogService::log("Successfully uninstalled $agentId and purged $oldSizeMB MB of associated storage.", LogService::LOG_INFO, "InstallerService");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_uninstalled', ['agent' => $agentId, 'purged_mb' => $oldSizeMB]);
         return ['status' => 'ok'];
