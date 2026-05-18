@@ -177,6 +177,10 @@ shopt -u nullglob
 # concurrently with auto-consolidation.
 CONSOLIDATE_MARKER="/tmp/unraid-aicliagents/.consolidate_marker_${TYPE}_${ID}"
 touch "$CONSOLIDATE_MARKER"
+# M2 fix (v2026.05.18.08): 50ms gap separates marker mtime from any concurrent
+# write hitting the same tmpfs nanosecond — the post-bake UPPER_CHANGED check
+# uses `find -newer $CONSOLIDATE_MARKER` and would otherwise miss equality writes.
+sleep 0.05
 
 # Check disk space on persistence target (atomic_write_layer writes directly there, not /tmp)
 check_disk_space "$PERSIST_PATH/.diskcheck" 200 || {
@@ -186,16 +190,112 @@ check_disk_space "$PERSIST_PATH/.diskcheck" 200 || {
     exit 1
 }
 
+# WP #935: detect SQLite DBs in the merged view and back them up via Online
+# Backup API before the wide bake (same pattern as commit_stack.sh).
+SQLITE_DBS=$(detect_sqlite_dbs "$MNT_POINT" 2>/dev/null)
+SQLITE_DB_COUNT=$(echo "$SQLITE_DBS" | grep -c -v '^$' 2>/dev/null || echo 0)
+SQLITE_STAGE=""
+MKSQUASHFS_EXTRA_EXCLUDES=""
+
+if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
+    log "Detected $SQLITE_DB_COUNT SQLite DB(s) in merged view — backing up via Online Backup API"
+    update_task_status "Backing up SQLite DBs..." 35 ""
+    SQLITE_STAGE="/tmp/unraid-aicliagents/.sqlite_stage_consol_${TYPE}_${ID}_$$"
+    rm -rf "$SQLITE_STAGE" 2>/dev/null
+    mkdir -p "$SQLITE_STAGE"
+
+    # shellcheck disable=SC2086
+    sqlite_backup_all "$MNT_POINT" "$SQLITE_STAGE" $SQLITE_DBS
+    _sba_rc=$?
+    if [ "$_sba_rc" -ne 0 ]; then
+        rm -rf "$SQLITE_STAGE" 2>/dev/null
+        rm -f "$CONSOLIDATE_MARKER"
+        # M3 fix (v2026.05.18.08): hard errors (return 1) must fail, not defer.
+        if [ "$_sba_rc" -eq 1 ]; then
+            error "SQLite backup hard error during consolidate — failing"
+            update_task_status "Failed" 0 "SQLite backup hard error"
+            lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_backup_hard_error\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
+            exit 1
+        fi
+        log "SQLite backup deferred (DB locked or backup timeout) — exiting 2 to retry"
+        update_task_status "Deferred" 0 "SQLite DB locked — retry later"
+        lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_backup_failed\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
+        exit 2
+    fi
+
+    MKSQUASHFS_EXTRA_EXCLUDES=$(build_mksquashfs_sqlite_excludes "$MNT_POINT" $SQLITE_DBS)
+fi
+
 # Step 3b: Atomic bake — writes sibling tempfile, fsyncs, verifies, renames atomically.
-# We bake from the mounted stack (MNT_POINT = merged view of all layers), not from UPPER_DIR.
+# We bake from the mounted stack (MNT_POINT = merged view of all layers).
 # atomic_write_layer returns the basename on stdout; all progress goes to stderr.
+_AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend"
+if [ -n "$MKSQUASHFS_EXTRA_EXCLUDES" ]; then
+    export MKSQUASHFS_ARGS="${MKSQUASHFS_ARGS:-$_AWL_DEFAULT_ARGS} $MKSQUASHFS_EXTRA_EXCLUDES"
+fi
+
 FINAL_NAME=""
 if ! FINAL_NAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$MNT_POINT" "consolidated"); then
     error "Atomic consolidation bake failed."
     update_task_status "Failed" 0 "Bake failed"
+    rm -rf "$SQLITE_STAGE" 2>/dev/null
     rm -f "$CONSOLIDATE_MARKER"
     lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"atomic_write_layer_failed\"}" 2>/dev/null || true
     exit 1
+fi
+
+# WP #935 Pass 3: append SQLite backups to the consolidated layer.
+#
+# C2 fix (v2026.05.18.08): MUST be atomic and MUST hard-fail. The previous
+# code mutated the just-renamed final in place and on failure just logged
+# and continued — which then proceeded to delete the old layers and wipe
+# UPPER, permanently losing the DBs. New protocol: append onto a TEMPFILE
+# copy of the final, verify, atomic-rename. On ANY failure, delete the
+# tempfile AND the partially-written final, restore the marker, exit 2
+# (defer). The old layers stay; UPPER stays; next consolidate retries.
+if [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ] && [ "$SQLITE_DB_COUNT" -gt 0 ]; then
+    log "Appending $SQLITE_DB_COUNT SQLite backup(s) to $FINAL_NAME (via tempfile)"
+    update_task_status "Appending SQLite snapshots..." 70 ""
+    APPEND_ARGS=$(echo "$_AWL_DEFAULT_ARGS" | sed 's/-noappend//g')
+    APPENDING_TMP="$PERSIST_PATH/.${FINAL_NAME}.appending.$$"
+    PRE_APPEND_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
+
+    _consol_append_fail() {
+        local reason="$1"
+        error "Append failed during consolidate: $reason — old layers preserved, deferring"
+        rm -f "$APPENDING_TMP" 2>/dev/null
+        # The wide-bake-only final is missing SQLite content. Deleting it
+        # ensures the consolidate is fully reverted: old layers will still
+        # be present (manifest update + old-layer-delete haven't run yet).
+        rm -f "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null
+        rm -rf "$SQLITE_STAGE" 2>/dev/null
+        # Don't remove CONSOLIDATE_MARKER — needed by UPPER_CHANGED check.
+        update_task_status "Deferred" 0 "SQLite append failed — retry later"
+        lifecycle_log "error" "consolidate_layers" "bash_consolidate_sqlite_append_failed" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$FINAL_NAME\",\"reason\":\"$reason\"}" 2>/dev/null || true
+        exit 2
+    }
+
+    if ! cp "$PERSIST_PATH/$FINAL_NAME" "$APPENDING_TMP" 2>/dev/null; then
+        _consol_append_fail "cp_to_tempfile_failed"
+    fi
+    # shellcheck disable=SC2086
+    if ! mksquashfs "$SQLITE_STAGE" "$APPENDING_TMP" $APPEND_ARGS > /dev/null 2>&1; then
+        _consol_append_fail "mksquashfs_append_returned_nonzero"
+    fi
+    POST_APPEND_BYTES=$(stat -c '%s' "$APPENDING_TMP" 2>/dev/null || echo 0)
+    if [ "$POST_APPEND_BYTES" -le "$PRE_APPEND_BYTES" ]; then
+        _consol_append_fail "append_zero_bytes_added"
+    fi
+    sync
+    if ! mv -f "$APPENDING_TMP" "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null; then
+        _consol_append_fail "atomic_rename_appended_failed"
+    fi
+    rm -rf "$SQLITE_STAGE" 2>/dev/null
+    lifecycle_log "info" "consolidate_layers" "bash_consolidate_sqlite_appended" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$FINAL_NAME\",\"db_count\":$SQLITE_DB_COUNT,\"pre_bytes\":$PRE_APPEND_BYTES,\"post_bytes\":$POST_APPEND_BYTES}" 2>/dev/null || true
 fi
 
 log "Consolidated volume written: $FINAL_NAME"

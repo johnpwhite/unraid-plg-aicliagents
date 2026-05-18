@@ -1,8 +1,13 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.18.05" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.18.08" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.18.08
+- **Fix (data loss — important): your agents stop forgetting your sessions.** A long-standing bug in how the plugin saves data from RAM to your Flash drive could silently drop the session-history database files used by Codex CLI, GitHub Copilot, Kilo Code, OpenCode and Goose — so an agent would occasionally start as if it had never seen you before, or hang on the "Waking Codex CLI..." loading screen. In severe cases the whole Unraid dashboard could freeze for minutes when the plugin was in use (downstream effect of an agent stuck reading a half-deleted database). This release fixes the save routine and adds defence-in-depth checks. **Already-lost session history is not recoverable by upgrading.** If an agent now hangs at Waking or complains about a corrupted database, in the affected agent's directory (e.g. `~/.codex/`, `~/.copilot/`) delete any `.db-shm` or `.db-wal` files that don't have a matching `.db` next to them, then re-launch — the agent starts fresh.
+- **Improve: Plugin upgrades no longer interrupt your work.** Routine upgrades from this release forward leave your terminal sessions running and your agents in place — typical upgrade time drops from ~30–90s of session-killing teardown to ~5–15s. The longer path is still used (and the release notes will say so) when a release genuinely needs to rebuild your storage layout. **One-time exception:** the upgrade FROM the previous storefront TO this release will still take the long path, because this release introduces the marker the plugin uses to recognise compatible layouts. From the next upgrade onward, routine updates run uninterrupted. Unsaved RAM data is flushed to Flash just before the swap, so a sudden power loss during the brief upgrade window doesn't lose recent activity.
+- **Improve: Qwen Code's DashScope API key now appears as a labelled password field on the agent's Store card** — previously users had to discover the `DASHSCOPE_API_KEY` env variable name themselves from the qwen-code README. Alternative providers (Ollama, vLLM, …) can still be configured via the general env panel.
+
 ## 2026.05.18.05
 - Fix (data loss): Storage consolidation no longer deletes the `.gemini/tmp/` directory during its pre-bake prune. That path holds gemini-cli's per-project session chat logs (`.gemini/tmp/&lt;projectId&gt;/chats/session-*.jsonl`) — durable user state, not cache. The previous behaviour was silently wiping chat history on every consolidate, and crashing the next gemini launch with an ENOENT on the session log. If you've used gemini-cli with this plugin before this release, past chat history is unfortunately not recoverable; from this release forward, it persists. (Verified on the test box: a synthetic chat log survives a full consolidate with content intact.)
 - Fix: Workspace session resume now works correctly for Kilo Code, Pi Coder, GitHub Copilot, and Goose. The resume flags wired into the "attach to existing session" command had drifted from each agent's current upstream CLI:
@@ -191,7 +196,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.18.05"
+export VERSION="2026.05.18.08"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -206,6 +211,20 @@ if [ -d "$EMHTTP_DEST" ] || [ -f "/var/log/plugins/$NAME.plg" ]; then
     export UPGRADE_MODE="1"
 fi
 
+# WP #941: Snapshot the currently-installed layout-version BEFORE the engine
+# extracts the new src/ tarball (which would otherwise overwrite it). cleanup.sh
+# compares this to the new on-disk value to decide hot-swap vs scorched-earth.
+# Default "0" handles fresh installs and pre-#941 versions (which never wrote
+# this file) — both correctly flag as a layout change on the very first upgrade.
+# M4 fix (v2026.05.18.08): strip whitespace + validate as integer. An
+# empty/whitespace/non-numeric file would otherwise yield "" which fails
+# the `!= "0"` test and trips a spurious scorched-earth teardown.
+_OLD_LV_RAW="$(cat "$EMHTTP_DEST/src/.layout-version" 2&gt;/dev/null || true)"
+_OLD_LV="$(printf '%s' "$_OLD_LV_RAW" | tr -d '[:space:]')"
+[ -z "$_OLD_LV" ] &amp;&amp; _OLD_LV="0"
+[[ "$_OLD_LV" =~ ^[0-9]+$ ]] || _OLD_LV="0"
+export OLD_LAYOUT_VERSION="$_OLD_LV"
+
 # OP #429: Clean orphan name-new.plg files left behind by prior aborted
 # installs. Unraid's plugin manager downloads updates to name-new.plg, runs
 # install, and atomic-renames -new.plg to .plg on success. Any abort before
@@ -217,12 +236,12 @@ fi
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.18.05" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.18.08" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.18.05" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.18.05" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.18.08" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.18.08" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.18.05)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.18.08)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

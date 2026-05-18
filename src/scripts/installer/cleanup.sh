@@ -92,6 +92,100 @@ if [ -n "$ORPHAN_PIDS" ]; then
     rm -f "$SUPERVISOR_PIDFILE" 2>/dev/null || true
 fi
 
+# --- 0b. WP #941: MIGRATION_NEEDED gate (hot-swap by default) ---
+# Routine upgrades only replace files in src/ (a sibling tree to the mounted
+# agent + home overlays). Killing sessions, unmounting overlays, and force-baking
+# RAM-to-Flash were downstream consequences of a legacy unmount-during-upgrade
+# requirement that no longer exists. Default = hot-swap; the supervisor's
+# post-restart bake handles persistence.
+#
+# Triggers full teardown (legacy "scorched earth" flow below) when:
+#   (a) the .migration_required sentinel is present (per-PLG opt-in for ad-hoc
+#       breaking changes that don't deserve a layout-version bump), OR
+#   (b) the layout-version differs between the old install and the new payload.
+#
+# Pre-#941 versions never wrote src/.layout-version, so OLD_LAYOUT_VERSION
+# defaults to "0" and triggers a one-time migration on first upgrade to v1 —
+# correct because the supervisor architecture and overlay paths may have
+# drifted across many releases on a long-lived install.
+MIGRATION_NEEDED=0
+# M4 fix (v2026.05.18.08): sanitize both versions to defend against an
+# empty/whitespace-only/non-numeric .layout-version file that would otherwise
+# cause a spurious scorched-earth teardown (e.g. `cat` of an empty file yields
+# "" which fails the `!= "0"` test and trips the gate). Strip whitespace,
+# default empty to "0", validate as pure integer.
+_sanitize_layout_ver() {
+    local v
+    v=$(printf '%s' "${1:-}" | tr -d '[:space:]')
+    [ -z "$v" ] && v="0"
+    [[ "$v" =~ ^[0-9]+$ ]] || v="0"
+    printf '%s' "$v"
+}
+NEW_LAYOUT_VERSION_RAW=$(cat "${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/.layout-version" 2>/dev/null || true)
+NEW_LAYOUT_VERSION=$(_sanitize_layout_ver "$NEW_LAYOUT_VERSION_RAW")
+OLD_LAYOUT_VERSION=$(_sanitize_layout_ver "${OLD_LAYOUT_VERSION:-0}")
+MIGRATION_SENTINEL="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/.migration_required"
+if [ -f "$MIGRATION_SENTINEL" ]; then
+    MIGRATION_NEEDED=1
+    log_status "    > .migration_required sentinel present — running full teardown."
+    rm -f "$MIGRATION_SENTINEL" 2>/dev/null || true
+fi
+if [ "$OLD_LAYOUT_VERSION" != "$NEW_LAYOUT_VERSION" ]; then
+    MIGRATION_NEEDED=1
+    log_status "    > Layout version changed ($OLD_LAYOUT_VERSION -> $NEW_LAYOUT_VERSION) — running full teardown."
+fi
+
+if [ "$MIGRATION_NEEDED" = "0" ] && [ "$UPGRADE_MODE" = "1" ]; then
+    log_status "    > Hot-swap upgrade: sessions, overlays, and agent processes stay up."
+
+    # C3 fix (v2026.05.18.08): best-effort synchronous bake of every active
+    # ZRAM UPPER before exit. Without this, dirty data accumulated in tmpfs
+    # since the last periodic bake is lost if the box loses power between
+    # cleanup.sh exit and the next supervisor bake tick (typically ~2 min
+    # after restart). The supervisor's eventual bake handles the typical
+    # graceful upgrade, but a power loss in that window is unrecoverable
+    # because ZRAM is tmpfs. Call commit_stack.sh per-entity — it holds
+    # its own flock and uses the v2026.05.18.08 atomic-append protocol.
+    log_status "    > Hot-swap pre-bake: flushing any dirty ZRAM UPPER to Flash..."
+    ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
+    EMHTTP_DEST_CLEANUP="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}"
+    COMMIT_STACK="$EMHTTP_DEST_CLEANUP/src/scripts/storage/commit_stack.sh"
+    # Source resolve_paths for home_persist_path / agent_persist_path
+    if ! declare -f home_persist_path >/dev/null 2>&1; then
+        source "$EMHTTP_DEST_CLEANUP/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+    fi
+    if [ -f "$COMMIT_STACK" ] && [ -d "$ZRAM_UPPER/homes" ]; then
+        for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
+            [ -d "$upper_dir" ] || continue
+            [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ] && continue
+            user=$(basename "$(dirname "$upper_dir")")
+            PERSIST_DIR=$(home_persist_path "$user" 2>/dev/null || echo "")
+            [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/persistence"
+            log_status "      [hot-swap] Pre-upgrade bake: home/$user -> $PERSIST_DIR"
+            # Failures (exit 2 defer, exit 1 hard) are non-blocking — upgrade
+            # proceeds either way. Worst case is a one-bake-cycle data lag.
+            bash "$COMMIT_STACK" "home" "$user" "$PERSIST_DIR" >/dev/null 2>&1 \
+                || log_status "      [hot-swap] Bake for home/$user returned non-zero — continuing"
+        done
+    fi
+    if [ -f "$COMMIT_STACK" ] && [ -d "$ZRAM_UPPER/agents" ]; then
+        for upper_dir in "$ZRAM_UPPER/agents"/*/upper; do
+            [ -d "$upper_dir" ] || continue
+            [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ] && continue
+            agent=$(basename "$(dirname "$upper_dir")")
+            PERSIST_DIR=$(agent_persist_path "$agent" 2>/dev/null || echo "")
+            [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/persistence"
+            log_status "      [hot-swap] Pre-upgrade bake: agent/$agent -> $PERSIST_DIR"
+            bash "$COMMIT_STACK" "agent" "$agent" "$PERSIST_DIR" >/dev/null 2>&1 \
+                || log_status "      [hot-swap] Bake for agent/$agent returned non-zero — continuing"
+        done
+    fi
+
+    lifecycle_log "info" "installer_cleanup" "installer_hotswap" "{\"layout_version\":\"$NEW_LAYOUT_VERSION\"}" 2>/dev/null || true
+    log_ok "Pre-upgrade cleanup complete (hot-swap path)."
+    exit 0
+fi
+
 # --- 0. ARCHITECTURE-AWARE PERSISTENCE (MANDATORY for Upgrades) ---
 # D-344: Bake ZRAM dirty data to Flash before unmounting.
 # Uses atomic_write_layer (Phase 2+): tempfile → fsync → verify → rename.

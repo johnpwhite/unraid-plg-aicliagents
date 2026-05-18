@@ -183,3 +183,168 @@ install_failure_trap() {
     # shellcheck disable=SC2064 — intentional eager expansion of $t_* here.
     trap "ec=\$?; if [ \$ec -ne 0 ] && [ \$ec -ne 2 ]; then snapshot_failure '$t_type' '$t_id' \$ec '$t_source'; fi" EXIT
 }
+
+# ----------------------------------------------------------------------------
+# WP #935: SQLite live-backup helpers + selective UPPER cleanup.
+# See docs/specs/CONSOLIDATE_LIVE_BACKUP.md for the design.
+# ----------------------------------------------------------------------------
+
+# detect_sqlite_dbs <root>
+# Echoes one absolute path per line for every SQLite-format-3 file found under
+# $root. M1 fix (v2026.05.18.08): magic-byte sniffs EVERY regular file rather
+# than only those matching *.db/*.sqlite/*.sqlite3 — third-party agents may use
+# non-standard extensions (.db3, .s3db, no extension). The sniff cost is one
+# 16-byte read per file; UPPER is typically <100K files on tmpfs, so well under
+# a second. We still skip files >2GB (SQLite header is always within the first
+# 16 bytes and large non-DB files like archives would be wasteful to sniff).
+# WAL/SHM siblings (*.db-wal, *.db-shm) intentionally NOT included — they have
+# their own magic bytes ("ZP" for WAL, internal for SHM) and the caller's
+# build_mksquashfs_sqlite_excludes generates -wal/-shm exclusions from each
+# parent .db automatically.
+detect_sqlite_dbs() {
+    local root="$1"
+    [ -d "$root" ] || return 0
+    find "$root" -type f -size -2147483648c 2>/dev/null \
+        | while IFS= read -r f; do
+            if head -c 16 "$f" 2>/dev/null | grep -q "SQLite format 3"; then
+                printf '%s\n' "$f"
+            fi
+        done
+}
+
+# sqlite_backup_all <root> <staging> <db-paths...>
+# For each db path, runs `sqlite3 X ".backup STAGING/relative/X"`. Online Backup
+# API works on a live DB without preventing concurrent writers. Returns:
+#   0 — all DBs backed up successfully
+#   2 — at least one backup failed (locked / disk full / timeout); caller should defer
+sqlite_backup_all() {
+    local root="$1"; shift
+    local staging="$1"; shift
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "[sqlite_backup_all] WARN: sqlite3 not on PATH; cannot back up SQLite DBs" >&2
+        return 2
+    fi
+    mkdir -p "$staging" 2>/dev/null || return 1
+    local db rel dest
+    for db in "$@"; do
+        [ -f "$db" ] || continue
+        rel="${db#$root/}"
+        dest="$staging/$rel"
+        mkdir -p "$(dirname "$dest")" 2>/dev/null
+        # 30 s timeout — if a writer holds an exclusive lock that long, defer.
+        if ! timeout 30 sqlite3 "$db" ".timeout 30000
+.backup '$dest'" 2>/dev/null; then
+            echo "[sqlite_backup_all] backup failed: $db (locked / disk full / timeout)" >&2
+            return 2
+        fi
+    done
+    return 0
+}
+
+# selective_upper_cleanup <upper_dir> <marker_file>
+# Wipes files in upper_dir that satisfy BOTH:
+#   (a) mtime not newer than the marker (no writes during bake), AND
+#   (b) no process holds an open write fd to the file
+# Prints a JSON status line to stdout for the caller to inline into a
+# lifecycle event. Best-effort — never fails the caller.
+selective_upper_cleanup() {
+    local upper="$1"
+    local marker="$2"
+    if [ ! -d "$upper" ] || [ ! -f "$marker" ]; then
+        echo '{"wiped_bytes":0,"wiped_count":0,"residual_bytes":0,"residual_files":0}'
+        return 0
+    fi
+
+    local tmpdir
+    tmpdir=$(mktemp -d 2>/dev/null) || tmpdir="/tmp/.suc-$$"
+    mkdir -p "$tmpdir" 2>/dev/null
+
+    # (a) Candidate set: files older-or-equal mtime to marker.
+    find "$upper" -type f ! -newer "$marker" 2>/dev/null | sort -u > "$tmpdir/candidates"
+
+    # (b1) SQLite-aware exclusion (C1 fix, v2026.05.18.08): SQLite WAL-mode
+    # readers hold the .db open as O_RDONLY + mmap. Our /proc/*/fdinfo flags
+    # check only catches write-mode fds, so a read-only mmap'd .db with old
+    # mtime would otherwise be admitted to the wipe set. If sqlite_backup_all
+    # deferred this cycle OR the append failed silently, the bake doesn't
+    # contain the .db — wiping it would be permanent loss. Add every
+    # detected SQLite .db (plus its -wal and -shm siblings) to excludes
+    # unconditionally. This is defence in depth: the canonical preservation
+    # path is the three-pass bake (detect → backup → append), but if anything
+    # in that chain breaks, this stops the wipe.
+    : > "$tmpdir/excludes"
+    local _sqlite_db
+    while IFS= read -r _sqlite_db; do
+        [ -n "$_sqlite_db" ] || continue
+        printf '%s\n' "$_sqlite_db" >> "$tmpdir/excludes"
+        printf '%s\n' "${_sqlite_db}-wal" >> "$tmpdir/excludes"
+        printf '%s\n' "${_sqlite_db}-shm" >> "$tmpdir/excludes"
+        printf '%s\n' "${_sqlite_db}-journal" >> "$tmpdir/excludes"
+    done < <(detect_sqlite_dbs "$upper" 2>/dev/null)
+
+    # (b2) Open-fd exclusion: files with an open write fd anywhere in /proc.
+    # Walk /proc/*/fd, resolve each symlink, check fdinfo flags for write access.
+    # flags is an octal string ending in 1 (O_WRONLY) or 2 (O_RDWR) means write.
+    local fd_dir fd target pid_fdinfo flags last_char
+    for fd_dir in /proc/[0-9]*/fd; do
+        [ -d "$fd_dir" ] || continue
+        for fd in "$fd_dir"/*; do
+            [ -L "$fd" ] || continue
+            target=$(readlink "$fd" 2>/dev/null) || continue
+            case "$target" in
+                "$upper"/*) ;;
+                *) continue ;;
+            esac
+            pid_fdinfo="${fd_dir%/fd}/fdinfo/$(basename "$fd")"
+            [ -f "$pid_fdinfo" ] || continue
+            flags=$(awk '/^flags:/ {print $2}' "$pid_fdinfo" 2>/dev/null)
+            # Octal flag's last digit: 0=O_RDONLY, 1=O_WRONLY, 2=O_RDWR, 3=O_RDWR|O_NONBLOCK, etc.
+            last_char="${flags: -1}"
+            case "$last_char" in
+                1|2|3) printf '%s\n' "$target" >> "$tmpdir/excludes" ;;
+            esac
+        done
+    done 2>/dev/null
+    sort -u "$tmpdir/excludes" -o "$tmpdir/excludes" 2>/dev/null
+
+    # Wipe set = candidates - excludes
+    comm -23 "$tmpdir/candidates" "$tmpdir/excludes" > "$tmpdir/wipe" 2>/dev/null
+
+    local wiped_bytes=0 wiped_count=0 bytes
+    while IFS= read -r f; do
+        [ -n "$f" ] && [ -f "$f" ] || continue
+        bytes=$(stat -c '%s' "$f" 2>/dev/null || echo 0)
+        if rm -f "$f" 2>/dev/null; then
+            wiped_bytes=$((wiped_bytes + bytes))
+            wiped_count=$((wiped_count + 1))
+        fi
+    done < "$tmpdir/wipe"
+
+    # Sweep newly-empty directories.
+    find "$upper" -type d -empty -delete 2>/dev/null
+
+    local residual_bytes residual_files
+    residual_bytes=$(du -sb "$upper" 2>/dev/null | awk '{print $1}')
+    residual_bytes="${residual_bytes:-0}"
+    residual_files=$(find "$upper" -type f 2>/dev/null | wc -l | tr -d ' ')
+    residual_files="${residual_files:-0}"
+
+    rm -rf "$tmpdir" 2>/dev/null
+
+    printf '{"wiped_bytes":%d,"wiped_count":%d,"residual_bytes":%s,"residual_files":%s}\n' \
+        "$wiped_bytes" "$wiped_count" "$residual_bytes" "$residual_files"
+    return 0
+}
+
+# build_mksquashfs_sqlite_excludes <root> <db-paths...>
+# Echoes the `-e <relpath>` arguments to pass to mksquashfs for excluding each
+# SQLite DB and its WAL/SHM siblings. Caller splits the output on whitespace
+# and passes to mksquashfs.
+build_mksquashfs_sqlite_excludes() {
+    local root="$1"; shift
+    local db rel
+    for db in "$@"; do
+        rel="${db#$root/}"
+        printf -- '-e %s -e %s -e %s ' "$rel" "${rel}-wal" "${rel}-shm"
+    done
+}

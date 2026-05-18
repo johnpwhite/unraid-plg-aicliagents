@@ -329,6 +329,14 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --resume {chatId}",
                 'resume_latest' => "{binary} {args} --resume",
                 'env_prefix' => 'QWEN',
+                // WP #936: surface the primary API key for Alibaba's DashScope
+                // (qwen-code's default provider). Without this in default_secrets
+                // the user has to discover the env var name themselves; with it
+                // they get a labelled password field on the Store card.
+                'default_secrets' => [
+                    ['env' => 'DASHSCOPE_API_KEY', 'label' => 'DashScope API Key', 'type' => 'password',
+                     'help' => 'Required for Alibaba\'s official Qwen API. Alternative providers (Ollama, vLLM) can be configured via the general env panel.'],
+                ],
             ],
 
         ];
