@@ -812,9 +812,25 @@ _op_bake() {
         lifecycle_log "info" "supervisor" "bake_ok" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code}" 2>/dev/null || true
     else
+        # WP #922: splice debug.log tail into the failure event for diagnostics
+        # that survive /tmp rotation. commit_stack.sh's failure trap (in
+        # common.sh) writes the tail to a per-entity file we drain here.
+        local safe_type safe_id stderr_tail tail_path
+        safe_type=$(printf '%s' "$type" | tr -c 'A-Za-z0-9_.-' '_')
+        safe_id=$(printf '%s' "$id"     | tr -c 'A-Za-z0-9_.-' '_')
+        tail_path="/tmp/unraid-aicliagents/.stderr_tail_${safe_type}_${safe_id}.txt"
+        stderr_tail=""
+        if [ -f "$tail_path" ]; then
+            stderr_tail=$(head -c 2000 "$tail_path" 2>/dev/null \
+                | tr -d '\r' \
+                | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/    /g' \
+                | tr '\n' ' ')
+            rm -f "$tail_path" 2>/dev/null || true
+        fi
+
         log_error "Bake failed: $entity (exit=$exit_code)"
         lifecycle_log "error" "supervisor" "bake_failed" \
-            "{\"entity\":\"$entity\",\"exit_code\":$exit_code}" 2>/dev/null || true
+            "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"stderr_tail\":\"$stderr_tail\"}" 2>/dev/null || true
     fi
 }
 
@@ -892,13 +908,42 @@ _op_consolidate() {
         log_info "Consolidate completed: $entity"
         lifecycle_log "info" "supervisor" "consolidate_ok" \
             "{\"entity\":\"$entity\"}" 2>/dev/null || true
+    elif [ "$exit_code" -eq 2 ]; then
+        # WP #922: exit 2 = deferred (mount busy / writes during bake). Not a
+        # failure — the script declined to proceed because a session was holding
+        # the merged mount open. Don't increment fail count, don't escalate.
+        # Reset the counter too — a clean defer should clear any prior counter
+        # state since "we couldn't try" is different from "we tried and failed".
+        _consolidate_fail_reset "$entity"
+        log_info "Consolidate deferred (busy): $entity — will retry next tick"
+        lifecycle_log "info" "supervisor" "consolidate_deferred" \
+            "{\"entity\":\"$entity\"}" 2>/dev/null || true
     else
         # Increment failure counter
         local fail_count
         fail_count=$(_consolidate_fail_increment "$entity")
+
+        # WP #922: splice the script's debug.log tail into the lifecycle event
+        # so the cause survives even if /tmp/.../debug.log rotates before
+        # someone investigates. The tail was written by common.sh's failure
+        # trap. We escape for JSON and cap at 2KB to keep the lifecycle log
+        # compact.
+        local safe_type safe_id stderr_tail tail_path
+        safe_type=$(printf '%s' "$type" | tr -c 'A-Za-z0-9_.-' '_')
+        safe_id=$(printf '%s' "$id"     | tr -c 'A-Za-z0-9_.-' '_')
+        tail_path="/tmp/unraid-aicliagents/.stderr_tail_${safe_type}_${safe_id}.txt"
+        stderr_tail=""
+        if [ -f "$tail_path" ]; then
+            stderr_tail=$(head -c 2000 "$tail_path" 2>/dev/null \
+                | tr -d '\r' \
+                | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/    /g' \
+                | tr '\n' ' ')
+            rm -f "$tail_path" 2>/dev/null || true
+        fi
+
         log_error "Consolidate failed: $entity (exit=$exit_code, fail_count=$fail_count)"
         lifecycle_log "error" "supervisor" "consolidate_failed" \
-            "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"fail_count\":$fail_count}" 2>/dev/null || true
+            "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"fail_count\":$fail_count,\"stderr_tail\":\"$stderr_tail\"}" 2>/dev/null || true
 
         if [ "$fail_count" -ge 2 ]; then
             _write_halt "$entity" "consolidate-disabled" "Two consecutive consolidate failures"

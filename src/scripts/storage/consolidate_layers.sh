@@ -11,6 +11,10 @@ MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$(dirname "$0")/common.sh"
 
+# WP #922: snapshot debug.log to Flash on non-zero exit. Survives /tmp rotation
+# so the next investigator has actual evidence. Skips on exit 2 (deferred).
+install_failure_trap "$TYPE" "$ID" "consolidate_layers"
+
 # Source canonical path resolver and lifecycle log writer (Phase 1)
 source "$(dirname "$0")/resolve_paths.sh" 2>/dev/null || true
 
@@ -71,11 +75,34 @@ update_task_status "Initializing..." 5 ""
 if ! mountpoint -q "$MNT_POINT"; then
     log "Stack not mounted. Attempting remount..."
     update_task_status "Mounting stack..." 10 ""
-    bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH" || { 
-        error "Failed to mount stack for consolidation"; 
+    bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH" || {
+        error "Failed to mount stack for consolidation";
         update_task_status "Failed" 0 "Mount failed";
-        exit 1; 
+        exit 1;
     }
+fi
+
+# WP #922: pre-bake busy check. Match commit_stack.sh's safety pattern — if any
+# process has open files on the merged mount, defer the consolidate rather than
+# charging in. Three things go wrong if we ignore this:
+#   1. The aggressive pre-bake prune (next block: rm -rf .npm, .cache, .claude
+#      caches, etc.) hits files that are open for write by an active agent,
+#      tripping `set -euo pipefail` and exiting 1 with no useful diagnostic.
+#   2. mksquashfs sees the merged view mid-write and bakes an inconsistent
+#      consolidated layer.
+#   3. The supervisor counts this as a real failure and after 2 fails halts
+#      auto-consolidate with a notification — even though the failure was just
+#      a session being active.
+#
+# Exit 2 signals "deferred / busy" — supervisor treats this as not-a-failure
+# and retries on next tick without incrementing the failure counter.
+if command -v fuser >/dev/null 2>&1; then
+    if fuser -sm "$MNT_POINT" 2>/dev/null; then
+        log "Mount is BUSY (open files detected by fuser -sm). Deferring consolidation — will retry when idle."
+        lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"mount_busy\"}" 2>/dev/null || true
+        update_task_status "Deferred (mount busy)" 0 "Sessions active — will retry when idle"
+        exit 2
+    fi
 fi
 
 # 2. Preparation: Pruning

@@ -1,8 +1,12 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.17.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.18.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.18.02
+- Improve: Storage consolidation no longer trips on busy workspaces. When the boot integrity / auto-consolidation pass runs while a workspace has files open on the home mount, the plugin now defers the operation (with a clear "deferred — busy" log) instead of marking it a failure and counting it against the auto-halt threshold. The Storage tab also gains a small non-blocking banner if a real consolidate failure happens, so it surfaces at the first occurrence rather than only after the supervisor escalates to a halt. When a failure does happen, the last 50 lines of the debug log are now snapshotted to `/boot/config/plugins/unraid-aicliagents/failures/` and the stderr tail is inlined into the lifecycle log entry, so the cause survives `/tmp` rotation between the failure and the next time anyone looks.
+- Fix: Agent channel selections (and other Settings writes that go through the atomic writer) reliably persist across a page reload on heavily-loaded servers. The atomic-write path now disables the userland buffer and fsyncs before the rename, closing a cross-process visibility lag that occasionally made the beta-channel radio appear unchecked immediately after saving.
+
 ## 2026.05.17.02
 - Improve: Out of beta. The plugin now ships as a regular Community Applications release — the Beta flag in the CA template has been removed.
 - Fix: Codex CLI launches correctly after install. From `@openai/codex` v0.99, OpenAI split the native binary into a per-platform optional dependency, so the previous expected binary path was wrong and Codex crashed immediately with "Agent Binary Missing". The path is now correct, and a fallback preserves pre-v0.99 installs that haven't been reinstalled.
@@ -178,7 +182,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.17.02"
+export VERSION="2026.05.18.02"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -204,12 +208,12 @@ fi
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.17.02" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.18.02" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.17.02" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.17.02" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.18.02" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.18.02" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.17.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.18.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

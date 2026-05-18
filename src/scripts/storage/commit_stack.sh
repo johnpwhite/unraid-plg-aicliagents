@@ -10,6 +10,10 @@ PERSIST_PATH="${3:-}"
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$(dirname "$0")/common.sh"
 
+# WP #922: snapshot debug.log to Flash on non-zero exit. Skips on exit 2 (which
+# commit_stack.sh uses for "baked but mount busy — ZRAM flush deferred").
+install_failure_trap "$TYPE" "$ID" "commit_stack"
+
 # Source canonical path resolver and lifecycle log writer (Phase 1)
 source "$(dirname "$0")/resolve_paths.sh" 2>/dev/null || true
 

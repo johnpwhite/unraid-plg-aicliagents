@@ -26,19 +26,30 @@ class AtomicWriteService {
 
         $tmpPath = $path . '.tmp.' . getmypid() . '.' . str_replace('.', '', (string)microtime(true));
 
-        $written = @file_put_contents($tmpPath, $content);
-        if ($written === false) {
+        // Bug #770 channel-persist flake: file_put_contents is fine in theory
+        // (it doesn't return until all bytes are in the kernel), but on a
+        // load-stressed Flash FS we still saw cross-process visibility lag
+        // after a successful save. The explicit fopen + stream_set_write_buffer
+        // path makes the buffer policy unambiguous (no userland buffer at all,
+        // bytes go straight to the kernel on every fwrite), and pairing it
+        // with an explicit fflush+fsync before close gives durability before
+        // the rename.
+        $fh = @fopen($tmpPath, 'w');
+        if ($fh === false) {
+            return false;
+        }
+        @stream_set_write_buffer($fh, 0);
+        $written = @fwrite($fh, $content);
+        if ($written === false || $written !== strlen($content)) {
+            @fclose($fh);
             @unlink($tmpPath);
             return false;
         }
-
-        $fd = @fopen($tmpPath, 'r+');
-        if ($fd !== false) {
-            if (function_exists('fsync')) {
-                @fsync($fd);
-            }
-            @fclose($fd);
+        @fflush($fh);
+        if (function_exists('fsync')) {
+            @fsync($fh);
         }
+        @fclose($fh);
 
         if (!@rename($tmpPath, $path)) {
             @unlink($tmpPath);

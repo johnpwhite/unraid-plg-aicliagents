@@ -136,12 +136,58 @@ class StorageHandler {
         }
 
         return [
-            'running'     => $running,
-            'tick_age_s'  => $tickAge,
-            'work'        => $workState,
-            'status'      => $status,
-            'queue_depth' => $queueDepth,
-            'pressure'    => self::_computeDirtyPressure(),
+            'running'           => $running,
+            'tick_age_s'        => $tickAge,
+            'work'              => $workState,
+            'status'            => $status,
+            'queue_depth'       => $queueDepth,
+            'pressure'          => self::_computeDirtyPressure(),
+            'consolidate_fails' => self::_readConsolidateFails(),
+        ];
+    }
+
+    /**
+     * WP #922: surface recent consolidate failures to the Storage tab so the
+     * user sees the issue before it escalates to a halt (which happens at 2
+     * consecutive failures).
+     *
+     * Reads the supervisor's per-entity counter dir + the Flash-backed
+     * failure-snapshot dir.
+     *
+     * @return array{counts: array<string,int>, recent_snapshots: array<int,string>, total_snapshots: int}
+     */
+    private static function _readConsolidateFails(): array {
+        $countsDir = \AICliAgents\Services\SupervisorService::CONSOLIDATE_FAILS_DIR;
+        $counts = [];
+        if (is_dir($countsDir)) {
+            foreach (@scandir($countsDir) ?: [] as $entry) {
+                if ($entry === '.' || $entry === '..') continue;
+                $val = @file_get_contents("$countsDir/$entry");
+                if ($val !== false) {
+                    // Filenames are "type__id" — undo the safe-encode
+                    $human = str_replace('__', '/', $entry);
+                    $counts[$human] = (int)trim($val);
+                }
+            }
+        }
+
+        $snapDir = '/boot/config/plugins/unraid-aicliagents/failures';
+        $recent  = [];
+        $total   = 0;
+        if (is_dir($snapDir)) {
+            $files = @scandir($snapDir, SCANDIR_SORT_DESCENDING) ?: [];
+            foreach ($files as $f) {
+                if ($f === '.' || $f === '..') continue;
+                if (substr($f, -4) !== '.log') continue;
+                $total++;
+                if (count($recent) < 3) $recent[] = $f;
+            }
+        }
+
+        return [
+            'counts'           => $counts,
+            'recent_snapshots' => $recent,
+            'total_snapshots'  => $total,
         ];
     }
 

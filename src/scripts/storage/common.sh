@@ -118,3 +118,68 @@ check_disk_space() {
 
     return 0
 }
+
+# WP #922: Flash-backed failure-snapshot helpers.
+#
+# When a storage script (consolidate_layers.sh, commit_stack.sh, …) exits
+# non-zero, capture the last 50 lines of DEBUG_LOG to a Flash-backed file so
+# the cause survives /tmp rotation. Also drop a short stderr-tail snippet the
+# supervisor can splice into its lifecycle event for at-a-glance diagnosis
+# without opening the per-failure file.
+#
+# Flash wear footprint: ~5 KB per failure, capped at 50 files. Trivial.
+FAILURE_DIR="/boot/config/plugins/unraid-aicliagents/failures"
+
+# snapshot_failure <type> <id> <exit_code> <source>
+# Best-effort — never fails, always returns 0.
+snapshot_failure() {
+    local f_type="${1:-unknown}"
+    local f_id="${2:-unknown}"
+    local f_exit="${3:-1}"
+    local f_source="${4:-storage_script}"
+    local ts
+    ts=$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%S')
+
+    mkdir -p "$FAILURE_DIR" 2>/dev/null || return 0
+
+    local safe_type safe_id
+    safe_type=$(printf '%s' "$f_type" | tr -c 'A-Za-z0-9_.-' '_')
+    safe_id=$(printf '%s' "$f_id"   | tr -c 'A-Za-z0-9_.-' '_')
+
+    local out="$FAILURE_DIR/${f_source}_${safe_type}_${safe_id}_${ts}.log"
+    {
+        echo "# AICliAgents failure snapshot"
+        echo "# source: $f_source"
+        echo "# entity: $f_type/$f_id"
+        echo "# exit_code: $f_exit"
+        echo "# captured_at: $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+        echo "# debug.log tail (last 50 lines):"
+        echo "# ----"
+        [ -f "$DEBUG_LOG" ] && tail -n 50 "$DEBUG_LOG" 2>/dev/null
+    } > "$out" 2>/dev/null || true
+
+    # stderr_tail for the supervisor's lifecycle event — per-entity so
+    # concurrent failures don't collide.
+    local tail_path="/tmp/unraid-aicliagents/.stderr_tail_${safe_type}_${safe_id}.txt"
+    [ -f "$DEBUG_LOG" ] && tail -n 10 "$DEBUG_LOG" 2>/dev/null > "$tail_path" 2>/dev/null || true
+
+    # Rotate the failures dir — keep the 50 most-recent snapshots; older ones
+    # are unlinked. Flash-cheap, avoids unbounded growth.
+    ls -1t "$FAILURE_DIR" 2>/dev/null | tail -n +51 | while read -r oldfile; do
+        [ -n "$oldfile" ] && rm -f "$FAILURE_DIR/$oldfile" 2>/dev/null || true
+    done
+
+    return 0
+}
+
+# install_failure_trap <type> <id> <source>
+# Registers an EXIT trap that calls snapshot_failure on non-zero exit, except
+# for exit code 2 (which means "deferred — busy", not a failure). Call near
+# the top of any storage script that wants the snapshot behaviour.
+install_failure_trap() {
+    local t_type="${1:-unknown}"
+    local t_id="${2:-unknown}"
+    local t_source="${3:-storage_script}"
+    # shellcheck disable=SC2064 — intentional eager expansion of $t_* here.
+    trap "ec=\$?; if [ \$ec -ne 0 ] && [ \$ec -ne 2 ]; then snapshot_failure '$t_type' '$t_id' \$ec '$t_source'; fi" EXIT
+}

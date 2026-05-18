@@ -526,6 +526,102 @@ function nuclearRebuild(type, id) { wipeStorage(type, id); }
     }
 })();
 
+// ---- WP #922: Recent-consolidate-failure indicator ----
+// Non-blocking, theme-friendly banner on the Storage tab. Shows when the
+// supervisor has a non-zero consolidate-failure counter for any entity, OR
+// when there are recent snapshot files on Flash. Clears automatically the
+// moment the supervisor's next successful consolidate resets the counter
+// (or when a busy-mount defer resets it).
+//
+// Sits ABOVE the boot-integrity banner — different signal (warning of an
+// in-flight problem the supervisor is still retrying) vs the existing banner
+// (manifest-state needs user attention).
+(function() {
+    var BANNER_ID = 'aicli-consolidate-fail-banner';
+    var _loaded = false;
+
+    function escapeHtml(s) {
+        return String(s || '').replace(/[&<>"']/g, function(c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    function fetchConsolidateFails() {
+        if (_loaded) return;
+        _loaded = true;
+        var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+        $.getJSON(
+            '/plugins/unraid-aicliagents/AICliAjax.php?action=get_supervisor_status&csrf_token=' + token,
+            function(data) { renderConsolidateFailsBanner(data); }
+        ).fail(function() {
+            // Non-fatal — banner stays hidden
+        });
+    }
+
+    function renderConsolidateFailsBanner(data) {
+        var existing = $('#' + BANNER_ID);
+        if (!data || !data.consolidate_fails) { existing.remove(); return; }
+        var f = data.consolidate_fails;
+        var counts = f.counts || {};
+        var entityKeys = Object.keys(counts).filter(function(k) { return (counts[k] | 0) > 0; });
+        var snapTotal = (f.total_snapshots | 0);
+
+        // Nothing to surface
+        if (entityKeys.length === 0 && snapTotal === 0) { existing.remove(); return; }
+
+        var rows = '';
+        $.each(entityKeys, function(_, k) {
+            rows += '<li><code>' + escapeHtml(k) + '</code> &mdash; ' + counts[k] +
+                ' consecutive failure' + (counts[k] === 1 ? '' : 's') +
+                ' (auto-halt triggers at 2).</li>';
+        });
+
+        var snapLines = '';
+        if (snapTotal > 0) {
+            var sample = (f.recent_snapshots || []).map(function(s) {
+                return '<code>' + escapeHtml(s) + '</code>';
+            }).join(', ');
+            snapLines = '<div style="font-size:11px;opacity:.75;margin-top:6px;">' +
+                snapTotal + ' failure snapshot' + (snapTotal === 1 ? '' : 's') +
+                ' on Flash at <code>/boot/config/plugins/unraid-aicliagents/failures/</code>' +
+                (sample ? '. Most recent: ' + sample : '') + '.</div>';
+        }
+
+        var html = '<div id="' + BANNER_ID + '" class="unapi" style="' +
+            'margin:12px 0;padding:12px 16px;border-radius:6px;' +
+            'background:var(--mild-background-color,#fff7e0);' +
+            'border:1px solid var(--orange,#e68a00);' +
+            'color:var(--text-color,#222);font-size:12px;">' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' +
+                '<i class="fa fa-info-circle" style="color:var(--orange,#e68a00);"></i>' +
+                '<strong style="color:var(--orange,#e68a00);">Recent consolidate failure</strong>' +
+            '</div>' +
+            (rows ? '<ul style="margin:4px 0 0 18px;padding:0;">' + rows + '</ul>' : '') +
+            snapLines +
+            '<div style="font-size:10px;opacity:.6;margin-top:6px;">' +
+                'The supervisor will retry automatically. This indicator clears as soon as ' +
+                'the next successful consolidate runs (or a defer clears the counter).' +
+            '</div>' +
+        '</div>';
+
+        if (existing.length) {
+            existing.replaceWith(html);
+        } else {
+            var $tab = $('#tab-storage');
+            if ($tab.length) $tab.prepend(html);
+        }
+    }
+
+    // Trigger fetch on storage-tab activation + on initial load if active.
+    $(document).on('click', '[data-tab="storage"], .aicli-nav-item[href*="storage"]', function() {
+        _loaded = false;
+        setTimeout(fetchConsolidateFails, 400);
+    });
+    if ($('#tab-storage').hasClass('active') || $('#tab-storage').is(':visible')) {
+        setTimeout(fetchConsolidateFails, 900);
+    }
+})();
+
 // ---- Phase 4b: Storage Unavailable halt overlay ----
 // Fetches list_halts once on page load. If any halts exist, renders a
 // fixed-position overlay (z-index:10002) blocking the page until each halt
