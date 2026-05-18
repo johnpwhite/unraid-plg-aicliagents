@@ -123,7 +123,10 @@ if [ "$TYPE" = "home" ]; then
     [ -d "$MNT_POINT/.npm" ] && find "$MNT_POINT/.npm" -mindepth 1 -delete 2>/dev/null || true
     [ -d "$MNT_POINT/.cache" ] && find "$MNT_POINT/.cache" -mindepth 1 -delete 2>/dev/null || true
     [ -d "$MNT_POINT/.bun/install" ] && rm -rf "$MNT_POINT/.bun/install" 2>/dev/null || true
-    [ -d "$MNT_POINT/.gemini/tmp" ] && rm -rf "$MNT_POINT/.gemini/tmp" 2>/dev/null || true
+    # WP #931: do NOT prune $MNT_POINT/.gemini/tmp — it contains gemini-cli's
+    # project-scoped session chat logs (.gemini/tmp/<projectId>/chats/session-*.jsonl),
+    # which are durable user state, not regenerable cache. Previously this line
+    # silently wiped users' chat histories on every consolidate.
     [ -d "$MNT_POINT/.claude/cache" ] && rm -rf "$MNT_POINT/.claude/cache" 2>/dev/null || true
     [ -d "$MNT_POINT/.claude/shell-snapshots" ] && rm -rf "$MNT_POINT/.claude/shell-snapshots" 2>/dev/null || true
     [ -d "$MNT_POINT/.claude/telemetry" ] && rm -rf "$MNT_POINT/.claude/telemetry" 2>/dev/null || true

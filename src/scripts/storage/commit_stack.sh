@@ -85,7 +85,11 @@ log "Pruning caches before bake..."
 # user-owned recovery artefacts managed by the storage-tab UI, not ours to delete.
 if [ "$TYPE" = "home" ]; then
     [ -d "$UPPER_DIR/.bun/install" ] && rm -rf "$UPPER_DIR/.bun/install" 2>/dev/null || true
-    [ -d "$UPPER_DIR/.gemini/tmp" ] && rm -rf "$UPPER_DIR/.gemini/tmp" 2>/dev/null || true
+    # WP #931: do NOT prune $UPPER_DIR/.gemini/tmp — it contains gemini-cli's
+    # project-scoped session chat logs (.gemini/tmp/<projectId>/chats/session-*.jsonl),
+    # which are durable user state, not regenerable cache. Previously this line
+    # silently wiped users' chat histories on every consolidate. If gemini-cli
+    # ever moves the chat logs out of tmp/, revisit.
     [ -d "$UPPER_DIR/.claude/cache" ] && rm -rf "$UPPER_DIR/.claude/cache" 2>/dev/null || true
     [ -d "$UPPER_DIR/.claude/shell-snapshots" ] && rm -rf "$UPPER_DIR/.claude/shell-snapshots" 2>/dev/null || true
     [ -d "$UPPER_DIR/.claude/telemetry" ] && rm -rf "$UPPER_DIR/.claude/telemetry" 2>/dev/null || true

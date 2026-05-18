@@ -163,7 +163,15 @@ class AgentRegistry {
                 'description' => 'An open-source oriented agent optimized for local development workflows.',
                 'npm_package' => 'opencode-ai',
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/opencode.ico',
-                'binary' => "$agentBase/opencode/node_modules/opencode-ai/bin/opencode",
+                // WP #932: opencode-ai ships bin/opencode.exe (cross-platform
+                // naming — postinstall replaces with the platform-matched
+                // binary, same convention as claude-code). The previous
+                // `bin/opencode` path doesn't exist in the package; the agent
+                // worked anyway because node_modules/.bin/opencode resolves
+                // to the right file, but our binExists file_exists() check
+                // was hitting the wrong raw path.
+                'binary' => "$agentBase/opencode/node_modules/opencode-ai/bin/opencode.exe",
+                'binary_fallback' => "$agentBase/opencode/node_modules/.bin/opencode",
                 'resume_cmd' => "{binary} {args} -s {chatId}",
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'OPENCODE',
@@ -175,8 +183,14 @@ class AgentRegistry {
                 'npm_package' => '@kilocode/cli',
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/kilocode.ico',
                 'binary' => "$agentBase/kilocode/node_modules/@kilocode/cli/bin/kilo",
-                'resume_cmd' => "{binary} {args} -s {chatId}",
-                'resume_latest' => "{binary} {args}",
+                // WP #932 (post-test correction): kilo --help confirms BOTH
+                // -c/--continue (resume last) and -s/--session <id> (per-ID
+                // resume) exist. Original code's `-s {chatId}` was correct
+                // for resume_cmd — keep that semantic, use the long form for
+                // readability. resume_latest gains --continue (was plain
+                // {binary} {args} which would have started a new session).
+                'resume_cmd' => "{binary} {args} --session {chatId}",
+                'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'KILOCODE',
             ],
             'pi-coder' => [
@@ -186,8 +200,12 @@ class AgentRegistry {
                 'npm_package' => '@mariozechner/pi-coding-agent',
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/picoder.png',
                 'binary' => "$agentBase/pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
-                'resume_cmd' => "{binary} {args} --resume {chatId}",
-                'resume_latest' => "{binary} {args} --resume",
+                // WP #932: pi-coder's --resume opens an interactive session
+                // picker (blocks indefinitely in our SSH-attach flow with no
+                // TTY input). Direct-ID resume is --session; continue-last is
+                // --continue. Previous resume_latest hung the workspace launch.
+                'resume_cmd' => "{binary} {args} --session {chatId}",
+                'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'PI_CODER',
             ],
             'gh-copilot' => [
@@ -196,10 +214,19 @@ class AgentRegistry {
                 'description' => 'GitHub\'s official CLI agent for natural language shell, git, and GitHub commands.',
                 'npm_package' => '@github/copilot',
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/githubcopilotcli.png',
-                'binary' => "$agentBase/gh-copilot/node_modules/@github/copilot/index.js",
-
+                // WP #932: npm-loader.js is the real entry — it tries the
+                // native SEA binary first and falls back to index.js on
+                // failure. Pointing directly at index.js bypassed the native
+                // path and slowed every launch.
+                'binary' => "$agentBase/gh-copilot/node_modules/@github/copilot/npm-loader.js",
+                'binary_fallback' => "$agentBase/gh-copilot/node_modules/@github/copilot/index.js",
+                // WP #932 (post-test correction): copilot --help confirms BOTH
+                // --continue (resume most recent) and --resume[=value] (per-ID
+                // resume) exist — the agent IS stateful. Keep --resume={chatId}
+                // for per-ID; gain --continue for resume_latest (previous plain
+                // {binary} {args} would not have resumed at all).
                 'resume_cmd' => "{binary} {args} --resume={chatId}",
-                'resume_latest' => "{binary} {args}",
+                'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'GH_COPILOT',
             ],
             'codex-cli' => [
@@ -263,7 +290,12 @@ class AgentRegistry {
                     'version_probe' => '{binary} --version',
                 ],
                 'binary' => "$agentBase/goose/bin/goose",
-                'resume_cmd' => "{binary} {args} session --name {chatId}",
+                // WP #932: `session --name {chatId}` CREATES a new session
+                // named {chatId} instead of resuming an existing one. Correct
+                // direct-ID resume is `session --resume -n <name>`. The
+                // resume_latest form was already correct (`--resume` without
+                // a name forks the most recent).
+                'resume_cmd' => "{binary} {args} session --resume -n {chatId}",
                 'resume_latest' => "{binary} {args} session --resume",
                 'env_prefix' => 'GOOSE',
                 // Three-field envs: Provider + Model + one dynamic API key whose env
