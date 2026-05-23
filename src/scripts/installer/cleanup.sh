@@ -4,6 +4,9 @@
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 # Graceful process termination: SIGTERM first, wait, then SIGKILL if needed.
 # Hard guard against ever touching VM / hypervisor / init processes even if a
 # future pattern over-matches. Builds a shrunk PID list that excludes any PID
@@ -135,6 +138,40 @@ if [ "$OLD_LAYOUT_VERSION" != "$NEW_LAYOUT_VERSION" ]; then
     log_status "    > Layout version changed ($OLD_LAYOUT_VERSION -> $NEW_LAYOUT_VERSION) — running full teardown."
 fi
 
+# --- Bug #1043 one-off: close pre-TMUX_TMPDIR terminal sessions ------------
+# Versions before the private-tmux-socket change kept their sessions in the
+# shared /tmp/tmux-<uid> socket; this version uses a plugin-private
+# TMUX_TMPDIR, so any such sessions would be silently orphaned by the upgrade.
+# Once only — gated by a sentinel, so it runs on exactly the first upgrade that
+# carries this code (the transition off the shared socket) — gracefully close
+# them: send Ctrl-C twice (the same safe close the UI uses) so each agent
+# flushes its state into the home overlay, then kill the session. Runs before
+# the hot-swap / full-teardown split so it covers both paths. `env -u
+# TMUX_TMPDIR` targets the old default socket location. The sentinel is written
+# unconditionally so this never runs again.
+TMUX_MIGRATED="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/.tmux-socket-migrated"
+if [ ! -f "$TMUX_MIGRATED" ] && command -v tmux >/dev/null 2>&1; then
+    _OLD_SESS=$(env -u TMUX_TMPDIR tmux ls -F '#S' 2>/dev/null | grep '^aicli-agent-' || true)
+    if [ -n "$_OLD_SESS" ]; then
+        log_status "    > Bug #1043 one-off: gracefully closing pre-upgrade terminal session(s) from the old tmux socket..."
+        for _pass in 1 2; do
+            printf '%s\n' "$_OLD_SESS" | while IFS= read -r _s; do
+                [ -n "$_s" ] || continue
+                env -u TMUX_TMPDIR tmux send-keys -t "$_s" C-c 2>/dev/null || true
+            done
+            sleep 1
+        done
+        sleep 2   # let agents finish flushing their state into the home overlay
+        printf '%s\n' "$_OLD_SESS" | while IFS= read -r _s; do
+            [ -n "$_s" ] || continue
+            env -u TMUX_TMPDIR tmux kill-session -t "$_s" 2>/dev/null || true
+        done
+        log_ok "Pre-upgrade terminal sessions closed cleanly."
+    fi
+    touch "$TMUX_MIGRATED" 2>/dev/null || true
+fi
+# --------------------------------------------------------------------------
+
 if [ "$MIGRATION_NEEDED" = "0" ] && [ "$UPGRADE_MODE" = "1" ]; then
     log_status "    > Hot-swap upgrade: sessions, overlays, and agent processes stay up."
 
@@ -244,7 +281,12 @@ graceful_kill "ttyd.*aicliterm-"
 
 # --- 4. Kill Active Agent tmux Sessions & Node Binaries ---
 if command -v tmux > /dev/null 2>&1; then
-    tmux ls -F '#S' 2>/dev/null | grep "^aicli-agent-" | xargs -r -I {} tmux kill-session -t "{}" > /dev/null 2>&1 || true
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too.
+    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        [ -S "$_sock" ] || continue
+        tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
+    done
 fi
 # Path-anchored pattern: only match node processes whose command line contains
 # a plugin-owned path. Prevents the previous agent-name regex from accidentally

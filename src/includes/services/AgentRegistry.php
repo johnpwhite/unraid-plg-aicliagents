@@ -131,6 +131,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --resume {chatId}",
                 'resume_latest' => "{binary} {args} --resume",
                 'env_prefix' => 'GEMINI',
+                'changelog_url' => 'https://github.com/google-gemini/gemini-cli/releases',
                 // No `default_envs` shipped. (GEMINI_CLI_ENABLE_AUTO_UPDATE was
                 // tried 2026-05-11 but Gemini CLI doesn't yet honour it — removed.)
                 // The manifest-seeding infrastructure stays wired (EnvService::
@@ -156,6 +157,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --resume {chatId}",
                 'resume_latest' => "{binary} {args} --resume",
                 'env_prefix' => 'CLAUDE',
+                'changelog_url' => 'https://github.com/anthropics/claude-code/releases',
             ],
             'opencode' => [
                 'id' => 'opencode',
@@ -175,6 +177,9 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} -s {chatId}",
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'OPENCODE',
+                // npm package carries no repository metadata — npm versions page
+                // is the verified fallback (no GitHub releases to point at).
+                'changelog_url' => 'https://www.npmjs.com/package/opencode-ai?activeTab=versions',
             ],
             'kilocode' => [
                 'id' => 'kilocode',
@@ -192,6 +197,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --session {chatId}",
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'KILOCODE',
+                'changelog_url' => 'https://github.com/Kilo-Org/kilocode/releases',
             ],
             'pi-coder' => [
                 'id' => 'pi-coder',
@@ -207,6 +213,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --session {chatId}",
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'PI_CODER',
+                'changelog_url' => 'https://github.com/badlogic/pi-mono/releases',
             ],
             'gh-copilot' => [
                 'id' => 'gh-copilot',
@@ -228,6 +235,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --resume={chatId}",
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'GH_COPILOT',
+                'changelog_url' => 'https://github.com/github/copilot-cli/releases',
             ],
             'codex-cli' => [
                 'id' => 'codex-cli',
@@ -253,6 +261,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args}",
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'CODEX',
+                'changelog_url' => 'https://github.com/openai/codex/releases',
             ],
             'factory-cli' => [
                 'id' => 'factory-cli',
@@ -264,6 +273,8 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args}",
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'FACTORY',
+                // @factory/cli has no public release history — npm versions page.
+                'changelog_url' => 'https://www.npmjs.com/package/@factory/cli?activeTab=versions',
             ],
             'nanocoder' => [
                 'id' => 'nanocoder',
@@ -275,6 +286,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args}",
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'NANOCODER',
+                'changelog_url' => 'https://github.com/Nano-Collective/nanocoder/releases',
             ],
             'goose' => [
                 'id' => 'goose',
@@ -298,6 +310,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} session --resume -n {chatId}",
                 'resume_latest' => "{binary} {args} session --resume",
                 'env_prefix' => 'GOOSE',
+                'changelog_url' => 'https://github.com/block/goose/releases',
                 // Three-field envs: Provider + Model + one dynamic API key whose env
                 // name is resolved at save time based on the selected provider
                 // ({GOOSE_PROVIDER}_API_KEY → ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
@@ -329,6 +342,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --resume {chatId}",
                 'resume_latest' => "{binary} {args} --resume",
                 'env_prefix' => 'QWEN',
+                'changelog_url' => 'https://github.com/QwenLM/qwen-code/releases',
                 // WP #936: surface the primary API key for Alibaba's DashScope
                 // (qwen-code's default provider). Without this in default_secrets
                 // the user has to discover the env var name themselves; with it
@@ -337,6 +351,42 @@ class AgentRegistry {
                     ['env' => 'DASHSCOPE_API_KEY', 'label' => 'DashScope API Key', 'type' => 'password',
                      'help' => 'Required for Alibaba\'s official Qwen API. Alternative providers (Ollama, vLLM) can be configured via the general env panel.'],
                 ],
+            ],
+            'antigravity-cli' => [
+                'id' => 'antigravity-cli',
+                'name' => 'Antigravity CLI',
+                'description' => 'Google\'s agent-first CLI — the successor to Gemini CLI, sharing the Antigravity 2.0 agent engine. Multi-step reasoning, multi-file edits, persistent conversation history.',
+                'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/antigravity.ico',
+                // WP #963: agy is a single static Go binary. The vendor install
+                // script (curl_install source) honours a captive $HOME — with
+                // CurlInstallSource's HOME=<agentDir>/home it lands the binary
+                // at <agentDir>/home/.local/bin/agy. No source.executable is set,
+                // so CurlInstallSource::stage() returns this `binary` verbatim.
+                'source' => [
+                    'type' => 'curl_install',
+                    'script_url' => 'https://antigravity.google/cli/install.sh',
+                    'version_probe' => '{binary} --version',
+                    // WP #963: Antigravity ships via a self-updater, not a
+                    // release history — its manifest serves only the current
+                    // {version,url,sha512}. CurlInstallSource probes manifest_url
+                    // for the latest installable version (Store-card badge +
+                    // single-entry dropdown). No downgrade/pin — there are no
+                    // archived builds to install. Unraid is always x86_64, so
+                    // the linux_amd64 manifest is hard-referenced.
+                    'manifest_url' => 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json',
+                ],
+                'binary' => "$agentBase/antigravity-cli/home/.local/bin/agy",
+                // Resume flags per `agy --help`: --conversation <id> resumes a
+                // specific conversation; --continue (-c) resumes the most recent.
+                'resume_cmd' => "{binary} {args} --conversation {chatId}",
+                'resume_latest' => "{binary} {args} --continue",
+                'env_prefix' => 'ANTIGRAVITY',
+                // Antigravity publishes no GitHub releases/tags; CHANGELOG.md in
+                // the repo is the version history. Surfaced as a Store-card link.
+                'changelog_url' => 'https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md',
+                // No default_secrets — auth is interactive Google OAuth (the CLI
+                // prints an authorization URL and accepts a pasted code), not an
+                // API-key env var.
             ],
 
         ];

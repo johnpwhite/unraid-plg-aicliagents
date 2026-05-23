@@ -94,9 +94,19 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>Terminal User</dt>
                         <dd>
                             <div class="input-row">
+                                <?php /* Bug #1054 follow-up: stamp the original user value at render time so
+                                   saveAICliAgentsManager can detect a user-switch and force a full page reload
+                                   afterwards. Without the reload the Store-card Args panel, workspace list, and
+                                   any other per-user UI state stay populated from the previous user's home
+                                   overlay (since the textareas are PHP-pre-rendered from the old request). */ ?>
+                                <input type="hidden" id="aicli-original-user" value="<?=htmlspecialchars($config['user'] ?? 'root', ENT_QUOTES, 'UTF-8')?>">
                                 <select name="user" id="user_select" style="flex: 1; min-width: 0;" <?=$autoSave?>>
-                                    <?php foreach ($users as $u => $d): ?>
-                                        <?=mk_option($config['user'], $u, $u . (empty($d) || $u === $d ? "" : " ($d)"))?>
+                                    <?php // Bug #1053: getUnraidUsers() returns a numeric-indexed LIST of
+                                          // usernames, so iterate as a list (the value is $u, the username),
+                                          // not as an associative array with $u => $d (which made the option
+                                          // value the list INDEX — saved "4" for the 5th user).
+                                    foreach ($users as $u): ?>
+                                        <?=mk_option($config['user'], $u, $u)?>
                                     <?php endforeach; ?>
                                 </select>
                                 <button type="button" class="aicli-btn-slim" onclick="window.open('/Users/UserAdd', '_blank')" title="Add User"><i class="fa fa-user-plus"></i></button>

@@ -117,9 +117,26 @@ function saveAICliAgentsManager(form, silent = false) {
 
     // Normal save (no path changes)
     let params = $(form).serialize();
+    // Bug #1054 follow-up: capture user-switch intent BEFORE the POST so we can
+    // force a full reload after a successful save. Args panels, workspaces, and
+    // other per-user UI state are PHP-pre-rendered from the user-home that was
+    // active at the previous page load -- without a reload they keep showing
+    // stale data from the old user (e.g. CLI args panel empty after switching
+    // back to root, even though root's args file is on disk).
+    var originalUser = ($('#aicli-original-user').val() || 'root');
+    var newUser = ($(form).find('[name="user"]').val() || 'root');
+    var userChanged = (originalUser !== newUser);
     $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, params, function() {
-        if (!silent) safeReload();
-        else swal({ title: "Saved", text: "Configuration updated.", type: "success", timer: 1000, showConfirmButton: false });
+        if (userChanged) {
+            // Always reload on a Terminal User switch -- silent or not. The new
+            // user's workspaces.json + args files live in a different home
+            // overlay, so the only way to surface them is a full page render.
+            safeReload();
+        } else if (!silent) {
+            safeReload();
+        } else {
+            swal({ title: "Saved", text: "Configuration updated.", type: "success", timer: 1000, showConfirmButton: false });
+        }
     });
 }
 

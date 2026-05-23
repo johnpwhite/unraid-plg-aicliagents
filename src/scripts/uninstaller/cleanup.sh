@@ -1,6 +1,9 @@
 #!/bin/bash
 # AICliAgents Uninstaller: Clean Removal of Assets & Processes
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 # Safe PID filter — drops any pid whose /proc/PID/exe resolves to a
 # hypervisor/init binary. Belt-and-braces guard against a kill pattern
 # ever accidentally matching a running VM or system service.
@@ -43,7 +46,12 @@ graceful_kill "ttyd.*(aicliterm|geminiterm)-"
 # 2. Terminate all AICli tmux sessions
 log_status "Terminating tmux agent sessions..."
 if command -v tmux >/dev/null 2>&1; then
-    tmux ls -F '#S' 2>/dev/null | grep -E "^aicli-agent-" | xargs -I {} tmux kill-session -t "{}" > /dev/null 2>&1 || true
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too.
+    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        [ -S "$_sock" ] || continue
+        tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
+    done
 fi
 
 # 3. Terminate orphaned agent node processes

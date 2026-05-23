@@ -14,6 +14,27 @@ use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\LogService;
 
 class CurlInstallSource implements AgentSource {
+    /**
+     * Recursively delete a directory tree. PHP-native (no shell) — the paths
+     * are plugin-owned but a shell `rm -rf` is an unnecessary injection
+     * surface for a pure filesystem operation.
+     */
+    private static function rrmdir(string $dir): void {
+        if (!is_dir($dir)) return;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $f) {
+            if ($f->isDir()) {
+                @rmdir($f->getPathname());
+            } else {
+                @unlink($f->getPathname());
+            }
+        }
+        @rmdir($dir);
+    }
+
     public function fetch(string $agentId, array $agent, ?string $targetVersion, $progress): bool {
         $src = $agent['source'] ?? [];
         $scriptUrl = (string)($src['script_url'] ?? '');
@@ -23,6 +44,17 @@ class CurlInstallSource implements AgentSource {
         }
 
         $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+
+        // WP #963: clean-reinstall. Wipe the prior captive bin/ and home/
+        // before re-running the vendor script. Vendor installers are commonly
+        // idempotent — they short-circuit ("already installed", exit 0) when
+        // their target binary is present — so a plugin-driven *upgrade* would
+        // otherwise no-op. The captive home/ is install-script scratch space
+        // ($HOME/.bashrc, $HOME/.cache staging), never user data; user data
+        // lives in the separate workspace overlay. Wiping it on every fetch
+        // is the correct semantic for an install-or-upgrade re-run.
+        self::rrmdir("$agentDir/bin");
+        self::rrmdir("$agentDir/home");
         @mkdir("$agentDir/home", 0755, true);
         @mkdir("$agentDir/bin", 0755, true);
 
@@ -45,7 +77,10 @@ class CurlInstallSource implements AgentSource {
         if (!empty($src['env']) && is_array($src['env'])) {
             foreach ($src['env'] as $k => $v) $envPairs[] = escapeshellarg("$k=$v");
         }
-        $run = implode(' ', $envPairs) . ' bash ' . escapeshellarg($scriptPath) . ' 2>&1; echo __RC=$?';
+        // WP #963: timeout guard. A hung vendor handoff (e.g. an interactive
+        // `agy install` shell-config step) must not stall the install. `timeout`
+        // exit 124 propagates through the __RC capture and fails the fetch.
+        $run = implode(' ', $envPairs) . ' timeout 300 bash ' . escapeshellarg($scriptPath) . ' 2>&1; echo __RC=$?';
         $out = @shell_exec($run) ?: '';
         @unlink($scriptPath);
         if (!preg_match('/__RC=(\d+)/', $out, $m) || (int)$m[1] !== 0) {
@@ -97,8 +132,66 @@ class CurlInstallSource implements AgentSource {
     }
 
     public function checkUpdates(string $agentId, array $agent, string $channel): ?array {
-        $repo = (string)($agent['source']['repo'] ?? '');
+        $src = $agent['source'] ?? [];
+        $repo = (string)($src['repo'] ?? '');
         if ($repo !== '') return (new GithubReleaseSource())->checkUpdates($agentId, $agent, $channel);
-        return null;
+
+        // WP #963: manifest-based latest-version probe. Vendors that distribute
+        // via a self-updater (e.g. Antigravity) publish a single-version
+        // manifest — {version,url,sha512} for "latest" — rather than a release
+        // history. Probe it so the agent gets an update badge.
+        $latest = self::probeManifestVersion($src);
+        if ($latest === null) return null;
+        $installed = AgentRegistry::getInstalledVersion($agentId);
+        $cmp = version_compare($latest, $installed);
+        return [
+            'installed_version' => $installed,
+            'latest_version'    => $latest,
+            'channel'           => $channel,
+            'has_update'        => ($cmp > 0),
+            'has_downgrade'     => ($cmp < 0),
+            'version_mismatch'  => ($cmp !== 0),
+        ];
+    }
+
+    /**
+     * WP #963: optional version-cache populator (same hook GithubReleaseSource
+     * uses — VersionCheckService calls it when method_exists). For a manifest
+     * source there is exactly one installable version (the vendor publishes no
+     * archive), so the cache holds a single 'latest'-tagged entry. The 'latest'
+     * tag makes getAvailableVersions include it unconditionally (no date cutoff).
+     * Returns an empty cache when no manifest_url is configured.
+     */
+    public function populateCache(string $agentId, array $agent): array {
+        $latest = self::probeManifestVersion($agent['source'] ?? []);
+        if ($latest === null) return ['dist_tags' => [], 'versions' => []];
+        return [
+            'dist_tags' => ['latest' => $latest],
+            'versions'  => [[
+                'version'   => $latest,
+                // The manifest carries no release date; "now" is fine — the
+                // 'latest' tag bypasses the getAvailableVersions date filter.
+                'timestamp' => time(),
+                'date'      => date('Y-m-d'),
+                'tags'      => ['latest'],
+            ]],
+        ];
+    }
+
+    /**
+     * Fetch source.manifest_url and extract the version string. The version key
+     * defaults to 'version' (override with source.manifest_version_key). Returns
+     * null on any failure (no URL, network error, malformed JSON, non-semver).
+     */
+    private static function probeManifestVersion(array $src): ?string {
+        $url = (string)($src['manifest_url'] ?? '');
+        if ($url === '') return null;
+        $json = @shell_exec('curl -fsSL -m 20 ' . escapeshellarg($url) . ' 2>/dev/null');
+        if (!is_string($json) || $json === '') return null;
+        $data = json_decode($json, true);
+        if (!is_array($data)) return null;
+        $key = (string)($src['manifest_version_key'] ?? 'version');
+        $v = $data[$key] ?? '';
+        return (is_string($v) && preg_match('/^\d+\.\d+\.\d+/', $v)) ? $v : null;
     }
 }

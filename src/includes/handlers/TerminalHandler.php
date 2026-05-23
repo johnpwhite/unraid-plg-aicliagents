@@ -222,16 +222,16 @@ class TerminalHandler {
         );
         aicli_log("gracefulClose: START $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
-        // Locate the tmux session matching -<id> suffix.
-        $findCmd = "tmux ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
-        $sessName = trim((string) shell_exec($findCmd));
-        $sessName = trim($sessName, "' \t\n");
+        // Non-root audit: shared multi-user lookup helper. Stays in lock-step
+        // with every other tmux call-site (agentSignalReload, AgentHandler,
+        // ProcessManager, InstallerService).
+        [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
 
         $capturedId = null;
 
         if (!empty($sessName)) {
             $escSess = escapeshellarg($sessName);
-            aicli_log("gracefulClose: tmux session resolved as '$sessName' | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+            aicli_log("gracefulClose: tmux session resolved as '$sessName' (sock=$tmuxSock) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
 
             @mkdir('/tmp/unraid-aicliagents', 0755, true);
 
@@ -240,15 +240,24 @@ class TerminalHandler {
             // (often 80 cols or narrower), which wraps copilot's UUID onto two
             // lines in a way tmux's -J flag cannot always re-join cleanly.
             // Resizing here guarantees the full resume line fits on one row.
-            @shell_exec("tmux resize-window -t $escSess -x 220 -y 50 2>/dev/null");
+            @shell_exec("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
 
             // Two Ctrl-Cs covers both single-press (opencode) and double-press
             // (claude/gemini/copilot/kilo) exit conventions. The second key on
             // single-press agents lands on the post-exit shell as a no-op.
-            @shell_exec("tmux send-keys -t $escSess C-c 2>/dev/null");
+            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
             usleep(150000);
-            @shell_exec("tmux send-keys -t $escSess C-c 2>/dev/null");
-            aicli_log("gracefulClose: sent Ctrl-C x2 | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+            // Bug #1071: Antigravity CLI ignores Ctrl-C and exits only on Ctrl-D.
+            // Sending Ctrl-D x2 covers both the agy single-press (REPL line) and
+            // double-press (exit confirmation) conventions. For agents that
+            // already exited from the Ctrl-C pair, the Ctrl-Ds land on the
+            // post-exit shell as a no-op.
+            usleep(150000);
+            @shell_exec("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
+            usleep(150000);
+            @shell_exec("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
+            aicli_log("gracefulClose: sent Ctrl-C x2 + Ctrl-D x2 (Bug #1071) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
 
             // Capture with up to 3 retries - agents that stream their exit
             // screen character-by-character can be caught mid-render on the
@@ -268,12 +277,17 @@ class TerminalHandler {
             //      kilocode ses_xxx) and legacy shapes.
             $pane = '';
             $m = null;
-            $regexFull   = '/(?:--resume[= ]|-s\s+)([A-Za-z0-9_-]{20,})/';
-            $regexQuoted = '/(?:--resume[= ]|-s\s+)(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\')/';
-            $regexShort  = '/(?:--resume[= ]|-s\s+)([A-Za-z0-9_-]{8,})/';
+            // Bug #1071: Antigravity CLI's exit hint uses `--conversation <id>`,
+            // not --resume. Accept either form in all three regex variants so
+            // antigravity-cli benefits from the same pane-scrape pipeline as
+            // the other agents. The leading flag list is the same shape:
+            // {--resume|--conversation|-s} followed by `= ` or whitespace.
+            $regexFull   = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{20,})/';
+            $regexQuoted = '/(?:--resume[= ]|--conversation[= ]|-s\s+)(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\')/';
+            $regexShort  = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{8,})/';
             for ($attempt = 0; $attempt < 3; $attempt++) {
                 usleep($attempt === 0 ? 1800000 : 1000000);
-                $pane = (string) shell_exec("tmux capture-pane -p -J -S -200 -t $escSess 2>/dev/null");
+                $pane = (string) shell_exec("$tmuxBin capture-pane -p -J -S -200 -t $escSess 2>/dev/null");
                 if (preg_match($regexFull, $pane, $m)) {
                     aicli_log("gracefulClose: captured full-length id on attempt " . ($attempt + 1) . " (" . strlen($pane) . " bytes of pane) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
                     break;
@@ -298,7 +312,7 @@ class TerminalHandler {
                 // Agent-specific disk-based fallback for CLIs that don't print
                 // a resume hint on exit (opencode). Looks up the most recent
                 // session id from the agent's own metadata store.
-                $capturedId = self::discoverLatestSessionId($agentId);
+                $capturedId = self::discoverLatestSessionId($agentId, $path);
                 if ($capturedId) {
                     aicli_log("gracefulClose: exit screen had no resume hint — discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
                 }
@@ -320,12 +334,12 @@ class TerminalHandler {
             // 10s. Order is critical: sentinel before Enter means the next
             // loop iteration breaks; the Enter just wakes the blocking read.
             @touch("/tmp/unraid-aicliagents/close-$safeId.flag");
-            @shell_exec("tmux send-keys -t $escSess Enter 2>/dev/null");
+            @shell_exec("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
 
             // Poll for the tmux session to actually exit. Up to 3s.
             $exited = false;
             for ($i = 0; $i < 30; $i++) {
-                $still = trim((string) shell_exec("tmux has-session -t $escSess 2>/dev/null && echo y || echo n"));
+                $still = trim((string) shell_exec("$tmuxBin has-session -t $escSess 2>/dev/null && echo y || echo n"));
                 if ($still === 'n') { $exited = true; break; }
                 usleep(100000);
             }
@@ -336,6 +350,21 @@ class TerminalHandler {
             }
         } else {
             aicli_log("gracefulClose: no tmux session found for $ctx — proceeding to hard stop (session may have already died)", AICLI_LOG_WARN, "TerminalHandler");
+        }
+
+        // Bug #1071 follow-up: always try the disk-based fallback when no
+        // resume id was captured from the pane (covers the case where the
+        // tmux session was already gone by the time gracefulClose ran).
+        if (empty($capturedId)) {
+            $diskId = self::discoverLatestSessionId($agentId, $path);
+            if ($diskId) {
+                $capturedId = $diskId;
+                aicli_log("gracefulClose: no live tmux pane to scrape -- discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                if (!empty($path) && !empty($agentId)) {
+                    \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $capturedId);
+                    aicli_log("gracefulClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                }
+            }
         }
 
         // Whether the tmux session exited cleanly or not, run the standard stop
@@ -383,9 +412,8 @@ class TerminalHandler {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
         // Same locate-by-suffix pattern as gracefulClose.
         $runShell = 'shell_exec';
-        $findCmd = "tmux ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
-        $sessName = trim((string) @$runShell($findCmd));
-        $sessName = trim($sessName, "' \t\n");
+        // Non-root audit: shared multi-user lookup helper.
+        [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
         if (empty($sessName)) {
             aicli_log("agentSignalReload: no tmux session matching $id", AICLI_LOG_WARN, "TerminalHandler");
             return ['status' => 'error', 'message' => 'No active tmux session for ' . $safeId];
@@ -399,7 +427,7 @@ class TerminalHandler {
         @touch($flagFile);
 
         $escSess = escapeshellarg($sessName);
-        @$runShell("tmux send-keys -t $escSess C-c 2>/dev/null");
+        @$runShell("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
 
         // WP #275a: do NOT blindly fire a second Ctrl-C 200ms later. If the agent
         // exits cleanly on the first Ctrl-C, the wrapper script consumes the flag
@@ -422,7 +450,7 @@ class TerminalHandler {
             if (!file_exists($flagFile)) { $consumed = true; break; }
         }
         if (!$consumed) {
-            @$runShell("tmux send-keys -t $escSess C-c 2>/dev/null");
+            @$runShell("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
             aicli_log("agentSignalReload: agent ignored first Ctrl-C; sent second to $sessName for $id", AICLI_LOG_INFO, "TerminalHandler");
         } else {
             aicli_log("agentSignalReload: clean exit on first Ctrl-C for $sessName ($id), no second needed", AICLI_LOG_INFO, "TerminalHandler");
@@ -448,7 +476,7 @@ class TerminalHandler {
      *
      * Returns null if unavailable or unsupported for the agent.
      */
-    private static function discoverLatestSessionId(string $agentId): ?string {
+    private static function discoverLatestSessionId(string $agentId, string $workspacePath = ''): ?string {
         $config = getAICliConfig();
         $username = $config['user'] ?? 'root';
         if (empty($username)) $username = 'root';
@@ -464,14 +492,53 @@ class TerminalHandler {
             return null;
         }
 
-        if ($agentId === 'claude-code') {
-            // Claude Code writes sessions as <uuid>.jsonl under ~/.claude/projects/<hash>/
-            // or ~/.claude/sessions/ (older layout). Return the basename of the most
-            // recently modified file — that is the session the user was last working in.
+        if ($agentId === 'antigravity-cli') {
+            // Bug #1071: agy stores each conversation as a separate
+            // <uuid>.pb file under <HOME>/.gemini/antigravity-cli/conversations/.
+            // Most recently modified = last active. The basename (sans .pb)
+            // is the conversation id passed to `agy --conversation <id>`.
+            $dir = "$homeDir/.gemini/antigravity-cli/conversations";
+            if (!is_dir($dir)) return null;
             $newestMtime = 0;
             $newestId    = null;
-            foreach (["$homeDir/.claude/projects", "$homeDir/.claude/sessions"] as $dir) {
-                if (!is_dir($dir)) continue;
+            foreach (glob("$dir/*.pb") ?: [] as $file) {
+                $mtime = @filemtime($file) ?: 0;
+                if ($mtime > $newestMtime) {
+                    $newestMtime = $mtime;
+                    $newestId    = basename($file, '.pb');
+                }
+            }
+            if ($newestId !== null && preg_match('/^[A-Za-z0-9-]{20,}$/', $newestId)) return $newestId;
+            return null;
+        }
+
+        if ($agentId === 'claude-code') {
+            // Claude organises sessions by project — `.claude/projects/<dasherised-cwd>/<uuid>.jsonl`.
+            // A globally-newest scan would pick a session from a DIFFERENT
+            // workspace and claude would later refuse the resume with
+            // "No conversation found" (claude looks up the session under the
+            // current cwd's project dir, not the originating one). So we MUST
+            // restrict the search to the closing workspace's project subdir.
+            $scanDirs = [];
+            if (!empty($workspacePath)) {
+                // Dasherise the workspace path the same way claude does:
+                // leading slash dropped, every '/' replaced with '-'. So
+                // /mnt/user/python -> -mnt-user-python.
+                $proj = '-' . str_replace('/', '-', ltrim($workspacePath, '/'));
+                $candidate = "$homeDir/.claude/projects/$proj";
+                if (is_dir($candidate)) $scanDirs[] = $candidate;
+            }
+            // Legacy fallback only when no workspace context was provided
+            // (e.g. older callers). Keeps backwards compat for any future
+            // call-site we haven't audited.
+            if (empty($scanDirs)) {
+                foreach (["$homeDir/.claude/projects", "$homeDir/.claude/sessions"] as $dir) {
+                    if (is_dir($dir)) $scanDirs[] = $dir;
+                }
+            }
+            $newestMtime = 0;
+            $newestId    = null;
+            foreach ($scanDirs as $dir) {
                 $it = new \RecursiveIteratorIterator(
                     new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS)
                 );

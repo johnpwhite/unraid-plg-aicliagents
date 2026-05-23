@@ -386,6 +386,16 @@ class LayerManifestService {
         return ($hash !== false) ? $hash : null;
     }
 
+    /**
+     * Classify a layer .sqsh from its filename: a baked-down full layer carries
+     * the "_consolidated_" marker in its name, every other layer is an append
+     * delta. Centralised here so callers that rebuild manifest entries (restore,
+     * recovery) do not each hand-roll the same string check.
+     */
+    public static function classifyLayerKind(string $filename): string {
+        return (strpos($filename, '_consolidated_') !== false) ? 'consolidated' : 'delta';
+    }
+
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------

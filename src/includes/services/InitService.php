@@ -169,7 +169,7 @@ class InitService {
                 LogService::log("Emergency mode cleanup: storage now available. Killing emergency sessions...", LogService::LOG_INFO, "InitService");
 
                 // Kill emergency terminal sessions (tmux + ttyd)
-                exec("tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -I {} tmux kill-session -t {} 2>/dev/null");
+                \AICliAgents\Services\ProcessManager::killAllAgentSessions();
                 exec("pkill -9 -f 'ttyd.*(aicliterm|temp-terminal)-' 2>/dev/null");
                 exec("pkill -9 -f 'aicli-run-' 2>/dev/null");
                 usleep(500000); // 0.5s for process cleanup

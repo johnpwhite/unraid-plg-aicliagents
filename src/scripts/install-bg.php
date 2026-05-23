@@ -28,9 +28,12 @@ $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
 // 2. Include the manager logic
 require_once "$pluginDir/includes/AICliAgentsManager.php";
 
-// 3. Get agent ID and optional target version from CLI arguments
+// 3. Get agent ID, optional target version, optional backup dest from argv.
+// argv[2] (version) and argv[3] (backup dest) are always passed by
+// AgentHandler::install — empty string means "unset".
 $agentId = $argv[1] ?? '';
-$targetVersion = $argv[2] ?? null;
+$targetVersion = (($argv[2] ?? '') !== '') ? $argv[2] : null;
+$backupDest = ($argv[3] ?? '');
 
 if (empty($agentId)) {
     aicli_log("Background Install Job aborted: Missing Agent ID", AICLI_LOG_ERROR);
@@ -56,6 +59,28 @@ aicli_log("Pre-install bake wait: {$wait['status']} (waited {$wait['waited_s']}s
     'pre_install_bake_wait',
     ['agent' => $agentId, 'user' => $user, 'status' => $wait['status'], 'waited_s' => $wait['waited_s']]
 );
+
+// WP #964 (slice): pre-upgrade backup. Runs BEFORE installAgent touches the
+// binary, so the current version is still intact. The overlay already
+// space-checked (backup + new version + 10%); if the copy still fails here
+// we ABORT the upgrade — the user asked for a rollback copy, so silently
+// proceeding without one would defeat the point, and the current install is
+// untouched and usable.
+if ($backupDest !== '') {
+    setInstallStatus("Backing up current version...", 3, $agentId);
+    aicli_log("Pre-upgrade backup of $agentId requested → $backupDest", AICLI_LOG_INFO);
+    $backup = \AICliAgents\Services\InstallerService::backupAgentVersion($agentId, $backupDest);
+    if (($backup['status'] ?? '') !== 'ok') {
+        $bmsg = $backup['message'] ?? 'unknown error';
+        aicli_log("Pre-upgrade backup FAILED for $agentId: $bmsg — upgrade aborted", AICLI_LOG_ERROR);
+        setInstallStatus("Backup failed — upgrade aborted (current version intact)", 0, $agentId, $bmsg);
+        \AICliAgents\Services\LifecycleLogService::log(
+            \AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'installer',
+            'agent_install_aborted_backup_failed', ['agent' => $agentId, 'error' => $bmsg]);
+        exit(1);
+    }
+    aicli_log("Pre-upgrade backup OK for $agentId → " . ($backup['dir'] ?? '?'), AICLI_LOG_INFO);
+}
 
 // 4. Run the install
 try {

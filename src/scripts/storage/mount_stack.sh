@@ -1,11 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 # AICliAgents: OverlayFS Stack Assembly
-# Usage: mount_stack.sh <type: agent|home> <id> <persistence_path>
+# Usage: mount_stack.sh <type: agent|home> <id> <persistence_path> [owner]
+#
+# Bug #1054: optional 4th arg `owner` — for non-root home overlays, chown the
+# UPPER_DIR / WORK_DIR / MNT_POINT to this user so OverlayFS writes inherit
+# the user's ownership and the agent can actually write to its $HOME. Empty
+# OWNER (the default, used by agent mounts) preserves root-write semantics.
 
 TYPE="${1:-}"
 ID="${2:-}"
 PERSIST_PATH="${3:-}"
+OWNER="${4:-}"
+
+# Bug #1054 v.06: for TYPE=home, default OWNER to $ID. Home overlays use the
+# username as the ID, so this auto-applies the OWNER chown for every caller
+# (commit_stack.sh remount-after-bake, consolidate_layers.sh remount, future
+# callers) without each one having to thread the user arg through. Agent
+# mounts (TYPE=agent, ID=claude-code etc.) aren't users; the `id "$OWNER"`
+# check below filters them out without further handling.
+if [ -z "$OWNER" ] && [ "$TYPE" = "home" ]; then
+    OWNER="$ID"
+fi
+
 PLUGIN_ROOT="/usr/local/emhttp/plugins/unraid-aicliagents"
 
 # Source shared storage functions (guard_path, check_disk_space, etc.)
@@ -57,6 +74,21 @@ MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 # Remove stale emergency symlink if present (emergency mode leaves a symlink at the mount point)
 [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
 mkdir -p "$UPPER_DIR" "$WORK_DIR" "$MNT_POINT"
+
+# Bug #1054: for non-root home overlays, chown the upperdir + workdir + mount
+# point (and its parent) to the agent user. OverlayFS inherits write semantics
+# from the upperdir owner — a root-owned upper means the agent gets EACCES on
+# every write into the merged view even though `mountpoint -q` reports healthy.
+# Empty OWNER (agent overlays) skips this block and preserves root-write.
+if [ -n "$OWNER" ] && [ "$OWNER" != "root" ] && id "$OWNER" >/dev/null 2>&1; then
+    chown -R "$OWNER" "$UPPER_DIR" "$WORK_DIR" 2>/dev/null || true
+    chown "$OWNER" "$MNT_POINT" 2>/dev/null || true
+    # Parent of MNT_POINT (e.g. /tmp/unraid-aicliagents/work/<user>/) holds
+    # per-session run scripts written by aicli-shell.sh — chown so the agent
+    # can mkdir/write alongside its home mount.
+    PARENT_DIR="$(dirname "$MNT_POINT")"
+    [ -d "$PARENT_DIR" ] && chown "$OWNER" "$PARENT_DIR" 2>/dev/null || true
+fi
 
 # 3. Discover Lower Layers (SquashFS volumes)
 # Sort newest-first using lexicographic order on the embedded timestamp.

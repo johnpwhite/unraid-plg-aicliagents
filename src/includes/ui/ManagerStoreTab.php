@@ -102,6 +102,13 @@ function av2_secrets_schema(array $agent): array {
                         <div class="filter-btn" onclick="setAgentFilter('installed', this)">Installed</div>
                         <div class="filter-btn" onclick="setAgentFilter('updates', this)">Updates</div>
                     </div>
+                    <button type="button" id="agent-sort-toggle" class="agent-sort-btn"
+                            data-dir="asc" onclick="toggleAgentSort()"
+                            title="Toggle agent card order (A&ndash;Z / Z&ndash;A)"
+                            aria-label="Toggle agent sort order">
+                        <i class="fa fa-sort-alpha-asc" id="agent-sort-icon"></i>
+                        <span id="agent-sort-label">A&ndash;Z</span>
+                    </button>
                 </div>
 
                 <div class="av2-grid" id="agent-store-grid">
@@ -185,6 +192,13 @@ function av2_secrets_schema(array $agent): array {
                         }
                         $agentSizeMB = $agentSizeBytes > 0 ? (int)round($agentSizeBytes / 1024 / 1024) : 0;
 
+                        // WP #964: locally-retained version backups (captured by the
+                        // WP #965 keep-a-copy upgrade flow). Surfaced in the version
+                        // picker as a "Restore a kept backup" optgroup so the user can
+                        // roll back to a version they previously ran without a re-fetch.
+                        $retainedBackups = \AICliAgents\Services\InstallerService::listRetainedBackups($id);
+                        $retainedJson    = htmlspecialchars(json_encode($retainedBackups), ENT_QUOTES, 'UTF-8');
+
                         // WP #748 J / Phase B follow-ups: per-agent storage-health.
                         // Pulled from the cached boot-integrity sweep + a quick halt-
                         // marker check. Drives an in-head pill plus contextual
@@ -232,6 +246,22 @@ function av2_secrets_schema(array $agent): array {
                             <div>
                                 <div class="av2-title"><?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?></div>
                                 <div class="av2-desc"><?=htmlspecialchars($agent['description'] ?? '', ENT_QUOTES, 'UTF-8')?></div>
+                                <?php
+                                // WP #963: optional release-notes link. Agents whose
+                                // vendor publishes a changelog (Antigravity, which has
+                                // no GitHub releases — CHANGELOG.md is its version
+                                // history) set `changelog_url`. Only render for a
+                                // valid http(s) URL.
+                                $changelogUrl = (string)($agent['changelog_url'] ?? '');
+                                if ($changelogUrl !== '' && preg_match('#^https?://#', $changelogUrl)):
+                                ?>
+                                    <a class="av2-changelog-link"
+                                       href="<?=htmlspecialchars($changelogUrl, ENT_QUOTES, 'UTF-8')?>"
+                                       target="_blank" rel="noopener noreferrer"
+                                       style="font-size:11px; opacity:0.7; text-decoration:none; color:var(--text-color);">
+                                        Release notes ↗
+                                    </a>
+                                <?php endif; ?>
                             </div>
                             <?php
                             // Stacked badge: installed version top row + upgrade indicator below.
@@ -322,7 +352,7 @@ function av2_secrets_schema(array $agent): array {
 
                                 <div class="av2-chan-section" id="av2-pin-row-<?=$id?>">
                                     <h4>Version</h4>
-                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" onchange="onVersionSelect(this)">
+                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
                                         <option value="">v<?=htmlspecialchars($installedVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
                                     <p class="av2-help" style="margin-top:6px;">Pick a version to install. Upgrade button in the card footer applies the latest on the selected channel.</p>
@@ -496,7 +526,7 @@ function av2_secrets_schema(array $agent): array {
 
                                 <div class="av2-chan-section" id="av2-pin-row-<?=$id?>">
                                     <h4>Version</h4>
-                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" onchange="onVersionSelect(this)">
+                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
                                         <option value="">v<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
                                 </div>

@@ -235,7 +235,14 @@ class InstallerService {
 
         // 1. Kill active sessions using this agent (tmux + ttyd)
         $safeId = escapeshellarg($agentId);
-        exec("tmux ls -F '#S' 2>/dev/null | grep 'aicli-agent-.*$agentId' | xargs -I {} tmux kill-session -t {} > /dev/null 2>&1");
+        // Non-root audit: iterate every per-uid tmux server so non-root
+        // user sessions for this agent get killed too.
+        foreach (glob('/tmp/unraid-aicliagents/tmux/tmux-*', GLOB_ONLYDIR) ?: [] as $perUserDir) {
+            $sock = $perUserDir . '/default';
+            if (!file_exists($sock)) continue;
+            $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
+            exec("$tmuxBin ls -F '#S' 2>/dev/null | grep 'aicli-agent-.*$agentId' | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
+        }
         exec("pgrep -f 'ttyd.*$agentId' 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
 
         // 2. Unmount the stack
@@ -305,6 +312,292 @@ class InstallerService {
         LogService::log("Successfully uninstalled $agentId and purged $oldSizeMB MB of associated storage.", LogService::LOG_INFO, "InstallerService");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_uninstalled', ['agent' => $agentId, 'purged_mb' => $oldSizeMB]);
         return ['status' => 'ok'];
+    }
+
+    /**
+     * WP #964 (slice): resolve a destination path to its nearest existing
+     * ancestor so disk_free_space() can be queried for the right volume even
+     * when the user-typed backup directory doesn't exist yet.
+     */
+    private static function resolveExistingAncestor(string $path): string {
+        $path = $path !== '' ? $path : '/';
+        $guard = 0;
+        while ($path !== '' && $path !== '/' && !is_dir($path) && $guard++ < 64) {
+            $path = dirname($path);
+        }
+        return is_dir($path) ? $path : '/';
+    }
+
+    /**
+     * WP #964 (slice): estimate the disk cost of backing up an agent's current
+     * version before an upgrade, and check the destination has room.
+     *
+     * The check covers BOTH the backup copy AND the upcoming upgrade's own
+     * footprint (the new version is guesstimated at ~the current version's
+     * size, since the vendor rarely publishes a size up front), plus a 10%
+     * headroom. Returns sizes in bytes for the overlay to render.
+     */
+    public static function estimateUpgradeBackup(string $agentId, string $destPath = ''): array {
+        if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        $config = ConfigService::getConfig();
+        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $destPath = trim($destPath) !== '' ? trim($destPath) : $persistPath;
+
+        $layers = glob("$persistPath/agent_{$agentId}_*.sqsh") ?: [];
+        $currentSize = 0;
+        foreach ($layers as $l) $currentSize += (int)@filesize($l);
+
+        // Guesstimate the new version's footprint as ~the current version's.
+        $estimatedNewSize = $currentSize;
+        // Need room for: the backup copy + the upgrade install, +10% headroom.
+        $required = (int)ceil(($currentSize + $estimatedNewSize) * 1.10);
+
+        $free = @disk_free_space(self::resolveExistingAncestor($destPath));
+        $free = ($free === false) ? 0 : (int)$free;
+
+        return [
+            'status'             => 'ok',
+            'agent'              => $agentId,
+            'current_version'    => AgentRegistry::getInstalledVersion($agentId),
+            'dest'               => $destPath,
+            'current_size'       => $currentSize,
+            'estimated_new_size' => $estimatedNewSize,
+            'required'           => $required,
+            'free'               => $free,
+            'sufficient'         => ($currentSize > 0 && $free >= $required),
+            'layer_count'        => count($layers),
+        ];
+    }
+
+    /**
+     * WP #964 (slice): copy an agent's current SquashFS layers to a rollback
+     * directory under $destPath BEFORE an upgrade replaces them. The layout
+     * (aicli-rollback/<agentId>/<version>_<dt>/ + meta.json) is what the
+     * future full rollback feature (WP #964) will enumerate and restore from.
+     * Returns ['status'=>'ok','dir'=>...] or ['status'=>'error','message'=>...].
+     */
+    public static function backupAgentVersion(string $agentId, string $destPath): array {
+        if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        if (strpos($destPath, '/') !== 0) {
+            return ['status' => 'error', 'message' => 'Backup destination must be an absolute path'];
+        }
+        $config = ConfigService::getConfig();
+        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+
+        $layers = glob("$persistPath/agent_{$agentId}_*.sqsh") ?: [];
+        if (empty($layers)) {
+            return ['status' => 'error', 'message' => "No SquashFS layers found for $agentId — nothing to back up"];
+        }
+
+        $version = AgentRegistry::getInstalledVersion($agentId);
+        $versionTag = preg_replace('/[^A-Za-z0-9._-]/', '_', $version !== '' ? $version : 'unknown');
+
+        // Skip if this exact version is already retained. Agent layers ARE the
+        // version, so a second copy is redundant — it only clutters the
+        // rollback picker (a restore round-trip would otherwise re-snapshot
+        // each version it passes through).
+        $rollbackRoot = rtrim($destPath, '/') . "/aicli-rollback/$agentId";
+        foreach (glob("$rollbackRoot/*/meta.json") ?: [] as $existingMeta) {
+            $em = json_decode((string)@file_get_contents($existingMeta), true);
+            if (is_array($em) && ($em['version'] ?? '') === $version) {
+                $existingDir = dirname($existingMeta);
+                LogService::log("Backup of $agentId v$version already retained at $existingDir — skipping duplicate",
+                    LogService::LOG_INFO, "InstallerService");
+                return ['status' => 'ok', 'dir' => $existingDir, 'version' => $version,
+                        'layers' => (array)($em['layers'] ?? []), 'bytes' => 0, 'skipped' => true];
+            }
+        }
+
+        $dt = gmdate('Ymd\THis\Z');
+        $backupDir = rtrim($destPath, '/') . "/aicli-rollback/$agentId/{$versionTag}_{$dt}";
+
+        if (!is_dir($backupDir) && !@mkdir($backupDir, 0755, true) && !is_dir($backupDir)) {
+            return ['status' => 'error', 'message' => "Cannot create backup directory: $backupDir"];
+        }
+
+        $copied = [];
+        foreach ($layers as $layer) {
+            $base = basename($layer);
+            if (!@copy($layer, "$backupDir/$base")) {
+                // Roll back the partial backup so a failed attempt leaves nothing.
+                foreach ($copied as $c) @unlink("$backupDir/$c");
+                @unlink("$backupDir/meta.json");
+                @rmdir($backupDir);
+                return ['status' => 'error', 'message' => "Failed to copy layer $base to $backupDir"];
+            }
+            $copied[] = $base;
+        }
+
+        @file_put_contents("$backupDir/meta.json", json_encode([
+            'agent'      => $agentId,
+            'version'    => $version,
+            'created_at' => $dt,
+            'layers'     => $copied,
+        ], JSON_PRETTY_PRINT));
+
+        $bytes = 0;
+        foreach ($copied as $c) $bytes += (int)@filesize("$backupDir/$c");
+        LogService::log("Backed up $agentId v$version (" . count($copied) . " layer(s), "
+            . round($bytes / 1048576, 1) . " MB) to $backupDir", LogService::LOG_INFO, "InstallerService");
+        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_version_backed_up',
+            ['agent' => $agentId, 'version' => $version, 'dir' => $backupDir, 'bytes' => $bytes]);
+
+        return ['status' => 'ok', 'dir' => $backupDir, 'version' => $version, 'layers' => $copied, 'bytes' => $bytes];
+    }
+
+    /**
+     * WP #964: list the locally-retained version backups for an agent — the
+     * snapshots backupAgentVersion writes under
+     * <persist>/aicli-rollback/<agent>/<version>_<dt>/. Newest first.
+     */
+    public static function listRetainedBackups(string $agentId): array {
+        if (empty($agentId)) return [];
+        $config = ConfigService::getConfig();
+        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        $base = rtrim($persistPath, '/') . "/aicli-rollback/$agentId";
+        if (!is_dir($base)) return [];
+
+        $out = [];
+        foreach (glob("$base/*/meta.json") ?: [] as $metaFile) {
+            $dir  = dirname($metaFile);
+            $meta = json_decode((string)@file_get_contents($metaFile), true);
+            if (!is_array($meta) || empty($meta['version'])) continue;
+            $bytes = 0;
+            foreach ((array)($meta['layers'] ?? []) as $l) $bytes += (int)@filesize("$dir/$l");
+            $out[] = [
+                'version'     => (string)$meta['version'],
+                'created_at'  => (string)($meta['created_at'] ?? ''),
+                'dir'         => $dir,
+                'bytes'       => $bytes,
+                'layer_count' => count((array)($meta['layers'] ?? [])),
+            ];
+        }
+        // Newest first — the meta created_at is the YYYYMMDDTHHMMSSZ stamp.
+        usort($out, fn($a, $b) => strcmp($b['created_at'], $a['created_at']));
+
+        // De-dup by version: several on-disk backups of the same version are
+        // equivalent (agent layers ARE the version). Keep only the newest of
+        // each so the picker shows one entry per version. New duplicates are
+        // already prevented at capture time by backupAgentVersion; this also
+        // collapses any duplicates left by an earlier plugin version.
+        $seen = [];
+        $deduped = [];
+        foreach ($out as $entry) {
+            if (isset($seen[$entry['version']])) continue;
+            $seen[$entry['version']] = true;
+            $deduped[] = $entry;
+        }
+        return $deduped;
+    }
+
+    /** PHP-native recursive delete of a directory's contents (leaves the dir). */
+    private static function rmdirContents(string $dir): void {
+        if (!is_dir($dir)) return;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $f) {
+            if ($f->isDir()) { @rmdir($f->getPathname()); } else { @unlink($f->getPathname()); }
+        }
+    }
+
+    /**
+     * WP #964: restore an agent to a locally-retained version backup. The
+     * current version is snapshotted first (roll-forward safety), then the
+     * retained layer becomes the active layer. Runs under the per-entity
+     * storage lock (WP #966) so it cannot race a bake / consolidate / reconcile.
+     */
+    public static function restoreAgentVersion(string $agentId, string $backupDir): array {
+        if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        $config = ConfigService::getConfig();
+        $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+
+        // Validate $backupDir is genuinely one of THIS agent's retained
+        // backups — never restore from an arbitrary caller-supplied path.
+        $rollbackBase = realpath(rtrim($persistPath, '/') . "/aicli-rollback/$agentId");
+        $realBackup   = realpath($backupDir);
+        if ($rollbackBase === false || $realBackup === false
+            || strpos($realBackup, $rollbackBase . DIRECTORY_SEPARATOR) !== 0) {
+            return ['status' => 'error', 'message' => 'Not a retained backup for this agent'];
+        }
+        $meta = json_decode((string)@file_get_contents("$realBackup/meta.json"), true);
+        if (!is_array($meta) || empty($meta['version']) || empty($meta['layers'])) {
+            return ['status' => 'error', 'message' => 'Retained backup is missing or has no meta.json'];
+        }
+        $restoreVersion = (string)$meta['version'];
+        $retainedLayers = (array)$meta['layers'];
+
+        // Per-entity storage lock (WP #966) — non-blocking: if a bake or
+        // consolidate is in flight, ask the user to retry rather than hang.
+        $lockId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $agentId);
+        $lockFh = @fopen("/var/run/aicli-bake-agent-$lockId.lock", 'c');
+        if (!$lockFh || !flock($lockFh, LOCK_EX | LOCK_NB)) {
+            if ($lockFh) fclose($lockFh);
+            return ['status' => 'error', 'message' => 'A storage operation is in progress — try the restore again in a moment'];
+        }
+
+        try {
+            // 1. Snapshot the current version so the user can roll forward.
+            $cur = self::backupAgentVersion($agentId, $persistPath);
+            if (($cur['status'] ?? '') !== 'ok'
+                && strpos((string)($cur['message'] ?? ''), 'No SquashFS layers') === false) {
+                return ['status' => 'error', 'message' => 'Could not snapshot the current version before restore: ' . ($cur['message'] ?? '?')];
+            }
+
+            // 2. Copy the retained layer(s) into the persistence directory.
+            $manifestLayers = [];
+            foreach ($retainedLayers as $layerFile) {
+                $srcFile = "$realBackup/$layerFile";
+                $dstFile = rtrim($persistPath, '/') . "/$layerFile";
+                if (!is_file($srcFile)) {
+                    return ['status' => 'error', 'message' => "Retained layer missing from backup: $layerFile"];
+                }
+                if (!@copy($srcFile, $dstFile)) {
+                    return ['status' => 'error', 'message' => "Failed to copy retained layer into place: $layerFile"];
+                }
+                $manifestLayers[] = [
+                    'filename'   => $layerFile,
+                    'sha256'     => hash_file('sha256', $dstFile) ?: '',
+                    'bytes'      => (int)@filesize($dstFile),
+                    'kind'       => \AICliAgents\Services\LayerManifestService::classifyLayerKind($layerFile),
+                    'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+                ];
+            }
+
+            // 3. Point the manifest at the restored layer set.
+            \AICliAgents\Services\LayerManifestService::replaceLayers("agent/$agentId", $manifestLayers, $persistPath);
+
+            // 4. Remove the superseded current-version layers (preserved in
+            //    aicli-rollback by step 1). Under the lock — race-free.
+            foreach (glob(rtrim($persistPath, '/') . "/agent_{$agentId}_*.sqsh") ?: [] as $f) {
+                if (!in_array(basename($f), $retainedLayers, true)) @unlink($f);
+            }
+
+            // 5. Wipe the agent's ZRAM upper so the merged view is exactly the
+            //    restored layer (the agent overlay upper is not user data).
+            self::rmdirContents("/tmp/unraid-aicliagents/zram_upper/agents/$agentId/upper");
+
+            // 6. Remount the agent stack to pick up the restored lower layer.
+            $mnt = AgentRegistry::AGENT_BASE . "/$agentId";
+            if (StorageMountService::isMounted($mnt)) {
+                StorageMountService::unmount($mnt);
+            }
+            $remounted = StorageMountService::ensureAgentMounted($agentId);
+
+            // 7. Record the restored version.
+            AgentRegistry::saveVersion($agentId, $restoreVersion);
+            VersionCheckService::invalidateAgent($agentId);
+
+            LogService::log("Restored $agentId to v$restoreVersion from $realBackup (remounted=" . ($remounted ? 'yes' : 'no') . ")", LogService::LOG_INFO, "InstallerService");
+            LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_version_restored',
+                ['agent' => $agentId, 'version' => $restoreVersion, 'from' => $realBackup]);
+
+            return ['status' => 'ok', 'version' => $restoreVersion];
+        } finally {
+            flock($lockFh, LOCK_UN);
+            fclose($lockFh);
+        }
     }
 
     /**

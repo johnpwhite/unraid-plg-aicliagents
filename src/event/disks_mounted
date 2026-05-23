@@ -8,6 +8,9 @@ LOG="/tmp/unraid-aicliagents/debug.log"
 
 mkdir -p /tmp/unraid-aicliagents
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventDisksMounted] $1" >> "$LOG"
 }
@@ -19,8 +22,15 @@ if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
     log "Emergency mode detected. Cleaning up and restoring normal operation..."
 
     # Kill emergency terminal sessions
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too. PHP/root tmux client sees only /tmp/.../tmux-0/default.
     if command -v tmux >/dev/null 2>&1; then
-        tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -I {} tmux kill-session -t {} >/dev/null 2>&1
+        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+            [ -S "$_sock" ] || continue
+            tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r _sess; do
+                tmux -S "$_sock" kill-session -t "$_sess" >/dev/null 2>&1 || true
+            done
+        done
     fi
     # Bug #533: replace bare pkill with cmdline-anchored kill. The pgrep pattern
     # matches the session-id substrings (aicliterm- / temp-terminal-) which are
@@ -76,6 +86,16 @@ if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
         if (\AICliAgents\Services\StorageMountService::isPathAvailable(\$persistPath)) {
             aicli_log('disks_mounted: Storage path available. Notifying UI.', AICLI_LOG_INFO, 'EventDisks');
             \AICliAgents\Services\NchanService::publish('storage_status', aicli_get_storage_status());
+            // Bug #1065: mount every installed agent's overlay so the binaries are
+            // visible to the host's terminal immediately after array start — not
+            // just to terminals opened through the plugin's UI. Without this, a
+            // user typing 'claude' in Unraid's main Terminal post-reboot hits
+            // 'No such file or directory' because the overlay was never mounted.
+            \AICliAgents\Services\StorageMountService::mountAllInstalledAgents();
+            // Bug #1067: array start is a natural reconciliation point -- kill
+            // any ttyd processes that survived an unclean exit or failed launch
+            // so the next page render sees an accurate session list.
+            \AICliAgents\Services\ProcessManager::sweepOrphanSessions(0);
             \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'array_started');
         } else {
             aicli_log('disks_mounted: Storage path still not available. Will retry on next access.', AICLI_LOG_WARN, 'EventDisks');

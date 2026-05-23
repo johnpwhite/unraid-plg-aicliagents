@@ -14,7 +14,8 @@ class AgentHandler {
 
     /** Time limit override for long-running actions (seconds). */
     private static $TIME_LIMITS = [
-        'install_agent' => 900,
+        'install_agent'        => 900,
+        'restore_agent_backup' => 300,
     ];
 
     public static function handle($action, $id) {
@@ -32,6 +33,8 @@ class AgentHandler {
             case 'get_version_cache':   return self::getVersionCache();
             case 'set_agent_channel':   return self::setAgentChannel();
             case 'list_active_installs': return self::listActiveInstalls();
+            case 'get_upgrade_backup_estimate': return self::getUpgradeBackupEstimate();
+            case 'restore_agent_backup': return self::restoreAgentBackup();
             default:                    return null;
             // Note: get_install_status outputs raw JSON and is dispatched directly
         }
@@ -41,7 +44,37 @@ class AgentHandler {
     public static function actions() {
         return ['install_agent', 'emergency_install', 'get_install_status', 'uninstall_agent',
                 'check_updates', 'check_versions', 'get_version_cache', 'set_agent_channel',
-                'list_active_installs'];
+                'list_active_installs', 'get_upgrade_backup_estimate', 'restore_agent_backup'];
+    }
+
+    /**
+     * WP #964: restore an agent to a locally-retained version backup. Runs
+     * synchronously — a restore is a local layer-copy + remount (seconds), not
+     * a download — so the UI shows a blocking "Restoring…" overlay rather than
+     * the background install-progress panel.
+     */
+    private static function restoreAgentBackup() {
+        $agentId   = $_GET['agentId'] ?? '';
+        $backupDir = (string)($_GET['backup_dir'] ?? '');
+        if (empty($agentId) || $backupDir === '') {
+            return ['status' => 'error', 'message' => 'Missing agentId or backup_dir'];
+        }
+        return \AICliAgents\Services\InstallerService::restoreAgentVersion($agentId, $backupDir);
+    }
+
+    /**
+     * WP #964 (slice): size + free-space estimate for the pre-upgrade "keep a
+     * copy" overlay. With no `dest` the backend defaults it to the persistence
+     * location and echoes the resolved path back, so the overlay's destination
+     * field has a single source of truth.
+     */
+    private static function getUpgradeBackupEstimate() {
+        $agentId = $_GET['agentId'] ?? '';
+        if (empty($agentId)) {
+            return ['status' => 'error', 'message' => 'No Agent ID provided'];
+        }
+        $dest = (string)($_GET['dest'] ?? '');
+        return \AICliAgents\Services\InstallerService::estimateUpgradeBackup($agentId, $dest);
     }
 
     /**
@@ -110,8 +143,13 @@ class AgentHandler {
             $cur['pre_closed_sessions'] = $preClosed;
             @file_put_contents($statusFile, json_encode($cur)); // nosemgrep: php.lang.security.tainted-url-to-connection.tainted-url-to-connection
         }
-        $versionArg = !empty($version) ? " " . escapeshellarg($version) : "";
-        aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg);
+        // WP #964 (slice): optional pre-upgrade backup. The version + backup-dest
+        // slots are passed positionally and ALWAYS present (empty string when
+        // unused) so install-bg.php can read argv[2]/argv[3] unambiguously.
+        $backupDest = (($_GET['backup'] ?? '') === '1') ? trim((string)($_GET['backup_dest'] ?? '')) : '';
+        $versionArg = " " . escapeshellarg($version);
+        $backupArg  = " " . escapeshellarg($backupDest);
+        aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg);
         return ['status' => 'ok', 'message' => 'Installation started', 'pre_closed_sessions' => $preClosed];
     }
 
@@ -149,16 +187,17 @@ class AgentHandler {
 
         foreach ($sessions as $s) {
             $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $s['id']);
-            $findCmd = "tmux ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
-            $sessName = trim((string) shell_exec($findCmd));
+            // Non-root audit: shared multi-user lookup so we close sessions
+            // owned by non-root configured users too.
+            [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
             if ($sessName === '') continue;
             $escSess = escapeshellarg($sessName);
-            @shell_exec("tmux resize-window -t $escSess -x 220 -y 50 2>/dev/null");
-            @shell_exec("tmux send-keys -t $escSess C-c 2>/dev/null");
+            @shell_exec("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
+            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
             usleep(200000);
-            @shell_exec("tmux send-keys -t $escSess C-c 2>/dev/null");
+            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
             usleep(200000);
-            @shell_exec("tmux send-keys -t $escSess C-c 2>/dev/null");
+            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
         }
 
         // Shared wait window - 1.5s for the agents' exit screens to render
@@ -178,12 +217,12 @@ class AgentHandler {
         $survivorPids = [];
         foreach ($sessions as $s) {
             $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $s['id']);
-            $findCmd = "tmux ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
-            $sessName = trim((string) shell_exec($findCmd));
+            // Non-root audit: shared multi-user lookup (capture-PIDs pass).
+            [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
             if ($sessName === '') continue;
             $escSess = escapeshellarg($sessName);
 
-            $paneOut = (string) shell_exec("tmux list-panes -t $escSess -F '#{pane_pid}' 2>/dev/null");
+            $paneOut = (string) shell_exec("$tmuxBin list-panes -t $escSess -F '#{pane_pid}' 2>/dev/null");
             foreach (explode("\n", trim($paneOut)) as $panePidStr) {
                 $panePid = (int) $panePidStr;
                 if ($panePid <= 1) continue;
@@ -195,7 +234,7 @@ class AgentHandler {
                 }
             }
 
-            @shell_exec("tmux kill-session -t $escSess 2>/dev/null");
+            @shell_exec("$tmuxBin kill-session -t $escSess 2>/dev/null");
         }
 
         // Escalate on any captured PID still alive after kill-session.

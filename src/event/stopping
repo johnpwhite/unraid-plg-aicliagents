@@ -15,6 +15,9 @@ CLASSIFY="$EMHTTP_DEST/src/scripts/storage/classify-path.sh"
 LOG="/tmp/unraid-aicliagents/debug.log"
 CONFIG="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 mkdir -p /tmp/unraid-aicliagents
 
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
@@ -44,6 +47,25 @@ classify() {
     fi
 }
 
+# Derive the shutdown bake budget from Unraid's own "Shutdown time-out"
+# (Settings → Disk Settings) so it tracks whatever the user has configured.
+# var.ini holds the live runtime value (reflects a change without a reboot);
+# disk.cfg is the persistent fallback; 90 is Unraid's default. We subtract a
+# 15s headroom so the bake + unmount finish INSIDE Unraid's overall shutdown
+# wall — overrunning it makes Unraid declare an unclean shutdown.
+_read_shutdown_budget() {
+    local raw="" src
+    for src in /var/local/emhttp/var.ini /boot/config/disk.cfg; do
+        [ -f "$src" ] || continue
+        raw=$(grep -oE '^shutdownTimeout="[0-9]+"' "$src" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        [ -n "$raw" ] && break
+    done
+    [ -z "$raw" ] && raw=90
+    local budget=$(( raw - 15 ))
+    [ "$budget" -lt 30 ] && budget=30
+    echo "$budget"
+}
+
 # Check if a classification means the path depends on array/pool stopping
 needs_array() {
     local cls="$1"
@@ -68,30 +90,19 @@ nchan_notify() {
 
 log "Shutdown/Array stop detected."
 
-# Phase 3.3: Ask the supervisor to flush all dirty entities synchronously
-# (60-second budget), then stop it.  Path-anchored throughout.
+# Bake-only shutdown: the shutdown path ONLY ever bakes (delta, append-only) —
+# it never consolidates. The supervisor is the only thing that can start a
+# consolidation, so it is stopped FIRST (below), before any shutdown bake runs.
+# (This block previously asked the supervisor to flush every entity, which
+# could cascade into an auto-consolidate mid-shutdown via the post-bake
+# layer-count trigger.) The actual home bake is done by stop-plugin.sh.
 SUPERVISOR_PIDFILE="/var/run/aicli-supervisor.pid"
 SUPERVISOR_SCRIPT="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh"
 
-if [ -f "$SUPERVISOR_SCRIPT" ]; then
-    # Bug #537: budget is configurable. Users with deep layer stacks (100+
-    # entities) under memory pressure cannot bake everything in 60s; the
-    # default leaves dirty state on shutdown. Read from cfg, fall back to 60.
-    FLUSH_BUDGET=$(grep -oE '^event_stopping_flush_timeout_seconds="[0-9]+"' "$CONFIG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
-    [ -z "$FLUSH_BUDGET" ] && FLUSH_BUDGET=60
-    [ "$FLUSH_BUDGET" -lt 10 ] 2>/dev/null && FLUSH_BUDGET=10
-    log "Asking supervisor to flush all entities before shutdown (budget: ${FLUSH_BUDGET}s)..."
-    lifecycle_log "info" "event_stopping" "supervisor_flush_start" "{\"budget_s\":$FLUSH_BUDGET}" 2>/dev/null || true
-    bash "$SUPERVISOR_SCRIPT" flush --all --timeout=$FLUSH_BUDGET
-    FLUSH_RC=$?
-    if [ "$FLUSH_RC" -eq 0 ]; then
-        log "Supervisor flush complete (clean shutdown)."
-        lifecycle_log "info" "event_stopping" "supervisor_flush_done" "{\"result\":\"clean\"}" 2>/dev/null || true
-    else
-        log "Supervisor flush timed out — proceeding with shutdown anyway."
-        lifecycle_log "warn" "event_stopping" "supervisor_flush_done" "{\"result\":\"timeout\",\"budget_s\":$FLUSH_BUDGET}" 2>/dev/null || true
-    fi
-fi
+# Budget for the whole stop sequence, derived from Unraid's Shutdown time-out.
+SHUTDOWN_BUDGET=$(_read_shutdown_budget)
+log "Shutdown bake budget: ${SHUTDOWN_BUDGET}s (from Unraid Shutdown time-out)."
+lifecycle_log "info" "event_stopping" "shutdown_budget" "{\"budget_s\":$SHUTDOWN_BUDGET}" 2>/dev/null || true
 
 if [ -f "$SUPERVISOR_PIDFILE" ]; then
     SUPERVISOR_PID="$(cat "$SUPERVISOR_PIDFILE" 2>/dev/null || echo 0)"
@@ -138,15 +149,15 @@ if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
     esac
 fi
 
-# Helper: run the full stop script
+# Helper: run the full stop script, bounded by the Unraid-derived budget.
 run_full_stop() {
-    timeout 30 bash -c '
+    timeout "$SHUTDOWN_BUDGET" bash -c '
         EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
         STOP_SCRIPT="$EMHTTP_DEST/scripts/user/stop-plugin.sh"
         [ ! -f "$STOP_SCRIPT" ] && STOP_SCRIPT="$EMHTTP_DEST/src/scripts/user/stop-plugin.sh"
         [ -f "$STOP_SCRIPT" ] && bash "$STOP_SCRIPT"
     ' 2>/dev/null
-    [ $? -eq 124 ] && warn "Stop sequence timed out after 30s."
+    [ $? -eq 124 ] && warn "Stop sequence timed out after ${SHUTDOWN_BUDGET}s."
 }
 
 if needs_array "$STORAGE_CLASS"; then
@@ -176,33 +187,38 @@ else
     KILLED=0
 
     if command -v tmux >/dev/null 2>&1; then
-        while IFS= read -r sess; do
-            [ -z "$sess" ] && continue
+        # Non-root audit: iterate every per-uid tmux socket. PHP/root tmux
+        # sees only its own server; non-root agents live under tmux-<uid>/.
+        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+            [ -S "$_sock" ] || continue
+            while IFS= read -r sess; do
+                [ -z "$sess" ] && continue
 
-            # Get CWD of all panes in this session
-            NEEDS_KILL=false
-            KILL_REASON=""
-            while IFS= read -r cwd; do
-                [ -z "$cwd" ] && continue
-                CWD_CLASS=$(classify "$cwd")
-                if needs_array "$CWD_CLASS"; then
-                    NEEDS_KILL=true
-                    KILL_REASON="$cwd ($CWD_CLASS)"
-                    break
+                # Get CWD of all panes in this session
+                NEEDS_KILL=false
+                KILL_REASON=""
+                while IFS= read -r cwd; do
+                    [ -z "$cwd" ] && continue
+                    CWD_CLASS=$(classify "$cwd")
+                    if needs_array "$CWD_CLASS"; then
+                        NEEDS_KILL=true
+                        KILL_REASON="$cwd ($CWD_CLASS)"
+                        break
+                    fi
+                done < <(tmux -S "$_sock" list-panes -t "$sess" -F '#{pane_current_path}' 2>/dev/null)
+
+                if [ "$NEEDS_KILL" = true ]; then
+                    log "  Killing session $sess — workspace: $KILL_REASON"
+                    # Extract session ID suffix for ttyd cleanup
+                    SESS_ID=$(echo "$sess" | sed 's/aicli-agent-[^-]*-//')
+                    tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
+                    pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
+                    KILLED=$((KILLED + 1))
+                else
+                    log "  Keeping session $sess (not on array/pool)"
                 fi
-            done < <(tmux list-panes -t "$sess" -F '#{pane_current_path}' 2>/dev/null)
-
-            if [ "$NEEDS_KILL" = true ]; then
-                log "  Killing session $sess — workspace: $KILL_REASON"
-                # Extract session ID suffix for ttyd cleanup
-                SESS_ID=$(echo "$sess" | sed 's/aicli-agent-[^-]*-//')
-                tmux kill-session -t "$sess" >/dev/null 2>&1
-                pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
-                KILLED=$((KILLED + 1))
-            else
-                log "  Keeping session $sess (not on array/pool)"
-            fi
-        done < <(tmux ls -F '#S' 2>/dev/null | grep '^aicli-agent-')
+            done < <(tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep '^aicli-agent-')
+        done
     fi
 
     # Wait for child processes to exit after tmux kill

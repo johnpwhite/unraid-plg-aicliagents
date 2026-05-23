@@ -80,10 +80,52 @@ class TerminalService {
 
         LogService::log("Found ttyd at: $ttyd", LogService::LOG_DEBUG, "TerminalService");
 
-        // D-195: Map UID 0 to 'root' for runuser compatibility
-        $username = $config['user'];
-        if ($username === '0' || $username === 0) {
+        // D-195 / Bug #1053: any configured user that is not present in
+        // /etc/passwd falls back to 'root'. ManagerConfigTab's user dropdown
+        // historically saved the option INDEX (e.g. "4") instead of the
+        // username — and a previously-valid user may also have been removed
+        // from the system since the setting was saved. Without this fallback,
+        // runuser fails with "user X does not exist" and every terminal then
+        // surfaces as "Terminal session not found".
+        $username = (string) ($config['user'] ?? '');
+        $userValid = $username !== ''
+            && function_exists('posix_getpwnam')
+            && is_array(@posix_getpwnam($username));
+        if (!$userValid) {
+            if ($username !== '' && $username !== 'root') {
+                LogService::log("Configured user '$username' does not exist on this system — falling back to root (Bug #1053)",
+                    LogService::LOG_WARN, "TerminalService");
+            }
             $username = 'root';
+        }
+
+        // Bug #1054: ensure the shared tmp tree is world-writable (sticky) and
+        // the per-user work dir is owned by the agent user, so non-root agents
+        // can create their per-session run scripts (aicli-run-*.sh) and append
+        // perf.log. PHP runs here as the web user (root on Unraid); aicli-shell.sh
+        // runs as $username after runuser, and otherwise has no way to mkdir under
+        // a root-owned tmp tree. The OverlayFS upper for the home stack is chowned
+        // by mount_stack.sh — this block handles only the non-overlay tmp paths.
+        @mkdir('/tmp/unraid-aicliagents', 01777, true);
+        @chmod('/tmp/unraid-aicliagents', 01777);
+        @mkdir('/tmp/unraid-aicliagents/work', 01777, true);
+        @chmod('/tmp/unraid-aicliagents/work', 01777);
+        $userWorkDir = '/tmp/unraid-aicliagents/work/' . $username;
+        if (!is_dir($userWorkDir)) {
+            @mkdir($userWorkDir, 0755, true);
+        }
+        $pw = function_exists('posix_getpwnam') ? @posix_getpwnam($username) : null;
+        if (is_array($pw)) {
+            @chown($userWorkDir, $pw['uid']);
+            @chgrp($userWorkDir, $pw['gid']);
+            @chmod($userWorkDir, 0755);
+        }
+        // A stale perf.log from an earlier root-as-user run is 0644 root-owned;
+        // a non-root agent can't append. World-appendable is fine for a debug
+        // perf trace (no secrets).
+        $perfLog = '/tmp/unraid-aicliagents/perf.log';
+        if (file_exists($perfLog)) {
+            @chmod($perfLog, 0666);
         }
 
         // 3. Ensure Storage is Mounted (SquashFS On-Demand)
@@ -270,6 +312,11 @@ class TerminalService {
      */
     public static function listActiveSessionsForAgent(string $agentId): array
     {
+        // Bug #1067: reconcile orphan ttyd processes before enumerating, so the
+        // agent-upgrade dialog's "open sessions" count reflects reality (not
+        // stale sock files from failed launches or unclean exits).
+        ProcessManager::sweepOrphanSessions();
+
         $out = [];
         foreach (glob("/var/run/aicliterm-*.sock") ?: [] as $sock) {
             if (!preg_match('/aicliterm-(.*)\.sock$/', $sock, $m)) continue;

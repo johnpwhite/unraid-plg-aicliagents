@@ -14,6 +14,9 @@ LOG="/tmp/unraid-aicliagents/debug.log"
 
 mkdir -p /tmp/unraid-aicliagents
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
 source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 
@@ -123,31 +126,37 @@ else
     KILLED=0
 
     if command -v tmux >/dev/null 2>&1; then
-        while IFS= read -r sess; do
-            [ -z "$sess" ] && continue
+        # Non-root audit: iterate every per-uid tmux socket. PHP/root tmux
+        # sees only its own server; non-root agents (e.g. aicliagent) live
+        # under tmux-<other-uid>/default and were previously invisible.
+        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+            [ -S "$_sock" ] || continue
+            while IFS= read -r sess; do
+                [ -z "$sess" ] && continue
 
-            NEEDS_KILL=false
-            KILL_REASON=""
-            while IFS= read -r cwd; do
-                [ -z "$cwd" ] && continue
-                CWD_CLASS=$(classify "$cwd")
-                if needs_array "$CWD_CLASS"; then
-                    NEEDS_KILL=true
-                    KILL_REASON="$cwd ($CWD_CLASS)"
-                    break
+                NEEDS_KILL=false
+                KILL_REASON=""
+                while IFS= read -r cwd; do
+                    [ -z "$cwd" ] && continue
+                    CWD_CLASS=$(classify "$cwd")
+                    if needs_array "$CWD_CLASS"; then
+                        NEEDS_KILL=true
+                        KILL_REASON="$cwd ($CWD_CLASS)"
+                        break
+                    fi
+                done < <(tmux -S "$_sock" list-panes -t "$sess" -F '#{pane_current_path}' 2>/dev/null)
+
+                if [ "$NEEDS_KILL" = true ]; then
+                    log "  Killing session $sess — workspace: $KILL_REASON"
+                    SESS_ID=$(echo "$sess" | sed 's/aicli-agent-[^-]*-//')
+                    tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
+                    pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
+                    KILLED=$((KILLED + 1))
+                else
+                    log "  Keeping session $sess (not on array/pool)"
                 fi
-            done < <(tmux list-panes -t "$sess" -F '#{pane_current_path}' 2>/dev/null)
-
-            if [ "$NEEDS_KILL" = true ]; then
-                log "  Killing session $sess — workspace: $KILL_REASON"
-                SESS_ID=$(echo "$sess" | sed 's/aicli-agent-[^-]*-//')
-                tmux kill-session -t "$sess" >/dev/null 2>&1
-                pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
-                KILLED=$((KILLED + 1))
-            else
-                log "  Keeping session $sess (not on array/pool)"
-            fi
-        done < <(tmux ls -F '#S' 2>/dev/null | grep '^aicli-agent-')
+            done < <(tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep '^aicli-agent-')
+        done
     fi
 
     if [ "$KILLED" -gt 0 ]; then

@@ -81,6 +81,53 @@ class StorageMountService {
      * gone and launches fail with MODULE_NOT_FOUND. We detect this, lazy-unmount
      * the phantom, and fall through to rebuild the stack cleanly.
      */
+
+    /**
+     * Bug #1065: mount every installed agent's overlay. Called from
+     * events/disks_mounted (at array start) and InitService boot-marker so
+     * the agent binaries are available to ANY shell on the host immediately
+     * after reboot — not just to terminals opened through the plugin's UI.
+     *
+     * Without this, the forum-reported failure is:
+     *   bash: /usr/local/emhttp/plugins/unraid-aicliagents/agents/<id>/node_modules/.bin/<cli>: No such file or directory
+     * because agent overlays were previously lazy-mounted only from
+     * TerminalService::startTerminal — the Unraid host terminal never
+     * triggered a mount, so the agent appeared "gone" until the user
+     * opened a webterm.
+     *
+     * Idempotent — ensureAgentMounted short-circuits on healthy mounts via
+     * its fast-path check, so calling on every boot is cheap.
+     *
+     * Returns ['mounted' => [...ids...], 'failed' => [...ids...]].
+     */
+    public static function mountAllInstalledAgents(): array {
+        $mounted = [];
+        $failed = [];
+        $registry = [];
+        try {
+            $registry = AgentRegistry::getRegistry();
+        } catch (\Throwable $e) {
+            LogService::log("mountAllInstalledAgents: registry load failed: " . $e->getMessage(), LogService::LOG_WARN, "StorageMountService");
+            return ['mounted' => [], 'failed' => []];
+        }
+        foreach ($registry as $id => $agent) {
+            if ($id === 'terminal') continue;
+            if (empty($agent['is_installed'])) continue;
+            try {
+                if (self::ensureAgentMounted($id)) {
+                    $mounted[] = $id;
+                } else {
+                    $failed[] = $id;
+                }
+            } catch (\Throwable $e) {
+                $failed[] = $id;
+                LogService::log("mountAllInstalledAgents: $id failed: " . $e->getMessage(), LogService::LOG_WARN, "StorageMountService");
+            }
+        }
+        LogService::log("Boot agent-mount sweep (Bug #1065): mounted=" . count($mounted) . " [" . implode(",", $mounted) . "] failed=" . count($failed) . " [" . implode(",", $failed) . "]", LogService::LOG_INFO, "StorageMountService");
+        return ['mounted' => $mounted, 'failed' => $failed];
+    }
+
     public static function ensureAgentMounted($agentId) {
         if (self::isMigrationInProgress()) return false;
 
@@ -128,11 +175,23 @@ class StorageMountService {
         $workDir = UtilityService::getWorkDir($user);
         $mnt = "$workDir/home";
 
+        // Bug #1054 self-heal: when the OverlayFS upperdir has the wrong
+        // owner (mounted by an older plugin version, or pre-upgrade state),
+        // OverlayFS caches the upper's metadata at mount time -- chowning
+        // the underlying upper does NOT propagate to the merged view, so
+        // writes from the agent user keep failing with EACCES even though
+        // the underlying inode now shows the correct owner. The helper
+        // chowns the upper + work (covers root-owned subdirs from copy_up,
+        // e.g. .aicli/ written by PHP-as-root) and FORCES an unmount when
+        // a wrong-owner upper is detected, so the mount step below rebuilds
+        // the kernel overlay state with mount_stack.sh's OWNER chown intact.
+        $forcedUnmount = self::ensureHomeUpperOwnership($user, $mnt);
+
         // Emergency mode: home is a symlink to the temp RAM dir — treat as mounted
         if (is_link($mnt) && self::isEmergencyMode()) return true;
 
         // Fast path: already a healthy overlay mount
-        if (self::isMounted($mnt) && self::isHomeMountHealthy($user)) return true;
+        if (!$forcedUnmount && self::isMounted($mnt) && self::isHomeMountHealthy($user)) return true;
 
         // Serialize concurrent mounts for the same user with an advisory lock.
         // Losers block until the winner finishes, then re-check before mounting.
@@ -167,8 +226,11 @@ class StorageMountService {
         LogService::log("Mounting Home Stack for $user", LogService::LOG_INFO, "StorageMountService");
 
         $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/mount_stack.sh";
+        // Bug #1054: pass $user as the OWNER arg so mount_stack.sh chowns the
+        // OverlayFS upperdir to the agent user -- otherwise the home overlay
+        // mounts but is effectively read-only for non-root agents.
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec("bash " . escapeshellarg($script) . " home " . escapeshellarg($user) . " " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
+        exec("bash " . escapeshellarg($script) . " home " . escapeshellarg($user) . " " . escapeshellarg($persistPath) . " " . escapeshellarg($user) . " 2>&1", $out, $res);
 
         if ($res !== 0) {
             LogService::log("Mount script FAILED for home $user: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
@@ -176,6 +238,63 @@ class StorageMountService {
 
         if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
         return ($res === 0);
+    }
+
+    /**
+     * Bug #1054: detect an OverlayFS home upperdir whose owner does NOT
+     * match the agent user, chown it recursively (covers root-owned subdirs
+     * like .aicli/ that PHP-as-root copy_up'd into the upper), and FORCE
+     * an unmount so the next mount step rebuilds the kernel overlay state
+     * via mount_stack.sh -- which then applies the OWNER chown at the
+     * correct moment for OverlayFS to honour the new owner on the merged
+     * view. Chowning alone is insufficient because OverlayFS caches upper
+     * metadata at mount time and ignores subsequent owner changes.
+     *
+     * Returns true if an unmount was forced (caller must skip the fast-path
+     * mount check and let the mount step below rebuild). Returns false when
+     * no action was needed (correct owner already, or user is root).
+     */
+    private static function ensureHomeUpperOwnership(string $user, string $mnt): bool {
+        if ($user === '' || $user === 'root') return false;
+        if (!function_exists('posix_getpwnam')) return false;
+        $pw = @posix_getpwnam($user);
+        if (!is_array($pw)) return false;
+        $upper = self::resolveHomeUpperPath($user);
+        if ($upper === null || !is_dir($upper)) return false;
+        $stat = @stat($upper);
+        if (!is_array($stat) || (int)$stat['uid'] === (int)$pw['uid']) return false;
+
+        LogService::log("Home upper for $user owned by uid={$stat['uid']} (expected {$pw['uid']}) -- chowning + forcing unmount per Bug #1054; mount_stack.sh will rebuild with correct owner", LogService::LOG_INFO, "StorageMountService");
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        @shell_exec("chown -R " . escapeshellarg($user) . " " . escapeshellarg($upper));
+        $work = preg_replace('#/upper$#', '/work', $upper);
+        if (is_string($work) && is_dir($work)) {
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            @shell_exec("chown -R " . escapeshellarg($user) . " " . escapeshellarg($work));
+        }
+
+        if (self::isMounted($mnt)) {
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            @shell_exec("umount -l " . escapeshellarg($mnt));
+        }
+        return true;
+    }
+
+    /**
+     * Resolves the OverlayFS upperdir path for a home overlay. Mirrors
+     * mount_stack.sh fstype branching (vfat -> ZRAM, else -> persist disk).
+     */
+    private static function resolveHomeUpperPath(string $user): ?string {
+        $persistPath = StoragePathResolver::homePersistPath($user);
+        if (empty($persistPath)) return null;
+        $cmd = "findmnt --noheadings --output FSTYPE --target " . escapeshellarg($persistPath);
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        $fstype = trim((string) @shell_exec($cmd));
+        $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
+        if ($fstype === 'vfat' || $fstype === '') {
+            return "/tmp/unraid-aicliagents/zram_upper/homes/$safeUser/upper";
+        }
+        return rtrim($persistPath, '/') . "/_upper/homes/$safeUser";
     }
 
     /**

@@ -8,6 +8,12 @@
  * </module_context>
  */
 
+// Bug #1043: route every tmux command this plugin shells out to (capture-pane,
+// send-keys, kill-session, ...) at a plugin-private socket directory instead of
+// the shared /tmp/tmux-<uid>, which other processes can leave with permissions
+// tmux rejects. Child processes the plugin spawns inherit this env var.
+putenv('TMUX_TMPDIR=/tmp/unraid-aicliagents/tmux');
+
 // 1. Include Atomic Services
 require_once __DIR__ . '/services/LogService.php';
 require_once __DIR__ . '/services/AtomicWriteService.php';

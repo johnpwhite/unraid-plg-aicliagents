@@ -312,6 +312,57 @@ if [ "$SQSH_SIZE" -gt "$MAX_SIZE" ]; then
     exit 1
 fi
 
+# --- CRITICAL SECTION: take the shared per-entity storage lock ---------------
+# Race fix: the supervisor's reconcile runs every ~7s and scans this directory.
+# Between the manifest replace and the end of the old-layer delete loop below,
+# the on-disk layer set legitimately differs from the manifest. If a reconcile
+# tick lands in that window it mis-classifies the old layers as "untracked" and
+# quarantines them to .untracked/ — actively losing baked data. The fix: hold
+# the SAME per-entity lock commit_stack.sh uses, for the whole swap; the
+# supervisor's reconcile skips any entity whose lock is held.
+#
+# The lock is taken HERE — after the (long) mksquashfs, which ran unlocked so it
+# never blocks a bake. If a bake holds the lock right now, defer (exit 2).
+_CONSOL_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
+_CONSOL_LOCK="/var/run/aicli-bake-${TYPE}-${_CONSOL_LOCK_ID}.lock"
+exec 8>"$_CONSOL_LOCK"
+if ! flock -n 8; then
+    error "Per-entity storage lock held (a bake is in flight) — deferring consolidate."
+    rm -f "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null
+    rm -f "$CONSOLIDATE_MARKER"
+    update_task_status "Deferred" 0 "Bake in progress — retry later"
+    lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"bake_lock_held\"}" 2>/dev/null || true
+    exit 2
+fi
+
+# Re-validate: did a bake land a NEW delta since OLD_LAYERS was snapshotted
+# (before the unlocked mksquashfs)? If so, the consolidated layer just built is
+# already stale — it cannot contain that delta. Discard it (non-destructive —
+# nothing else has been touched yet) and defer. The bake always wins.
+shopt -s nullglob
+_CURRENT_LAYERS=("$PERSIST_PATH/${TYPE}_${ID}_"*.sqsh)
+shopt -u nullglob
+for _cur in "${_CURRENT_LAYERS[@]}"; do
+    _cur_base="$(basename "$_cur")"
+    [ "$_cur_base" = "$FINAL_NAME" ] && continue
+    _was_known=0
+    for _old in "${OLD_LAYERS[@]}"; do
+        [ "$(basename "$_old")" = "$_cur_base" ] && _was_known=1 && break
+    done
+    if [ "$_was_known" -eq 0 ]; then
+        error "New layer '$_cur_base' appeared during consolidation — a bake landed. Discarding stale consolidated layer; deferring."
+        rm -f "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null
+        rm -f "$CONSOLIDATE_MARKER"
+        update_task_status "Deferred" 0 "A bake completed during consolidation — retry later"
+        lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"bake_landed_during_consolidate\",\"new_layer\":\"$_cur_base\"}" 2>/dev/null || true
+        exit 2
+    fi
+done
+# Lock held on fd 8 + layer set validated — safe to swap the manifest and
+# remove the old layers. Lock releases when this script exits.
+
 # 4 (was 5). Update manifest BEFORE deleting old layer files (Fix #4a).
 #
 # Order matters for crash safety:

@@ -153,6 +153,30 @@ trap_exit() {
     cleanup
 }
 trap trap_exit EXIT
+
+# Bug #1043: point tmux at a plugin-private socket directory instead of the
+# shared /tmp/tmux-<uid>. Other processes on the box (a user's own SSH tmux, a
+# container bind-mounting /tmp, another plugin) can leave /tmp/tmux-<uid> with
+# permissions tmux rejects ("unsafe permissions"), and the terminal then fails
+# with "Terminal session not found". /tmp/unraid-aicliagents/tmux is the
+# plugin's alone, so tmux's tmux-<uid> dir inside it cannot be corrupted from
+# outside. Exported so the tmux server and every child inherit the same socket
+# location; every other plugin script that calls tmux sets it identically.
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+mkdir -p "$TMUX_TMPDIR" 2>/dev/null
+chmod 0777 "$TMUX_TMPDIR" 2>/dev/null
+
+# Bug #1054 root cause: tmux uses the user's login SHELL (from /etc/passwd, or
+# $SHELL env if set) to run the session's command. System users created with
+# `useradd -r` (typical for sandboxed agent accounts like `aicliagent`) have
+# /bin/false or /sbin/nologin as their login shell -- tmux then invokes
+# RUN_SCRIPT via /bin/false, which exits immediately, the session terminates,
+# and the tmux server exits with "no server running" before aicli-shell.sh's
+# has-session check fires. The fix: force $SHELL to /bin/bash before any tmux
+# call so the session command runs under bash regardless of /etc/passwd shell.
+# This is the in-flight fix that works for any sandbox user the admin picks.
+export SHELL=/bin/bash
+
 # TMUX EXECUTION
 if ! command -v tmux >/dev/null 2>&1; then
     echo -e "\n\n\033[1;31m[FATAL ERROR]\033[0m Required dependency 'tmux' is missing or not executable."
@@ -192,6 +216,19 @@ FUNCOEF
     printf 'export AICLI_SESSION_ID=%q\n' "$ID" >> "$RUN_SCRIPT"
     printf 'export AGENT_ID=%q\n' "$AGENT_ID" >> "$RUN_SCRIPT"
     printf 'export HOME=%q\n' "$HOME_DIR" >> "$RUN_SCRIPT"
+
+    # Bug #1042: bring up the per-user Secret Service (org.freedesktop.secrets)
+    # so keyring-using agents — Antigravity CLI today — can persist their auth
+    # token instead of re-prompting every session. Idempotent and reused per
+    # user; best-effort — on failure the agent just falls back to interactive
+    # auth. See docs/specs/SECRET_SERVICE.md.
+    _SS_ADDR=$(bash "$EMHTTP_DEST/src/secret-service/secret-service-up.sh" "$USER_NAME" "$HOME_DIR" 2>>"$DEBUG_LOG")
+    if [ -n "$_SS_ADDR" ]; then
+        printf 'export DBUS_SESSION_BUS_ADDRESS=%q\n' "$_SS_ADDR" >> "$RUN_SCRIPT"
+        log_aicli "DEBUG" 3 "Secret Service ready for $USER_NAME: $_SS_ADDR"
+    else
+        log_aicli "WARN" 1 "Secret Service unavailable — keyring-using agents may re-prompt for auth"
+    fi
     
     # D-170: Ensure agent binaries are in the PATH for the child shell.
     # D-404 (#55): The "terminal" (drop-in shell) workspace has no single frozen
@@ -286,10 +323,19 @@ FUNCOEF
     printf 'export AICLI_EXPORTED_KEYS_FILE=%q\n' "$EXPORTED_KEYS_FILE" >> "$RUN_SCRIPT"
 
     cat << 'EOF' >> "$RUN_SCRIPT"
+# Bug #1054 diagnostic: log VERY early so we can pin down where RUN_SCRIPT
+# dies in failing non-root launches. The previous death pre-empted any
+# perf_log/log_aicli call, so the FIRST line of the heredoc body is now
+# a direct debug.log write -- bypasses log_aicli (which calls php) so it
+# works even if php is broken in this context.
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> /tmp/unraid-aicliagents/debug.log
 export TERM=xterm-256color
 export LC_ALL=en_US.UTF-8
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-B] before stty sane" >> /tmp/unraid-aicliagents/debug.log
 stty sane 2>/dev/null
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-C] after stty sane (rc=$?)" >> /tmp/unraid-aicliagents/debug.log
 perf_log run.start
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-D] after perf_log run.start" >> /tmp/unraid-aicliagents/debug.log
 
 # WP #275c: install a no-op SIGINT trap on the RUN_SCRIPT itself.
 # Why: in a non-interactive bash script with no SIGINT trap, receiving SIGINT
@@ -673,7 +719,12 @@ EOF
     chmod +x "$RUN_SCRIPT"
     log_aicli "DEBUG" 3 "Launching tmux session $SESSION for script $RUN_SCRIPT"
     perf_log tmux.new.begin
+    # Bug #1054 diagnostic: capture caller env + cwd so we can compare working
+    # vs failing launches. Removed once root cause is fixed.
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-PRE-TMUX] sess=$SESSION uid=$(id -u) cwd=$(pwd) TMUX_TMPDIR=$TMUX_TMPDIR tmux_v=$(tmux -V) script_size=$(wc -c < "$RUN_SCRIPT")" >> "$DEBUG_LOG"
     tmux -u new-session -d -s "$SESSION" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
+    _tmux_rc=$?
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-POST-TMUX] new-session rc=$_tmux_rc has-session-now=$(tmux has-session -t "$SESSION" 2>&1 && echo YES || echo NO)" >> "$DEBUG_LOG"
     if [ $? -ne 0 ]; then
         log_aicli "ERROR" 1 "Failed to create tmux session $SESSION. Check $DEBUG_LOG"
     fi

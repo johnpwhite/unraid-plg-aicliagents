@@ -10,6 +10,9 @@ EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 LOG_FILE="/tmp/unraid-aicliagents/debug.log"
 ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 # Ensure plugin binaries (mksquashfs, node, etc.) are in PATH
 export PATH="$EMHTTP_DEST/bin:$EMHTTP_DEST/src/scripts/storage:$PATH"
 
@@ -58,39 +61,68 @@ if [ -f "$SUPERVISOR_PIDFILE" ]; then
     fi
 fi
 
-# ── Step 1: Kill ALL our processes at once with SIGKILL ──
-# Previous approach (kill tmux first, then node) didn't work because:
-# - tmux kill-session sends SIGHUP which bash scripts can survive
-# - aicli-run-*.sh retry loop respawns the agent before our next pkill fires
-# Solution: SIGKILL everything simultaneously so nothing can respawn.
-# Safe kill helper: pkill but with an explicit exe-path exclusion for
-# hypervisor/init processes. Belt-and-braces — these patterns should never
-# match qemu/libvirt/init anyway, but the filter makes it guaranteed.
+# ── Step 1: Graceful agent shutdown, then SIGKILL ──
+# Retry-loop wrappers are hard-killed first (so they cannot respawn an agent),
+# then the agents get a SIGTERM window to flush their state into the home
+# overlay, then any straggler is SIGKILLed. Both kill helpers carry an
+# exe-path exclusion for hypervisor/init processes — belt-and-braces; the
+# patterns never match qemu/libvirt/init anyway.
+_safe_excluded() {
+    local exe
+    exe=$(readlink "/proc/$1/exe" 2>/dev/null)
+    case "$exe" in
+        */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) return 0 ;;
+    esac
+    return 1
+}
 safe_pkill() {
-    local pattern="$1"
-    local pids
-    pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
-    for pid in $pids; do
-        local exe
-        exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
-        case "$exe" in
-            */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
-        esac
+    local pattern="$1" pid
+    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true); do
+        _safe_excluded "$pid" && continue
         kill -9 "$pid" >/dev/null 2>&1 || true
     done
 }
-status "Killing all AICliAgents processes..."
+# Graceful: SIGTERM the pattern, then poll up to <wait>s for a clean exit.
+safe_pterm() {
+    local pattern="$1" wait="${2:-5}" pid waited=0
+    for pid in $(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true); do
+        _safe_excluded "$pid" && continue
+        kill -TERM "$pid" >/dev/null 2>&1 || true
+    done
+    while [ "$waited" -lt "$wait" ]; do
+        pgrep -f "$pattern" >/dev/null 2>&1 || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+# 1a. Hard-kill the retry-loop wrappers FIRST so nothing respawns an agent
+#     while we are gracefully stopping it (they carry no data to flush).
+status "Stopping agent retry loops..."
 safe_pkill 'aicli-run-'                                    # Retry loop scripts
 safe_pkill 'aicli-shell'                                   # Shell wrappers
-# Path-anchored node pattern — requires the cmdline to carry a plugin-owned
-# path so we cannot accidentally match unrelated Node services running on the
-# host. The old agent-name regex would match e.g. `node /opt/factory-bot/…`.
+# 1b. Graceful SIGTERM to the agents — they write SQLite DBs + chat history
+#     into the HOME overlay, so give them a window to flush cleanly before the
+#     home bake, otherwise the shutdown delta captures a torn mid-write state.
+#     Path-anchored node pattern so we never match an unrelated host service.
+status "Gracefully stopping agents (SIGTERM, then bake-safe wait)..."
+safe_pterm 'node .*(unraid-aicliagents|/\.aicli/)' 5
+# 1c. SIGKILL any straggler that ignored SIGTERM, plus the ttyd terminals.
 safe_pkill 'node .*(unraid-aicliagents|/\.aicli/)'
 safe_pkill 'ttyd.*(aicliterm|temp-terminal)-'
+# 1d. Stop the per-user Secret Service daemons + their private session buses
+#     (Bug #1042) so the keyring file is quiescent before the home bake, and
+#     so a plugin upgrade picks up a new daemon binary on the next launch.
+safe_pkill 'secret-service-daemon'
+safe_pkill 'dbus-daemon .*unraid-aicliagents/secret-service'
 # Now kill tmux sessions (the children are already dead)
 if command -v tmux >/dev/null 2>&1; then
-    tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r sess; do
-        tmux kill-session -t "$sess" >/dev/null 2>&1
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too.
+    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        [ -S "$_sock" ] || continue
+        tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r sess; do
+            tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
+        done
     done
 fi
 
@@ -101,7 +133,13 @@ sleep 2
 safe_pkill 'aicli-run-'
 safe_pkill 'node .*(unraid-aicliagents|/\.aicli/)'
 
-# ── Step 6: Bake dirty ZRAM data to persistence (delta only, NO consolidation) ──
+# ── Step 6: Bake dirty ZRAM HOME data to persistence ──
+# HOME ONLY — and delta only, never a consolidation. Home holds the user's
+# irreplaceable data (chat history, workspaces, secrets); agent overlays are
+# just installed software, re-installable from the registry, so they are NOT
+# baked at shutdown — that keeps the whole (time-limited) shutdown budget for
+# the home bake, the only thing that matters. atomic_write_layer is
+# append-only: it writes a new delta and never touches an existing layer.
 if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
     BAKED=0
     # Helper: check if an upper dir has real files (not just overlayfs whiteouts/opaque markers)
@@ -113,7 +151,7 @@ if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
         [ "$count" -gt 0 ]
     }
 
-    # Bake dirty home layers
+    # Bake dirty home layers (home only — see header).
     if [ -d "$ZRAM_UPPER/homes" ]; then
         for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
             [ -d "$upper_dir" ] || continue
@@ -130,24 +168,7 @@ if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
             fi
         done
     fi
-    # Bake dirty agent layers
-    if [ -d "$ZRAM_UPPER/agents" ]; then
-        for upper_dir in "$ZRAM_UPPER/agents"/*/upper; do
-            [ -d "$upper_dir" ] || continue
-            has_real_files "$upper_dir" || continue
-            agent=$(basename "$(dirname "$upper_dir")")
-            agent_path=$(agent_persist_path 2>/dev/null || echo "$PERSIST_PATH")
-            status "Baking agent delta for $agent..."
-            DELTA_NAME=$(atomic_write_layer "agent" "$agent" "$agent_path" "$upper_dir" "delta" 2>>"$LOG_FILE")
-            if [ -n "$DELTA_NAME" ]; then
-                BAKED=$((BAKED + 1))
-                status "  Saved $DELTA_NAME for $agent."
-            else
-                warn "Agent delta bake failed for $agent."
-            fi
-        done
-    fi
-    [ "$BAKED" -gt 0 ] && status "Persisted $BAKED delta(s) to Flash." || status "No dirty data to persist."
+    [ "$BAKED" -gt 0 ] && status "Persisted $BAKED home delta(s) to Flash." || status "No dirty home data to persist."
 else
     warn " Storage path $PERSIST_PATH not accessible. Skipping final sync."
 fi

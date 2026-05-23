@@ -9,6 +9,9 @@ CONFIG_DIR="/boot/config/plugins/$NAME"
 EMHTTP_DEST="/usr/local/emhttp/plugins/$NAME"
 LOG_FILE="$CONFIG_DIR/uninstall.log"
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 # --- Log Status Helper ---
 log_status() { echo "$1" >&3; echo "[$(date +%T)] $1" >> "$LOG_FILE" 2>/dev/null; }
 export -f log_status
@@ -52,7 +55,12 @@ graceful_kill() {
 log_status "  [1/4] Terminating AI Agent Sessions..."
 graceful_kill "ttyd.*aicliterm-"
 if command -v tmux >/dev/null 2>&1; then
-    tmux ls -F '#S' 2>/dev/null | grep -E "^aicli-agent-" | xargs -I {} tmux kill-session -t "{}" > /dev/null 2>&1 || true
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too.
+    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        [ -S "$_sock" ] || continue
+        tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
+    done
 fi
 # Path-anchored: requires a plugin-owned path in the cmdline so we cannot
 # cross-match unrelated host node services or — critically — qemu VM cmdlines

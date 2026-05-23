@@ -9,6 +9,8 @@ find "$EMHTTP_DEST" -path "$EMHTTP_DEST/agents" -prune -o -type d -exec chmod 75
 chmod -R 755 "$EMHTTP_DEST/src/scripts" 2>/dev/null || true
 chmod -R 755 "$EMHTTP_DEST/src/includes" 2>/dev/null || true
 chmod -R 755 "$EMHTTP_DEST/src/assets" 2>/dev/null || true
+# Bug #1042: the Secret Service daemon binary + launcher must be executable.
+chmod -R 755 "$EMHTTP_DEST/src/secret-service" 2>/dev/null || true
 chmod -R 755 "$EMHTTP_DEST/bin" 2>/dev/null || true
 chmod 755 "$EMHTTP_DEST/agents" 2>/dev/null || true
 chmod 755 "$EMHTTP_DEST/src/event"/* 2>/dev/null || true

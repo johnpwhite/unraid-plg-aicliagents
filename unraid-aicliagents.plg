@@ -1,8 +1,21 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.18.08" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.23.19" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.23.19
+- **Feat: Antigravity CLI added.** Google's coding assistant is now in the Agent Store. Tracks upstream versions for the update card, and supports Resume from a specific conversation or the most recent.
+- **Feat: Keep-a-copy on upgrade.** Optionally retain a per-version backup of an agent's layers when upgrading. The version picker grows a "Restore" option listing the kept backups; pick one to roll back to that version. The upgrade dialog shows disk usage up-front so you can decide whether to keep a copy. Backups live alongside the active layers in your configured persistence path.
+- **Feat: Native keyring for agents that ask for one.** Agents that store their auth tokens in a system keyring previously re-prompted for auth every session because Unraid has no keyring daemon. The plugin now starts a per-user keyring at agent launch, so the token survives across sessions. Today this benefits Antigravity CLI; the framework is generic.
+- **Feat: Agent CLIs work from the Unraid host terminal after a reboot.** Running an agent CLI from the standard Unraid Terminal button right after a reboot previously failed with "No such file or directory" — agent storage was only attached on demand when the plugin's own webterm opened. The plugin now attaches every installed agent at array start, so the binaries are available to any shell on the host immediately.
+- **Fix: Setting "Terminal User" to a non-root account now works end-to-end.** Previously the Settings dropdown saved the wrong value, the agent's home was effectively read-only, terminals failed to launch, and the Store-card panels kept showing the previous user's data after the switch. All four issues are fixed, and the Settings page auto-reloads on user-switch so per-user data re-renders against the new home. All close, agent-upgrade, hard-stop, plugin-stop, plugin-uninstall, and array-stop paths now reach non-root sessions too.
+- **Fix: "Terminal session not found" after a busy server tick.** Other processes on the host can occasionally leave the shared tmux socket directory with permissions tmux rejects, and every plugin terminal would then fail to start. The plugin now uses its own private socket directory, isolated from anything else on the box.
+- **Fix: Agent-upgrade "open sessions" count no longer inflated by orphan terminals.** Failed launches and unclean exits previously left terminal-server processes alive forever. The upgrade-confirm dialog counted these as live sessions, inflating the warning. The plugin now reconciles terminal-server processes against running sessions on every list and array-start, and reaps orphans automatically.
+- **Fix: Resume button now appears for Antigravity CLI workspaces after close + re-add.** The close-time resume-id capture wasn't aware of agy's specific exit behaviour or where it stores its conversation files; both handled now. Note: agy itself still requires two Ctrl-Ds to exit — that's upstream behaviour, not something the plugin can change.
+- **Fix: Claude Resume cross-workspace contamination.** Closing workspace B sometimes saved workspace A's session id, so clicking Resume on B later opened Claude with the wrong session and refused with "No conversation found". Resume-id discovery is now scoped to the closing workspace.
+- **Fix: CLI Args panel reflects the active Terminal User.** After switching the Terminal User in Settings, the per-agent Args panel kept showing the previous user's saved arg until the page was hard-refreshed. The Settings page now auto-reloads on a user-switch.
+- **Improve: Release-notes link + A-Z sort on the Agent Store.** Each Store card now shows a Release-notes link when the agent's source publishes a changelog URL. The agent grid gets an A-Z/Z-A toggle, persisted in the URL.
+
 ## 2026.05.18.08
 - **Fix (data loss — important): your agents stop forgetting your sessions.** A long-standing bug in how the plugin saves data from RAM to your Flash drive could silently drop the session-history database files used by Codex CLI, GitHub Copilot, Kilo Code, OpenCode and Goose — so an agent would occasionally start as if it had never seen you before, or hang on the "Waking Codex CLI..." loading screen. In severe cases the whole Unraid dashboard could freeze for minutes when the plugin was in use (downstream effect of an agent stuck reading a half-deleted database). This release fixes the save routine and adds defence-in-depth checks. **Already-lost session history is not recoverable by upgrading.** If an agent now hangs at Waking or complains about a corrupted database, in the affected agent's directory (e.g. `~/.codex/`, `~/.copilot/`) delete any `.db-shm` or `.db-wal` files that don't have a matching `.db` next to them, then re-launch — the agent starts fresh.
 - **Improve: Plugin upgrades no longer interrupt your work.** Routine upgrades from this release forward leave your terminal sessions running and your agents in place — typical upgrade time drops from ~30–90s of session-killing teardown to ~5–15s. The longer path is still used (and the release notes will say so) when a release genuinely needs to rebuild your storage layout. **One-time exception:** the upgrade FROM the previous storefront TO this release will still take the long path, because this release introduces the marker the plugin uses to recognise compatible layouts. From the next upgrade onward, routine updates run uninterrupted. Unsaved RAM data is flushed to Flash just before the swap, so a sudden power loss during the brief upgrade window doesn't lose recent activity.
@@ -196,7 +209,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.18.08"
+export VERSION="2026.05.23.19"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -236,12 +249,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.18.08" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.23.19" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.18.08" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.18.08" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.23.19" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.23.19" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.18.08)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.23.19)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

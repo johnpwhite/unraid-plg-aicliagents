@@ -5,6 +5,9 @@
 STATUS_FILE="/tmp/unraid-aicliagents/repair-status"
 mkdir -p "$(dirname "$STATUS_FILE")"
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 log_progress() {
     local pct=$1 msg=$2
     # D-170: Use timestamped logging for professional appearance
@@ -34,7 +37,12 @@ log_progress 10 "Stopping active agent processes..."
 _rp_safe_kill 'install-bg.php'
 _rp_safe_kill 'ttyd.*aicliterm-'
 if command -v tmux >/dev/null 2>&1; then
-    tmux ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -I {} tmux kill-session -t {} >/dev/null 2>&1
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too.
+    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        [ -S "$_sock" ] || continue
+        tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -r -I {} tmux -S "$_sock" kill-session -t {} >/dev/null 2>&1 || true
+    done
 fi
 # Path-anchored: only match node processes carrying a plugin-owned path.
 _rp_safe_kill 'node .*(unraid-aicliagents|/\.aicli/)'

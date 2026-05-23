@@ -566,6 +566,26 @@ _op_reconcile() {
         fi
         [ -n "$persist_path" ] || continue
 
+        # Race guard: hold the shared per-entity storage lock for this entity's
+        # reconcile pass. A bake (commit_stack.sh) or consolidate
+        # (consolidate_layers.sh) takes the same lock while it mutates the
+        # persistence directory + manifest — and mid-operation the on-disk
+        # layer set legitimately differs from the manifest. Without this guard
+        # the untracked-layer logic below quarantines those in-flight layers
+        # to .untracked/, actively losing freshly-baked data. flock -n: if a
+        # bake/consolidate holds it, skip this entity this tick. Holding it
+        # (not just probing) for the whole entity body closes the TOCTOU.
+        # fd 8 is reassigned each iteration; the previous entity's lock is
+        # released by this exec, and the post-loop `exec 8>&-` closes the last.
+        local _rec_lock_id="${id//[^a-zA-Z0-9_-]/_}"
+        exec 8>"/var/run/aicli-bake-${type}-${_rec_lock_id}.lock"
+        if ! flock -n 8; then
+            log_info "Reconcile: $entity — storage lock held (bake/consolidate in flight), skipping this tick"
+            lifecycle_log "info" "supervisor" "reconcile_skipped_locked" \
+                "{\"entity\":\"$entity\"}" 2>/dev/null || true
+            continue
+        fi
+
         # Check manifest path against current config (path drift)
         local manifest_stored_path
         manifest_stored_path=$(_manifest_entity_persist_path "$entity")
@@ -714,6 +734,11 @@ _op_reconcile() {
             "{\"entity\":\"$entity\",\"active_count\":${#actual_files[@]}}" 2>/dev/null || true
 
     done <<< "$entities_json"
+
+    # Release the last entity's per-entity storage lock (fd 8 was reassigned
+    # per iteration; close it so the final entity's lock isn't held until the
+    # next reconcile tick).
+    exec 8>&- 2>/dev/null || true
 
     # Cleanup: orphaned .tmp.* tempfiles in any persist path (older than 1 hour)
     local persist_dirs=()

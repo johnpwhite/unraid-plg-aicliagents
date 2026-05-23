@@ -25,6 +25,9 @@
 export LANG=en_US.utf8
 export LC_ALL=en_US.utf8
 
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
 SESSION_PATTERN='^aicli-agent-[A-Za-z0-9_.-]+$'
 
 _list_sessions() {

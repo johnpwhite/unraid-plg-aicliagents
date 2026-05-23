@@ -64,6 +64,12 @@ function installVersionAgent(id, btn, explicitVersion) {
 // hop to the install endpoint. Keeps the close-sessions list visible so the
 // user always knows what's about to happen.
 function _showInstallConfirm(id, version, btn, label, sessions) {
+    // WP #964 (slice): an upgrade gets the richer keep-a-copy overlay — it
+    // offers a rollback backup of the current version before replacing it.
+    if (label === 'Upgrade') {
+        _showUpgradeBackupOverlay(id, version, btn, sessions);
+        return;
+    }
     var isInstall = !label || label === 'Install';
     var vLabel = version ? ('v' + version) : 'latest';
     var title, confirmText;
@@ -112,7 +118,171 @@ function _showInstallConfirm(id, version, btn, label, sessions) {
     });
 }
 
-function doInstall(id, version, btn, sessionsToClose) {
+// ---------------------------------------------------------------------------
+// WP #964 (slice): pre-upgrade "keep a copy" overlay.
+// Offers a rollback backup of the current version before the upgrade replaces
+// it. Fetches a size + free-space estimate, lets the user pick a destination,
+// and — when space is short — disables the backup while still allowing the
+// upgrade to proceed (or be cancelled).
+// ---------------------------------------------------------------------------
+var _aicliBackupCtx = { agentId: null, timer: null };
+
+function _escAttr(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    var u = ['KB', 'MB', 'GB', 'TB'], i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+}
+
+// Append a "<label><b>value</b>" pair to an element (DOM nodes — no innerHTML).
+function _aicliReadoutSeg(el, label, value, first) {
+    if (!first) el.appendChild(document.createTextNode(' · '));
+    el.appendChild(document.createTextNode(label));
+    var b = document.createElement('b');
+    b.textContent = value;
+    el.appendChild(b);
+}
+
+// Update the readout / note / toggle from an estimate response (or null on
+// fetch failure). Insufficient space OR a non-absolute path disables the
+// backup toggle — the confirm button still upgrades, just without a copy.
+function _aicliRenderBackupEstimate(est) {
+    var readout = document.getElementById('aicli-bk-readout');
+    var note    = document.getElementById('aicli-bk-note');
+    var toggle  = document.getElementById('aicli-bk-toggle');
+    var dest    = document.getElementById('aicli-bk-dest');
+    if (!readout || !note || !toggle) return;
+
+    var destVal = dest ? dest.value.trim() : '';
+    var absOk = destVal.charAt(0) === '/';
+
+    if (!est || est.status !== 'ok') {
+        readout.textContent = 'Could not estimate backup size.';
+        note.style.color = 'var(--orange, #e68a00)';
+        note.textContent = '⚠ Backup unavailable — you can still upgrade without one, or cancel.';
+        toggle.checked = false; toggle.disabled = true;
+        return;
+    }
+
+    readout.textContent = '';
+    _aicliReadoutSeg(readout, 'Current version: ', _fmtBytes(est.current_size), true);
+    _aicliReadoutSeg(readout, 'Upgrade needs ≈ ', _fmtBytes(est.required), false);
+    _aicliReadoutSeg(readout, 'Free at destination: ', _fmtBytes(est.free), false);
+    readout.appendChild(document.createTextNode(' (estimate includes 10% headroom)'));
+
+    if (!absOk) {
+        note.style.color = 'var(--orange, #e68a00)';
+        note.textContent = '⚠ Enter an absolute path (starting with /) for the backup.';
+        toggle.checked = false; toggle.disabled = true;
+        return;
+    }
+    if (!est.sufficient) {
+        note.style.color = 'var(--orange, #e68a00)';
+        note.textContent = '⚠ Not enough space here for a backup. You can upgrade without one, or cancel.';
+        toggle.checked = false; toggle.disabled = true;
+        return;
+    }
+    note.style.color = '';
+    note.textContent = '';
+    toggle.disabled = false;
+}
+
+function _aicliFetchBackupEstimate(dest, cb) {
+    var url = '/plugins/unraid-aicliagents/AICliAjax.php?action=get_upgrade_backup_estimate'
+            + '&agentId=' + encodeURIComponent(_aicliBackupCtx.agentId)
+            + '&dest=' + encodeURIComponent(dest || '')
+            + '&csrf_token=' + csrf;
+    $.getJSON(url).always(function(r) {
+        cb((r && r.status === 'ok') ? r : null);
+    });
+}
+
+// Debounced re-estimate when the destination field changes (different volume
+// → different free space). Called from the input's inline oninput handler.
+function _aicliBackupDestChanged() {
+    if (_aicliBackupCtx.timer) clearTimeout(_aicliBackupCtx.timer);
+    _aicliBackupCtx.timer = setTimeout(function() {
+        var dest = document.getElementById('aicli-bk-dest');
+        _aicliFetchBackupEstimate(dest ? dest.value.trim() : '', _aicliRenderBackupEstimate);
+    }, 400);
+}
+
+function _showUpgradeBackupOverlay(id, version, btn, sessions) {
+    _aicliBackupCtx.agentId = id;
+    // Initial estimate with no dest → backend defaults it to the persistence
+    // location and echoes the resolved path back.
+    _aicliFetchBackupEstimate('', function(est) {
+        var vLabel  = version ? ('v' + version) : 'latest';
+        var curVer  = (est && est.current_version) ? est.current_version : '';
+        var destVal = (est && est.dest) ? est.dest : '';
+
+        var sessionHtml = '';
+        if (sessions.length > 0) {
+            var lines = sessions.map(function(s) {
+                return '• ' + _escAttr(s.path || '<no workspace>')
+                     + '  (' + _escAttr((s.id || '').slice(0, 8)) + ')';
+            }).join('<br>');
+            sessionHtml =
+                '<div style="margin-bottom:10px;">'
+              + sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
+              + ' will be gracefully closed:<br>' + lines + '</div>';
+        }
+
+        var html =
+            '<div style="text-align:left; font-size:13px; line-height:1.5;">'
+          + sessionHtml
+          + '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px; cursor:pointer;">'
+          +   '<input type="checkbox" id="aicli-bk-toggle" checked style="margin-top:2px;">'
+          +   '<span>Keep a copy of the current version'
+          +     (curVer ? ' (<b>v' + _escAttr(curVer) + '</b>)' : '')
+          +     ' so you can roll back if the upgrade goes wrong.</span>'
+          + '</label>'
+          + '<div style="margin-bottom:8px;">'
+          +   '<div style="opacity:0.7; margin-bottom:3px;">Backup destination</div>'
+          +   '<input type="text" id="aicli-bk-dest" value="' + _escAttr(destVal) + '"'
+          +     ' oninput="_aicliBackupDestChanged()"'
+          +     ' style="width:100%; box-sizing:border-box; padding:5px 8px;">'
+          + '</div>'
+          + '<div id="aicli-bk-readout" style="font-size:12px; opacity:0.85;"></div>'
+          + '<div id="aicli-bk-note" style="font-size:12px; margin-top:6px; font-weight:600;"></div>'
+          + '</div>';
+
+        swal({
+            title: 'Upgrade to ' + vLabel + '?',
+            text: html,
+            html: true,
+            showCancelButton: true,
+            confirmButtonText: sessions.length > 0 ? 'Close & upgrade' : 'Upgrade',
+            cancelButtonText: 'Cancel',
+            closeOnConfirm: false,
+        }, function(confirmed) {
+            if (!confirmed) return;
+            var toggle = document.getElementById('aicli-bk-toggle');
+            var destEl = document.getElementById('aicli-bk-dest');
+            // Backup only when the toggle is both checked AND enabled — a
+            // disabled toggle means insufficient space / bad path, so the
+            // confirm means "upgrade without a backup".
+            var opts = (toggle && toggle.checked && !toggle.disabled)
+                ? { backup: true, dest: (destEl ? destEl.value.trim() : '') }
+                : null;
+            swal.close();
+            doInstall(id, version, btn, sessions.length, opts);
+        });
+
+        // swal renders synchronously — the overlay DOM exists now, so paint
+        // the initial estimate into it.
+        _aicliRenderBackupEstimate(est);
+    });
+}
+
+function doInstall(id, version, btn, sessionsToClose, backupOpts) {
     // The click source can be a <button> OR a <select> (version picker). For
     // a select, mutating innerHTML would nuke the options, so we only swap
     // the waiting-state content on real buttons and just disable the select.
@@ -142,6 +312,8 @@ function doInstall(id, version, btn, sessionsToClose) {
     // JSON takes over once polling kicks in.
     if (sessionsToClose && sessionsToClose > 0) {
         status.text('Closing ' + sessionsToClose + ' active session' + (sessionsToClose === 1 ? '' : 's') + '…');
+    } else if (backupOpts && backupOpts.backup) {
+        status.text('Backing up current version…');
     } else {
         status.text('Preparing installation…');
     }
@@ -150,6 +322,10 @@ function doInstall(id, version, btn, sessionsToClose) {
 
     var url = '/plugins/unraid-aicliagents/AICliAjax.php?action=install_agent&agentId=' + id + '&csrf_token=' + csrf;
     if (version) url += '&version=' + encodeURIComponent(version);
+    // WP #964 (slice): request a pre-upgrade backup of the current version.
+    if (backupOpts && backupOpts.backup && backupOpts.dest) {
+        url += '&backup=1&backup_dest=' + encodeURIComponent(backupOpts.dest);
+    }
 
     $.getJSON(url, function(r) {
         if (r.status === 'error') {
@@ -303,7 +479,8 @@ function populateVersionPicker(id, data) {
         var channelLabel = (data.channel === 'beta') ? 'beta' : 'stable';
         emptyOpt.textContent = 'No versions available on this channel (' + channelLabel + ')';
         select.appendChild(emptyOpt);
-        select.disabled = true;
+        // WP #964: kept backups stay restorable even with no upstream versions.
+        select.disabled = (appendRetainedBackups(select) === 0);
         return;
     }
     // Versions are available — ensure the select is usable.
@@ -352,7 +529,8 @@ function populateVersionPicker(id, data) {
         var channelLabel = (data.channel === 'beta') ? 'beta' : 'stable';
         emptyOpt.textContent = 'No versions available on this channel (' + channelLabel + ')';
         select.appendChild(emptyOpt);
-        select.disabled = true;
+        // WP #964: kept backups stay restorable even with no upstream versions.
+        select.disabled = (appendRetainedBackups(select) === 0);
         return;
     }
 
@@ -386,6 +564,55 @@ function populateVersionPicker(id, data) {
         opt.selected = true;
         select.insertBefore(opt, select.firstChild);
     }
+
+    // WP #964: append the "Restore a kept backup" optgroup last, so retained
+    // local backups always sit below the live upstream versions.
+    appendRetainedBackups(select);
+}
+
+// WP #964: format the YYYYMMDDTHHMMSSZ backup stamp as a readable UTC date.
+function _fmtBackupStamp(stamp) {
+    var s = String(stamp || '');
+    var m = s.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+    return m ? (m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] + ' UTC') : s;
+}
+
+// WP #964: append an <optgroup> of locally-retained version backups to a
+// version picker. The backup list is rendered server-side onto the <select>
+// as a data-backups JSON attribute (it survives the populateVersionPicker
+// rebuild because only child <option>s are cleared, not attributes).
+// Returns the number of backup options appended.
+function appendRetainedBackups(select) {
+    if (!select) return 0;
+    var raw = select.getAttribute('data-backups');
+    if (!raw) return 0;
+    var backups;
+    try { backups = JSON.parse(raw); } catch (e) { return 0; }
+    if (!backups || !backups.length) return 0;
+
+    // Don't offer a "restore" to the version that's already installed — it is
+    // already the top entry of the picker, and rolling back to it is a no-op.
+    var installed = select.getAttribute('data-installed');
+    var restorable = backups.filter(function(b) { return b.version !== installed; });
+    if (!restorable.length) return 0;
+
+    var group = document.createElement('optgroup');
+    group.label = 'Restore a kept backup';
+    restorable.forEach(function(b) {
+        var opt = document.createElement('option');
+        // Sentinel value — never forwarded as an install target. onVersionSelect
+        // routes it to the restore flow via the data-restore marker below.
+        opt.value = 'restore:' + b.dir;
+        opt.setAttribute('data-restore', '1');
+        opt.setAttribute('data-backup-dir', b.dir);
+        opt.setAttribute('data-restore-version', b.version);
+        var mb = b.bytes ? (Math.round(b.bytes / 1048576 * 10) / 10) + ' MB' : '';
+        opt.textContent = 'v' + b.version + ' — kept ' + _fmtBackupStamp(b.created_at)
+                          + (mb ? ' (' + mb + ')' : '');
+        group.appendChild(opt);
+    });
+    select.appendChild(group);
+    return restorable.length;
 }
 
 function updateAgentBadge(id, data) {
@@ -421,7 +648,19 @@ function onVersionSelect(select) {
     var id = select.getAttribute('data-agent');
     var version = select.value;
     var installed = select.getAttribute('data-installed');
-    if (!id || !version) return;
+    if (!id) return;
+
+    // WP #964: a "kept backup" option routes to a restore, not an install.
+    var picked = select.options[select.selectedIndex];
+    if (picked && picked.getAttribute('data-restore') === '1') {
+        restoreAgentBackup(id,
+            picked.getAttribute('data-backup-dir'),
+            picked.getAttribute('data-restore-version'),
+            select);
+        return;
+    }
+
+    if (!version) return;
     // Strip the sentinel from entry labels; never forward empty/sentinel targets
     if (version === '0.0.0' || version === 'unknown' || version === 'installed') return;
     // Re-picking the current version is a no-op (prevents spurious reinstalls
@@ -441,6 +680,49 @@ function onVersionSelect(select) {
     // Use the picker itself as the click-source for button-state UI. Works
     // on both v2 cards (.av2-card) and the legacy card layout.
     installVersionAgent(id, select, version);
+}
+
+// WP #964: restore an agent to a locally-retained version backup. Routed here
+// from onVersionSelect when a "Restore a kept backup" optgroup option is
+// picked. The backend (restore_agent_backup) snapshots the current version
+// first under the per-entity storage lock, so the action is itself reversible.
+function restoreAgentBackup(id, backupDir, version, select) {
+    var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+    // Reset the picker to the installed version — the swal dialog now carries
+    // the restore intent, and a confirmed restore reloads the page anyway.
+    if (select) select.value = select.getAttribute('data-installed') || '';
+    if (!backupDir || !version) {
+        swal('Restore failed', 'Backup details missing — refresh the page and retry.', 'error');
+        return;
+    }
+    swal({
+        title: 'Restore ' + id + ' to v' + version + '?',
+        text: 'Restore ' + id + ' from your locally-kept backup of v' + version
+            + '. This replaces the currently-installed version. A backup of the '
+            + 'current version is taken first, so the restore is reversible.',
+        type: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Restore v' + version,
+        confirmButtonColor: '#e67e22',
+        showLoaderOnConfirm: true,
+        closeOnConfirm: false
+    }, function() {
+        $.ajax({
+            url: '/plugins/unraid-aicliagents/AICliAjax.php',
+            type: 'GET',
+            data: { action: 'restore_agent_backup', agentId: id, backup_dir: backupDir, csrf_token: token },
+            dataType: 'json'
+        }).done(function(r) {
+            if (r && r.status === 'ok') {
+                swal({ title: 'Restored', text: id + ' is now on v' + version + '.', type: 'success', timer: 1800, showConfirmButton: false });
+                setTimeout(function() { safeReload(); }, 1200);
+            } else {
+                swal('Restore failed', (r && r.message) ? r.message : 'Check the lifecycle log.', 'error');
+            }
+        }).fail(function() {
+            swal('Restore failed', 'AJAX request failed. Check debug.log.', 'error');
+        });
+    });
 }
 
 // Simple semver compare (returns -1, 0, 1)
@@ -551,7 +833,52 @@ $(function() {
         if (si) { si.value = savedSearch; si.dataset.userTyped = savedSearch; }
     }
     if (agentFilter !== 'all' || savedSearch) filterAgents();
+
+    // Apply the persisted A-Z / Z-A card order (defaults to A-Z on first load).
+    initAgentSort();
 });
+
+// --- WP #964 follow-on: agent card A-Z / Z-A ordering toggle ---------------
+// Reorders the .av2-card nodes inside #agent-store-grid by their data-name.
+// The chosen direction persists in localStorage; default is A-Z. Independent
+// of filterAgents() — sorting reorders, filtering toggles display.
+var AGENT_SORT_KEY = 'aicli_agent_sort';
+
+function applyAgentSort(dir) {
+    dir = (dir === 'desc') ? 'desc' : 'asc';
+    var grid = document.getElementById('agent-store-grid');
+    if (grid) {
+        var cards = Array.prototype.slice.call(grid.querySelectorAll('.av2-card'));
+        cards.sort(function(a, b) {
+            var an = (a.getAttribute('data-name') || '').toLowerCase();
+            var bn = (b.getAttribute('data-name') || '').toLowerCase();
+            if (an < bn) return dir === 'desc' ? 1 : -1;
+            if (an > bn) return dir === 'desc' ? -1 : 1;
+            return 0;
+        });
+        cards.forEach(function(c) { grid.appendChild(c); });
+    }
+    var icon  = document.getElementById('agent-sort-icon');
+    var label = document.getElementById('agent-sort-label');
+    var btn   = document.getElementById('agent-sort-toggle');
+    if (icon)  icon.className = 'fa fa-sort-alpha-' + (dir === 'desc' ? 'desc' : 'asc');
+    if (label) label.textContent = (dir === 'desc' ? 'Z–A' : 'A–Z');
+    if (btn)   btn.setAttribute('data-dir', dir);
+}
+
+function toggleAgentSort() {
+    var btn  = document.getElementById('agent-sort-toggle');
+    var cur  = btn ? btn.getAttribute('data-dir') : 'asc';
+    var next = (cur === 'desc') ? 'asc' : 'desc';
+    try { localStorage.setItem(AGENT_SORT_KEY, next); } catch (e) {}
+    applyAgentSort(next);
+}
+
+function initAgentSort() {
+    var dir = 'asc';
+    try { dir = localStorage.getItem(AGENT_SORT_KEY) || 'asc'; } catch (e) {}
+    applyAgentSort(dir);
+}
 
 function filterAgents() {
     const search = ($('#agent-search-input').val() || '').trim().toLowerCase();

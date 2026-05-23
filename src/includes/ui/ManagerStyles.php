@@ -257,6 +257,12 @@
     .filter-btn:hover { background: rgba(255,255,255,0.15); border-color: var(--orange, #ff8c00); }
     .filter-btn.active { background: var(--orange, #ff8c00); color: #fff; border-color: var(--orange, #ff8c00); }
 
+    /* Sort toggle — a <button>, so reset the UA font/line-height to inherit
+       and match .filter-btn's box model exactly so it sits as a 4th chip. */
+    .agent-sort-btn { padding: 6px 15px; border-radius: 4px; font-size: 10px; font-weight: bold; font-family: inherit; line-height: inherit; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color, rgba(255,255,255,0.15)); transition: all 0.2s; text-transform: uppercase; color: var(--text-color, #ccc); white-space: nowrap; vertical-align: middle; margin: 0; }
+    .agent-sort-btn:hover { background: rgba(255,255,255,0.15); border-color: var(--orange, #ff8c00); }
+    .agent-sort-btn i { margin-right: 6px; opacity: 0.85; }
+
     .config-toggle { padding: 8px 12px; font-size: 10px; font-weight: bold; cursor: pointer; opacity: 0.6; border-top: 1px solid rgba(255,255,255,0.03); display: flex; align-items: center; gap: 8px; transition: opacity 0.2s; }
     .config-toggle:hover { opacity: 1; color: #ff8c00; }
     .agent-config-panel { padding: 12px; background: rgba(0,0,0,0.15); border-top: 1px solid rgba(255,255,255,0.03); display: flex; flex-direction: column; gap: 10px; }
