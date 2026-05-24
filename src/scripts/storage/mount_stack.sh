@@ -126,13 +126,27 @@ fi
 shopt -u nullglob
 
 LOWERS=""
+# WP #1084: track loop mounts created during THIS invocation so the overlay-
+# mount failure path below can unmount them. Pre-existing loop mounts (skipped
+# at line `if ! mountpoint -q`) are NOT in this list — they may belong to a
+# concurrent / prior mount_stack run.
+_NEW_LOOP_MOUNTS=()
 for sqsh in "${FILES[@]}"; do
     # Mount each squashfs to a temporary loop mount if not already done
     SQSH_NAME=$(basename "$sqsh" .sqsh)
     SQSH_MNT="/tmp/unraid-aicliagents/mnt/$SQSH_NAME"
     mkdir -p "$SQSH_MNT"
     if ! mountpoint -q "$SQSH_MNT"; then
-        mount -o loop,ro "$sqsh" "$SQSH_MNT" || { error "Failed to mount $sqsh"; exit 1; }
+        if ! mount -o loop,ro "$sqsh" "$SQSH_MNT"; then
+            error "Failed to mount $sqsh"
+            # WP #1084: clean up any loop mounts we created earlier in this
+            # loop so they don't leak when the layer mount fails mid-stack.
+            for _lm in "${_NEW_LOOP_MOUNTS[@]}"; do
+                umount "$_lm" 2>/dev/null || umount -l "$_lm" 2>/dev/null || true
+            done
+            exit 1
+        fi
+        _NEW_LOOP_MOUNTS+=("$SQSH_MNT")
     fi
     [ -n "$LOWERS" ] && LOWERS="$LOWERS:"
     LOWERS="$LOWERS$SQSH_MNT"
@@ -229,5 +243,12 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
     lifecycle_log "info" "mount_stack" "mount_stack_assembled" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"layer_count\":$LAYER_COUNT,\"mount_point\":\"$MNT_POINT\"}" 2>/dev/null || true
 else
     error "Failed to mount OverlayFS stack at $MNT_POINT"
+    # WP #1084: overlay mount failed — clean up the loop mounts we just made
+    # so they don't leak as orphans pointing at (potentially since-deleted)
+    # sqsh files. Pre-existing loop mounts are left alone.
+    for _lm in "${_NEW_LOOP_MOUNTS[@]}"; do
+        umount "$_lm" 2>/dev/null || umount -l "$_lm" 2>/dev/null || true
+    done
+    lifecycle_log "error" "mount_stack" "mount_stack_failed_loops_cleaned" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"new_loops_cleaned\":${#_NEW_LOOP_MOUNTS[@]}}" 2>/dev/null || true
     exit 1
 fi

@@ -348,3 +348,117 @@ build_mksquashfs_sqlite_excludes() {
         printf -- '-e %s -e %s -e %s ' "$rel" "${rel}-wal" "${rel}-shm"
     done
 }
+
+# build_mksquashfs_sqlite_sidecar_excludes <root> <db-paths...>
+# Echoes `-e <relpath>-wal -e <relpath>-shm -e <relpath>-journal` arguments —
+# the SIDECAR files only, NOT the .db itself. Used by the overlay-merge bake
+# path (WP #1078): the .db is provided via the overlay upper from the
+# sqlite3 .backup snapshot, so it doesn't need exclusion; the sidecars are
+# transient and reconstructed by SQLite on next open.
+build_mksquashfs_sqlite_sidecar_excludes() {
+    local root="$1"; shift
+    local db rel
+    for db in "$@"; do
+        rel="${db#$root/}"
+        printf -- '-e %s -e %s -e %s ' "${rel}-wal" "${rel}-shm" "${rel}-journal"
+    done
+}
+
+# bake_via_overlay_merge <type> <id> <persist_path> <lower_dir> <sqlite_stage> <kind> <db-paths...>
+#
+# Bakes a SquashFS layer from the merged view of <lower_dir> + <sqlite_stage>.
+# Stdout: final basename on success. Stderr: progress + diagnostics.
+# Returns 0 on success, non-zero on any failure (overlay mount, atomic_write_layer, umount).
+#
+# WP #1078 fix: replaces the broken two-pass `wide-bake + mksquashfs -append`
+# protocol. mksquashfs's append mode does NOT merge new content into existing
+# directories — it RENAMES them with _N suffix, stranding the SQLite backups
+# at unreachable paths (.copilot_1/session-store.db etc.). This helper uses
+# overlayfs to merge the lower (UPPER_DIR for commit, MNT_POINT for consolidate)
+# with the SQLite backup stage, then bakes the merged view in ONE atomic pass.
+# The .db sidecar files (-wal/-shm/-journal) are excluded — SQLite reconstructs
+# them from the .db on next open.
+#
+# Caller must have already populated $sqlite_stage via sqlite_backup_all.
+# Caller is responsible for `rm -rf "$sqlite_stage"` after this returns.
+bake_via_overlay_merge() {
+    local type="${1:-}"; shift
+    local id="${1:-}"; shift
+    local persist_path="${1:-}"; shift
+    local lower_dir="${1:-}"; shift
+    local sqlite_stage="${1:-}"; shift
+    local kind="${1:-delta}"; shift
+    # remaining positional args are the detected SQLite DB paths (absolute, under $lower_dir)
+
+    if [ -z "$type" ] || [ -z "$id" ] || [ -z "$persist_path" ] || [ -z "$lower_dir" ] || [ -z "$sqlite_stage" ]; then
+        echo "[bake_via_overlay_merge] ERROR: missing required arguments" >&2
+        return 1
+    fi
+    if [ ! -d "$lower_dir" ] || [ ! -d "$sqlite_stage" ]; then
+        echo "[bake_via_overlay_merge] ERROR: lower_dir or sqlite_stage missing" >&2
+        return 1
+    fi
+
+    # Per-invocation working dirs on tmpfs (overlay requires upper + work on same fs).
+    local merge_root="/tmp/unraid-aicliagents/.bake_merge_${type}_${id}_$$"
+    local merge_work="$merge_root/work"
+    local merge_out="$merge_root/merged"
+    rm -rf "$merge_root" 2>/dev/null
+    mkdir -p "$merge_work" "$merge_out" 2>/dev/null || {
+        echo "[bake_via_overlay_merge] ERROR: cannot create merge dirs under $merge_root" >&2
+        return 1
+    }
+
+    # Mount overlay: lower=lower_dir (read-only logically), upper=sqlite_stage (shadows
+    # the live DBs at their original paths), work=fresh tmpfs dir.
+    if ! mount -t overlay overlay \
+        -o "lowerdir=${lower_dir},upperdir=${sqlite_stage},workdir=${merge_work}" \
+        "$merge_out" 2>/dev/null; then
+        echo "[bake_via_overlay_merge] ERROR: overlay mount failed: lower=$lower_dir upper=$sqlite_stage" >&2
+        rm -rf "$merge_root" 2>/dev/null
+        return 1
+    fi
+
+    # Build sidecar excludes (relative to lower_dir, which is the overlay's effective root).
+    local sidecar_excludes
+    # shellcheck disable=SC2086 — intentional word-split on positional args
+    sidecar_excludes=$(build_mksquashfs_sqlite_sidecar_excludes "$lower_dir" "$@")
+
+    # Compose final mksquashfs args. Preserve any caller-supplied MKSQUASHFS_ARGS
+    # (e.g. compression override from supervisor), append sidecar excludes.
+    local base_args="${MKSQUASHFS_ARGS:-${_AWL_DEFAULT_ARGS:--comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend}}"
+    local final_args="$base_args $sidecar_excludes"
+
+    local result=""
+    if ! result=$(MKSQUASHFS_ARGS="$final_args" atomic_write_layer "$type" "$id" "$persist_path" "$merge_out" "$kind"); then
+        umount "$merge_out" 2>/dev/null || umount -l "$merge_out" 2>/dev/null || true
+        rm -rf "$merge_root" 2>/dev/null
+        echo "[bake_via_overlay_merge] ERROR: atomic_write_layer failed" >&2
+        return 1
+    fi
+
+    # Cleanup overlay. Lazy umount is the safety net for cases where a stray fd
+    # held the merge_out path open during bake (shouldn't happen, but harmless).
+    umount "$merge_out" 2>/dev/null || umount -l "$merge_out" 2>/dev/null || true
+    rm -rf "$merge_root" 2>/dev/null
+
+    printf '%s\n' "$result"
+    return 0
+}
+
+# write_defer_reason <type> <id> <reason>
+# Writes a single-line reason marker for callers (StorageMountService / TaskService)
+# to disambiguate the three legitimate exit-2 paths (mount_busy / sqlite_backup_deferred
+# / consolidate_lock_held). Best-effort — failure to write does not abort the bake.
+# Path: /tmp/unraid-aicliagents/.bake_defer_reason_${type}_${id}
+# PHP side is responsible for unlink-after-read so stale reasons don't bleed across runs.
+write_defer_reason() {
+    local type="${1:-}"
+    local id="${2:-}"
+    local reason="${3:-unknown}"
+    [ -n "$type" ] && [ -n "$id" ] || return 0
+    local sanitised_id="${id//[^a-zA-Z0-9_-]/_}"
+    local marker="/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${sanitised_id}"
+    # Truncate to a single short line; reason should be a stable identifier.
+    printf '%s\n' "$reason" > "$marker" 2>/dev/null || true
+}

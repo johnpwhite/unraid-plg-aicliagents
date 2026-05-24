@@ -64,6 +64,12 @@ update_task_status() {
         "$step" "$progress" "$completed" "$(date +%s)" "$reason" > "$TASK_STATUS_FILE"
 }
 
+# WP #1078: clear any stale defer-reason marker from a prior consolidate run
+# so PHP reads THIS run's reason on any exit-2 path. Sanitise the ID the same
+# way write_defer_reason does so the rm matches the eventual write.
+_DEFER_REASON_ID="${ID//[^a-zA-Z0-9_-]/_}"
+rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_DEFER_REASON_ID}" 2>/dev/null || true
+
 # Validate paths before any mount or destructive operations
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; update_task_status "Failed" 0 "Invalid path"; exit 1; }
 _assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non-durable filesystem — consolidation refused"; update_task_status "Failed" 0 "Non-durable path"; exit 1; }
@@ -101,6 +107,7 @@ if command -v fuser >/dev/null 2>&1; then
         log "Mount is BUSY (open files detected by fuser -sm). Deferring consolidation — will retry when idle."
         lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"mount_busy\"}" 2>/dev/null || true
         update_task_status "Deferred (mount busy)" 0 "Sessions active — will retry when idle"
+        write_defer_reason "$TYPE" "$ID" "mount_busy"
         exit 2
     fi
 fi
@@ -117,6 +124,7 @@ fi
 # Operates on the MERGED mount path ($MNT_POINT) so the consolidated layer
 # doesn't carry regenerable caches from lower layers either.
 # HARD CONSTRAINT: never touch snap_*/migrated_legacy_data/*backup*/SAFE_BACKUP.
+ORPHAN_N_EXCLUDES=""
 if [ "$TYPE" = "home" ]; then
     log "Pruning regenerable caches from merged home view before consolidation..."
     update_task_status "Pruning caches..." 18 ""
@@ -130,6 +138,38 @@ if [ "$TYPE" = "home" ]; then
     [ -d "$MNT_POINT/.claude/cache" ] && rm -rf "$MNT_POINT/.claude/cache" 2>/dev/null || true
     [ -d "$MNT_POINT/.claude/shell-snapshots" ] && rm -rf "$MNT_POINT/.claude/shell-snapshots" 2>/dev/null || true
     [ -d "$MNT_POINT/.claude/telemetry" ] && rm -rf "$MNT_POINT/.claude/telemetry" 2>/dev/null || true
+
+    # WP #1078 one-shot cleanup: detect orphan ".<name>_<N>" top-level dirs that
+    # contain SQLite .db files — these are stranded artifacts of the broken
+    # mksquashfs-append protocol (v2026.05.18.06 → v2026.05.23.19), unreachable
+    # by any agent. Exclude them from the next consolidated layer via -e so the
+    # consolidated tree finally matches the canonical layout. They live in the
+    # squashfs layers (not in UPPER), so we can't rm them from $MNT_POINT —
+    # we exclude them from mksquashfs's read of the merged view instead.
+    # Match e.g. ".copilot_1", ".local_2", ".codex_3"; the trailing _<digit>+
+    # signature is mksquashfs's collision-rename marker.
+    for _orphan_dir in "$MNT_POINT"/.*_[0-9]*; do
+        [ -d "$_orphan_dir" ] || continue
+        _orphan_name=$(basename "$_orphan_dir")
+        # Pattern guard: only ".<letters>_<digits>" — leave any user dir with
+        # an underscore-number suffix that does NOT start with "." alone.
+        case "$_orphan_name" in
+            .*_[0-9]*) ;;
+            *) continue ;;
+        esac
+        # Signature confirmation: must contain a .db file or be an empty
+        # parent of one (the consolidated layer on Tower has empty .local_1/
+        # because earlier append-failure cleanups rm'd the wide-bake-only deltas). Both
+        # cases are safe to exclude — empty shadow dirs are pure noise; .db-
+        # bearing shadow dirs are unreachable data the user lost weeks ago.
+        if find "$_orphan_dir" -maxdepth 8 -name '*.db' -type f 2>/dev/null | grep -q . \
+           || [ -z "$(find "$_orphan_dir" -mindepth 1 -type f -print -quit 2>/dev/null)" ]; then
+            log "WP #1078 cleanup: excluding orphan shadow dir from consolidate: $_orphan_name"
+            ORPHAN_N_EXCLUDES="$ORPHAN_N_EXCLUDES -e $_orphan_name"
+            lifecycle_log "info" "consolidate_layers" "wp1078_orphan_excluded" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"orphan\":\"$_orphan_name\"}" 2>/dev/null || true
+        fi
+    done
 fi
 
 # Check disk space in /tmp for the scratch verify mount used by atomic_write_layer (minimal — just a mountpoint)
@@ -191,11 +231,20 @@ check_disk_space "$PERSIST_PATH/.diskcheck" 200 || {
 }
 
 # WP #935: detect SQLite DBs in the merged view and back them up via Online
-# Backup API before the wide bake (same pattern as commit_stack.sh).
+# Backup API before the bake.
+# WP #1078 (2026-05-24): the bake now uses overlay-merge (lower=MNT_POINT,
+# upper=sqlite_stage) → single-pass mksquashfs. The previous two-pass append
+# protocol was broken — mksquashfs append renamed colliding top-level dirs
+# with _N suffix, stranding the SQLite backups at unreachable paths. See
+# docs/specs/SQLITE_APPEND_DATALOSS_BUG.md and commit_stack.sh for the
+# detailed analysis. The .db sidecars (-wal/-shm/-journal) are excluded;
+# SQLite reconstitutes them from the .db on next open.
 SQLITE_DBS=$(detect_sqlite_dbs "$MNT_POINT" 2>/dev/null)
-SQLITE_DB_COUNT=$(echo "$SQLITE_DBS" | grep -c -v '^$' 2>/dev/null || echo 0)
+# Count non-empty lines via awk (handles empty input cleanly; the prior
+# `echo | grep -c -v '^$' || echo 0` produced "0\n0" on empty input and
+# tripped `[: integer expected` further down).
+SQLITE_DB_COUNT=$(printf '%s\n' "$SQLITE_DBS" | awk 'NF{c++}END{print c+0}')
 SQLITE_STAGE=""
-MKSQUASHFS_EXTRA_EXCLUDES=""
 
 if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
     log "Detected $SQLITE_DB_COUNT SQLite DB(s) in merged view — backing up via Online Backup API"
@@ -222,80 +271,48 @@ if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
         update_task_status "Deferred" 0 "SQLite DB locked — retry later"
         lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_backup_failed\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
+        write_defer_reason "$TYPE" "$ID" "sqlite_backup_deferred"
         exit 2
     fi
-
-    MKSQUASHFS_EXTRA_EXCLUDES=$(build_mksquashfs_sqlite_excludes "$MNT_POINT" $SQLITE_DBS)
 fi
 
-# Step 3b: Atomic bake — writes sibling tempfile, fsyncs, verifies, renames atomically.
-# We bake from the mounted stack (MNT_POINT = merged view of all layers).
-# atomic_write_layer returns the basename on stdout; all progress goes to stderr.
+# Step 3b: Atomic bake. Two paths:
+#   (a) SQLite DBs detected → overlay-merge bake (single pass; sqlite_stage
+#       shadows the live DBs in MNT_POINT; WAL/SHM/journal excluded).
+#   (b) No SQLite DBs → direct bake of MNT_POINT.
+# Both go through atomic_write_layer (tempfile + fsync + verify + atomic rename).
+# WP #1078 orphan excludes (if any were detected in the pre-bake prune block)
+# are folded into MKSQUASHFS_ARGS so both paths honour them.
 _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend"
-if [ -n "$MKSQUASHFS_EXTRA_EXCLUDES" ]; then
-    export MKSQUASHFS_ARGS="${MKSQUASHFS_ARGS:-$_AWL_DEFAULT_ARGS} $MKSQUASHFS_EXTRA_EXCLUDES"
+if [ -n "$ORPHAN_N_EXCLUDES" ]; then
+    export MKSQUASHFS_ARGS="${MKSQUASHFS_ARGS:-$_AWL_DEFAULT_ARGS} $ORPHAN_N_EXCLUDES"
 fi
 
 FINAL_NAME=""
-if ! FINAL_NAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$MNT_POINT" "consolidated"); then
-    error "Atomic consolidation bake failed."
-    update_task_status "Failed" 0 "Bake failed"
-    rm -rf "$SQLITE_STAGE" 2>/dev/null
-    rm -f "$CONSOLIDATE_MARKER"
-    lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"atomic_write_layer_failed\"}" 2>/dev/null || true
-    exit 1
-fi
-
-# WP #935 Pass 3: append SQLite backups to the consolidated layer.
-#
-# C2 fix (v2026.05.18.08): MUST be atomic and MUST hard-fail. The previous
-# code mutated the just-renamed final in place and on failure just logged
-# and continued — which then proceeded to delete the old layers and wipe
-# UPPER, permanently losing the DBs. New protocol: append onto a TEMPFILE
-# copy of the final, verify, atomic-rename. On ANY failure, delete the
-# tempfile AND the partially-written final, restore the marker, exit 2
-# (defer). The old layers stay; UPPER stays; next consolidate retries.
-if [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ] && [ "$SQLITE_DB_COUNT" -gt 0 ]; then
-    log "Appending $SQLITE_DB_COUNT SQLite backup(s) to $FINAL_NAME (via tempfile)"
-    update_task_status "Appending SQLite snapshots..." 70 ""
-    APPEND_ARGS=$(echo "$_AWL_DEFAULT_ARGS" | sed 's/-noappend//g')
-    APPENDING_TMP="$PERSIST_PATH/.${FINAL_NAME}.appending.$$"
-    PRE_APPEND_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
-
-    _consol_append_fail() {
-        local reason="$1"
-        error "Append failed during consolidate: $reason — old layers preserved, deferring"
-        rm -f "$APPENDING_TMP" 2>/dev/null
-        # The wide-bake-only final is missing SQLite content. Deleting it
-        # ensures the consolidate is fully reverted: old layers will still
-        # be present (manifest update + old-layer-delete haven't run yet).
-        rm -f "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null
+if [ "$SQLITE_DB_COUNT" -gt 0 ] && [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ]; then
+    log "Consolidating via overlay-merge ($SQLITE_DB_COUNT SQLite backup(s) shadow live DBs)..."
+    update_task_status "Baking consolidated volume..." 40 ""
+    # shellcheck disable=SC2086 — intentional word-splitting on the DB path list
+    if ! FINAL_NAME=$(bake_via_overlay_merge "$TYPE" "$ID" "$PERSIST_PATH" "$MNT_POINT" "$SQLITE_STAGE" "consolidated" $SQLITE_DBS); then
+        error "Overlay-merge consolidation bake failed."
+        update_task_status "Failed" 0 "Bake failed"
         rm -rf "$SQLITE_STAGE" 2>/dev/null
-        # Don't remove CONSOLIDATE_MARKER — needed by UPPER_CHANGED check.
-        update_task_status "Deferred" 0 "SQLite append failed — retry later"
-        lifecycle_log "error" "consolidate_layers" "bash_consolidate_sqlite_append_failed" \
-            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$FINAL_NAME\",\"reason\":\"$reason\"}" 2>/dev/null || true
-        exit 2
-    }
-
-    if ! cp "$PERSIST_PATH/$FINAL_NAME" "$APPENDING_TMP" 2>/dev/null; then
-        _consol_append_fail "cp_to_tempfile_failed"
-    fi
-    # shellcheck disable=SC2086
-    if ! mksquashfs "$SQLITE_STAGE" "$APPENDING_TMP" $APPEND_ARGS > /dev/null 2>&1; then
-        _consol_append_fail "mksquashfs_append_returned_nonzero"
-    fi
-    POST_APPEND_BYTES=$(stat -c '%s' "$APPENDING_TMP" 2>/dev/null || echo 0)
-    if [ "$POST_APPEND_BYTES" -le "$PRE_APPEND_BYTES" ]; then
-        _consol_append_fail "append_zero_bytes_added"
-    fi
-    sync
-    if ! mv -f "$APPENDING_TMP" "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null; then
-        _consol_append_fail "atomic_rename_appended_failed"
+        rm -f "$CONSOLIDATE_MARKER"
+        lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"overlay_merge_bake_failed\"}" 2>/dev/null || true
+        exit 1
     fi
     rm -rf "$SQLITE_STAGE" 2>/dev/null
-    lifecycle_log "info" "consolidate_layers" "bash_consolidate_sqlite_appended" \
-        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$FINAL_NAME\",\"db_count\":$SQLITE_DB_COUNT,\"pre_bytes\":$PRE_APPEND_BYTES,\"post_bytes\":$POST_APPEND_BYTES}" 2>/dev/null || true
+    lifecycle_log "info" "consolidate_layers" "bash_consolidate_sqlite_merged" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$FINAL_NAME\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
+else
+    update_task_status "Baking consolidated volume..." 40 ""
+    if ! FINAL_NAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$MNT_POINT" "consolidated"); then
+        error "Atomic consolidation bake failed."
+        update_task_status "Failed" 0 "Bake failed"
+        rm -f "$CONSOLIDATE_MARKER"
+        lifecycle_log "error" "consolidate_layers" "bash_consolidate_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"atomic_write_layer_failed\"}" 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 log "Consolidated volume written: $FINAL_NAME"
@@ -333,6 +350,7 @@ if ! flock -n 8; then
     update_task_status "Deferred" 0 "Bake in progress — retry later"
     lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" \
         "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"bake_lock_held\"}" 2>/dev/null || true
+    write_defer_reason "$TYPE" "$ID" "bake_lock_held"
     exit 2
 fi
 
@@ -357,6 +375,7 @@ for _cur in "${_CURRENT_LAYERS[@]}"; do
         update_task_status "Deferred" 0 "A bake completed during consolidation — retry later"
         lifecycle_log "info" "consolidate_layers" "bash_consolidate_deferred" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"bake_landed_during_consolidate\",\"new_layer\":\"$_cur_base\"}" 2>/dev/null || true
+        write_defer_reason "$TYPE" "$ID" "bake_landed_during_consolidate"
         exit 2
     fi
 done
@@ -415,33 +434,60 @@ for old_layer in "${OLD_LAYERS[@]}"; do
 done
 
 # 6. Remount & Clear RAM
-log "Finalizing stack and clearing RAM..."
-log "Note: Active agent terminals may log transient I/O errors during remount. This is expected and resolves automatically."
-update_task_status "Finalizing stack..." 95 ""
-umount -l "$MNT_POINT" 2>/dev/null || true
+# WP #1080 + #1081 (2026-05-24): single fuser check, then check UPPER_CHANGED
+# BEFORE the umount (find -newer reads $UPPER_DIR directly, doesn't need the
+# mount), then refresh-and-wipe. The prior structure had umount → check →
+# wipe → mount, leaving the mount torn down for the entire duration of the
+# wipe (potentially seconds for big uppers). The new structure narrows the
+# umount window to the mount_stack.sh refresh only.
+#
+# Why check UPPER_CHANGED before umount: `find $UPPER_DIR -newer $marker`
+# operates on the raw ZRAM tmpfs upper, not through the overlay mount.
+# Doing the check before umount means we don't add to the unmounted window.
+if fuser -sm "$MNT_POINT" 2>/dev/null; then
+    log "Mount became BUSY during consolidate (agent launched mid-bake). Deferring refresh+wipe — next mount cycle picks up $FINAL_NAME."
+    rm -f "$CONSOLIDATE_MARKER"
+    FINAL_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
+    lifecycle_log "info" "consolidate_layers" "bash_consolidate_ok_refresh_deferred" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\",\"bytes\":$FINAL_BYTES,\"reason\":\"mount_busy_at_refresh\"}" 2>/dev/null || true
+    update_task_status "Consolidation complete (mount refresh deferred — sessions active)." 100 ""
+    exit 0
+fi
 
-# D-353: Reset RAM layer after consolidation (since data is now in base volume)
-# BUT: skip the wipe if any writes arrived AFTER the bake marker — those
-# writes are NOT in the consolidated volume and would be silently lost.
-# Leave them in place; the next commit_stack will pick them up as a delta
-# on top of the new consolidated base.
+# Check UPPER_CHANGED before the umount window. find -newer operates on the
+# raw ZRAM tmpfs, not through the overlay mount, so this is safe to do here.
+# (D-353: skip the wipe if any writes arrived after the bake marker — those
+# writes are NOT in the consolidated volume and would be silently lost.)
 UPPER_CHANGED=""
 if [ -f "$CONSOLIDATE_MARKER" ] && [ -d "$UPPER_DIR" ]; then
     UPPER_CHANGED=$(find "$UPPER_DIR" -newer "$CONSOLIDATE_MARKER" -type f 2>/dev/null | head -1)
 fi
 rm -f "$CONSOLIDATE_MARKER"
 
+log "Finalizing stack and clearing RAM..."
+log "Note: Active agent terminals may log transient I/O errors during remount. This is expected and resolves automatically."
+update_task_status "Finalizing stack..." 95 ""
+
+# Refresh mount FIRST (mount_stack.sh handles its own umount-then-mount cycle —
+# the brief umount window inside it is the only unmounted gap, vs the prior
+# code's umount + wipe + mount which kept it down for the full wipe).
+bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH"
+
+# Now safely wipe UPPER (if appropriate). The new consolidated lower is exposed
+# via the just-refreshed mount, so removing files from upper falls through to
+# the new lower (correct content).
 if [ -d "$UPPER_DIR" ]; then
     if [ -n "$UPPER_CHANGED" ]; then
         log "Writes detected in upper layer during bake (e.g. $UPPER_CHANGED). Preserving upper to avoid data loss — next commit will delta them onto the consolidated base."
     else
         find "$UPPER_DIR" -mindepth 1 -delete
-        find "$WORK_DIR" -mindepth 1 -delete
+        # WP #1081: WORK_DIR wipe REMOVED — under the refresh-then-wipe order
+        # the overlay holds a live kernel fd on $WORK_DIR/work; wiping it from
+        # userspace mid-mount breaks copy-up. The wipe was cosmetic kernel-
+        # scratch reclamation; overlayfs clears workdir on its own mount.
         sync
     fi
 fi
-
-bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH"
 
 FINAL_BYTES=$(stat -c '%s' "$PERSIST_PATH/$FINAL_NAME" 2>/dev/null || echo 0)
 lifecycle_log "info" "consolidate_layers" "bash_consolidate_ok" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"final\":\"$FINAL_NAME\",\"bytes\":$FINAL_BYTES}" 2>/dev/null || true

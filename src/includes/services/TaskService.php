@@ -47,9 +47,42 @@ class TaskService {
         if ($res === 0) {
             return ['status' => 'ok', 'message' => 'Persistence successful'];
         } elseif ($res === 2) {
-            return ['status' => 'busy', 'message' => 'Data persisted to Flash, but ZRAM could not be cleared because a terminal session is still active. Please close all terminal tabs for this user to fully reset RAM usage.'];
+            return ['status' => 'busy', 'message' => self::deferReasonMessage('home', $username)];
         } else {
             return ['status' => 'error', 'message' => 'Persistence (Bake) failed. Check debug.log for details.'];
+        }
+    }
+
+    /**
+     * Reads the defer-reason marker that commit_stack.sh / consolidate_layers.sh
+     * write before any exit-2 path (WP #1078). Returns a user-facing message
+     * matched to the actual deferral cause. Unlinks the marker after read so
+     * stale reasons don't bleed across runs. Falls back to the historic "mount
+     * busy" wording when the marker is missing or has an unknown value — that
+     * was the original meaning of exit-2 before WP #935 added defer-eligible
+     * SQLite failures, and remains the most common case (active terminal).
+     */
+    private static function deferReasonMessage(string $type, string $id): string {
+        $sanitisedId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $id);
+        $marker = "/tmp/unraid-aicliagents/.bake_defer_reason_{$type}_{$sanitisedId}";
+        $reason = '';
+        if (is_file($marker)) {
+            $raw = @file_get_contents($marker);
+            if ($raw !== false) {
+                $reason = trim($raw);
+            }
+            @unlink($marker);
+        }
+        switch ($reason) {
+            case 'sqlite_backup_deferred':
+                return 'Data persisted to Flash, but a SQLite database backup deferred (DB locked or backup timed out). The bake will retry automatically on the next cycle.';
+            case 'bake_lock_held':
+                return 'Data persisted to Flash, but a concurrent bake is in flight. The current operation will retry automatically on the next cycle.';
+            case 'bake_landed_during_consolidate':
+                return 'Consolidation deferred: a new delta bake landed mid-flight and took priority. The consolidate will retry automatically on the next cycle.';
+            case 'mount_busy':
+            default:
+                return 'Data persisted to Flash, but ZRAM could not be cleared because a terminal session is still active. Please close all terminal tabs for this user to fully reset RAM usage.';
         }
     }
 

@@ -42,6 +42,11 @@ class CurlInstallSource implements AgentSource {
             LogService::log("CurlInstallSource: missing script_url for $agentId", LogService::LOG_ERROR, "CurlInstallSource");
             return false;
         }
+        // WP #1083: HTTPS-only at validation time. UrlValidator logs the
+        // rejection with the offending URL; we just bail.
+        if (!UrlValidator::requireHttps($scriptUrl, "CurlInstallSource::fetch script_url ($agentId)")) {
+            return false;
+        }
 
         $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
 
@@ -186,6 +191,12 @@ class CurlInstallSource implements AgentSource {
     private static function probeManifestVersion(array $src): ?string {
         $url = (string)($src['manifest_url'] ?? '');
         if ($url === '') return null;
+        // WP #1083: HTTPS-only at validation time. A non-HTTPS manifest could
+        // be MITM'd to lie about a "newer version available", tricking the
+        // user into upgrading to whatever the attacker serves.
+        if (!UrlValidator::requireHttps($url, 'CurlInstallSource::probeManifestVersion manifest_url')) {
+            return null;
+        }
         $json = @shell_exec('curl -fsSL -m 20 ' . escapeshellarg($url) . ' 2>/dev/null');
         if (!is_string($json) || $json === '') return null;
         $data = json_decode($json, true);

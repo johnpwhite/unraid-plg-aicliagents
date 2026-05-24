@@ -55,6 +55,12 @@ fi
 # post-bake consolidate-threshold check).  The kernel releases it on exit
 # (clean or crash) so there is no risk of a stale-lock deadlock.
 
+# WP #1078: clear any stale defer-reason marker from a prior run so the
+# reason read by TaskService.php / StorageMountService.php is THIS bake's
+# truth, never a prior cycle's. Cheap rm at start; each exit-2 path writes
+# the current cause via write_defer_reason; exit-0 leaves no marker.
+rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+
 log() {
     local msg="[$(get_ts)] [INFO] [COMMIT] $1"
     echo "$msg"
@@ -123,18 +129,29 @@ touch "$MARKER"
 sleep 0.05
 
 # WP #935: detect SQLite DBs in UPPER and back them up via Online Backup API
-# BEFORE the wide bake. SQLite's .backup is safe against concurrent writers
-# (page-version-counter detection); the WAL/SHM siblings are excluded from
-# the mksquashfs scan (their content is reconstituted by SQLite from the .db
-# on next open). After the wide bake, the SQLite backups are appended to the
-# layer via `mksquashfs -append`. The bake stays atomic — atomic_write_layer
-# handles tempfile + verify + rename for the wide pass, and the append step
-# happens only after rename has succeeded (worst-case: missing SQLite content
-# in this layer, which the next bake captures cleanly).
+# BEFORE the bake. SQLite's .backup is safe against concurrent writers
+# (page-version-counter detection); the .backup output replaces the live DB
+# via an overlay merge for the bake (see WP #1078). WAL/SHM/journal sidecars
+# are excluded — SQLite reconstitutes them from the .db on next open.
+#
+# WP #1078 (2026-05-24): replaces the prior two-pass `wide-bake + mksquashfs
+# -append <sqlite-stage>` protocol. mksquashfs's append mode does NOT merge
+# new content into existing directories — when the source dir (sqlite stage)
+# has top-level entries that already exist in the target squashfs, mksquashfs
+# RENAMES the new ones with _N suffix (.copilot/ → .copilot_1/). The SQLite
+# backups landed at unreachable paths, silently lost on next mount. The
+# byte-growth defence-in-depth check (8b4c397) caught only the subset
+# where the appended content was small enough that 4 KB block alignment
+# masked the growth — when the append "succeeded" with bigger content, the
+# DBs were stranded at .copilot_1/session-store.db etc., usable by nothing.
+# New path: overlay-merge (lower=UPPER_DIR, upper=sqlite_stage) → single bake.
 SQLITE_DBS=$(detect_sqlite_dbs "$UPPER_DIR" 2>/dev/null)
-SQLITE_DB_COUNT=$(echo "$SQLITE_DBS" | grep -c -v '^$' 2>/dev/null || echo 0)
+# Count non-empty lines. Previous `echo | grep -c -v` produced "0\n0" when
+# SQLITE_DBS was empty (grep -c outputs "0" AND returns exit 1, triggering the
+# `|| echo 0`), breaking the integer comparison below with a benign-but-noisy
+# `[: integer expected` stderr warning. awk handles empty input cleanly.
+SQLITE_DB_COUNT=$(printf '%s\n' "$SQLITE_DBS" | awk 'NF{c++}END{print c+0}')
 SQLITE_STAGE=""
-MKSQUASHFS_EXTRA_EXCLUDES=""
 
 if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
     log "Detected $SQLITE_DB_COUNT SQLite DB(s) in upper — backing up via Online Backup API"
@@ -163,88 +180,41 @@ if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
         log "SQLite backup deferred (DB locked or backup timeout) — exiting 2 to retry"
         lifecycle_log "info" "commit_stack" "bash_bake_deferred" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_backup_failed\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
+        # WP #1078: distinguish defer reasons for the UI (see TaskService.php).
+        write_defer_reason "$TYPE" "$ID" "sqlite_backup_deferred"
         exit 2
     fi
-
-    # Build the -e exclude list for the wide bake.
-    MKSQUASHFS_EXTRA_EXCLUDES=$(build_mksquashfs_sqlite_excludes "$UPPER_DIR" $SQLITE_DBS)
 fi
 
-# 2. Atomic bake (Pass 1 — wide). Excludes SQLite DBs + their WAL/SHM siblings
-# if any were detected. Apps continue writing freely; the bake reads at file
-# level via the merged FS.
-log "Baking changes to $PERSIST_PATH/ (atomic delta, $SQLITE_DB_COUNT SQLite path(s) excluded)..."
-
-# Inject the SQLite excludes into mksquashfs args via the MKSQUASHFS_ARGS env
-# var that atomic_write_layer respects. Compose with the default args.
+# 2. Atomic bake. Two paths:
+#   (a) SQLite DBs detected → overlay-merge bake (single pass; sqlite_stage
+#       shadows the live DBs in UPPER_DIR; WAL/SHM/journal excluded).
+#   (b) No SQLite DBs → direct bake of UPPER_DIR.
+# Apps continue writing freely; the bake reads at file level via the merged FS.
 _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend"
-if [ -n "$MKSQUASHFS_EXTRA_EXCLUDES" ]; then
-    export MKSQUASHFS_ARGS="${MKSQUASHFS_ARGS:-$_AWL_DEFAULT_ARGS} $MKSQUASHFS_EXTRA_EXCLUDES"
-fi
 
 NEW_BASENAME=""
-if ! NEW_BASENAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$UPPER_DIR" "delta"); then
-    error "Atomic bake failed."
-    rm -rf "$SQLITE_STAGE" 2>/dev/null
-    rm -f "$MARKER"
-    lifecycle_log "error" "commit_stack" "bash_bake_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
-    exit 1
-fi
-
-# 2b. Pass 3 (append): if we backed up any SQLite DBs, fold them into the layer
-# at their relative paths.
-#
-# C2 fix (v2026.05.18.08): the append used to mutate the just-renamed final
-# file in place. If mksquashfs failed (disk full, OOM-kill, signal),
-# the on-disk final.sqsh was partially corrupted AND the script fell through
-# to selective_upper_cleanup which wiped the live DBs from UPPER (mtime old,
-# no write fd between SQLite transactions). Net: silent permanent data loss.
-#
-# New protocol: append onto a TEMPFILE copy. Verify the append actually added
-# bytes. Only if everything succeeds, atomic-rename over the final. On ANY
-# failure, delete the tempfile and exit 2 (defer) — leave UPPER intact so the
-# next bake retries. The wide-bake-only final is harmless because the C1
-# SQLite-aware exclusion in selective_upper_cleanup keeps the DBs in UPPER
-# regardless; we delete it anyway to avoid manifest pollution with a layer
-# that's missing SQLite content. Don't run selective cleanup on defer.
-if [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ] && [ "$SQLITE_DB_COUNT" -gt 0 ]; then
-    log "Appending $SQLITE_DB_COUNT SQLite backup(s) to $NEW_BASENAME (via tempfile)"
-    APPEND_ARGS=$(echo "$_AWL_DEFAULT_ARGS" | sed 's/-noappend//g')
-    APPENDING_TMP="$PERSIST_PATH/.${NEW_BASENAME}.appending.$$"
-    PRE_APPEND_BYTES=$(stat -c '%s' "$PERSIST_PATH/$NEW_BASENAME" 2>/dev/null || echo 0)
-
-    _append_fail() {
-        local reason="$1"
-        error "Append failed: $reason — deferring bake (UPPER preserved for retry)"
-        rm -f "$APPENDING_TMP" 2>/dev/null
-        rm -f "$PERSIST_PATH/$NEW_BASENAME" 2>/dev/null
+if [ "$SQLITE_DB_COUNT" -gt 0 ] && [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ]; then
+    log "Baking changes to $PERSIST_PATH/ (atomic delta, overlay-merge with $SQLITE_DB_COUNT SQLite backup(s))..."
+    # shellcheck disable=SC2086 — intentional word-splitting on the DB path list
+    if ! NEW_BASENAME=$(bake_via_overlay_merge "$TYPE" "$ID" "$PERSIST_PATH" "$UPPER_DIR" "$SQLITE_STAGE" "delta" $SQLITE_DBS); then
+        error "Overlay-merge bake failed."
         rm -rf "$SQLITE_STAGE" 2>/dev/null
         rm -f "$MARKER"
-        lifecycle_log "error" "commit_stack" "bash_bake_sqlite_append_failed" \
-            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\",\"reason\":\"$reason\"}" 2>/dev/null || true
-        exit 2
-    }
-
-    if ! cp "$PERSIST_PATH/$NEW_BASENAME" "$APPENDING_TMP" 2>/dev/null; then
-        _append_fail "cp_to_tempfile_failed"
-    fi
-    # shellcheck disable=SC2086
-    if ! mksquashfs "$SQLITE_STAGE" "$APPENDING_TMP" $APPEND_ARGS > /dev/null 2>&1; then
-        _append_fail "mksquashfs_append_returned_nonzero"
-    fi
-    POST_APPEND_BYTES=$(stat -c '%s' "$APPENDING_TMP" 2>/dev/null || echo 0)
-    if [ "$POST_APPEND_BYTES" -le "$PRE_APPEND_BYTES" ]; then
-        # Append "succeeded" but added zero bytes — defence-in-depth check that
-        # would have caught the same-day -e leak bug if it ever recurs.
-        _append_fail "append_zero_bytes_added"
-    fi
-    sync
-    if ! mv -f "$APPENDING_TMP" "$PERSIST_PATH/$NEW_BASENAME" 2>/dev/null; then
-        _append_fail "atomic_rename_appended_failed"
+        lifecycle_log "error" "commit_stack" "bash_bake_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\",\"reason\":\"overlay_merge_bake_failed\"}" 2>/dev/null || true
+        exit 1
     fi
     rm -rf "$SQLITE_STAGE" 2>/dev/null
-    lifecycle_log "info" "commit_stack" "bash_bake_sqlite_appended" \
-        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\",\"db_count\":$SQLITE_DB_COUNT,\"pre_bytes\":$PRE_APPEND_BYTES,\"post_bytes\":$POST_APPEND_BYTES}" 2>/dev/null || true
+    lifecycle_log "info" "commit_stack" "bash_bake_sqlite_merged" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\",\"db_count\":$SQLITE_DB_COUNT}" 2>/dev/null || true
+else
+    log "Baking changes to $PERSIST_PATH/ (atomic delta, no SQLite content)..."
+    if ! NEW_BASENAME=$(atomic_write_layer "$TYPE" "$ID" "$PERSIST_PATH" "$UPPER_DIR" "delta"); then
+        error "Atomic bake failed."
+        rm -f "$MARKER"
+        lifecycle_log "error" "commit_stack" "bash_bake_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 # NEW_SQSH is the final path of the just-written layer
@@ -257,37 +227,59 @@ MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 
 log "Checking for active sessions on $MNT_POINT..."
 
-# Check 1: Any process has open files on the mounted filesystem
+# WP #1081 (2026-05-24): SINGLE fuser check immediately before any destructive op,
+# then refresh FIRST and cleanup SECOND. The prior structure (WP #1080) added a
+# second fuser check before the refresh but left selective_upper_cleanup BETWEEN
+# the two checks — a 10-second window during which an agent could launch, then
+# the cleanup would remove a file from upper that was in the new lower (but the
+# mount wasn't yet refreshed to expose the new lower), causing the file to
+# briefly vanish from the agent's view. Restructuring so cleanup runs AFTER
+# refresh closes that race: removing files from upper after refresh is safe
+# because the new lower (with those files) is exposed.
+#
+# Why refresh-first is safe: the bake already wrote the new sqsh atomically via
+# atomic_write_layer.sh (tempfile + fsync + verify + rename). UPPER is unchanged
+# by the bake. Refreshing the mount picks up the new lower without touching
+# upper. Then cleanup runs on a mount where the new lower is exposed, so any
+# file removed from upper falls through to the new lower (correct content).
+#
+# Residual race: the umount-remount inside mount_stack.sh has a brief window
+# (microseconds) where the mountpoint is unmounted. An agent that launches in
+# that exact window still dies with ENOENT. The fuser check below is the
+# narrow-window mitigation. A full fix would require per-entity locks that
+# agent launches respect; deferred as a future hardening pass.
+SQSH_BYTES=$(stat -c '%s' "$NEW_SQSH" 2>/dev/null || echo 0)
 if fuser -sm "$MNT_POINT" 2>/dev/null; then
-    log "Mount is BUSY (open files detected). Skipping ZRAM flush."
+    log "Mount is BUSY (open files detected). Deferring refresh + ZRAM cleanup."
     log "Data persisted to Flash. ZRAM dirty stats remain until sessions close."
     rm -f "$MARKER"
-    SQSH_BYTES=$(stat -c '%s' "$NEW_SQSH" 2>/dev/null || echo 0)
     lifecycle_log "info" "commit_stack" "bash_bake_busy" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$(basename "$NEW_SQSH")\",\"bytes\":$SQSH_BYTES}" 2>/dev/null || true
+    write_defer_reason "$TYPE" "$ID" "mount_busy"
     exit 2
 fi
 
-# WP #935: Selective UPPER cleanup. Previously we ran an all-or-nothing
-# `find $UPPER -mindepth 1 -delete` gated by "any file newer than marker?".
-# That gate was too coarse — one actively-written file (a SQLite WAL, a log
-# tail) pinned the ENTIRE upper in ZRAM until the agent went idle. The new
-# logic is per-file: a file is wiped only if (a) its mtime is not newer than
-# the marker AND (b) no process holds an open write fd to it. Bytes that
-# satisfy the invariant are reclaimed; the rest stay in ZRAM safely.
+# Refresh mount stack to pick up the new lower layer. Done BEFORE selective
+# cleanup so the new lower is exposed when we start removing files from upper.
+log "Refreshing mount stack..."
+bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH"
+
+# WP #935: Selective UPPER cleanup — now safe to run because the refresh above
+# exposed the new lower. Per-file: a file is wiped only if (a) its mtime is not
+# newer than the marker AND (b) no process holds an open write fd to it. Bytes
+# that satisfy the invariant are reclaimed; the rest stay in ZRAM safely.
 log "Performing selective ZRAM cleanup (per-file mtime + open-fd invariant)..."
 CLEANUP_JSON=$(selective_upper_cleanup "$UPPER_DIR" "$MARKER")
 rm -f "$MARKER"
 
-# Sweep the WORK_DIR — overlayfs whiteout/work files for files we just wiped
-# are no longer needed; safe to remove unconditionally (they're never
-# user data, just kernel-managed overlayfs bookkeeping).
-find "$WORK_DIR" -mindepth 1 -delete 2>/dev/null || true
+# WP #1081: WORK_DIR wipe REMOVED. Previously this swept overlayfs whiteout/work
+# files after cleanup. But under the refresh-then-cleanup order, the overlay is
+# already remounted with a live kernel fd on $WORK_DIR/work; wiping that subdir
+# from userspace mid-mount breaks copy-up (smoke A10 reproduced: fopen on a new
+# file in the merged view returned ENOENT until the next mount cycle). The wipe
+# was purely cosmetic kernel-scratch reclamation — overlayfs clears workdir
+# contents on its OWN mount, so leftover bytes don't accumulate across cycles.
 sync
 
-# Refresh mount stack to pick up the new lower layer.
-log "Refreshing mount stack..."
-bash "$(dirname "$0")/mount_stack.sh" "$TYPE" "$ID" "$PERSIST_PATH"
-SQSH_BYTES=$(stat -c '%s' "$NEW_SQSH" 2>/dev/null || echo 0)
 # Inline the selective-cleanup stats into the bake_ok event for observability.
 # CLEANUP_JSON is a JSON object; splice into the outer event.
 lifecycle_log "info" "commit_stack" "bash_bake_ok" \

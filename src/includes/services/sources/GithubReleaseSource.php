@@ -217,6 +217,11 @@ class GithubReleaseSource implements AgentSource {
 
     private function apiGet(string $path) {
         $url = self::API_BASE . $path;
+        // WP #1083: HTTPS-only validation. API_BASE is hardcoded https today,
+        // but the check defends against future refactor regressions.
+        if (!UrlValidator::requireHttps($url, 'GithubReleaseSource::apiGet')) {
+            return null;
+        }
         $cmd = 'curl -fsSL -m 15 -H "Accept: application/vnd.github+json" -H "User-Agent: unraid-aicliagents" '
              . escapeshellarg($url) . ' 2>/dev/null';
         $out = @shell_exec($cmd);
@@ -234,6 +239,12 @@ class GithubReleaseSource implements AgentSource {
     }
 
     private function download(string $url, string $dest): bool {
+        // WP #1083: validate the asset URL — comes from GitHub API response,
+        // which today returns https URLs, but a compromised release could
+        // theoretically embed a non-HTTPS browser_download_url.
+        if (!UrlValidator::requireHttps($url, 'GithubReleaseSource::download')) {
+            return false;
+        }
         $cmd = 'curl -fL -m 300 -o ' . escapeshellarg($dest) . ' ' . escapeshellarg($url) . ' 2>&1';
         $out = @shell_exec($cmd);
         if (!file_exists($dest) || filesize($dest) === 0) {

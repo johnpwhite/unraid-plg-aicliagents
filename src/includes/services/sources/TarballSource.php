@@ -31,6 +31,10 @@ class TarballSource implements AgentSource {
         }
 
         $url = str_replace(['{version}', '{arch}'], [$version, $this->arch()], $urlTpl);
+        // WP #1083: HTTPS-only validation on the resolved download URL.
+        if (!UrlValidator::requireHttps($url, "TarballSource::fetch url ($agentId)")) {
+            return false;
+        }
         $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
         @mkdir("$agentDir/pkg", 0755, true);
 
@@ -96,6 +100,11 @@ class TarballSource implements AgentSource {
     private function resolveLatest(array $src): ?string {
         $indexUrl = (string)($src['version_index_url'] ?? '');
         if ($indexUrl === '') return null;
+        // WP #1083: HTTPS-only on the version index endpoint. A non-HTTPS
+        // index could be MITM'd to advertise a fake "latest" pointer.
+        if (!UrlValidator::requireHttps($indexUrl, 'TarballSource::resolveLatest version_index_url')) {
+            return null;
+        }
         $cmd = 'curl -fsSL -m 15 ' . escapeshellarg($indexUrl) . ' 2>/dev/null';
         $body = @shell_exec($cmd);
         if (empty($body)) return null;

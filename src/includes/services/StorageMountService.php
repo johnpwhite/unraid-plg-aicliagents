@@ -398,8 +398,18 @@ class StorageMountService {
             LogService::log("Successfully persisted $dirtyMB MB of RAM storage to Flash disk for $type $id.", LogService::LOG_INFO, "StorageMountService");
             LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'bake_ok', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'result' => 0]);
         } elseif ($res === 2) {
-            LogService::log("Successfully backed up $dirtyMB MB to Flash for $id, but RAM flush deferred due to active session.", LogService::LOG_INFO, "StorageMountService");
-            LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'bake_deferred_busy', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB]);
+            // WP #1078: peek (don't consume) the defer-reason marker so the backend
+            // log line names the actual cause. TaskService.php consumes & unlinks
+            // it when building the user-facing message; we only read it here.
+            $sanitisedId = preg_replace('/[^a-zA-Z0-9_-]/', '_', (string)$id);
+            $marker = "/tmp/unraid-aicliagents/.bake_defer_reason_{$type}_{$sanitisedId}";
+            $deferReason = 'unknown';
+            if (is_file($marker)) {
+                $raw = @file_get_contents($marker);
+                if ($raw !== false) $deferReason = trim($raw) ?: 'unknown';
+            }
+            LogService::log("Backed up $dirtyMB MB to Flash for $id, RAM flush deferred (reason=$deferReason).", LogService::LOG_INFO, "StorageMountService");
+            LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'bake_deferred', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'reason' => $deferReason]);
         } else {
             LogService::log("FAILED SquashFS persistence bake for $type $id. Check commit_stack.sh output.", LogService::LOG_ERROR, "StorageMountService");
             LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, 'StorageMountService', 'bake_failed', ['type' => $type, 'id' => $id, 'result' => $res]);

@@ -9,9 +9,39 @@ BIN_DEST="$EMHTTP_DEST/bin"
 mkdir -p "$RUNTIME_BASE"
 mkdir -p "$BIN_DEST"
 
+# WP #1082 (2026-05-24): SHA256 verification for every download. Pinned URLs
+# return the same bytes per upstream contract; a mismatch means the download
+# was corrupted, MITM'd, or upstream re-published. Fail closed — refuse to
+# install a binary we can't verify. Computed once by fetching from upstream;
+# update via tools/refresh-runtime-sha256.sh if a URL is changed.
+#
+# verify_sha256 <file_path> <expected_sha256> <name>
+# Returns 0 on match, exits 1 on mismatch (removes the bad file first).
+verify_sha256() {
+    local _file="$1" _expected="$2" _name="${3:-binary}"
+    if [ ! -f "$_file" ]; then
+        log_fail "$_name: download missing at $_file (cannot verify)."
+        return 1
+    fi
+    local _actual
+    _actual=$(sha256sum "$_file" 2>/dev/null | awk '{print $1}')
+    if [ -z "$_actual" ]; then
+        log_fail "$_name: sha256sum failed on $_file."
+        rm -f "$_file"
+        exit 1
+    fi
+    if [ "$_actual" != "$_expected" ]; then
+        log_fail "$_name: SHA256 mismatch — expected=$_expected actual=$_actual (possible corruption / MITM)."
+        rm -f "$_file"
+        exit 1
+    fi
+    return 0
+}
+
 # --- 1. Node.js Runtime (v22+ required) ---
 NODE_TAR="node-v22.22.0-linux-x64.tar.gz"
 NODE_URL="https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.gz"
+NODE_SHA256="c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744"
 
 USE_SYSTEM_NODE=0
 if command -v node > /dev/null 2>&1; then
@@ -33,6 +63,7 @@ else
         if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
             wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
         fi
+        verify_sha256 "$CONFIG_DIR/$NODE_TAR" "$NODE_SHA256" "Node.js" || exit 1
         TMP_EXTRACT="/tmp/node-extract-$$"
         mkdir -p "$TMP_EXTRACT"
         tar -xf "$CONFIG_DIR/$NODE_TAR" -C "$TMP_EXTRACT" --no-same-owner
@@ -58,6 +89,7 @@ fi
 # --- 2. tmux (v3.6a) ---
 TMUX_TAR="tmux-v3.6a.gz"
 TMUX_URL="https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6a/tmux.linux-amd64.gz"
+TMUX_SHA256="e6e1b346af08e17f47b66571a50fa76ed499e6a1cd000519f5f9e04c4722b7be"
 
 log_step "tmux..."
 # Always remove stale global symlinks first to prevent circular references on upgrades.
@@ -76,6 +108,7 @@ else
         if [ ! -f "$CONFIG_DIR/$TMUX_TAR" ]; then
             wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$TMUX_TAR" "$TMUX_URL"
         fi
+        verify_sha256 "$CONFIG_DIR/$TMUX_TAR" "$TMUX_SHA256" "tmux" || exit 1
         mkdir -p "$RUNTIME_BASE/bin"
         gunzip -c "$CONFIG_DIR/$TMUX_TAR" > "$RUNTIME_BASE/bin/tmux"
         chmod +x "$RUNTIME_BASE/bin/tmux"
@@ -91,11 +124,13 @@ ln -sf "$BIN_DEST/tmux" /usr/local/bin/tmux
 # --- 3. fd and ripgrep ---
 FD_TAR="fd-v10.3.0-x86_64-unknown-linux-musl.tar.gz"
 FD_URL="https://github.com/sharkdp/fd/releases/download/v10.3.0/$FD_TAR"
+FD_SHA256="2b6bfaae8c48f12050813c2ffe1884c61ea26e750d803df9c9114550a314cd14"
 RG_TAR="ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz"
 RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/$RG_TAR"
+RG_SHA256="f84757b07f425fe5cf11d87df6644691c644a5cd2348a2c670894272999d3ba7"
 
 install_tool() {
-    local tar=$1 url=$2 name=$3
+    local tar=$1 url=$2 name=$3 expected_sha=$4
     log_step "$name..."
     if command -v "$name" > /dev/null 2>&1; then
         log_ok "System $name found."
@@ -106,6 +141,7 @@ install_tool() {
             if [ ! -f "$CONFIG_DIR/$tar" ]; then
                 wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$tar" "$url"
             fi
+            verify_sha256 "$CONFIG_DIR/$tar" "$expected_sha" "$name" || exit 1
             local tmp="/tmp/$name-extract-$$"
             mkdir -p "$tmp"
             tar -xf "$CONFIG_DIR/$tar" -C "$tmp" --no-same-owner
@@ -124,8 +160,8 @@ install_tool() {
     [ ! -e "/usr/local/bin/$name" ] && ln -sf "$BIN_DEST/$name" "/usr/local/bin/$name"
 }
 
-install_tool "$FD_TAR" "$FD_URL" "fd"
-install_tool "$RG_TAR" "$RG_URL" "rg"
+install_tool "$FD_TAR" "$FD_URL" "fd" "$FD_SHA256"
+install_tool "$RG_TAR" "$RG_URL" "rg" "$RG_SHA256"
 
 # --- 4. squashfs-tools (mksquashfs/unsquashfs) ---
 # D-304: Ensure SquashFS tools are available for the new storage architecture.
@@ -133,6 +169,7 @@ install_tool "$RG_TAR" "$RG_URL" "rg"
 SQUASH_TAR="squashfs-tools-4.5-x86_64-2.txz"
 SQUASH_URL="https://mirrors.slackware.com/slackware/slackware64-15.0/slackware64/ap/$SQUASH_TAR"
 SQUASH_URL_ALT="https://slackware.uk/slackware/slackware64-15.0/slackware64/ap/$SQUASH_TAR"
+SQUASH_SHA256="1615c7198fe92513fb47326c53a52031448dc9c2b7858382a0d2a1d39bd95b45"
 
 log_step "squashfs-tools..."
 
@@ -166,6 +203,8 @@ else
             rm -f "$CONFIG_DIR/$SQUASH_TAR"
             exit 1
         fi
+
+        verify_sha256 "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_SHA256" "squashfs-tools" || exit 1
 
         TMP_EXTRACT="/tmp/squash-extract-$$"
         mkdir -p "$TMP_EXTRACT"
