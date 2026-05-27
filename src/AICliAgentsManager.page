@@ -1,0 +1,44 @@
+Menu="Utilities"
+Title="AI CLI Agents"
+Icon="assets/icons/google-gemini.png"
+---
+<?php
+/**
+ * <module_context>
+ * Description: Primary Management page for AICliAgents plugin settings and marketplace.
+ * Dependencies: AICliAgentsManager.php, ManagerStyles, ManagerLayout, ManagerConfigTab, ManagerStoreTab, ManagerScripts.
+ * </module_context>
+ */
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+aicli_ensure_init(true);
+
+$config = getAICliConfig();
+$registry = getAICliAgentsRegistry();
+$version = \AICliAgents\Services\ConfigService::getVersion();
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
+$users = getUnraidUsers();
+
+// Include UI Components
+$ui_path = '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/ui';
+require_once "$ui_path/ManagerStyles.php";
+require_once "$ui_path/CommonLogging.php";
+?>
+
+<link type="text/css" rel="stylesheet" href="<?autov('/webGui/styles/jquery.filetree.css')?>">
+<script src="<?autov('/webGui/javascript/jquery.filetree.js')?>"></script>
+
+<?php
+require_once "$ui_path/ManagerLayout.php";
+require_once "$ui_path/ManagerConfigTab.php";
+require_once "$ui_path/ManagerStoreTab.php";
+require_once "$ui_path/ManagerStorageTab.php";
+require_once "$ui_path/ManagerLogTab.php";
+require_once "$ui_path/ManagerGlobalState.php";
+require_once "$ui_path/ManagerLogScripts.php";
+require_once "$ui_path/ManagerStorageScripts.php";
+require_once "$ui_path/ManagerStoreScripts.php";
+require_once "$ui_path/ManagerScripts.php";
+require_once "$ui_path/NchanSubscribers.php";
+?>
+

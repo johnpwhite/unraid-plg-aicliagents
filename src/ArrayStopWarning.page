@@ -1,0 +1,164 @@
+Menu="Buttons"
+---
+<?php
+// Determine if home/agent storage paths are on the array
+$cfgFile = '/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg';
+$homeOnArray = false;
+$agentOnArray = false;
+$homePath = '';
+$agentPath = '';
+if (file_exists($cfgFile)) {
+    $cfg = @parse_ini_file($cfgFile) ?: [];
+    $homePath = $cfg['home_storage_path'] ?? $cfg['persistence_base'] ?? '';
+    $agentPath = $cfg['agent_storage_path'] ?? '';
+    // Check if paths are on array/pool (starts with /mnt/ but not /mnt/storage, /mnt/disks, /mnt/remotes)
+    $classifyScript = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/classify-path.sh';
+    if (file_exists($classifyScript) && !empty($homePath)) {
+        $homeClass = trim(shell_exec("bash " . escapeshellarg($classifyScript) . " " . escapeshellarg($homePath) . " 2>/dev/null") ?: '');
+        $homeOnArray = ($homeClass === 'array' || strpos($homeClass, 'pool:') === 0);
+    }
+    if (file_exists($classifyScript) && !empty($agentPath)) {
+        $agentClass = trim(shell_exec("bash " . escapeshellarg($classifyScript) . " " . escapeshellarg($agentPath) . " 2>/dev/null") ?: '');
+        $agentOnArray = ($agentClass === 'array' || strpos($agentClass, 'pool:') === 0);
+    }
+}
+?>
+<script>
+/**
+ * AI CLI Agents: Global Array Stop Interceptor
+ * Warns the user about active sessions AND storage paths on the array before stopping.
+ */
+(function() {
+    var homeOnArray = <?= json_encode($homeOnArray) ?>;
+    var agentOnArray = <?= json_encode($agentOnArray) ?>;
+    var homePath = <?= json_encode($homePath) ?>;
+    var agentPath = <?= json_encode($agentPath) ?>;
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const checkAndIntercept = () => {
+            const originalStopArray = window.stopArray;
+
+            if (typeof originalStopArray === 'function' && !originalStopArray._aicli_wrapped) {
+                console.log('[AICli] Global Array Stop Interceptor Active');
+
+                window.stopArray = async function(form) {
+                    let sessions = [];
+                    try {
+                        const resp = await fetch('/plugins/unraid-aicliagents/AICliAjax.php?action=get_workspaces&csrf_token=' + encodeURIComponent(window.csrf_token || ''));
+                        const data = await resp.json();
+                        sessions = (data && data.sessions) ? data.sessions : [];
+                    } catch (e) {}
+
+                    // Filter for sessions with workspace paths on array/pool
+                    const arraySessions = sessions.filter(function(s) {
+                        var path = (s.path || '').replace(/\/+/g, '/');
+                        return path.startsWith('/mnt/') && !path.startsWith('/mnt/disks/') && !path.startsWith('/mnt/remotes/');
+                    });
+
+                    var hasImpact = (arraySessions.length > 0 || homeOnArray || agentOnArray);
+
+                    if (!hasImpact) {
+                        // Nothing affected — pass through to default Unraid behavior
+                        originalStopArray(form);
+                        return;
+                    }
+
+                    // Build impact summary
+                    var bodyHtml = '';
+
+                    // Storage warnings
+                    if (homeOnArray || agentOnArray) {
+                        bodyHtml += '<div style="margin-bottom:12px;text-align:left;">';
+                        bodyHtml += '<div style="font-weight:600;margin-bottom:6px;">Storage on array:</div>';
+                        if (homeOnArray) {
+                            bodyHtml += '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:rgba(234,179,8,0.1);border-radius:4px;margin:2px 0;font-size:12px;">'
+                                + '<i class="fa fa-home" style="color:#eab308;width:16px;text-align:center;"></i>'
+                                + '<span>Home Storage: <span style="font-family:monospace;font-size:11px;opacity:0.7;">' + homePath + '</span></span>'
+                                + '</div>';
+                        }
+                        if (agentOnArray) {
+                            bodyHtml += '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:rgba(234,179,8,0.1);border-radius:4px;margin:2px 0;font-size:12px;">'
+                                + '<i class="fa fa-cube" style="color:#eab308;width:16px;text-align:center;"></i>'
+                                + '<span>Agent Storage: <span style="font-family:monospace;font-size:11px;opacity:0.7;">' + agentPath + '</span></span>'
+                                + '</div>';
+                        }
+                        bodyHtml += '<div style="font-size:11px;opacity:0.6;margin-top:4px;">A temporary home will be used while the array is stopped. Any changes made in emergency mode will be discarded when the array restarts.</div>';
+                        bodyHtml += '</div>';
+                    }
+
+                    // Session list
+                    if (arraySessions.length > 0) {
+                        bodyHtml += '<div style="text-align:left;">';
+                        bodyHtml += '<div style="font-weight:600;margin-bottom:6px;">' + arraySessions.length + ' session(s) with workspaces on the array:</div>';
+                        bodyHtml += '<div style="max-height:150px;overflow-y:auto;">';
+                        arraySessions.forEach(function(s) {
+                            bodyHtml += '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:rgba(0,0,0,0.05);border-radius:4px;margin:2px 0;font-size:12px;">'
+                                + '<strong style="color:#ff8c00;min-width:80px;">' + (s.agentId || 'unknown') + '</strong>'
+                                + '<span style="opacity:0.7;font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (s.path || '') + '</span>'
+                                + '</div>';
+                        });
+                        bodyHtml += '</div>';
+                        bodyHtml += '<div style="font-size:11px;opacity:0.6;margin-top:4px;">These sessions will be terminated to prevent unmount locks.</div>';
+                        bodyHtml += '</div>';
+                    }
+
+                    var arraySessionIds = arraySessions.map(function(s) { return s.id; }).join(',');
+
+                    if (typeof window.swal === 'function') {
+                        window.swal({
+                            title: "AI CLI Agents Affected",
+                            text: bodyHtml,
+                            type: "warning",
+                            html: true,
+                            showCancelButton: true,
+                            confirmButtonText: "Proceed & Stop Array",
+                            cancelButtonText: "Cancel",
+                            confirmButtonColor: "#DD6B55"
+                        }, function(confirmed) {
+                            if (confirmed) {
+                                if (arraySessions.length > 0) {
+                                    var csrf = window.csrf_token || '';
+                                    fetch('/plugins/unraid-aicliagents/AICliAjax.php?action=evict_all&ids=' + arraySessionIds + '&csrf_token=' + csrf)
+                                        .then(function() {
+                                            if (!$(form).find('input[name="cmdStop"]').length) {
+                                                $(form).append('<input type="hidden" name="cmdStop" value="Stop">');
+                                            }
+                                            form.submit();
+                                        })
+                                        .catch(function() {
+                                            if (!$(form).find('input[name="cmdStop"]').length) {
+                                                $(form).append('<input type="hidden" name="cmdStop" value="Stop">');
+                                            }
+                                            form.submit();
+                                        });
+                                } else {
+                                    // No sessions to kill, just storage warning acknowledged
+                                    if (!$(form).find('input[name="cmdStop"]').length) {
+                                        $(form).append('<input type="hidden" name="cmdStop" value="Stop">');
+                                    }
+                                    form.submit();
+                                }
+                            }
+                        });
+                    } else {
+                        if (confirm("AI CLI Agents will be affected by stopping the array. Proceed?")) {
+                            if (arraySessions.length > 0) {
+                                var csrf = window.csrf_token || '';
+                                fetch('/plugins/unraid-aicliagents/AICliAjax.php?action=evict_all&ids=' + arraySessionIds + '&csrf_token=' + csrf)
+                                    .finally(function() { form.submit(); });
+                            } else {
+                                form.submit();
+                            }
+                        }
+                    }
+                };
+
+                window.stopArray._aicli_wrapped = true;
+            }
+        };
+
+        checkAndIntercept();
+        setInterval(checkAndIntercept, 5000);
+    });
+})();
+</script>

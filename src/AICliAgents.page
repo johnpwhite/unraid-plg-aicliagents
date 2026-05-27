@@ -1,0 +1,44 @@
+Menu="Tasks"
+Title="AI CLI Agents"
+Icon="assets/icons/google-gemini.png"
+---
+<?php
+/**
+ * <module_context>
+ * Description: Primary Terminal view for AICliAgents plugin.
+ * Dependencies: AICliAgentsManager.php, TerminalStyles, UploadOverlay, TerminalScripts.
+ * </module_context>
+ */
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+aicli_ensure_init(true);
+
+$config = getAICliConfig();
+if ($config['enable_tab'] !== '1') {
+    echo "AICliAgents CLI Tab is disabled in settings.";
+    return;
+}
+
+$version = \AICliAgents\Services\ConfigService::getVersion();
+$var = @parse_ini_file("/var/local/emhttp/var.ini");
+$csrf_token = $var['csrf_token'] ?? '';
+
+// Include UI Components
+$ui_path = '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/ui';
+require_once "$ui_path/TerminalStyles.php";
+require_once "$ui_path/CommonLogging.php";
+?>
+
+<div id="aicliagents-root"></div>
+
+<?php
+require_once "$ui_path/UploadOverlay.php";
+?>
+
+<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= htmlspecialchars($version) ?>">
+<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($version) ?>"></script>
+
+<?php
+require_once "$ui_path/TerminalGlobalState.php";
+require_once "$ui_path/TerminalUploadScripts.php";
+require_once "$ui_path/TerminalScripts.php";
+?>

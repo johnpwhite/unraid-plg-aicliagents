@@ -1,0 +1,25 @@
+{
+  "root": true,
+  "env": {
+    "browser": true,
+    "es2022": true,
+    "jquery": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "extends": ["eslint:recommended"],
+  "globals": {
+    "Chart": "readonly",
+    "swal": "readonly",
+    "module": "readonly"
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "error",
+    "eqeqeq": ["warn", "smart"],
+    "no-console": "off"
+  },
+  "ignorePatterns": ["src/js/chart.min.js", "src/vendor/**"]
+}

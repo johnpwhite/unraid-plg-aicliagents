@@ -1,0 +1,25 @@
+# Enforce LF line endings for shell scripts and PHP regardless of platform
+# autocrlf setting. Unraid's bash and Unraid plugin install pipelines fail
+# hard on CRLF in shell scripts (saved as memory feedback_crlf_blocks_factory).
+# Without this file, Windows clones inherit core.autocrlf=true and ship
+# CRLF-corrupted scripts to the test server.
+
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.php   text eol=lf
+*.page  text eol=lf
+*.plg   text eol=lf
+*.xml   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+
+# Treat shell-like files without extensions (event hooks) as LF too.
+src/event/* text eol=lf
+
+# Keep binaries binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.ico   binary
+*.tar.gz binary
+*.sqsh  binary

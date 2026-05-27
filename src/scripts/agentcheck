@@ -1,0 +1,13 @@
+#!/bin/bash
+# AICliAgents: Background agent version check
+# Runs via cron. Checks all installed agents for available updates
+# and posts Unraid notifications for any found.
+
+PLUGIN_DIR="/usr/local/emhttp/plugins/unraid-aicliagents"
+LOG="/tmp/unraid-aicliagents/debug.log"
+
+# Ensure plugin is installed
+[ -f "$PLUGIN_DIR/src/includes/AICliAgentsManager.php" ] || exit 0
+
+# Run the check + notify via dedicated PHP script
+/usr/bin/php "$PLUGIN_DIR/src/scripts/agentcheck.php" >> "$LOG" 2>&1

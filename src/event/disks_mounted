@@ -1,0 +1,106 @@
+#!/bin/bash
+# AICliAgents: Array Start Restoration
+# Fires when Unraid disks are mounted (array started).
+# Cleans up emergency mode and publishes UI refresh.
+
+EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+LOG="/tmp/unraid-aicliagents/debug.log"
+
+mkdir -p /tmp/unraid-aicliagents
+
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventDisksMounted] $1" >> "$LOG"
+}
+
+log "Array disks mounted. Checking for deferred storage restoration..."
+
+# 1. Clean up emergency mode if active
+if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
+    log "Emergency mode detected. Cleaning up and restoring normal operation..."
+
+    # Kill emergency terminal sessions
+    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
+    # get killed too. PHP/root tmux client sees only /tmp/.../tmux-0/default.
+    if command -v tmux >/dev/null 2>&1; then
+        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+            [ -S "$_sock" ] || continue
+            tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r _sess; do
+                tmux -S "$_sock" kill-session -t "$_sess" >/dev/null 2>&1 || true
+            done
+        done
+    fi
+    # Bug #533: replace bare pkill with cmdline-anchored kill. The pgrep pattern
+    # matches the session-id substrings (aicliterm- / temp-terminal-) which are
+    # plugin-specific in practice, but per memory feedback_kill_patterns_vm_safety
+    # we must also verify the process's full cmdline contains this plugin's
+    # install path before signalling. Belt-and-braces: also exclude hypervisor
+    # exe paths (qemu/libvirt/init) so a future cmdline rename can't cause a
+    # repeat of the VM-killed incident.
+    for _pid in $(pgrep -f 'ttyd.*(aicliterm|temp-terminal)-' 2>/dev/null); do
+        _cmdline="$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || echo '')"
+        case "$_cmdline" in *"unraid-aicliagents"*) ;; *) continue ;; esac
+        case "$(readlink "/proc/$_pid/exe" 2>/dev/null)" in
+            */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
+        esac
+        kill -9 "$_pid" >/dev/null 2>&1 || true
+    done
+
+    # Remove emergency home and flag
+    rm -rf /tmp/unraid-aicliagents/emergency_home
+    rm -f /tmp/unraid-aicliagents/.emergency_mode
+
+    # Remove any symlinks to emergency home in work dirs
+    for link in /tmp/unraid-aicliagents/work/*/home; do
+        [ -L "$link" ] && rm -f "$link"
+    done
+
+    # Remove emergency-installed agents from RAM
+    AGENT_BASE="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
+    for flag in /tmp/unraid-aicliagents/.emergency_agent_*; do
+        [ -f "$flag" ] || continue
+        eid="${flag##*.emergency_agent_}"
+        edir="$AGENT_BASE/$eid"
+        if [ -d "$edir" ] && ! mountpoint -q "$edir" 2>/dev/null; then
+            rm -rf "$edir"
+            log "Removed emergency RAM agent: $eid"
+        fi
+        rm -f "$flag"
+    done
+
+    log "Emergency mode cleaned up."
+fi
+
+# 2. Publish UI refresh via PHP (config-aware storage status) and run an
+# autolaunch sweep so workspaces flagged for auto-launch are running before
+# the user opens the AICliAgents tab. Bug #521: previously the page-load
+# trigger was the only post-array-start path, so users always paid the start
+# latency on their first click.
+if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
+    timeout 60 /usr/bin/php -r "
+        require_once '$EMHTTP_DEST/src/includes/AICliAgentsManager.php';
+        \$config = getAICliConfig();
+        \$persistPath = \$config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
+        if (\AICliAgents\Services\StorageMountService::isPathAvailable(\$persistPath)) {
+            aicli_log('disks_mounted: Storage path available. Notifying UI.', AICLI_LOG_INFO, 'EventDisks');
+            \AICliAgents\Services\NchanService::publish('storage_status', aicli_get_storage_status());
+            // Bug #1065: mount every installed agent's overlay so the binaries are
+            // visible to the host's terminal immediately after array start — not
+            // just to terminals opened through the plugin's UI. Without this, a
+            // user typing 'claude' in Unraid's main Terminal post-reboot hits
+            // 'No such file or directory' because the overlay was never mounted.
+            \AICliAgents\Services\StorageMountService::mountAllInstalledAgents();
+            // Bug #1067: array start is a natural reconciliation point -- kill
+            // any ttyd processes that survived an unclean exit or failed launch
+            // so the next page render sees an accurate session list.
+            \AICliAgents\Services\ProcessManager::sweepOrphanSessions(0);
+            \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'array_started');
+        } else {
+            aicli_log('disks_mounted: Storage path still not available. Will retry on next access.', AICLI_LOG_WARN, 'EventDisks');
+        }
+    " >> "$LOG" 2>&1
+fi
+
+log "Restoration sequence complete."

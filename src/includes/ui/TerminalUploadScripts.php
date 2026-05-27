@@ -1,0 +1,179 @@
+<?php
+/**
+ * <module_context>
+ * Description: JavaScript logic for file uploads (paste, drag-drop, chunks) in AICliAgents Terminal.
+ * Dependencies: jQuery, SweetAlert, $csrf_token.
+ * Constraints: Atomic UI fragment.
+ * </module_context>
+ */
+?>
+<script>
+(function() {
+    const overlay = $('#upload-overlay');
+    const dropZone = $('#drop-zone');
+    const confirmBtn = $('#confirm-upload');
+    const filenameInput = $('#upload-filename');
+    const previewArea = $('#upload-preview');
+    let pendingBlob = null;
+
+    function logUpload(msg, level) {
+        console.log('[AICli-Upload] ' + msg);
+        if (typeof window.aicli_log_to_server === 'function') {
+            window.aicli_log_to_server('[Upload] ' + msg, level || 2);
+        }
+    }
+
+    function showUpload(targetPath) {
+        window._aicli_target_path = targetPath || localStorage.getItem('aicli_last_path') || '/mnt/user';
+        $('#upload-target-info').text(window._aicli_target_path);
+        overlay.css('display', 'flex').hide().fadeIn(200);
+        logUpload('Overlay opened. Target: ' + window._aicli_target_path, 3);
+    }
+
+    function hideUpload() {
+        overlay.fadeOut(200, function() {
+            previewArea.hide(); dropZone.show(); confirmBtn.hide();
+            pendingBlob = null; $('#upload-progress-container').hide(); $('#upload-bar').css('width', '0%');
+            $('#file-input').val('');
+        });
+    }
+
+    $('#cancel-upload').on('click', function() { logUpload('Upload cancelled by user.', 3); hideUpload(); });
+
+    document.addEventListener('paste', function(e) {
+        if (e.target.id === 'upload-filename') return;
+        const items = (e.clipboardData || window.clipboardData).items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1 || items[i].kind === 'file') {
+                const blob = items[i].getAsFile();
+                if (blob) {
+                    e.preventDefault(); e.stopPropagation();
+                    pendingBlob = blob;
+                    logUpload('Paste detected: ' + (blob.name || 'clipboard image') + ' (' + blob.size + ' bytes, ' + blob.type + ')');
+                    handleInputFile(blob, true, window._aicli_target_path);
+                    break;
+                }
+            }
+        }
+    }, true);
+
+    $(window).on('dragover', function(e) { e.preventDefault(); e.stopPropagation(); });
+    $(window).on('dragenter', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        if (e.originalEvent.dataTransfer && e.originalEvent.dataTransfer.types.includes('Files')) showUpload();
+    });
+
+    dropZone.on('dragover', function() { $(this).addClass('dragover'); return false; })
+            .on('dragleave', function() { $(this).removeClass('dragover'); return false; })
+            .on('drop', function(e) {
+                $(this).removeClass('dragover');
+                const files = e.originalEvent.dataTransfer.files;
+                if (files.length > 0) {
+                    pendingBlob = files[0];
+                    logUpload('Drop detected: ' + pendingBlob.name + ' (' + pendingBlob.size + ' bytes)');
+                    handleInputFile(pendingBlob, false);
+                }
+                return false;
+            });
+
+    $('#file-input').on('change', function() {
+        if (this.files.length > 0) {
+            pendingBlob = this.files[0];
+            logUpload('File selected: ' + pendingBlob.name + ' (' + pendingBlob.size + ' bytes)');
+            handleInputFile(pendingBlob, false);
+            // Reset so re-selecting the same file fires change again
+            $(this).val('');
+        }
+    });
+
+    function handleInputFile(blob, isPaste, path) {
+        showUpload(path); dropZone.hide(); previewArea.show();
+        let name = blob.name || ('pasted_image_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.png');
+        filenameInput.val(name); confirmBtn.show().text('Confirm Upload');
+        if (blob.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = (e) => $('#paste-preview-img').attr('src', e.target.result).show();
+            reader.readAsDataURL(blob);
+        } else $('#paste-preview-img').hide();
+    }
+
+    confirmBtn.on('click', async function() {
+        if (!pendingBlob) { logUpload('Confirm clicked but no pending file.', 1); return; }
+        var fname = filenameInput.val();
+        var path = window._aicli_target_path;
+        logUpload('Upload starting: ' + fname + ' (' + pendingBlob.size + ' bytes) to ' + path);
+
+        $('#upload-progress-container').show(); $(this).prop('disabled', true).text('Uploading...');
+        try {
+            if (pendingBlob.size === 0) throw new Error('File is empty (0 bytes).');
+            await uploadFileInChunks(pendingBlob, fname, path);
+            logUpload('Upload complete: ' + fname);
+            hideUpload();
+            setTimeout(function() {
+                swal({ title: "Uploaded!", text: fname + " saved to workspace.", type: "success", timer: 2000, showConfirmButton: false });
+            }, 300);
+        } catch (err) {
+            logUpload('Upload FAILED: ' + (err.message || err), 0);
+            hideUpload();
+            setTimeout(function() { swal("Upload Failed", err.message || 'Unknown error', "error"); }, 300);
+        }
+        finally { $(this).prop('disabled', false).text('Confirm Upload'); }
+    });
+
+    async function uploadFileInChunks(file, filename, path) {
+        if (!path) throw new Error('No workspace path set. Open a workspace first.');
+        if (!filename) throw new Error('No filename specified.');
+
+        // D-405: Unraid nginx hangs all POST requests (fetch and XHR) to standalone PHP scripts.
+        // Use base64 encoding via jQuery $.ajax (which Unraid uses for its own file operations).
+        logUpload('Reading file as base64 (' + file.size + ' bytes)...', 3);
+
+        var b64data = await new Promise(function(resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function() {
+                var result = reader.result;
+                // Strip Data URL prefix if present
+                var idx = result.indexOf(',');
+                resolve(idx >= 0 ? result.substring(idx + 1) : result);
+            };
+            reader.onerror = function() { reject(new Error('Failed to read file')); };
+            reader.readAsDataURL(file);
+        });
+
+        logUpload('Base64 encoded: ' + b64data.length + ' chars. Sending via $.ajax...', 3);
+        $('#upload-bar').css('width', '50%');
+
+        var res = await new Promise(function(resolve, reject) {
+            $.ajax({
+                url: '/plugins/unraid-aicliagents/AICliAjax.php?action=save_file&csrf_token=' + encodeURIComponent(window.csrf_token),
+                method: 'POST',
+                data: {
+                    csrf_token: window.csrf_token,
+                    path: path,
+                    filename: filename,
+                    filedata: b64data
+                },
+                dataType: 'json',
+                timeout: 60000,
+                success: function(data) {
+                    logUpload('Server response: ' + JSON.stringify(data), 3);
+                    resolve(data);
+                },
+                error: function(xhr, status, err) {
+                    logUpload('$.ajax error: ' + status + ' / ' + err + ' / HTTP ' + xhr.status, 0);
+                    reject(new Error('Upload failed: ' + (err || status)));
+                }
+            });
+        });
+
+        if (res.status !== 'ok') {
+            logUpload('Server rejected: ' + JSON.stringify(res), 0);
+            throw new Error(res.message || 'Server rejected the upload');
+        }
+        $('#upload-bar').css('width', '100%');
+    }
+
+    window.aicli_trigger_upload = showUpload;
+    window.aicli_handle_file = handleInputFile;
+})();
+</script>

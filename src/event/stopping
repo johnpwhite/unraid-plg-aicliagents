@@ -1,0 +1,280 @@
+#!/bin/bash
+# AICliAgents: Array Stop / Shutdown Handler
+# Fired by Unraid when the array is being stopped or the server is shutting down.
+#
+# Three scenarios:
+# 1. Storage ON array/pool → full stop (persist + kill all + unmount + emergency flag)
+# 2. Storage on Flash, SERVER shutting down → full stop (persist + kill all + unmount)
+# 3. Storage on Flash, ARRAY stopping → selective: kill only sessions whose workspace
+#    paths are on the array/pool. Leave sessions on /root, /boot, /tmp running.
+#
+# All path classification uses classify-path.sh (no PHP dependency during shutdown).
+
+EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+CLASSIFY="$EMHTTP_DEST/src/scripts/storage/classify-path.sh"
+LOG="/tmp/unraid-aicliagents/debug.log"
+CONFIG="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+
+# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
+export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+
+mkdir -p /tmp/unraid-aicliagents
+
+# Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventStopping] $1" >> "$LOG"
+}
+warn() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] [EventStopping] $1" >> "$LOG"
+}
+
+# Classify a path using the shared bash utility
+classify() {
+    if [ -f "$CLASSIFY" ]; then
+        bash "$CLASSIFY" "$1" 2>/dev/null
+    else
+        # Minimal fallback if script not deployed yet
+        case "$1" in
+            /boot|/boot/*) echo "flash" ;;
+            /tmp|/tmp/*) echo "ram" ;;
+            /mnt/user/*|/mnt/user0/*) echo "array" ;;
+            /mnt/disk[0-9]*) echo "array" ;;
+            /mnt/disks/*|/mnt/remotes/*) echo "unassigned" ;;
+            *) echo "unknown" ;;
+        esac
+    fi
+}
+
+# Derive the shutdown bake budget from Unraid's own "Shutdown time-out"
+# (Settings → Disk Settings) so it tracks whatever the user has configured.
+# var.ini holds the live runtime value (reflects a change without a reboot);
+# disk.cfg is the persistent fallback; 90 is Unraid's default. We subtract a
+# 15s headroom so the bake + unmount finish INSIDE Unraid's overall shutdown
+# wall — overrunning it makes Unraid declare an unclean shutdown.
+_read_shutdown_budget() {
+    local raw="" src
+    for src in /var/local/emhttp/var.ini /boot/config/disk.cfg; do
+        [ -f "$src" ] || continue
+        raw=$(grep -oE '^shutdownTimeout="[0-9]+"' "$src" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        [ -n "$raw" ] && break
+    done
+    [ -z "$raw" ] && raw=90
+    local budget=$(( raw - 15 ))
+    [ "$budget" -lt 30 ] && budget=30
+    echo "$budget"
+}
+
+# Check if a classification means the path depends on array/pool stopping
+needs_array() {
+    local cls="$1"
+    case "$cls" in
+        array|pool:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Publish storage status change to Nchan so the React UI updates in real-time
+nchan_notify() {
+    local home_avail="${1:-true}"
+    local agents_avail="${2:-true}"
+    local emergency="${3:-false}"
+    # Unraid's Nchan publisher lives on the internal Unix socket server
+    curl -s -X POST --unix-socket /var/run/nginx.socket \
+        "http://localhost/pub/aicli_storage_status?buffer_length=1" \
+        -H "Content-Type: application/json" \
+        -d "{\"home_available\":$home_avail,\"agents_available\":$agents_avail,\"emergency_mode\":$emergency}" \
+        --max-time 2 >/dev/null 2>&1 || true
+}
+
+log "Shutdown/Array stop detected."
+
+# Bake-only shutdown: the shutdown path ONLY ever bakes (delta, append-only) —
+# it never consolidates. The supervisor is the only thing that can start a
+# consolidation, so it is stopped FIRST (below), before any shutdown bake runs.
+# (This block previously asked the supervisor to flush every entity, which
+# could cascade into an auto-consolidate mid-shutdown via the post-bake
+# layer-count trigger.) The actual home bake is done by stop-plugin.sh.
+SUPERVISOR_PIDFILE="/var/run/aicli-supervisor.pid"
+SUPERVISOR_SCRIPT="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh"
+
+# Budget for the whole stop sequence, derived from Unraid's Shutdown time-out.
+SHUTDOWN_BUDGET=$(_read_shutdown_budget)
+log "Shutdown bake budget: ${SHUTDOWN_BUDGET}s (from Unraid Shutdown time-out)."
+lifecycle_log "info" "event_stopping" "shutdown_budget" "{\"budget_s\":$SHUTDOWN_BUDGET}" 2>/dev/null || true
+
+if [ -f "$SUPERVISOR_PIDFILE" ]; then
+    SUPERVISOR_PID="$(cat "$SUPERVISOR_PIDFILE" 2>/dev/null || echo 0)"
+    if [ "$SUPERVISOR_PID" -gt 0 ] 2>/dev/null; then
+        # Verify the PID actually belongs to the supervisor script (not a recycled PID)
+        SUPERVISOR_CMDLINE="$(tr '\0' ' ' < "/proc/$SUPERVISOR_PID/cmdline" 2>/dev/null || echo '')"
+        if echo "$SUPERVISOR_CMDLINE" | grep -qF "$SUPERVISOR_SCRIPT"; then
+            log "Sending TERM to supervisor (pid $SUPERVISOR_PID)..."
+            kill -TERM "$SUPERVISOR_PID" 2>/dev/null || true
+        else
+            log "Supervisor pidfile present but PID $SUPERVISOR_PID does not own the script (stale). Removing."
+            rm -f "$SUPERVISOR_PIDFILE" 2>/dev/null || true
+        fi
+    fi
+fi
+
+# Determine storage classification
+# Fix C: use agent_persist_path() from canonical resolver (not a bare grep on agent_storage_path).
+PERSIST_PATH=$(agent_persist_path 2>/dev/null)
+[ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
+STORAGE_CLASS=$(classify "$PERSIST_PATH")
+log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
+lifecycle_log "info" "event_stopping" "shutdown_event_received" "{\"storage_class\":\"$STORAGE_CLASS\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
+
+# Check if this is a full server shutdown vs just array stop.
+# Bug #539: pgrep alone misses shutdowns initiated via systemd or the WebGUI
+# AJAX endpoint (powerdown calls into rc.local and friends, not /sbin/shutdown).
+# Cross-check runlevel and systemd state so the emergency_mode flag is set
+# correctly in both code paths.
+IS_SHUTDOWN=false
+if pgrep -f '(/sbin/shutdown|/sbin/reboot|/sbin/poweroff|/sbin/halt|/usr/sbin/powerdown)' >/dev/null 2>&1; then
+    IS_SHUTDOWN=true
+fi
+if [ "$IS_SHUTDOWN" = false ] && command -v runlevel >/dev/null 2>&1; then
+    # Runlevels 0 (halt) and 6 (reboot) signal shutdown intent regardless of
+    # which binary triggered the transition.
+    _RL="$(runlevel 2>/dev/null | awk '{print $2}')"
+    case "$_RL" in 0|6) IS_SHUTDOWN=true ;; esac
+fi
+if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
+    # systemd-managed boxes (rare on Unraid 7.2 but possible on derivatives).
+    case "$(systemctl is-system-running 2>/dev/null)" in
+        stopping|halting) IS_SHUTDOWN=true ;;
+    esac
+fi
+
+# Helper: run the full stop script, bounded by the Unraid-derived budget.
+run_full_stop() {
+    timeout "$SHUTDOWN_BUDGET" bash -c '
+        EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+        STOP_SCRIPT="$EMHTTP_DEST/scripts/user/stop-plugin.sh"
+        [ ! -f "$STOP_SCRIPT" ] && STOP_SCRIPT="$EMHTTP_DEST/src/scripts/user/stop-plugin.sh"
+        [ -f "$STOP_SCRIPT" ] && bash "$STOP_SCRIPT"
+    ' 2>/dev/null
+    [ $? -eq 124 ] && warn "Stop sequence timed out after ${SHUTDOWN_BUDGET}s."
+}
+
+if needs_array "$STORAGE_CLASS"; then
+    # ── Scenario 1: Storage on array/pool — full stop ──
+    log "Storage depends on array/pool. Running full stop + persist..."
+    nchan_notify false false false
+    run_full_stop
+
+    if [ "$IS_SHUTDOWN" = false ]; then
+        touch /tmp/unraid-aicliagents/.emergency_mode
+        log "Emergency mode flag set (array stopped, server still running)."
+        # Notify UI: home gone, agents gone (both on array), emergency mode active
+        nchan_notify false false true
+    fi
+
+elif [ "$IS_SHUTDOWN" = true ]; then
+    # ── Scenario 2: Flash storage, server shutting down — full stop ──
+    log "Server shutdown detected. Running full stop + persist..."
+    run_full_stop
+
+else
+    # ── Scenario 3: Flash storage, array stopping — selective session kill ──
+    log "Storage on Flash. Selectively stopping sessions with array/pool workspace paths..."
+    # Storage remains available (on Flash), just notify UI to refresh session state
+    nchan_notify true true false
+
+    KILLED=0
+
+    if command -v tmux >/dev/null 2>&1; then
+        # Non-root audit: iterate every per-uid tmux socket. PHP/root tmux
+        # sees only its own server; non-root agents live under tmux-<uid>/.
+        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+            [ -S "$_sock" ] || continue
+            while IFS= read -r sess; do
+                [ -z "$sess" ] && continue
+
+                # Get CWD of all panes in this session
+                NEEDS_KILL=false
+                KILL_REASON=""
+                while IFS= read -r cwd; do
+                    [ -z "$cwd" ] && continue
+                    CWD_CLASS=$(classify "$cwd")
+                    if needs_array "$CWD_CLASS"; then
+                        NEEDS_KILL=true
+                        KILL_REASON="$cwd ($CWD_CLASS)"
+                        break
+                    fi
+                done < <(tmux -S "$_sock" list-panes -t "$sess" -F '#{pane_current_path}' 2>/dev/null)
+
+                if [ "$NEEDS_KILL" = true ]; then
+                    log "  Killing session $sess — workspace: $KILL_REASON"
+                    # Extract session ID suffix for ttyd cleanup
+                    SESS_ID=$(echo "$sess" | sed 's/aicli-agent-[^-]*-//')
+                    tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
+                    pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
+                    KILLED=$((KILLED + 1))
+                else
+                    log "  Keeping session $sess (not on array/pool)"
+                fi
+            done < <(tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep '^aicli-agent-')
+        done
+    fi
+
+    # Wait for child processes to exit after tmux kill
+    if [ "$KILLED" -gt 0 ]; then
+        sleep 2
+
+        # Final sweep: kill any orphaned aicli-shell/node that survived tmux kill
+        # Only kill processes whose CWD is on the array (check /proc/PID/cwd)
+        for pid in $(pgrep -f 'aicli-run-|aicli-shell' 2>/dev/null); do
+            PID_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
+            PID_CLASS=$(classify "$PID_CWD")
+            if needs_array "$PID_CLASS"; then
+                kill -9 "$pid" 2>/dev/null
+            fi
+        done
+
+        # Persist home to Flash via atomic writer (finding I/E/F closed).
+        # Bug #538: Source atomic_write_layer.sh here — distinguish "script
+        # missing" from "function fails" so the operator can tell from the log
+        # which failure path occurred. Previously || true masked the difference.
+        EMHTTP_DEST_STOP="/usr/local/emhttp/plugins/unraid-aicliagents"
+        AWL_SCRIPT="$EMHTTP_DEST_STOP/src/scripts/storage/atomic_write_layer.sh"
+        if ! declare -f atomic_write_layer >/dev/null 2>&1; then
+            if [ ! -f "$AWL_SCRIPT" ]; then
+                warn "atomic_write_layer.sh not deployed at $AWL_SCRIPT — home delta bake will be skipped this cycle."
+                lifecycle_log "warn" "event_stopping" "awl_missing" "{\"path\":\"$AWL_SCRIPT\"}" 2>/dev/null || true
+            elif ! source "$AWL_SCRIPT" 2>/dev/null; then
+                warn "atomic_write_layer.sh failed to source — home delta bake will be skipped this cycle."
+                lifecycle_log "warn" "event_stopping" "awl_source_failed" "{\"path\":\"$AWL_SCRIPT\"}" 2>/dev/null || true
+            fi
+        fi
+        ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
+        if [ -d "$ZRAM_UPPER/homes" ]; then
+            for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
+                [ -d "$upper_dir" ] || continue
+                [ -z "$(ls -A "$upper_dir" 2>/dev/null)" ] && continue
+                user=$(basename "$(dirname "$upper_dir")")
+                HOME_PERSIST=$(home_persist_path "$user" 2>/dev/null || echo "")
+                [ -z "$HOME_PERSIST" ] && HOME_PERSIST="$PERSIST_PATH"
+                [ -d "$HOME_PERSIST" ] || continue
+                log "  Baking home delta for $user..."
+                lifecycle_log "info" "event_stopping" "shutdown_bake_attempted" "{\"user\":\"$user\"}" 2>/dev/null || true
+                DELTA_NAME=$(atomic_write_layer "home" "$user" "$HOME_PERSIST" "$upper_dir" "delta" 2>/dev/null)
+                if [ -n "$DELTA_NAME" ]; then
+                    log "  Saved $DELTA_NAME for $user."
+                else
+                    warn "  Home delta bake failed for $user."
+                fi
+            done
+        fi
+
+        log "Selectively stopped $KILLED session(s)."
+    else
+        log "No sessions have array/pool workspace paths. Nothing to do."
+    fi
+fi
+
+lifecycle_log "info" "event_stopping" "shutdown_complete" "{\"storage_class\":\"$STORAGE_CLASS\"}" 2>/dev/null || true
+log "Event handler complete."
