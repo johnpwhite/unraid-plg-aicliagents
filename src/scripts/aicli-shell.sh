@@ -463,7 +463,20 @@ while true; do
              "$HOME_DIR/.config/${AGENT_ID}" \
              "$HOME_DIR/.local/share/${AGENT_ID}" \
              2>/dev/null
-    
+
+    # WP #1227: Antigravity CLI (agy) unconditionally tries to open a log file
+    # in $HOME_DIR/.gemini/antigravity-cli/log/ at startup. When the directory
+    # is absent, agy's log-redirect fails and Go's glog library falls back to
+    # writing verbose info messages directly to stderr — which is the same TTY
+    # as the terminal, so log lines interleave with TUI rendering and corrupt
+    # the display. Pre-creating the directory here (on every loop iteration,
+    # same as the .cache/.config/.local dirs above) ensures the redirect
+    # succeeds on first launch and after any bake/snapshot cycle that wipes the
+    # delta layer.
+    if [[ "$AGENT_ID" == "antigravity-cli" ]]; then
+        mkdir -p "$HOME_DIR/.gemini/antigravity-cli/log" 2>/dev/null
+    fi
+
     # Fix A: Re-resolve the effective binary on every relaunch iteration.
     # An in-place agent upgrade (e.g. claude-code 2.1.x dropping cli.js and
     # adding bin/claude.exe) leaves frozen_binary pointing at the deleted file.

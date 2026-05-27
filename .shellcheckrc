@@ -1,5 +1,0 @@
-# ShellCheck configuration for AICliAgents
-# SC1017: Carriage return errors (Windows line endings — normalized by tar on deploy)
-disable=SC1017
-# SC2086: Double-quote to prevent globbing — many intentional word-splitting patterns
-# SC2046: Quote this to prevent word splitting — same reason
