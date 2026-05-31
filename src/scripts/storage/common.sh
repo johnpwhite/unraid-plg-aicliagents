@@ -495,6 +495,36 @@ selective_upper_cleanup() {
         printf '%s\n' "${_sqlite_db}-journal" >> "$tmpdir/excludes"
     done < <(detect_sqlite_dbs "$upper" 2>/dev/null)
 
+    # (b1.6) Chat/session-store defence-in-depth (DATA-LOSS guard).
+    # Agent conversation history (Claude .jsonl transcripts, Antigravity .pb
+    # conversations + index, gemini chat logs, factory/codex/pi sessions, kilo/
+    # opencode prompt history) is durable USER state — the same class as SQLite
+    # above and the .gemini/tmp chats WP #931 carved out of the prune. Once an
+    # agent closes the file it has no open write fd, and with mtime <= marker it
+    # would otherwise be admitted to the wipe set. If the just-run bake/consolidate
+    # failed to durably capture it first (stale lowerdir, or a busy-cooldown
+    # skipped/deferred bake), reclaiming it is PERMANENT loss — the bug that
+    # destroyed a user's Claude + Antigravity conversations across an upgrade.
+    # Protect these paths unconditionally; a never-reclaimed conversation merely
+    # lingers in zram until a later bake captures it (KB-sized; negligible).
+    # NOTE: when adding a new agent, add its conversation/session store here.
+    while IFS= read -r _chat_f; do
+        [ -n "$_chat_f" ] && printf '%s\n' "$_chat_f" >> "$tmpdir/excludes"
+    done < <(find "$upper" -type f \( \
+        -path '*/.claude/projects/*' -o \
+        -path '*/.claude/sessions/*' -o \
+        -path '*/.claude/history.jsonl' -o \
+        -path '*/.gemini/antigravity-cli/conversations/*' -o \
+        -path '*/.gemini/antigravity-cli/cache/last_conversations.json' -o \
+        -path '*/.gemini/tmp/*/chats/*' -o \
+        -path '*/.gemini/projects.json' -o \
+        -path '*/.gemini/config/projects/*' -o \
+        -path '*/.factory/sessions/*' -o \
+        -path '*/.codex/sessions/*' -o \
+        -path '*/.pi/agent/sessions/*' -o \
+        -path '*/.local/state/*/prompt-history.jsonl' \
+        \) 2>/dev/null)
+
     # (b2) Open-fd exclusion: files with an open write fd anywhere in /proc.
     # Walk /proc/*/fd, resolve each symlink, check fdinfo flags for write access.
     # flags is an octal string ending in 1 (O_WRONLY) or 2 (O_RDWR) means write.

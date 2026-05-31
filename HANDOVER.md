@@ -5,7 +5,21 @@ The quiescent-workspace-lifecycle is **COMPLETE**. The two remaining items —
 **#6 force-reclaim on pressure/ceiling + 5-min countdown (WP #1262)** and
 **#7 launch⇄mount-op lock (WP #1263)** — are **BUILT, L1/L2-green, and TESTED ON
 FACTORY**: published **v2026.05.31.03**, deployed to .4, smoke-verified, and
-live-verified end-to-end on .4. Storefront NOT pushed (awaiting explicit go).
+live-verified end-to-end on .4.
+
+**STOREFRONT: PUBLISHED.** v2026.05.31.06 is live on public GitHub (CA store) as of
+2026-05-31. The release bundles the #6/#7 lifecycle work plus three follow-up fixes
+shipped to factory after .03 and now public:
+- **v2026.05.31.04** — debug/log console restored to always-black (the v2026.05.29.02
+  theme audit had themed it → green-on-white on light themes). Guarded.
+- **v2026.05.31.05** — agent-upgrade "keep a copy" backup now defaults OFF (opt-in);
+  the toggle pulses a heartbeat glow while unticked so it's noticed. Guarded.
+- **v2026.05.31.06** — SSH copy-connect chip command now inlines
+  `TMUX_TMPDIR=/tmp/unraid-aicliagents/tmux` so the attach hits the plugin's private
+  tmux socket (was reporting "no sessions"). Bug #1043 guard extended to cover it.
+The public changelog was net-off'd (theme-improve line added; #1246 excluded as a
+factory-loop-internal defect) — see CHANGES.public.xml. NOTE: a storefront publish
+fails if the Bash shell cwd is inside ui-build (Windows handle lock) — cd out first.
 
 ## What SHIPPED in v2026.05.31.03
 

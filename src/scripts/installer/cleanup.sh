@@ -199,9 +199,15 @@ if [ "$MIGRATION_NEEDED" = "0" ] && [ "$UPGRADE_MODE" = "1" ]; then
             PERSIST_DIR=$(home_persist_path "$user" 2>/dev/null || echo "")
             [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/persistence"
             log_status "      [hot-swap] Pre-upgrade bake: home/$user -> $PERSIST_DIR"
-            # Failures (exit 2 defer, exit 1 hard) are non-blocking — upgrade
-            # proceeds either way. Worst case is a one-bake-cycle data lag.
-            bash "$COMMIT_STACK" "home" "$user" "$PERSIST_DIR" >/dev/null 2>&1 \
+            # DATA-LOSS fix: AICLI_BUSY_BAKE_COOLDOWN_SEC=0 forces this pre-upgrade
+            # flush to run even if a session is live AND within the busy-bake
+            # cooldown window — otherwise the bake is SKIPPED (exit 2) and the
+            # upgrade proceeds with the ZRAM upper un-flushed, losing any
+            # conversation data written since the last bake (the upgrade that ate
+            # a user's Claude/Antigravity history). The bake persists the delta;
+            # only the reclaim still defers while busy (harmless — data is on Flash).
+            # exit 2/1 stay non-blocking so the upgrade never wedges.
+            AICLI_BUSY_BAKE_COOLDOWN_SEC=0 bash "$COMMIT_STACK" "home" "$user" "$PERSIST_DIR" >/dev/null 2>&1 \
                 || log_status "      [hot-swap] Bake for home/$user returned non-zero — continuing"
         done
     fi
@@ -213,7 +219,9 @@ if [ "$MIGRATION_NEEDED" = "0" ] && [ "$UPGRADE_MODE" = "1" ]; then
             PERSIST_DIR=$(agent_persist_path "$agent" 2>/dev/null || echo "")
             [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/persistence"
             log_status "      [hot-swap] Pre-upgrade bake: agent/$agent -> $PERSIST_DIR"
-            bash "$COMMIT_STACK" "agent" "$agent" "$PERSIST_DIR" >/dev/null 2>&1 \
+            # DATA-LOSS fix: bypass the busy-bake cooldown so the upgrade flush is
+            # authoritative (see the home pre-bake above).
+            AICLI_BUSY_BAKE_COOLDOWN_SEC=0 bash "$COMMIT_STACK" "agent" "$agent" "$PERSIST_DIR" >/dev/null 2>&1 \
                 || log_status "      [hot-swap] Bake for agent/$agent returned non-zero — continuing"
         done
     fi
