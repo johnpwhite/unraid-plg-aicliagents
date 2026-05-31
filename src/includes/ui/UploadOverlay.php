@@ -24,7 +24,7 @@
             <img id="paste-preview-img" style="max-width:100%; max-height:200px; border-radius:6px; border:1px solid #444; box-shadow: 0 4px 15px rgba(0,0,0,0.5);">
             <div id="file-name-input-area" style="margin-top:15px;">
                 <label for="upload-filename" class="sr-only">Filename</label>
-                <input type="text" id="upload-filename" placeholder="filename.png" aria-label="Upload filename" style="width:100%; background:#111; border:1px solid var(--orange, #ff8c00); color:#fff; padding:10px; border-radius:4px; font-family:monospace;">
+                <input type="text" id="upload-filename" placeholder="filename.png" aria-label="Upload filename" style="width:100%; background:var(--background-color, #111); border:1px solid var(--orange, #ff8c00); color:var(--text-color, #fff); padding:10px; border-radius:4px; font-family:monospace;">
             </div>
         </div>
 

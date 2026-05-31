@@ -322,8 +322,9 @@ create_proxy "droid" "factory-cli/node_modules/.bin/droid"
 create_proxy "nanocoder" "nanocoder/node_modules/.bin/nanocoder"
 create_proxy "goose" "goose/bin/goose"
 create_proxy "qwen" "qwen-code/node_modules/@qwen-code/qwen-code/cli.js"
+create_proxy "agy"  "antigravity-cli/home/.local/bin/agy"
 
-log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen)."
+log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen, agy)."
 
 # --- 6. Docker Tool Wrappers ---
 # Tools that require Docker containers. The wrapper either proxies to the container

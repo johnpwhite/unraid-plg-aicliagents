@@ -1,8 +1,25 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.24.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.31.06" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.31.06
+- **Feat: Automatic memory reclaim for long-lived workspaces.** When a workspace stays open long enough to build up unsaved changes in RAM and the plugin needs that memory back (storage pressure, or many pending storage layers), it now warns you and counts down 5 minutes, then gracefully closes the session — saving your place so you can reopen and resume exactly where you left off.
+- **Fix: Agent commands no longer intermittently fail with "No such file or directory" during a live session.** While the plugin saved a workspace's RAM to disk, a refresh could briefly remount your home directory out from under a running agent (for example Claude Code creating a session folder). The save no longer disturbs a connected session.
+- **Fix: Antigravity CLI now reopens to your last conversation** instead of a blank one — the plugin reads agy's own conversation index when you reopen a workspace.
+- **Fix: Tools an agent runs for you — git, editors, pagers — no longer hang** waiting for input that never arrives; they now run non-interactively and complete.
+- **Fix: Interactive prompts inside a full-screen agent render cleanly.** A prompt such as an SSH password requested by a tool running inside a TUI agent no longer "staircases" diagonally down the screen.
+- **Fix: The copied SSH connect command now actually attaches.** The one-click "copy SSH command" produced a command that reported "no sessions" because it didn't point at the plugin's private tmux socket; it now connects to your live session.
+- **Improve: The plugin UI now follows your Unraid light or dark theme** — panels, bars, and dialogs adapt instead of always rendering dark. (The debug/log console stays dark on purpose — it's a terminal.)
+- **Improve: "Keep a copy on upgrade" now defaults to off** — a backup is a deliberate opt-in — and the option gently pulses while unticked so it's easy to spot.
+
+## 2026.05.24.03
+- **Fix: Antigravity CLI sessions displayed corrupted terminal output on first launch.** Go's internal log messages were being written directly to the terminal, overlapping with the agent's own display. The log directory the agent uses to redirect those messages away from the screen now exists before the agent starts.
+- **Fix: Agent could fail on first launch with an authentication error after a full sync to persistent storage** (complete fix — v2026.05.24.02 contained the right logic but an unrelated packaging issue meant the fix was not installed on upgrade; this release ensures it lands correctly).
+
+## 2026.05.24.02
+- **Fix: Agent could fail on first launch with an authentication error after a full sync to persistent storage.** After a clean complete bake, the post-sync cleanup routine was inadvertently removing the overlay's working directory from the filesystem. The overlay appeared mounted and reads worked fine, but all writes — including the OAuth token refresh that runs at every startup — returned "No such file or directory", causing agents to report auth errors or loop on launch. Fixed.
+
 ## 2026.05.24.01
 - **Fix (data loss — important): the proper fix for agents forgetting your sessions.** v2026.05.18.08 announced a fix for this — that release tackled one symptom but missed the underlying cause. Your agent (Copilot, OpenCode, Codex, Kilo Code, Goose) could still occasionally start as if it had never seen you before, or hang on the "Waking..." loading screen. This release fixes the underlying behaviour. **Already-lost session history is not recoverable by upgrading.** If an agent now hangs at Waking or complains about a corrupted database, in the affected agent's directory (e.g. `~/.codex/`, `~/.copilot/`) delete any `.db-shm` or `.db-wal` files that don't have a matching `.db` next to them, then re-launch — the agent starts fresh.
 - **Fix: Agent commands no longer occasionally fail mid-storage-save.** On busy servers, a command running in the brief window when the plugin was saving RAM to persistent storage could fail with "No such file or directory" — most reproducible on a clean Antigravity install. The save and the launch no longer collide.
@@ -215,7 +232,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.24.01"
+export VERSION="2026.05.31.06"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -255,12 +272,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.24.01" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.31.06" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.24.01" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.24.01" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.31.06" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.31.06" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.24.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.31.06)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

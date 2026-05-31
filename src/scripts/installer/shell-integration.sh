@@ -13,7 +13,11 @@ _aicli_run() {
     # 1. Automatically map to the plugin's persistent RAM home for the current user
     local user_home="/tmp/unraid-aicliagents/work/$(whoami)/home"
     [ ! -d "$user_home" ] && mkdir -p "$user_home" && chmod 0700 "$user_home" >/dev/null 2>&1
-    
+    # Pre-create keyring dir so it lands in the first bake cycle (Bug #1042:
+    # if the daemon creates it only at D-Bus start it may not exist on flash
+    # before a reboot, causing the auth token to be lost).
+    mkdir -p "$user_home/.local/share/aicli-keyring" 2>/dev/null
+
     # 2. Run agent with redirected HOME (No cleanup or permission logic to avoid interference)
     HOME="$user_home" "$agent_path" "$@"
 }
@@ -31,6 +35,7 @@ alias nanocoder='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/
 alias copilot='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/bin/copilot'
 alias goose='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/goose/bin/goose'
 alias qwen='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/qwen-code/node_modules/.bin/qwen'
+alias agy='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/antigravity-cli/home/.local/bin/agy'
 
 # Note: Any commands run via these aliases will have their data automatically
 # backed up to Flash by the plugin's background sync daemon.

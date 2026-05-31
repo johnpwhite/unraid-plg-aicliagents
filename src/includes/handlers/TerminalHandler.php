@@ -375,27 +375,18 @@ class TerminalHandler {
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
         aicli_log("gracefulClose: DONE $resumeStr | $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
-        // WP #748 Phase 1 (E): workspace close does NOT enqueue an immediate bake.
-        // Instead it writes a lightweight "wants-bake" flag file under
-        // /tmp/unraid-aicliagents/supervisor/wants-bake/ so the supervisor's
-        // next tick detects it and bakes — even if we're not yet past the
-        // bake_schedule_minutes window. One flag file, one eventual write.
-        // This collapses rapid workspace-flips into a single bake and removes
-        // a redundant Flash write per close.
-        $config = getAICliConfig();
-        $user = $config['user'] ?? 'root';
-        if (empty($user)) {
-            $user = 'root';
-        }
-        $wantsBakeDir = '/tmp/unraid-aicliagents/supervisor/wants-bake';
-        @mkdir($wantsBakeDir, 0755, true);
-        $safeUser = preg_replace('/[^a-zA-Z0-9_-]/', '_', $user);
-        @file_put_contents("$wantsBakeDir/home_$safeUser", (string) time());
+        // Quiescent-lifecycle (2026-05-31): workspace close NO LONGER forces a
+        // bake (the old "wants-bake" flag is gone). The supervisor bakes home on
+        // its own cadence (bake_schedule_minutes + dirty-pressure), and a full
+        // server shutdown bakes home unconditionally (stop-plugin.sh Step 6), so
+        // persistence is covered without a per-close Flash write. Reclaim happens
+        // when the home goes idle (this close may BE that idle moment). We still
+        // captured + saved the resume id above so the next open resumes the chat.
         \AICliAgents\Services\LifecycleLogService::log(
             \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
             'gracefulClose',
-            'workspace_close_wants_bake_flagged',
-            ['user' => $user, 'session' => $safeId]
+            'workspace_closed_no_forced_bake',
+            ['session' => $safeId, 'resume_id' => $capturedId ?: '']
         );
 
         return ['status' => 'ok', 'resume_id' => $capturedId, 'baking' => false];
@@ -493,10 +484,17 @@ class TerminalHandler {
         }
 
         if ($agentId === 'antigravity-cli') {
-            // Bug #1071: agy stores each conversation as a separate
-            // <uuid>.pb file under <HOME>/.gemini/antigravity-cli/conversations/.
-            // Most recently modified = last active. The basename (sans .pb)
-            // is the conversation id passed to `agy --conversation <id>`.
+            // agy maps {workspace cwd -> conversation id} in its own authoritative
+            // index (cache/last_conversations.json). Prefer it — it is
+            // workspace-correct. A global-newest .pb mtime scan picks a DIFFERENT
+            // workspace's chat (the claude-code branch below documents exactly this
+            // hazard; the stale resume_*.json entries observed on .4 — pointing at
+            // conversations that no longer exist — are that scan misfiring).
+            $byWorkspace = \AICliAgents\Services\TerminalService::antigravityResumeId($homeDir, $workspacePath);
+            if ($byWorkspace !== null) return $byWorkspace;
+
+            // Fallback: newest <uuid>.pb by mtime — covers a conversation not yet
+            // in the index (or a blank $workspacePath). Validate the id shape.
             $dir = "$homeDir/.gemini/antigravity-cli/conversations";
             if (!is_dir($dir)) return null;
             $newestMtime = 0;

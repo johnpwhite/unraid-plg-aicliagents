@@ -28,9 +28,10 @@ class TmuxService {
         'prefix'            => 'C-b',
         'base-index'        => '0',
         'bell-action'       => 'any',
-        'default-terminal'  => 'screen',
+        'default-terminal'  => 'xterm-256color',
         'focus-events'      => 'on',
         'allow-passthrough' => 'on',
+        'escape-time'       => '0',   // WP #1253: avoid 500ms ESC mis-parse on fast TUI streams
     ];
 
     // ---------- Paths ----------

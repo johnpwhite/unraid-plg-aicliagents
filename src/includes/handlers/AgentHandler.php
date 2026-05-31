@@ -338,12 +338,18 @@ class AgentHandler {
         $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
         $needsCheck = !$cache || !\AICliAgents\Services\VersionCheckService::isCacheFresh(3600);
         if (!$needsCheck) {
-            // Check for individually stale agents (e.g., after install/downgrade invalidation)
+            // Check for individually stale agents (e.g., after install/downgrade invalidation).
+            // Covers both npm agents (dist-tag cache) and non-NPM agents that implement
+            // populateCache (e.g. CurlInstallSource with a manifest_url). Without this,
+            // invalidateAgent() for antigravity-cli sets checked_at=0 but the store page
+            // never kicks off a refresh until npm agents also expire (up to 1 hour later).
             foreach ($registry as $id => $agent) {
-                // Only NPM agents use the dist-tag cache staleness check here. Non-NPM
-                // agents (github_release, curl_install, tarball) have their own update
-                // plumbing via the AgentSource interface.
-                if (empty($agent['npm_package']) || $id === 'terminal') continue;
+                if ($id === 'terminal') continue;
+                $isNpm = !empty($agent['npm_package']);
+                if (!$isNpm) {
+                    $source = \AICliAgents\Services\Sources\SourceResolver::resolve($agent);
+                    if ($source === null || !method_exists($source, 'populateCache')) continue;
+                }
                 $agentEntry = $cache[$id] ?? null;
                 if (!$agentEntry || ($agentEntry['checked_at'] ?? 0) === 0) {
                     $needsCheck = true;

@@ -151,6 +151,22 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <div style="font-size:10px; color:#3b82f6; margin-top:2px; padding:3px 6px; background:rgba(59,130,246,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-info-circle"></i> On pool '<?=htmlspecialchars(substr($agentClass, 5), ENT_QUOTES, 'UTF-8')?>' — unavailable if pool is stopped.</div>
                             <?php endif; ?>
                         </dd>
+
+                        <dt>Consolidate Layer Ceiling</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="consolidate_max_layers"
+                                       value="<?=\AICliAgents\Services\ConfigService::getConsolidateMaxLayers()?>"
+                                       min="4" max="40" step="1" style="width: 90px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">layers</span>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Home overlay layer ceiling. Consolidation runs automatically at this minus 2
+                                (or under disk-space pressure, or on a manual "Consolidate Layers" click).
+                                Higher = fewer consolidations (less Flash churn) but slower cold mounts.
+                                Range 4–40; default 30 (consolidates at 28). Agents are unaffected — one layer per install.
+                            </div>
+                        </dd>
                     </dl>
                 </div>
             </div>

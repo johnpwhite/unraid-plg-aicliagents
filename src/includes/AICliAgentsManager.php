@@ -45,6 +45,7 @@ require_once __DIR__ . '/services/SecretService.php';
 require_once __DIR__ . '/services/EnvService.php';
 require_once __DIR__ . '/services/sources/AgentSource.php';
 require_once __DIR__ . '/services/sources/NpmSource.php';
+require_once __DIR__ . '/services/sources/UrlValidator.php';
 require_once __DIR__ . '/services/sources/GithubReleaseSource.php';
 require_once __DIR__ . '/services/sources/CurlInstallSource.php';
 require_once __DIR__ . '/services/sources/TarballSource.php';

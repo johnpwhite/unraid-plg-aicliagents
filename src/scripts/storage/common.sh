@@ -119,6 +119,219 @@ check_disk_space() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# Layer identity & ordering (WP: D01/D02/D03 fix — monotonic per-entity seq).
+#
+# Canonical layer name (current writer):
+#   ${type}_${id}_${kind}_${seq10}_${dt}.sqsh
+#     kind  = delta | consolidated
+#     seq10 = 10-digit zero-padded per-entity monotonic counter (PRIMARY identity
+#             + sort key) — immune to wall-clock collisions / NTP step-back.
+#     dt    = YYYYMMDDTHHMMSSZ (kept human-readable; secondary sort tiebreak).
+#
+# Legacy names (still valid lowers; never produced by the current writer) carry
+# NO seq and are treated as seq 0 so they always sort BELOW any seq>=1 layer:
+#   ${type}_${id}_delta_${dt}.sqsh          (ISO, pre-seq)
+#   ${type}_${id}_consolidated_${dt}.sqsh   (ISO, pre-seq)
+#   ${type}_${id}_delta_${epoch}.sqsh       (legacy epoch)
+#   ${type}_${id}_v${epoch}_vol1.sqsh       (legacy consolidated)
+#
+# These helpers are the SINGLE SOURCE of layer discovery/ordering — mount_stack.sh,
+# storagectl.sh and atomic_write_layer.sh all call them so naming + sort never diverge.
+
+# _layer_parse_seq <name-or-path> -> integer seq (legacy / unparseable = 0).
+_layer_parse_seq() {
+    local bn seq
+    bn="$(basename -- "$1" .sqsh)"
+    # Only the new format carries a 10-digit seq between kind and dt.
+    seq="$(printf '%s' "$bn" | sed -n -E 's/.*_(delta|consolidated)_([0-9]{10})_[0-9]{8}T[0-9]{6}Z$/\2/p')"
+    # 10#-prefix forces base-10 (avoid octal on leading zeros); guard empty -> 0.
+    printf '%d' "$((10#${seq:-0}))"
+}
+
+# _layer_sort_key <name-or-path> -> "<seq10> <ts>" — newest-first via `LC_ALL=C sort -r`.
+# seq dominates, ts (dt/epoch) breaks ties; both fixed-shape so a byte-order reverse
+# sort yields seq-desc then dt-desc.
+_layer_sort_key() {
+    local bn seq ts
+    bn="$(basename -- "$1" .sqsh)"
+    seq="$(printf '%s' "$bn" | sed -n -E 's/.*_(delta|consolidated)_([0-9]{10})_[0-9]{8}T[0-9]{6}Z$/\2/p')"
+    if [ -n "$seq" ]; then
+        ts="$(printf '%s' "$bn" | sed -n -E 's/.*_(delta|consolidated)_[0-9]{10}_([0-9]{8}T[0-9]{6}Z)$/\2/p')"
+    else
+        seq="0000000000"
+        ts="$(printf '%s' "$bn" | sed -n -E 's/.*_(delta|consolidated)_([0-9]{8}T[0-9]{6}Z)$/\2/p')"
+        [ -z "$ts" ] && ts="$(printf '%s' "$bn" | sed -n -E 's/.*_delta_([0-9]{10,})$/\1/p')"
+        [ -z "$ts" ] && ts="$(printf '%s' "$bn" | sed -n -E 's/.*_v([0-9]{10,})_vol1$/\1/p')"
+        [ -z "$ts" ] && ts="00000000T000000Z"
+    fi
+    printf '%s %s' "$seq" "$ts"
+}
+
+# _layer_next_seq <persist> <type> <id> -> next per-entity seq (max existing + 1).
+# Fresh OR all-legacy (seq 0) entity -> 1, so the first new-format layer sorts above
+# any pre-seq layers. Callers hold the per-entity bake lock, so this scan is race-free.
+_layer_next_seq() {
+    local persist="$1" type="$2" id="$3" max=0 f s
+    shopt -s nullglob
+    for f in "$persist"/"${type}_${id}_"*.sqsh; do
+        [ -e "$f" ] || continue
+        s="$(_layer_parse_seq "$f")"
+        [ "$s" -gt "$max" ] && max="$s"
+    done
+    shopt -u nullglob
+    printf '%d' "$((max + 1))"
+}
+
+# _layer_discover_sorted <persist> <type> <id> -> newest-first FULL PATHS, one/line.
+# Single source of discovery ordering (seq desc, then dt desc). A tab separates the
+# sort key from the path so `cut -f2-` recovers the path verbatim (paths have no tabs).
+_layer_discover_sorted() {
+    local persist="$1" type="$2" id="$3" f
+    shopt -s nullglob
+    for f in "$persist"/"${type}_${id}_"*.sqsh; do
+        [ -e "$f" ] || continue
+        printf '%s\t%s\n' "$(_layer_sort_key "$f")" "$f"
+    done | LC_ALL=C sort -r | cut -f2-
+    shopt -u nullglob
+}
+
+# ---------------------------------------------------------------------------
+# Phase 5: homes-only consolidate policy constants + the effective-MAX helper.
+#
+# Consolidation is the most expensive + most data-loss-prone storage op, so for
+# HOMES it should fire only when absolutely necessary: when the layer stack nears
+# the overlay ceiling, or persist is under space pressure, or the user triggers it
+# manually. The verdict is computed in storagectl `status` (so it's deterministically
+# integration-testable); these constants + helper are the single source of its bounds.
+#
+# Constants are MEASURED, not guessed (probe on .4, 2026-05-30 — see
+# docs/specs/PHASE5_STORAGECTL_DISPATCHER.md "The MAX setting"): up to 45 prod-shaped
+# layers mounted with no kernel ceiling and ~2 ms (flat) overlay assembly; the
+# `lowerdir=` option string grows ~83 B/layer (3382 B at k=40, under one 4096-B page).
+DEFAULT_MAX_LAYERS=30          # home layer ceiling default; consolidate triggers at -2 (28)
+CONSOLIDATE_FLOOR=4            # clamp floor (keeps max-2 >= 2)
+CONSOLIDATE_HARD_CEILING=40    # clamp ceiling (option string ~3382 B, conservatively < 1 page)
+# SCRATCH_MARGIN — bytes of headroom the space-pressure rule requires beyond the
+# summed layer sizes (consolidated tempfile + verify scratch + fragmentation). 200 MB.
+SCRATCH_MARGIN=$((200 * 1024 * 1024))
+
+# _consolidate_max_layers -> effective home overlay layer ceiling.
+# Precedence: AICLI_CONSOLIDATE_MAX_LAYERS env (test / emergency override, mirrors
+# the AICLI_ITEST_GUARD test-hook precedent) > cfg key consolidate_max_layers >
+# DEFAULT_MAX_LAYERS. Always clamped to [CONSOLIDATE_FLOOR, CONSOLIDATE_HARD_CEILING].
+# Self-contained cfg read (common.sh may be sourced WITHOUT resolve_paths.sh, so it
+# does not rely on _rp_read_cfg).
+_consolidate_max_layers() {
+    local raw="" cfg="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+    if [ -n "${AICLI_CONSOLIDATE_MAX_LAYERS:-}" ]; then
+        raw="$AICLI_CONSOLIDATE_MAX_LAYERS"
+    elif [ -f "$cfg" ]; then
+        raw="$(grep -oP '^consolidate_max_layers="?\K[0-9]+' "$cfg" 2>/dev/null | head -1)"
+    fi
+    # Non-numeric / empty -> default.
+    case "$raw" in
+        ''|*[!0-9]*) raw="$DEFAULT_MAX_LAYERS" ;;
+    esac
+    # Clamp to the measured bounds.
+    [ "$raw" -lt "$CONSOLIDATE_FLOOR" ] && raw="$CONSOLIDATE_FLOOR"
+    [ "$raw" -gt "$CONSOLIDATE_HARD_CEILING" ] && raw="$CONSOLIDATE_HARD_CEILING"
+    printf '%d' "$raw"
+}
+
+# _entity_paths <type> <id> <persist> — single source of the fstype->upper/work
+# derivation + mount-point template shared by the trio (now storage_ops.sh) and
+# storagectl. Sets globals: UPPER_DIR, WORK_DIR, MNT_POINT, ENTITY_UPPER_MODE.
+# vfat / unknown persist fstype -> ZRAM upper (buffers writes off Flash); any
+# durable fstype -> direct disk upper. PURE path computation — no dir creation,
+# no zram init (callers do those side-effects). Must match mount_stack's historic
+# logic exactly so a bake/consolidate writes from the same upper a mount reads.
+_entity_paths() {
+    local _ep_type="$1" _ep_id="$2" _ep_persist="$3" _ep_fst
+    _ep_fst=$(findmnt --noheadings --output FSTYPE --target "$_ep_persist" 2>/dev/null || echo '')
+    if [ "$_ep_fst" = "vfat" ] || [ -z "$_ep_fst" ]; then
+        ENTITY_UPPER_MODE="zram"
+        UPPER_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_id/upper"
+        WORK_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_id/work"
+    else
+        ENTITY_UPPER_MODE="disk"
+        UPPER_DIR="$_ep_persist/_upper/${_ep_type}s/$_ep_id"
+        WORK_DIR="$_ep_persist/_work/${_ep_type}s/$_ep_id"
+    fi
+    if [ "$_ep_type" = "home" ]; then
+        MNT_POINT="/tmp/unraid-aicliagents/work/$_ep_id/home"
+    else
+        MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$_ep_id"
+    fi
+}
+
+# home_mount_in_use <mount_point>
+# True (0) if a LIVE INTERACTIVE agent/terminal session is using this home mount
+# — i.e. one a umount/remount would disrupt with ENOENT. Used to gate the
+# post-bake reclaim (refresh + ZRAM cleanup) so it never remounts under a live
+# session, only when the home is genuinely idle.
+#
+# WHY NOT a bare `HOME=<mount>` environ scan (the obvious approach, and what an
+# earlier cut of this did): the plugin's OWN permanent daemons run with
+# HOME=<mount> for the plugin's whole lifetime — the per-user session
+# `dbus-daemon --session` and the `secret-service-daemon` (its keyring store
+# lives under <mount>/.local/share). A HOME= scan matches those, so the home
+# would read "busy" FOREVER and reclaim would never run (zram never reclaimed).
+# Orphaned detached `tmux` from an unreaped close has the same effect. Neither is
+# an interactive session a user is connected to.
+#
+# WHY ttyd: every interactive workspace/terminal session is fronted by a live
+# `ttyd` whose child env (on its argv: `... env AICLI_HOME=<mount> ... aicli-shell.sh`)
+# carries AICLI_HOME=<mount>. ttyd presence = a user is actually connected and the
+# agent may touch HOME at any moment (e.g. claude's mkdir ~/.claude/session-env/
+# <uuid>) — exactly the op that ENOENTs in the unmounted window. When all such
+# sessions close, no ttyd carries this mount, so reclaim proceeds (daemons persist
+# but only touch HOME rarely; that residual matches pre-fix behaviour).
+#
+# fuser -sm is kept as a fast path for any process holding a real open fd / cwd /
+# exe on the fs (covers agent overlays and any directly-held handle).
+#
+# Best-effort: runs as root. Transient PIDs vanishing mid-scan are ignored.
+home_mount_in_use() {
+    local mnt="$1"
+    [ -n "$mnt" ] || return 1
+    # Fast path: any open fd / cwd / exe / mmap physically on the fs.
+    fuser -sm "$mnt" 2>/dev/null && return 0
+    # Live interactive session: a ttyd whose argv carries AICLI_HOME=<mount>.
+    local _pid
+    for _pid in $(pgrep -x ttyd 2>/dev/null); do
+        if tr '\0' '\n' < "/proc/$_pid/cmdline" 2>/dev/null | grep -qxF "AICLI_HOME=$mnt"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# WP #1263 (#7): canonical per-entity overlay-mount-op lock path.
+#
+# Every overlay (re)mount of an entity routes through op_mount — the launch path
+# (StorageMountService::ensureHomeMounted -> storagectl mount -> op_mount), the
+# post-bake reclaim refresh (op_bake -> op_mount), and the post-consolidate
+# remount (op_consolidate -> op_mount) all call it. Taking this flock INSIDE
+# op_mount therefore serialises a launch's stack assembly against a concurrent
+# reclaim/consolidate remount, closing the residual race that the
+# home_mount_in_use defer leaves open: a launch begins before its ttyd exists, so
+# the home momentarily reads "idle" and a supervisor reclaim could umount/remount
+# the overlay out from under the assembling launch.
+#
+# It is a SEPARATE lock from the per-entity bake lock
+# (/var/run/aicli-bake-<type>-<id>.lock): the bake lock guards the whole
+# squashfs write, which is safe during a live session and must NOT block a launch
+# for minutes — only the brief remount needs mutual exclusion. It is also
+# separate from PHP's home_mount lock (which serialises PHP-vs-PHP launches);
+# making op_mount block on THAT file would deadlock (PHP holds it across the
+# op_mount exec). Sanitisation matches storage_ops.sh _LOCK_ID ([^a-zA-Z0-9_-] -> _).
+mount_op_lock_path() {
+    local _type="${1:-home}" _id="${2:-}"
+    local _safe="${_id//[^a-zA-Z0-9_-]/_}"
+    echo "/var/run/aicli-mount-op-${_type}-${_safe}.lock"
+}
+
 # WP #922: Flash-backed failure-snapshot helpers.
 #
 # When a storage script (consolidate_layers.sh, commit_stack.sh, …) exits
@@ -320,8 +533,12 @@ selective_upper_cleanup() {
         fi
     done < "$tmpdir/wipe"
 
-    # Sweep newly-empty directories.
-    find "$upper" -type d -empty -delete 2>/dev/null
+    # Sweep newly-empty directories. -mindepth 1 is critical: without it, find
+    # will delete $upper itself when it becomes empty after a complete bake —
+    # the kernel overlay stays mounted but the directory entry is gone, causing
+    # all subsequent writes (including token refresh write-back) to fail ENOENT.
+    # See WP #1224 for the incident post-mortem.
+    find "$upper" -mindepth 1 -type d -empty -delete 2>/dev/null
 
     local residual_bytes residual_files
     residual_bytes=$(du -sb "$upper" 2>/dev/null | awk '{print $1}')

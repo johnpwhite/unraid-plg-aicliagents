@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Containers>
+  <PluginURL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg</PluginURL>
+  <PluginAuthor>John White</PluginAuthor>
+  <Category>Tools:System</Category>
+  <Name>Unraid AI CLI Agents</Name>
+  <Description>Integrated AICliAgents CLI for AI-assisted Unraid server management.</Description>
+  <Overview>
+    Unraid AICliAgents CLI brings the power of AICli's AI-assisted management directly to your Unraid WebUI.
+    
+    [b]Features:[/b]
+    - AI-assisted server management.
+    - Integrated CLI interface.
+    - Human-in-the-Loop (HITL) safety for critical operations.
+  </Overview>
+  <Support>https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/</Support>
+  <Icon>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/assets/icons/google-gemini.png</Icon>
+  <Project>https://github.com/johnpwhite/unraid-plg-aicliagents</Project>
+</Containers>

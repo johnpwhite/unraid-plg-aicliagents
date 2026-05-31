@@ -331,11 +331,57 @@ FUNCOEF
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> /tmp/unraid-aicliagents/debug.log
 export TERM=xterm-256color
 export LC_ALL=en_US.UTF-8
+# WP #1259: non-interactive defaults for the agent shell + every child it spawns.
+# A TUI agent (notably agy/antigravity) runs child commands with NO controlling
+# TTY and does NOT forward keystrokes to them -- a regression from gemini-cli's
+# node-pty shell, which gave children a PTY and relayed input. So any child that
+# opens an editor or pager, or waits on a y/N prompt, HANGS forever: the prompt
+# re-renders but can never be answered. (Verified on .4: ssh will read a piped
+# password fine even with no TTY -- the block is that agy sends the child no
+# input at all.) These defaults make the common offenders non-interactive so they
+# COMPLETE instead of hanging. Each is a DEFAULT (:-) so an explicit value from
+# the 5-tier env (applied later by _aicli_load_envs) still wins. NOTE: ssh/sudo
+# *password* prompts can't be fixed here -- use key-based ssh; sudo is moot since
+# the agent already runs as root. Harmless to gemini-cli (it forwards input, and
+# the :- defaults respect any editor/pager it was configured with).
+export GIT_PAGER="${GIT_PAGER:-cat}"
+export PAGER="${PAGER:-cat}"
+export SYSTEMD_PAGER="${SYSTEMD_PAGER:-}"
+export LESS="${LESS:-FRX}"
+export GIT_EDITOR="${GIT_EDITOR:-true}"
+export GIT_SEQUENCE_EDITOR="${GIT_SEQUENCE_EDITOR:-true}"
+export EDITOR="${EDITOR:-true}"
+export VISUAL="${VISUAL:-true}"
+export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
+export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-B] before stty sane" >> /tmp/unraid-aicliagents/debug.log
 stty sane 2>/dev/null
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-C] after stty sane (rc=$?)" >> /tmp/unraid-aicliagents/debug.log
 perf_log run.start
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-D] after perf_log run.start" >> /tmp/unraid-aicliagents/debug.log
+
+# WP #1253: keep opost+onlcr asserted on this pane for the life of the session.
+# A TUI agent (e.g. agy) cfmakeraw's the pane (turning opost OFF) for its own UI.
+# Any INTERACTIVE child it then spawns (an ssh password prompt, sudo, etc.)
+# inherits that raw pane and emits bare LF without CR; tmux emulates the bare LF
+# into a diagonal "staircase" (the cursor drops a row but never returns to col 0).
+# Re-asserting opost+onlcr makes the kernel translate LF->CRLF before tmux reads
+# it, so the staircase can never form. This is harmless to the agent's own UI:
+# its explicit \r\n just gains a redundant (no-op) CR, and cursor-positioning
+# escape sequences are unaffected by opost. A low-rate keeper is required because
+# the agent re-raws the pane on (re)launch and on resize; it self-terminates when
+# this run-script (the session) exits. Confirmed live on .4 (WP #1253).
+_AICLI_PANE_TTY="$(tty 2>/dev/null)"
+case "$_AICLI_PANE_TTY" in
+    /dev/*)
+        ( _rs_pid=$$
+          while kill -0 "$_rs_pid" 2>/dev/null; do
+              stty -F "$_AICLI_PANE_TTY" opost onlcr 2>/dev/null
+              sleep 0.5
+          done ) >/dev/null 2>&1 &
+        ;;
+esac
 
 # WP #275c: install a no-op SIGINT trap on the RUN_SCRIPT itself.
 # Why: in a non-interactive bash script with no SIGINT trap, receiving SIGINT
@@ -462,8 +508,22 @@ while true; do
     mkdir -p "$HOME_DIR/.cache/${AGENT_ID}" \
              "$HOME_DIR/.config/${AGENT_ID}" \
              "$HOME_DIR/.local/share/${AGENT_ID}" \
+             "$HOME_DIR/.local/share/aicli-keyring" \
              2>/dev/null
-    
+
+    # WP #1227: Antigravity CLI (agy) unconditionally tries to open a log file
+    # in $HOME_DIR/.gemini/antigravity-cli/log/ at startup. When the directory
+    # is absent, agy's log-redirect fails and Go's glog library falls back to
+    # writing verbose info messages directly to stderr — which is the same TTY
+    # as the terminal, so log lines interleave with TUI rendering and corrupt
+    # the display. Pre-creating the directory here (on every loop iteration,
+    # same as the .cache/.config/.local dirs above) ensures the redirect
+    # succeeds on first launch and after any bake/snapshot cycle that wipes the
+    # delta layer.
+    if [[ "$AGENT_ID" == "antigravity-cli" ]]; then
+        mkdir -p "$HOME_DIR/.gemini/antigravity-cli/log" 2>/dev/null
+    fi
+
     # Fix A: Re-resolve the effective binary on every relaunch iteration.
     # An in-place agent upgrade (e.g. claude-code 2.1.x dropping cli.js and
     # adding bin/claude.exe) leaves frozen_binary pointing at the deleted file.
@@ -540,6 +600,15 @@ while true; do
         fi
     elif [ "$AGENT_ID" == "pi-coder" ]; then
         if [ -d "$HOME_DIR/.pi/agent/sessions" ] && [ -n "$(find "$HOME_DIR/.pi/agent/sessions" -type f 2>/dev/null)" ]; then
+            can_resume=1
+        fi
+    elif [ "$AGENT_ID" == "antigravity-cli" ]; then
+        # No explicit chat id was handed in, but if agy has any stored conversation
+        # for this home, resume-latest (--continue) so a reopened/relaunched
+        # workspace returns to the last chat instead of a blank session. (The
+        # workspace-correct id normally arrives via getResumeId/findSession ->
+        # frozen_chat_id; this is the safety net when it doesn't.)
+        if [ -d "$HOME_DIR/.gemini/antigravity-cli/conversations" ] && [ -n "$(find "$HOME_DIR/.gemini/antigravity-cli/conversations" -name '*.pb' -type f 2>/dev/null)" ]; then
             can_resume=1
         fi
     fi
@@ -639,7 +708,15 @@ while true; do
     if [ "$status" != "ok" ]; then
         log_aicli "ERROR" 1 "All launch attempts failed for $AGENT_ID. Binary corrupted or Node error. Check $DEBUG_LOG"
     fi
-    
+
+    # Restore PTY line discipline after every agent exit. TUI agents (agy,
+    # gemini-cli, claude-code) call cfmakeraw() which disables ONLCR; on exit
+    # they should restore it via tcsetattr but often don't, leaving the PTY in
+    # raw mode — the next prompt or clear then renders as a diagonal staircase.
+    # Also re-assert TERM in case a dumb parent environment leaked through.
+    stty sane 2>/dev/null
+    { [ "$TERM" = "dumb" ] || [ -z "$TERM" ]; } && export TERM=xterm-256color
+
     if [ "$AGENT_ID" == "terminal" ]; then exit 0; fi
 
     # Graceful-close sentinel: if the UI requested a clean shutdown (Ctrl-C x2
@@ -683,6 +760,17 @@ while true; do
                     fi
                 fi
             done
+        elif [ "$AGENT_ID" == "antigravity-cli" ]; then
+            # After an in-TUI conversation switch, agy writes the active chat's
+            # <uuid>.pb. Newest .pb by mtime = the just-active conversation; sync it
+            # so the next Ctrl-C relaunch resumes THAT chat, not the baked-in one.
+            _acd="$HOME_DIR/.gemini/antigravity-cli/conversations"
+            if [ -d "$_acd" ]; then
+                _newest_pb=$(find "$_acd" -name "*.pb" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+                if [ -n "$_newest_pb" ]; then
+                    _discovered_chat=$(basename "$_newest_pb" .pb)
+                fi
+            fi
         fi
         if [ -n "$_discovered_chat" ] && [ "$_discovered_chat" != "$frozen_chat_id" ]; then
             log_aicli "INFO" 2 "Post-exit GUID sync: $frozen_chat_id -> $_discovered_chat"
@@ -740,6 +828,18 @@ tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
 tmux set-option -g status off 2>/dev/null
 tmux set-option -g allow-passthrough on 2>/dev/null
 tmux set-option -g focus-events on 2>/dev/null
+# WP #1253: escape-time 0 — tmux's 500ms default makes a lone ESC ambiguous (key
+# vs. start-of-sequence). When a fast TUI streamer (e.g. antigravity) emits an
+# escape sequence whose bytes arrive SPLIT across reads over the ttyd/websocket
+# pipe, tmux waits then mis-parses the ESC, emitting literal bytes / dropping the
+# sequence -> intermittent blank/garble of streamed output. 0 is the canonical
+# TUI-app setting and is harmless on a fast local-socket terminal.
+tmux set-option -g escape-time 0 2>/dev/null
+# xterm-256color: tells apps inside tmux the correct terminal type (not screen),
+# avoiding line-translation issues when TUI agents (agy, gemini-cli) set raw PTY mode.
+# The terminal-overrides append enables 24-bit colour pass-through from ttyd/the browser.
+tmux set-option -g default-terminal "xterm-256color" 2>/dev/null
+tmux set-option -ga terminal-overrides ",xterm-256color:Tc" 2>/dev/null
 
 # Helper: apply a JSON file of allow-listed tmux options via a single PHP pass.
 apply_tmux_json() {

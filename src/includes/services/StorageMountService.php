@@ -150,9 +150,11 @@ class StorageMountService {
 
         LogService::log("Mounting Agent Stack: $agentId", LogService::LOG_INFO, "StorageMountService");
 
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/mount_stack.sh";
+        // Phase 5: route through the storagectl dispatcher (op_mount) instead of
+        // the mount_stack.sh shim. Exit code is unchanged (0 ok / non-0 fail).
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec("bash " . escapeshellarg($script) . " agent " . escapeshellarg($agentId) . " " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
+        exec("bash " . escapeshellarg($script) . " mount --type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
 
         if ($res !== 0) {
             LogService::log("Mount script FAILED for agent $agentId: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
@@ -225,12 +227,14 @@ class StorageMountService {
 
         LogService::log("Mounting Home Stack for $user", LogService::LOG_INFO, "StorageMountService");
 
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/mount_stack.sh";
-        // Bug #1054: pass $user as the OWNER arg so mount_stack.sh chowns the
-        // OverlayFS upperdir to the agent user -- otherwise the home overlay
-        // mounts but is effectively read-only for non-root agents.
+        // Phase 5: route through the storagectl dispatcher (op_mount) instead of
+        // the mount_stack.sh shim. Exit code unchanged.
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        // Bug #1054: pass $user as --owner so op_mount chowns the OverlayFS
+        // upperdir to the agent user -- otherwise the home overlay mounts but is
+        // effectively read-only for non-root agents.
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec("bash " . escapeshellarg($script) . " home " . escapeshellarg($user) . " " . escapeshellarg($persistPath) . " " . escapeshellarg($user) . " 2>&1", $out, $res);
+        exec("bash " . escapeshellarg($script) . " mount --type home --id " . escapeshellarg($user) . " --persist " . escapeshellarg($persistPath) . " --owner " . escapeshellarg($user) . " 2>&1", $out, $res);
 
         if ($res !== 0) {
             LogService::log("Mount script FAILED for home $user: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
@@ -380,7 +384,9 @@ class StorageMountService {
             return 1;
         }
 
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/commit_stack.sh";
+        // Phase 5: route through the storagectl dispatcher (op_bake) instead of
+        // the commit_stack.sh shim. Exit code unchanged (0 ok / 1 fail / 2 deferred).
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
 
         $upperDir = StoragePathResolver::zramUpper($type, $id);
         $dirtyMB = 0;
@@ -392,7 +398,7 @@ class StorageMountService {
         LogService::log("Initiating SquashFS persistence bake for $type $id ($dirtyMB MB dirty)...", LogService::LOG_INFO, "StorageMountService");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'bake_start', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'persist_path' => $persistPath]);
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec("bash " . escapeshellarg($script) . " " . escapeshellarg($type) . " " . escapeshellarg($id) . " " . escapeshellarg($persistPath), $out, $res);
+        exec("bash " . escapeshellarg($script) . " bake --type " . escapeshellarg($type) . " --id " . escapeshellarg($id) . " --persist " . escapeshellarg($persistPath), $out, $res);
 
         if ($res === 0) {
             LogService::log("Successfully persisted $dirtyMB MB of RAM storage to Flash disk for $type $id.", LogService::LOG_INFO, "StorageMountService");
@@ -435,46 +441,13 @@ class StorageMountService {
             }
         }
 
-        // D-404: Auto-consolidate when layer count exceeds threshold to prevent loop
-        // device exhaustion. Fire on both $res === 0 (clean commit + ZRAM flush) AND
-        // $res === 2 (baked-but-busy: delta .sqsh was still created, so it still
-        // counts toward the total). Previously we only fired on $res === 0 — but
-        // the home stack is almost always busy (ttyd + tmux + agent hold fds on
-        // the mount), so deltas piled up forever. consolidate_layers.sh uses
-        // umount -l (lazy) so it's safe to run while sessions are open; the
-        // script itself documents the transient I/O as expected.
-        //
-        // WP #268: previously the busy threshold was 15 to avoid a visible
-        // remount during active use, but the home stack is permanently busy
-        // (ttyd + tmux + agents), so deltas piled up to ~7-8 before users
-        // noticed. Lowered to 5 to match idle — users see slightly more
-        // remounts during sustained activity but Flash wear stays bounded.
-        //
-        // WP #748 J: home-only. Agents never reach this code path (the agent
-        // branch at the top returns early via consolidate()), but the explicit
-        // type guard documents the invariant: under J, agents collapse to one
-        // layer per install — no layer-count-driven consolidate ever applies.
-        if ($type === 'home' && ($res === 0 || $res === 2)) {
-            $layerCount = count(glob("$persistPath/{$type}_{$id}_*.sqsh"));
-            $threshold = 5;
-            if ($layerCount >= $threshold) {
-                // WP #271 follow-up: defer consolidation if the mount is busy.
-                // Earlier behaviour was to consolidate via lazy umount even with
-                // active processes, which orphaned in-flight writes (the cause of
-                // the workspaces / claude credentials loss reported on this box).
-                // Now: if any process holds the mount, mark a pending intent and
-                // run later when the mount goes idle (hooked into gracefulClose
-                // and the AJAX dispatcher's lazy backstop).
-                $mnt = StoragePathResolver::homeMount($id);
-                if (self::isMountBusy($mnt)) {
-                    self::markConsolidatePending($type, $id);
-                    LogService::log("Auto-consolidation deferred for $type $id ($layerCount layers >= $threshold). Mount busy — will run when idle.", LogService::LOG_INFO, "StorageMountService");
-                } else {
-                    LogService::log("Auto-consolidation triggered for $type $id ($layerCount layers >= $threshold threshold, mount idle).", LogService::LOG_INFO, "StorageMountService");
-                    self::consolidate($type, $id);
-                }
-            }
-        }
+        // Phase 5: the count>=5 home auto-consolidate that used to live here is
+        // REMOVED. Home consolidation is now driven by the homes-only policy in
+        // storagectl `status` (layers >= consolidate_max_layers-2, or space
+        // pressure), evaluated each supervisor tick (_check_consolidate_policy),
+        // or by a manual "consolidate now" trigger. Bakes still create deltas here;
+        // consolidation cadence is decoupled from the per-bake layer count, so a
+        // delta no longer forces an expensive re-squash every 5 layers.
 
         return $res;
     }
@@ -487,7 +460,9 @@ class StorageMountService {
         $persistPath = ($type === 'home')
             ? StoragePathResolver::homePersistPath($id)
             : StoragePathResolver::agentPersistPath();
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/consolidate_layers.sh";
+        // Phase 5: route through the storagectl dispatcher (op_consolidate) instead
+        // of the consolidate_layers.sh shim. Exit code unchanged (0 ok / 1 / 2).
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
 
         $oldSize = 0;
         foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) {
@@ -498,7 +473,7 @@ class StorageMountService {
         LogService::log("Initiating layer consolidation for $type $id (Current footprint: $oldSizeMB MB)...", LogService::LOG_INFO, "StorageMountService");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'consolidate_start', ['type' => $type, 'id' => $id, 'old_size_mb' => $oldSizeMB]);
         // nosemgrep: php.lang.security.exec-use.exec-use
-        exec("bash " . escapeshellarg($script) . " " . escapeshellarg($type) . " " . escapeshellarg($id) . " " . escapeshellarg($persistPath), $out, $res);
+        exec("bash " . escapeshellarg($script) . " consolidate --type " . escapeshellarg($type) . " --id " . escapeshellarg($id) . " --persist " . escapeshellarg($persistPath), $out, $res);
 
         if ($res === 0) {
             $newSize = 0;
@@ -544,15 +519,14 @@ class StorageMountService {
     }
 
     // -----------------------------------------------------------------------
-    // Pending-consolidation queue (WP #271 follow-up)
+    // Pending-consolidation marker — read-only remnant after Phase 5
     //
-    // When auto-consolidate would fire on a busy mount, we record a marker
-    // file instead of running consolidate immediately. The marker is checked
-    // and (if the mount is idle) drained at three trigger points:
-    //   1. gracefulClose() — a session just ended, mount activity dropped
-    //   2. stopTerminal()  — manual close
-    //   3. The AJAX dispatcher's lazy backstop — throttled to once per 60s
-    // The UI surfaces an "Awaiting idle" badge while a marker exists.
+    // The producer (markConsolidatePending, fired by the old count>=5
+    // auto-consolidate) was removed in Phase 5: consolidation is now policy- and
+    // manual-driven. getConsolidatePendingSince remains only because
+    // StorageMetricsService still reads it for the UI "Awaiting idle" badge — with
+    // no producer it returns null, so the badge simply never lights. isMountBusy is
+    // kept as a public helper for the manual / Phase-6 "consolidate now" path.
     // -----------------------------------------------------------------------
 
     private const PENDING_DIR = '/tmp/unraid-aicliagents';
@@ -574,13 +548,6 @@ class StorageMountService {
             return ((int)$m[1] === 0);
         }
         return false;
-    }
-
-    public static function markConsolidatePending(string $type, string $id): void
-    {
-        $f = self::pendingMarkerPath($type, $id);
-        @file_put_contents($f, (string)time());
-        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'StorageMountService', 'consolidate_marker_set', ['type' => $type, 'id' => $id]);
     }
 
     public static function clearConsolidatePending(string $type, string $id): void

@@ -34,6 +34,12 @@ if ! declare -f lifecycle_log >/dev/null 2>&1; then
     _AWLSH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     source "${_AWLSH_DIR}/resolve_paths.sh" 2>/dev/null || true
 fi
+# Layer-identity helpers (_layer_next_seq) live in common.sh. Callers
+# (commit_stack/consolidate) source it first, but guard for standalone use.
+if ! declare -f _layer_next_seq >/dev/null 2>&1; then
+    _AWLSH_DIR="${_AWLSH_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+    source "${_AWLSH_DIR}/common.sh" 2>/dev/null || true
+fi
 
 # Default mksquashfs flags — same as commit_stack.sh and consolidate_layers.sh.
 # Override via MKSQUASHFS_ARGS env var.
@@ -66,18 +72,27 @@ atomic_write_layer() {
     fi
 
     # ----- Step 1: Compute target filename --------------------------------------
-    # dt: UTC ISO 8601 basic (YYYYMMDDTHHMMSSZ) — 16 chars, lex-sortable, human-readable.
+    # dt: UTC ISO 8601 basic (YYYYMMDDTHHMMSSZ) — 16 chars, human-readable.
     local dt
     dt=$(date -u +%Y%m%dT%H%M%SZ)
     local epoch
     epoch=$(date +%s)
 
-    local final_name
-    if [ "$kind" = "delta" ]; then
-        final_name="${type}_${id}_delta_${dt}.sqsh"
+    # WP D01/D02/D03: a monotonic per-entity seq is the PRIMARY layer identity +
+    # sort key. It makes the name unique even within one UTC second (D01) and makes
+    # ordering immune to wall-clock step-back (D02); legacy layers parse as seq 0 so
+    # the first seq>=1 layer correctly sorts above them (D03). dt is retained as the
+    # human-readable secondary tiebreak. _layer_next_seq scans this entity's existing
+    # layers (delta + consolidated) for the max seq and returns max+1.
+    local seq seq10
+    if declare -f _layer_next_seq >/dev/null 2>&1; then
+        seq="$(_layer_next_seq "$persist_path" "$type" "$id")"
     else
-        final_name="${type}_${id}_consolidated_${dt}.sqsh"
+        seq=1   # helper unavailable (should not happen) — safe non-colliding default path below
     fi
+    seq10=$(printf '%010d' "$seq" 2>/dev/null || printf '%010d' 1)
+
+    local final_name="${type}_${id}_${kind}_${seq10}_${dt}.sqsh"
 
     local final_path="${persist_path}/${final_name}"
 

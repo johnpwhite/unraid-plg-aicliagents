@@ -62,6 +62,8 @@ class TerminalService {
         if (!empty($chatId) && $chatId !== 'auto' && $chatId !== '_fresh_') {
             AtomicWriteService::write(UtilityService::getChatIdPath($id), (string)$chatId);
         }
+        // NOTE: per-session user is written AFTER $username is finalised (~line 99);
+        // the write call below is the only place that happens.
 
         // Verification
         if (!file_exists($shell)) {
@@ -98,6 +100,11 @@ class TerminalService {
             }
             $username = 'root';
         }
+
+        // WP #1262: persist the effective username so listActiveSessionsForHome
+        // and filterSessionsByHome can attribute legacy-started sessions to the
+        // right user without a config re-read.
+        AtomicWriteService::write(UtilityService::getUserIdPath($id), $username);
 
         // Bug #1054: ensure the shared tmp tree is world-writable (sticky) and
         // the per-user work dir is owned by the agent user, so non-root agents
@@ -251,6 +258,34 @@ class TerminalService {
     }
 
     /**
+     * Resolve the conversation id agy will resume for a workspace path, from
+     * agy's OWN authoritative index: <home>/.gemini/antigravity-cli/cache/
+     * last_conversations.json maps {cwd -> conversation-id} (agy keys it by the
+     * directory it was launched in — the workspace path).
+     *
+     * Why this exists: a bare `agy` launch does NOT auto-resume — it opens a
+     * blank conversation (verified live: the cli.log shows "conversation ''" then
+     * the user manually re-selecting the prior chat). So the plugin must pass the
+     * id explicitly via `agy --conversation <id>`. Reading agy's own index beats
+     * guessing from .pb mtimes: a global-newest-mtime scan picks a DIFFERENT
+     * workspace's chat (and the stale resume-config entries on .4 prove that scan
+     * misfires). We return the id only when its conversation file still exists, so
+     * a stale index entry (conversation since deleted) can't yield a dead
+     * --conversation that agy rejects -> blank session.
+     */
+    public static function antigravityResumeId(string $home, string $path): ?string {
+        if ($home === '' || $path === '') return null;
+        $cacheFile = "$home/.gemini/antigravity-cli/cache/last_conversations.json";
+        if (!is_file($cacheFile)) return null;
+        $data = @json_decode((string) @file_get_contents($cacheFile), true);
+        if (!is_array($data)) return null;
+        $id = $data[$path] ?? null;
+        if (!is_string($id) || !preg_match('/^[A-Za-z0-9-]{20,}$/', $id)) return null;
+        if (!is_file("$home/.gemini/antigravity-cli/conversations/$id.pb")) return null;
+        return $id;
+    }
+
+    /**
      * Finds a recent chat session for a project path.
      */
     public static function findSession($path, $agentId = 'gemini-cli') {
@@ -292,6 +327,18 @@ class TerminalService {
                 }
                 $checkPath = dirname($checkPath);
             }
+        }
+
+        // agy: read agy's own per-workspace conversation index. Without this,
+        // get_chat_session returns null for antigravity on every page load, the
+        // UI loses the chat id (chatSessionId=''), and a re-launch of the session
+        // runs bare `agy` -> blank conversation ("not resuming the last chat").
+        if ($agentId === 'antigravity-cli') {
+            $config = ConfigService::getConfig();
+            $user = $config['user'] ?? 'root';
+            if (empty($user)) $user = 'root';
+            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            return self::antigravityResumeId($home, $path);
         }
 
         // Claude and OpenCode handle their own session persistence internally
@@ -336,6 +383,123 @@ class TerminalService {
             ];
         }
         return $out;
+    }
+
+    /**
+     * Pure filter — TDD seam for listActiveSessionsForHome / forceCloseHome.
+     *
+     * Returns only the sessions that belong to $user:
+     *   - Session has a non-empty 'user' key equal to $user (case-sensitive), OR
+     *   - Session has no 'user' key / empty 'user' AND $configUser === $user
+     *     (legacy sessions started before per-session user tracking was added).
+     *
+     * @param array<int, array<string, mixed>> $sessions  Output of listActiveSessionsForHome's inner loop.
+     * @param string $user       The home-user to filter for.
+     * @param string|null $configUser  The current configured user from getAICliConfig()['user'].
+     * @return array<int, array<string, mixed>>
+     */
+    public static function filterSessionsByHome(array $sessions, string $user, ?string $configUser = null): array
+    {
+        $out = [];
+        foreach ($sessions as $session) {
+            $sessionUser = isset($session['user']) ? (string)$session['user'] : '';
+            if ($sessionUser !== '') {
+                // Has explicit user — exact match only.
+                if ($sessionUser === $user) {
+                    $out[] = $session;
+                }
+            } else {
+                // Legacy session (no user written) — belongs to the configured user.
+                if ($configUser !== null && $configUser === $user) {
+                    $out[] = $session;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Enumerate active terminal sessions belonging to $user's home overlay.
+     * Mirrors listActiveSessionsForAgent exactly, adding a 'user' field read
+     * from the .user metadata file, then delegates filtering to
+     * filterSessionsByHome (which handles legacy sessions transparently).
+     *
+     * @return array<int, array<string, mixed>>  Each entry has at least 'id' and 'user'.
+     */
+    public static function listActiveSessionsForHome(string $user): array
+    {
+        ProcessManager::sweepOrphanSessions();
+
+        $config      = ConfigService::getConfig();
+        $configUser  = (string)($config['user'] ?? '');
+        if ($configUser === '') $configUser = 'root';
+
+        $all = [];
+        foreach (glob("/var/run/aicliterm-*.sock") ?: [] as $sock) {
+            if (!preg_match('/aicliterm-(.*)\.sock$/', $sock, $m)) continue;
+            $id = $m[1];
+
+            $agentFile   = UtilityService::getAgentIdPath($id);
+            $workdirFile = UtilityService::getWorkDirFilePath($id);
+            $chatFile    = UtilityService::getChatIdPath($id);
+            $userFile    = UtilityService::getUserIdPath($id);
+
+            $all[] = [
+                'id'         => $id,
+                'agentId'    => is_file($agentFile)   ? trim((string)@file_get_contents($agentFile))   : '',
+                'path'       => is_file($workdirFile) ? trim((string)@file_get_contents($workdirFile)) : '',
+                'chatId'     => is_file($chatFile)    ? trim((string)@file_get_contents($chatFile))    : '',
+                'user'       => is_file($userFile)    ? trim((string)@file_get_contents($userFile))    : '',
+                'started_at' => @filemtime($sock) ?: 0,
+            ];
+        }
+
+        return self::filterSessionsByHome($all, $user, $configUser);
+    }
+
+    /**
+     * Headlessly force-close every active terminal session belonging to $user's
+     * home overlay. Reuses the proven gracefulClose path (Ctrl-C x2 + Ctrl-D x2 +
+     * resume-id scrape + teardown) so it is functionally identical to a user
+     * clicking "Close" in the UI — just invoked by the supervisor's force-reclaim
+     * escalation rather than an HTTP request (WP #1262).
+     *
+     * Each session is closed independently; a failure on one does not prevent
+     * subsequent sessions from being closed. Returns the count of sessions
+     * successfully handed to gracefulClose (not the count of clean exits — the
+     * caller must re-enumerate if it needs to confirm quiescence).
+     *
+     * @return int  Number of sessions closed (gracefulClose invoked).
+     */
+    public static function forceCloseHome(string $user): int
+    {
+        $sessions = self::listActiveSessionsForHome($user);
+        $closed   = 0;
+
+        foreach ($sessions as $session) {
+            $sessionId = (string)($session['id'] ?? '');
+            if ($sessionId === '') continue;
+            try {
+                \AICliAgents\Handlers\TerminalHandler::handle('graceful_close', $sessionId);
+                $closed++;
+                LogService::log(
+                    "forceCloseHome: closed session $sessionId for user=$user (WP #1262)",
+                    LogService::LOG_INFO, "TerminalService"
+                );
+            } catch (\Throwable $e) {
+                LogService::log(
+                    "forceCloseHome: failed to close session $sessionId for user=$user — " . $e->getMessage(),
+                    LogService::LOG_WARN, "TerminalService"
+                );
+            }
+        }
+
+        LogService::log(
+            "forceCloseHome: closed $closed/" . count($sessions) . " sessions for user=$user",
+            LogService::LOG_INFO, "TerminalService"
+        );
+
+        return $closed;
     }
 
     /**

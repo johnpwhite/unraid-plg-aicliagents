@@ -195,4 +195,8 @@ class UtilityService {
     public static function getWorkDirFilePath($id = 'default') {
         return "/var/run/unraid-aicliagents-$id.workdir";
     }
+
+    public static function getUserIdPath($id = 'default') {
+        return "/var/run/unraid-aicliagents-$id.user";
+    }
 }

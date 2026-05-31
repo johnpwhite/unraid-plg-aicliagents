@@ -75,6 +75,7 @@ class ProcessManager {
         }
         @unlink("/var/run/unraid-aicliagents-$id.chatid");
         @unlink("/var/run/unraid-aicliagents-$id.agentid");
+        @unlink("/var/run/unraid-aicliagents-$id.user");
 
         if ($killTmux) {
             // Non-root audit: iterate per-uid tmux sockets so non-root
@@ -248,5 +249,6 @@ class ProcessManager {
         @unlink("/var/run/unraid-aicliagents-{$safe}.chatid");
         @unlink("/var/run/unraid-aicliagents-{$safe}.agentid");
         @unlink("/var/run/unraid-aicliagents-{$safe}.workdir");
+        @unlink("/var/run/unraid-aicliagents-{$safe}.user");
     }
 }

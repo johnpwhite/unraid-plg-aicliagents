@@ -53,6 +53,11 @@ class ConfigService {
             'dirty_threshold_critical_pct'      => '50',
             'consolidate_layer_threshold_flash' => '30',
             'consolidate_layer_threshold_array' => '5',
+            // Phase 5: homes-only consolidate policy — overlay layer ceiling.
+            // Consolidation is recommended at this value MINUS 2. Read-time clamp to
+            // [4, 40] via getConsolidateMaxLayers() (mirrors bash _consolidate_max_layers).
+            // Default + bounds measured Phase 0.2 — see PHASE5_STORAGECTL_DISPATCHER.md.
+            'consolidate_max_layers'            => '30',
             'emergency_bake_compression'        => 'lz4',
             // Boot Integrity (Phase 4b)
             'boot_integrity_strict'             => '1',
@@ -81,6 +86,30 @@ class ConfigService {
         }
 
         return $merged;
+    }
+
+    // Phase 5 consolidate-policy bounds (mirror bash common.sh constants).
+    const CONSOLIDATE_MAX_LAYERS_DEFAULT = 30;
+    const CONSOLIDATE_MAX_LAYERS_FLOOR   = 4;
+    const CONSOLIDATE_MAX_LAYERS_CEILING = 40;
+
+    /**
+     * Effective home overlay layer ceiling for the consolidate policy. The settings
+     * page persists the raw value; this applies the read-time clamp to [4, 40], mirroring
+     * the bash _consolidate_max_layers() helper so PHP and shell agree. Consolidation is
+     * recommended at this value minus 2.
+     * @return int Clamped layer ceiling.
+     */
+    public static function getConsolidateMaxLayers(): int {
+        $config = self::getConfig();
+        $raw = $config['consolidate_max_layers'] ?? self::CONSOLIDATE_MAX_LAYERS_DEFAULT;
+        if (!is_numeric($raw)) {
+            $raw = self::CONSOLIDATE_MAX_LAYERS_DEFAULT;
+        }
+        $val = (int)$raw;
+        if ($val < self::CONSOLIDATE_MAX_LAYERS_FLOOR)   $val = self::CONSOLIDATE_MAX_LAYERS_FLOOR;
+        if ($val > self::CONSOLIDATE_MAX_LAYERS_CEILING) $val = self::CONSOLIDATE_MAX_LAYERS_CEILING;
+        return $val;
     }
 
     /**

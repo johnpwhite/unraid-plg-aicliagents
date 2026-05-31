@@ -60,8 +60,9 @@ DIRTY_HARD_PCT="${dirty_threshold_hard_pct:-25}"
 DIRTY_CRITICAL_MB="${dirty_threshold_critical_mb:-4096}"
 DIRTY_CRITICAL_PCT="${dirty_threshold_critical_pct:-50}"
 EMERGENCY_BAKE_COMP="${emergency_bake_compression:-lz4}"
-CONSOLIDATE_THRESHOLD_FLASH="${consolidate_layer_threshold_flash:-30}"
-CONSOLIDATE_THRESHOLD_ARRAY="${consolidate_layer_threshold_array:-5}"
+# Phase 5: the old count-based consolidate thresholds (consolidate_layer_threshold_*)
+# are gone — home consolidation is now driven by the storagectl `status` policy
+# (layers >= consolidate_max_layers-2, or space pressure). See _check_consolidate_policy.
 
 # Notify script path
 NOTIFY_SCRIPT="/usr/local/emhttp/plugins/dynamix/scripts/notify"
@@ -798,12 +799,12 @@ _op_bake() {
     # Spawn child — in a subshell that drops the inherited single-instance lock
     # fd FIRST (Bug #757): if the supervisor crashes mid-bake, the orphaned bake
     # must not keep the lock held (a bake can run for minutes). The `exec`
-    # replaces the subshell with commit_stack.sh, so $! and the watchdog's
-    # kill -0/-TERM/-KILL still target the right PID.
+    # replaces the subshell with storagectl (Phase 5: it dispatches to op_bake),
+    # so $! and the watchdog's kill -0/-TERM/-KILL still target the right PID.
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
         export MKSQUASHFS_ARGS="-comp $compression"
-        exec bash "${STORAGE_DIR}/commit_stack.sh" "$type" "$id" "$persist_path" >/dev/null 2>&1
+        exec bash "${STORAGE_DIR}/storagectl.sh" bake --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
 
@@ -898,7 +899,7 @@ _op_consolidate() {
     # orphaned one must not block a fresh supervisor.
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
-        exec bash "${STORAGE_DIR}/consolidate_layers.sh" "$type" "$id" "$persist_path" >/dev/null 2>&1
+        exec bash "${STORAGE_DIR}/storagectl.sh" consolidate --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
 
@@ -1192,6 +1193,216 @@ _check_wants_bake_flags() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 5: homes-only policy-driven consolidate enqueue.
+#
+# Replaces the old count>=5 auto-consolidate that lived in PHP
+# StorageMountService::commitChanges. Each tick, for every HOME entity in the
+# manifest, ask storagectl for the consolidate verdict and enqueue a low-priority
+# consolidate when the policy recommends it (stack near the overlay ceiling, or
+# persist under space pressure). Agents are excluded — storagectl omits the verdict
+# for them and they collapse to one layer per install anyway.
+#
+# queue_enqueue does NOT dedup (filenames carry a unique epoch), so we skip the
+# enqueue when a consolidate for this entity is already pending — otherwise a home
+# parked at the threshold would pile up one .req per tick until the op drains.
+# ---------------------------------------------------------------------------
+_check_consolidate_policy() {
+    local mpath
+    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    [ -f "$mpath" ] || return 0
+    [ "$(command -v php)" ] || return 0
+
+    local home_ids
+    home_ids=$(php -d display_errors=0 -r "
+        \$m = json_decode(@file_get_contents('$mpath'), true);
+        if (!is_array(\$m)) exit;
+        foreach (\$m['entities'] ?? [] as \$k => \$v) {
+            if (strpos(\$k, 'home/') === 0) echo substr(\$k, 5) . PHP_EOL;
+        }
+    " 2>/dev/null || true)
+    [ -n "$home_ids" ] || return 0
+
+    local id persist json reason safe_id existing
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        persist="$(home_persist_path "$id" 2>/dev/null || true)"
+        [ -n "$persist" ] || continue
+
+        json="$(bash "${STORAGE_DIR}/storagectl.sh" status --type home --id "$id" --persist "$persist" 2>/dev/null)"
+        # The consolidate object is emitted only for homes; "recommended":true appears
+        # nowhere else in the status JSON, so a substring test is unambiguous.
+        case "$json" in
+            *'"recommended":true'*) : ;;
+            *) continue ;;
+        esac
+
+        # Skip if a consolidate is already queued for this entity (no per-tick pile-up).
+        safe_id="$(printf '%s' "$id" | tr '/ ' '__')"
+        existing="$(ls "${QUEUE_DIR}"/*_home_"${safe_id}"_consolidate.req 2>/dev/null | head -1)"
+        [ -n "$existing" ] && continue
+
+        # `defer_reason` can't false-match: its key is `defer_reason`, not `reason`.
+        reason="$(printf '%s' "$json" | grep -oP '"reason":"\K[^"]+' | head -1)"
+        [ -n "$reason" ] || reason="policy"
+        queue_enqueue 90 "home" "$id" "consolidate" "policy:${reason}" 2>/dev/null || true
+        lifecycle_log "info" "supervisor" "consolidate_policy_enqueued" \
+            "{\"entity\":\"home/$id\",\"reason\":\"$reason\"}" 2>/dev/null || true
+        log_info "Consolidate policy: enqueued home/$id (reason=$reason)"
+    done <<< "$home_ids"
+}
+
+# ---------------------------------------------------------------------------
+# WP #1262 (#6): force-reclaim escalation.
+#
+# The reclaim/consolidate-at-idle path only runs when a home is idle (the
+# post-bake reclaim and _check_consolidate_policy both defer on a live session).
+# A permanently-connected session would therefore defer reclaim FOREVER, letting
+# the ZRAM upper grow unbounded and the delta stack march to the hard ceiling.
+# This is the bounded escape valve: when a home is BUSY (live session) AND
+# storagectl recommends consolidation (layers >= ceiling-2, or space pressure),
+# arm a user-warned countdown; at the deadline gracefully force-close the home's
+# sessions (resume-id preserved — TerminalHandler::gracefulClose) so the home
+# reaches idle and the already-deferred consolidate runs. Below threshold OR
+# idle, do nothing and let natural idle drive reclaim. NEVER fires for a routine
+# bake — only when consolidation is actually recommended.
+# ---------------------------------------------------------------------------
+
+# Countdown duration (seconds). Precedence: env (tests/tuning) > cfg > 300 (5min).
+_force_reclaim_countdown_sec() {
+    echo "${AICLI_FORCE_RECLAIM_COUNTDOWN_SEC:-${force_reclaim_countdown_sec:-300}}"
+}
+
+# Injectable clock so the state machine is unit-testable without faking date(1).
+_now_epoch() { date +%s; }
+
+# Echo newline-separated home ids from the manifest (homes only).
+_manifest_home_ids() {
+    local mpath
+    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    [ -f "$mpath" ] || return 0
+    [ "$(command -v php)" ] || return 0
+    php -d display_errors=0 -r "
+        \$m = json_decode(@file_get_contents('$mpath'), true);
+        if (!is_array(\$m)) exit;
+        foreach (\$m['entities'] ?? [] as \$k => \$v) {
+            if (strpos(\$k, 'home/') === 0) echo substr(\$k, 5) . PHP_EOL;
+        }
+    " 2>/dev/null || true
+}
+
+# _home_reclaim_recommended <id> <persist> — return 0 if storagectl recommends
+# consolidate/reclaim for this home; sets _RECLAIM_REASON to the verdict reason.
+# Same signal _check_consolidate_policy uses (consolidate.recommended), so the
+# escalation arms on exactly the same threshold that the (deferred) consolidate
+# is already waiting on.
+_home_reclaim_recommended() {
+    local id="$1" persist="$2" json
+    _RECLAIM_REASON=""
+    json="$(bash "${STORAGE_DIR}/storagectl.sh" status --type home --id "$id" --persist "$persist" 2>/dev/null)"
+    case "$json" in
+        *'"recommended":true'*) : ;;
+        *) return 1 ;;
+    esac
+    _RECLAIM_REASON="$(printf '%s' "$json" | grep -oP '"reason":"\K[^"]+' | head -1)"
+    [ -n "$_RECLAIM_REASON" ] || _RECLAIM_REASON="policy"
+    return 0
+}
+
+# _force_close_home_sessions <user> — close every live session on this home,
+# preserving resume ids. Reuses the proven PHP gracefulClose path (flush +
+# resume-id scrape + ttyd/tmux teardown) headlessly via a CLI bridge, so it works
+# whether or not a browser is connected. Best-effort; never aborts the tick.
+_force_close_home_sessions() {
+    local user="$1"
+    [ -n "$user" ] || return 0
+    [ "$(command -v php)" ] || return 0
+    local plugin_dir="/usr/local/emhttp/plugins/unraid-aicliagents"
+    php -d display_errors=0 -r "
+        \$_SERVER['DOCUMENT_ROOT']='/usr/local/emhttp';
+        require_once '$plugin_dir/src/includes/AICliAgentsManager.php';
+        if (method_exists('\\AICliAgents\\Services\\TerminalService','forceCloseHome')) {
+            \\AICliAgents\\Services\\TerminalService::forceCloseHome('$user');
+        }
+    " 2>/dev/null || true
+}
+
+# The state machine. See block comment above. Stub-overridable boundary helpers:
+# _now_epoch, _manifest_home_ids, home_persist_path, home_mount,
+# _home_reclaim_recommended, home_mount_in_use, _force_close_home_sessions.
+_check_force_reclaim_escalation() {
+    local esc_dir="${SUPERVISOR_DIR}/escalation"
+    local countdown
+    countdown="$(_force_reclaim_countdown_sec)"
+
+    local ids
+    ids="$(_manifest_home_ids)"
+    [ -n "$ids" ] || return 0
+
+    local now
+    now="$(_now_epoch)"
+
+    local id
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        local safe_id state_file persist mnt
+        safe_id="$(printf '%s' "$id" | tr '/ ' '__')"
+        state_file="${esc_dir}/home_${safe_id}.json"
+        persist="$(home_persist_path "$id" 2>/dev/null)"
+        mnt="$(home_mount "$id" 2>/dev/null)"
+
+        local recommended=0 busy=0
+        if [ -n "$persist" ] && _home_reclaim_recommended "$id" "$persist"; then recommended=1; fi
+        if [ -n "$mnt" ] && home_mount_in_use "$mnt"; then busy=1; fi
+
+        if [ "$recommended" -eq 1 ] && [ "$busy" -eq 1 ]; then
+            if [ ! -f "$state_file" ]; then
+                # Arm: write countdown state + notify the user once.
+                mkdir -p "$esc_dir" 2>/dev/null || true
+                local deadline=$(( now + countdown ))
+                _atomic_json_write "$state_file" \
+                    "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"deadline_epoch":%d,"state":"countdown"}' \
+                        "$id" "$_RECLAIM_REASON" "$now" "$deadline")" || true
+                local mins=$(( countdown / 60 ))
+                _supervisor_notify "warning" "AICliAgents: storage reclaim scheduled" \
+                    "Home '$id' needs storage reclamation but has a live session. Sessions will close in ${mins} min to free memory; you can resume exactly where you left off." \
+                    "force_reclaim_${id}" 3600
+                lifecycle_log "warn" "supervisor" "force_reclaim_armed" \
+                    "{\"entity\":\"home/$id\",\"reason\":\"$_RECLAIM_REASON\",\"deadline_epoch\":$deadline}" 2>/dev/null || true
+                log_info "Force-reclaim armed for home/$id (reason=$_RECLAIM_REASON, deadline in ${countdown}s)"
+            else
+                # Countdown in flight — fire at/after the deadline. Read the
+                # deadline with sed (POSIX, no PCRE) so the state machine is
+                # unit-testable on any grep build, not just .4's UTF-8 locale.
+                local deadline
+                deadline="$(sed -n 's/.*"deadline_epoch":\([0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)"
+                [ -n "$deadline" ] || deadline=0
+                if [ "$now" -ge "$deadline" ]; then
+                    log_warn "Force-reclaim deadline reached for home/$id — closing sessions"
+                    lifecycle_log "warn" "supervisor" "force_reclaim_firing" \
+                        "{\"entity\":\"home/$id\"}" 2>/dev/null || true
+                    # Flip to "closing" BEFORE the close so the UI renders the
+                    # terminal state even if the close takes a moment.
+                    _atomic_json_write "$state_file" \
+                        "$(printf '{"entity":"home/%s","reason":"%s","state":"closing","fired_at":%d}' \
+                            "$id" "$_RECLAIM_REASON" "$now")" || true
+                    _force_close_home_sessions "$id"
+                fi
+            fi
+        else
+            # Condition no longer holds (home went idle, or pressure relieved):
+            # stand down — drop any countdown so we never force-close a user who
+            # already closed naturally.
+            if [ -f "$state_file" ]; then
+                rm -f "$state_file" 2>/dev/null || true
+                lifecycle_log "info" "supervisor" "force_reclaim_cleared" \
+                    "{\"entity\":\"home/$id\",\"recommended\":$recommended,\"busy\":$busy}" 2>/dev/null || true
+                log_info "Force-reclaim stood down for home/$id (recommended=$recommended busy=$busy)"
+            fi
+        fi
+    done <<< "$ids"
+}
+
+# ---------------------------------------------------------------------------
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
 _work_tick() {
@@ -1218,6 +1429,16 @@ _work_tick() {
 
     # Step 3a: WP #748 Phase 1 (E) — consume wants-bake flags from workspace closes
     _check_wants_bake_flags
+
+    # Step 3b: Phase 5 — homes-only policy-driven consolidate enqueue (replaces the
+    # old count>=5 PHP trigger). Enqueues a consolidate when storagectl recommends it.
+    _check_consolidate_policy
+
+    # Step 3c: WP #1262 (#6) — force-reclaim escalation. When a home is busy AND
+    # consolidation is recommended (so the Step-3b consolidate keeps deferring on
+    # the live session), arm a user-warned countdown; at the deadline force-close
+    # the home's sessions so it reaches idle and the deferred consolidate runs.
+    _check_force_reclaim_escalation
 
     # Step 4: Pop and process one queue item
     local qdepth
@@ -1356,7 +1577,9 @@ _do_start() {
     # would be the loser and have exited). The only things to clean up are
     # ORPHANS of a *crashed* predecessor: its heartbeat subshell (its cmdline
     # still shows "...aicli-supervisor.sh start") and any in-flight
-    # commit_stack.sh / consolidate_layers.sh work child. We identify orphans by
+    # storagectl bake/consolidate work child (Phase 5: the supervisor now execs
+    # storagectl directly, so the work-child cmdline is storagectl.sh, not the old
+    # commit_stack.sh / consolidate_layers.sh). We identify orphans by
     # PPid==1 (reparented to init) — never touch a process with a live parent.
     # Path-anchored cmdline match only (VM-safety guard: never a bare agent-name
     # pgrep that could match a qemu cmdline). This REPLACES the old "kill every
@@ -1368,8 +1591,8 @@ _do_start() {
     local _self_script="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh"
     _find_orphan_children() {
         { pgrep -f "$_self_script start" 2>/dev/null
-          pgrep -f "/src/scripts/storage/commit_stack.sh " 2>/dev/null
-          pgrep -f "/src/scripts/storage/consolidate_layers.sh " 2>/dev/null
+          pgrep -f "/src/scripts/storage/storagectl.sh bake " 2>/dev/null
+          pgrep -f "/src/scripts/storage/storagectl.sh consolidate " 2>/dev/null
         } | sort -un | while read -r _pid; do
             [ -n "$_pid" ] || continue
             [ "$_pid" = "$$" ] && continue
@@ -1426,10 +1649,6 @@ _do_start() {
         [ -n "$_v" ] && DIRTY_CRITICAL_MB="$_v"
         _v=$(grep -oP '^emergency_bake_compression="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
         [ -n "$_v" ] && EMERGENCY_BAKE_COMP="$_v"
-        _v=$(grep -oP '^consolidate_layer_threshold_flash="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
-        [ -n "$_v" ] && CONSOLIDATE_THRESHOLD_FLASH="$_v"
-        _v=$(grep -oP '^consolidate_layer_threshold_array="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
-        [ -n "$_v" ] && CONSOLIDATE_THRESHOLD_ARRAY="$_v"
     fi
 
     log_info "Supervisor starting (pid $$, version $DAEMON_VERSION)"
@@ -1746,29 +1965,36 @@ _do_cleanup_phantoms() {
 # ---------------------------------------------------------------------------
 # Entry point — dispatch on first argument
 # ---------------------------------------------------------------------------
-CMD="${1:-start}"
+# Source guard: only dispatch when EXECUTED (`bash aicli-supervisor.sh <cmd>`),
+# not when SOURCED. Sourcing the script (BASH_SOURCE[0] != $0) loads every
+# function for unit testing WITHOUT starting the daemon. Production always
+# execs it (SupervisorService.php, event/ scripts) so $0 == BASH_SOURCE[0]
+# and the dispatch runs exactly as before.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    CMD="${1:-start}"
 
-case "$CMD" in
-    start|"")
-        _do_cleanup_phantoms
-        _do_start
-        ;;
-    stop)
-        _do_stop "${2:-10}"
-        ;;
-    flush)
-        shift
-        _do_flush "$@"
-        ;;
-    status|--status)
-        _do_status
-        ;;
-    cleanup-phantoms)
-        _do_cleanup_phantoms
-        exit $?
-        ;;
-    *)
-        log_error "Unknown command: $CMD. Use: start | stop | flush | status | cleanup-phantoms"
-        exit 1
-        ;;
-esac
+    case "$CMD" in
+        start|"")
+            _do_cleanup_phantoms
+            _do_start
+            ;;
+        stop)
+            _do_stop "${2:-10}"
+            ;;
+        flush)
+            shift
+            _do_flush "$@"
+            ;;
+        status|--status)
+            _do_status
+            ;;
+        cleanup-phantoms)
+            _do_cleanup_phantoms
+            exit $?
+            ;;
+        *)
+            log_error "Unknown command: $CMD. Use: start | stop | flush | status | cleanup-phantoms"
+            exit 1
+            ;;
+    esac
+fi

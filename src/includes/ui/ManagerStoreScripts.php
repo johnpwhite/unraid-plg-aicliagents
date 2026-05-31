@@ -239,7 +239,10 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
             '<div style="text-align:left; font-size:13px; line-height:1.5;">'
           + sessionHtml
           + '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px; cursor:pointer;">'
-          +   '<input type="checkbox" id="aicli-bk-toggle" checked style="margin-top:2px;">'
+          // Default OFF: a backup is opt-in. _aicliRenderBackupEstimate's
+          // success branch only enables the toggle, never re-checks it, so an
+          // unchecked default stays unchecked unless the user ticks it.
+          +   '<input type="checkbox" id="aicli-bk-toggle" style="margin-top:2px;">'
           +   '<span>Keep a copy of the current version'
           +     (curVer ? ' (<b>v' + _escAttr(curVer) + '</b>)' : '')
           +     ' so you can roll back if the upgrade goes wrong.</span>'
@@ -1180,7 +1183,7 @@ const AV2_TMUX_HELP = {
     'prefix':            'Command prefix key (default C-b). Every tmux keybinding is triggered by this combo first.',
     'base-index':        'Index of the first window — 0 matches shell conventions, 1 matches keyboard number row.',
     'bell-action':       'Which pane triggers a bell alert: any, none, current (focused only), other (unfocused only).',
-    'default-terminal':  'TERM value exported to programs. screen-256color is safe; tmux-256color enables italics.',
+    'default-terminal':  'TERM value exported to programs (default: xterm-256color). xterm-256color is broadly compatible; tmux-256color enables italics but requires terminfo on the server.',
     'focus-events':      'Forward focus-gained/focus-lost escape codes to apps (needed for vim/nvim auto-reload).',
     'allow-passthrough': 'Allow OSC escape sequences to pass through tmux — enables inline images, hyperlinks.',
 };

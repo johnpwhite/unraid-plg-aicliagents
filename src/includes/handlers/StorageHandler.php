@@ -18,6 +18,7 @@ class StorageHandler {
             case 'get_storage_status':          $result = self::getStatus(); break;
             case 'get_boot_integrity_status':   return self::getBootIntegrityStatus(); // read-only, no Nchan publish
             case 'get_supervisor_status':       return self::getSupervisorStatus(); // read-only, no Nchan publish
+            case 'get_force_reclaim_state':     return self::getForceReclaimState(); // read-only, no Nchan publish
             case 'restore_from_sibling':        return self::restoreFromSibling(); // mutating, but no Nchan — integrity-only
             case 'list_halts':                  return self::listHalts();           // read-only, no Nchan publish
             case 'clear_halt':                  return self::clearHalt();           // mutating, invalidates boot cache
@@ -46,7 +47,7 @@ class StorageHandler {
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_task_status',
+        return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'expand_storage', 'shrink_storage',
@@ -144,6 +145,40 @@ class StorageHandler {
             'pressure'          => self::_computeDirtyPressure(),
             'consolidate_fails' => self::_readConsolidateFails(),
         ];
+    }
+
+    /**
+     * WP #1262: Return the current force-reclaim countdown state for the React UI.
+     *
+     * Reads /tmp/unraid-aicliagents/supervisor/escalation/home_<safeId>.json
+     * written by the bash supervisor when a home overlay is busy AND storage
+     * reclaim is needed. The React banner polls this every 5 s and displays a
+     * live countdown + "Close now" shortcut.
+     *
+     * Response shapes:
+     *   no file / parse error:  { "status":"ok", "state":"none", "now":<epoch> }
+     *   countdown:              { "status":"ok", "now":<epoch>, "state":"countdown",
+     *                             "entity":"home/root", "reason":"layers_near_max",
+     *                             "started_at":<epoch>, "deadline_epoch":<epoch> }
+     *   closing:                { "status":"ok", "now":<epoch>, "state":"closing",
+     *                             "entity":"home/root", "reason":"layers_near_max",
+     *                             "fired_at":<epoch> }
+     */
+    private static function getForceReclaimState(): array {
+        $config = getAICliConfig();
+        $user   = (string)($config['user'] ?? 'root');
+        if (empty($user)) $user = 'root';
+        $safeId = str_replace(['/', ' '], '_', $user);
+        $path   = "/tmp/unraid-aicliagents/supervisor/escalation/home_{$safeId}.json";
+
+        $none = ['status' => 'ok', 'state' => 'none', 'now' => time()];
+        if (!file_exists($path)) return $none;
+        $raw = @file_get_contents($path);
+        if ($raw === false || $raw === '') return $none;
+        $decoded = @json_decode($raw, true);
+        if (!is_array($decoded)) return $none;
+
+        return array_merge(['status' => 'ok', 'now' => time()], $decoded);
     }
 
     /**

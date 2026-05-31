@@ -16,7 +16,7 @@
         <div style="width:300px; height:6px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden;">
             <div id="migration-bar" style="width:0%; height:100%; background:var(--orange, #ff8c00);"></div>
         </div>
-        <button type="button" class="aicli-btn-slim" onclick="openMigrationLog()" style="background:#444; color:#fff; border:1px solid #666;"><i class="fa fa-file-text-o"></i> View Migration Log</button>
+        <button type="button" class="aicli-btn-slim" onclick="openMigrationLog()" style="background:var(--title-header-background-color, #444); color:var(--text-color, #fff); border:1px solid var(--border-color, #666);"><i class="fa fa-file-text-o"></i> View Migration Log</button>
     </div>
 </div>
 

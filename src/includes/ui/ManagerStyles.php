@@ -141,10 +141,10 @@
     .aicli-btn-slim.info { background: #007bff !important; }
     
     .aicli-pill-btn {
-        background: #333; border: 1px solid #444; color: #eee; padding: 2px 8px; border-radius: 10px;
+        background: var(--mild-background-color, #333); border: 1px solid var(--border-color, #444); color: var(--text-color, #eee); padding: 2px 8px; border-radius: 10px;
         font-size: 9px; cursor: pointer; font-weight: bold; transition: all 0.2s;
     }
-    .aicli-pill-btn:hover { background: #444; border-color: #ff8c00; color: #ff8c00; }
+    .aicli-pill-btn:hover { background: var(--border-color, #444); border-color: #ff8c00; color: #ff8c00; }
 
     .stat-icon-btn {
         color: var(--text-color, #888); font-size: 12px; cursor: pointer; transition: all 0.2s;
@@ -155,7 +155,7 @@
     .stat-icon-btn i { pointer-events: none; }
 
     /* Storage & Bars */
-    .stat-bar-wrap { width: 100%; height: 24px; background: #222; border-radius: 4px; overflow: hidden; position: relative; border: 1px solid #333; display: flex; }
+    .stat-bar-wrap { width: 100%; height: 24px; background: var(--mild-background-color, #222); border-radius: 4px; overflow: hidden; position: relative; border: 1px solid var(--border-color, #333); display: flex; }
     .stat-bar-fill { height: 100%; width: 0%; transition: width 0.5s; }
     .stat-bar-base { height: 100%; background: #1e4976; transition: width 0.5s; position: relative; } /* Dark Blue: Flash */
     .stat-bar-dirty { height: 100%; background: var(--orange, #ff8c00); transition: width 0.5s; position: relative; } /* Orange: RAM Delta */
@@ -163,7 +163,7 @@
     
     /* Install Progress Bar (Marketplace) */
     .install-progress { flex: 1; display: none; flex-direction: column; justify-content: center; }
-    .install-bar-wrap { width: 100%; height: 12px; background: #000; border-radius: 6px; overflow: hidden; border: 1px solid #444; margin-top: 4px; display: block !important; }
+    .install-bar-wrap { width: 100%; height: 12px; background: var(--background-color, #000); border-radius: 6px; overflow: hidden; border: 1px solid var(--border-color, #444); margin-top: 4px; display: block !important; }
     .install-bar-fill { height: 100%; width: 0%; background: var(--orange, #ff8c00); transition: width 0.3s ease; box-shadow: 0 0 10px rgba(255,140,0,0.5); display: block !important; }
 
     .legend-item { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; opacity: 0.7; }
@@ -273,10 +273,15 @@
 
     .agent-footer { padding: 10px 12px; background: var(--title-header-background-color, rgba(0,0,0,0.4)); border-top: 1px solid var(--border-color, rgba(255,255,255,0.05)); display: flex; align-items: center; justify-content: space-between; min-height: 46px; }
 
-    /* Log Viewer */
+    /* Log Viewer / Debug console.
+       INTENTIONALLY ALWAYS DARK — do NOT theme this with var(--background-color)
+       etc. It is a terminal surface with green (#0f0) monospace text; on a light
+       Unraid theme a theme-aware background turns it into unreadable green-on-white.
+       The v2026.05.29.02 theme audit themed these and broke it; keep them hardcoded
+       dark so the console stays black regardless of the page theme. */
     .log-terminal { background: #000; border-radius: 4px; border: 1px solid #333; overflow: hidden; display: flex; flex-direction: column; }
-    .log-header { background: #222; padding: 0 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; height: 32px; }
-    .log-body { height: 400px; overflow-y: auto !important; padding: 10px; font-family: 'Courier New', monospace; font-size: 11px; color: #0f0; white-space: pre-wrap; position: relative; overscroll-behavior: contain; }
+    .log-header { background: #1a1a1a; padding: 0 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; height: 32px; }
+    .log-body { height: 400px; overflow-y: auto !important; padding: 10px; font-family: 'Courier New', monospace; font-size: 11px; background: #000; color: #0f0; white-space: pre-wrap; position: relative; overscroll-behavior: contain; }
     .log-tab { padding: 0 12px; cursor: pointer; opacity: 0.7; color: #fff; font-size: 9px; font-weight: bold; text-transform: uppercase; line-height: 32px; border-right: 1px solid #333; transition: all 0.15s; letter-spacing: 0.03em; }
     .log-tab:hover { opacity: 1; background: #2a2a2a; }
 
@@ -291,6 +296,26 @@
     .log-action-btn.danger { color: #f88; }
     .log-action-btn.danger:hover { background: #600; color: #fcc; border-color: #800; }
     .log-tab.active { opacity: 1; background: #333; color: #ff8c00; }
+
+    /* Upgrade "keep a copy" toggle. The backup now defaults OFF (opt-in), so when
+       it's UNticked we pulse a soft orange glow in/out like a heartbeat to draw the
+       user's eye to the opt-in. The pulse stops the moment they tick it (or when the
+       toggle is disabled — insufficient space / bad path — where opting in isn't
+       possible). prefers-reduced-motion gets a static outline instead of the animation. */
+    @keyframes aicli-bk-heartbeat {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255,140,0,0); }
+        50%      { box-shadow: 0 0 7px 3px rgba(255,140,0,0.85); }
+    }
+    #aicli-bk-toggle { border-radius: 3px; }
+    #aicli-bk-toggle:not(:checked):not(:disabled) {
+        animation: aicli-bk-heartbeat 1.8s ease-in-out infinite;
+        outline: 1px solid rgba(255,140,0,0.7);
+        outline-offset: 1px;
+    }
+    #aicli-bk-toggle:checked, #aicli-bk-toggle:disabled { animation: none; outline: none; }
+    @media (prefers-reduced-motion: reduce) {
+        #aicli-bk-toggle:not(:checked):not(:disabled) { animation: none; outline: 2px solid rgba(255,140,0,0.85); }
+    }
     
     .help-text { font-size: 0.85em; opacity: 0.6; font-style: italic; white-space: normal; text-align: left !important; width: 100%; }
 
@@ -304,7 +329,7 @@
         width: 500px; max-height: 80vh; border-radius: 8px; overflow: hidden;
         box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         border: 1px solid var(--border-color, #ccc);
-        background: var(--background-color, var(--body-background, #fff));
+        background: var(--background-color, #fff);
         color: var(--text-color, inherit);
         display: flex; flex-direction: column;
     }
