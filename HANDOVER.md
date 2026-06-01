@@ -1,119 +1,95 @@
-I'm resuming work on unraid-plg-aicliagents. Context from previous session (2026-05-31).
+I'm resuming work on unraid-plg-aicliagents. Context from previous session (2026-06-01).
 
-## Headline
-The quiescent-workspace-lifecycle is **COMPLETE**. The two remaining items —
-**#6 force-reclaim on pressure/ceiling + 5-min countdown (WP #1262)** and
-**#7 launch⇄mount-op lock (WP #1263)** — are **BUILT, L1/L2-green, and TESTED ON
-FACTORY**: published **v2026.05.31.03**, deployed to .4, smoke-verified, and
-live-verified end-to-end on .4.
+## ⚠️ MOST RECENT — STRUCTURAL DATA-LOSS FIXES SHIPPED TO FACTORY (storefront promote PENDING John's go)
 
-**STOREFRONT: PUBLISHED.** v2026.05.31.06 is live on public GitHub (CA store) as of
-2026-05-31. The release bundles the #6/#7 lifecycle work plus three follow-up fixes
-shipped to factory after .03 and now public:
-- **v2026.05.31.04** — debug/log console restored to always-black (the v2026.05.29.02
-  theme audit had themed it → green-on-white on light themes). Guarded.
-- **v2026.05.31.05** — agent-upgrade "keep a copy" backup now defaults OFF (opt-in);
-  the toggle pulses a heartbeat glow while unticked so it's noticed. Guarded.
-- **v2026.05.31.06** — SSH copy-connect chip command now inlines
-  `TMUX_TMPDIR=/tmp/unraid-aicliagents/tmux` so the attach hits the plugin's private
-  tmux socket (was reporting "no sessions"). Bug #1043 guard extended to cover it.
-The public changelog was net-off'd (theme-improve line added; #1246 excluded as a
-factory-loop-internal defect) — see CHANGES.public.xml. NOTE: a storefront publish
-fails if the Bash shell cwd is inside ui-build (Windows handle lock) — cd out first.
+The two structural follow-ups to the conversation-data-loss incident (#1276) are
+**BUILT, fully tested, published to factory v2026.05.31.08, and verified on .4** —
+but NOT yet promoted to storefront (public). Awaiting John's go for the public push.
 
-## What SHIPPED in v2026.05.31.03
+### What shipped (factory v2026.05.31.08 → deployed + verified on 192.168.1.4)
 
-### #6 — Force-reclaim escalation (WP #1262)
-The reclaim/consolidate-at-idle path only runs when a home is idle, so a
-permanently-connected session would defer reclaim forever. #6 is the bounded
-escape valve. **Key realisation: it collapses to "make a stuck-busy home reach
-idle"** — reclaim itself is emergent (once force-close drives the home idle, the
-already-deferred `_check_consolidate_policy` consolidate runs).
-- **`aicli-supervisor.sh _check_force_reclaim_escalation`** — state machine: when
-  a home is BUSY (`home_mount_in_use`) AND storagectl's `consolidate.recommended`
-  is true (layers≥ceiling-2 / space pressure), arm a countdown
-  (`/tmp/unraid-aicliagents/supervisor/escalation/home_<user>.json`, default 300s
-  via `AICLI_FORCE_RECLAIM_COUNTDOWN_SEC`), notify once; at the deadline call the
-  force-close bridge; stand down (delete state) if the home goes idle / pressure
-  relieves first. Wired into `_work_tick` (Step 3c). Boundary helpers are
-  injectable (`_now_epoch`, `_manifest_home_ids`, `_home_reclaim_recommended`,
-  `_force_close_home_sessions`) so it's unit-testable.
-- **Headless force-close** — `TerminalService::forceCloseHome($user)` enumerates
-  `listActiveSessionsForHome($user)` and calls the PROVEN `gracefulClose` per
-  session (flush→scrape resume-id→saveResumeId→teardown), so a forced close is
-  byte-identical to a user click and resume is preserved. New per-session `.user`
-  metadata file + pure `filterSessionsByHome` (the TDD seam). Bash bridge
-  `_force_close_home_sessions` invokes it via PHP CLI (works headless).
-- **UI** — read-only `get_force_reclaim_state` endpoint (StorageHandler) + a React
-  countdown banner in `AICliAgentsTerminal.tsx` (polls 5s, 1s tick, M:SS, reason
-  copy, "Close now"→`closeTab`); `state==closing` → existing empty state.
-- **SUPERVISOR SOURCE GUARD** added: the bottom dispatch is now
-  `if [ "${BASH_SOURCE[0]}" = "${0}" ]; then … fi` so the supervisor can be SOURCED
-  for unit tests without starting the daemon. Production always execs it → unchanged.
+- **WP #1277 (Fix #2) — bake-confirmed reclaim. THE generic fix.** `selective_upper_cleanup`
+  now wipes a file from the zram upper ONLY if it is PROVEN captured in the just-baked
+  layer. `atomic_write_layer` emits the captured-file list (from its verify RO-mount
+  `find`) to `AICLI_BAKE_MANIFEST_OUT`; `op_bake` maps those relpaths onto `UPPER_DIR` and
+  passes them as a new 3rd arg to `selective_upper_cleanup`, which `comm -12`-intersects the
+  wipe set with it. A closed conversation file the bake failed to capture is never reclaimed
+  → loss closed generically (any agent, any window), not via the per-agent allowlist (which
+  stays as belt-and-braces). Manifest passed UNCONDITIONALLY — empty/missing ⇒ wipe NOTHING
+  (safe), never a fall-back to the aggressive legacy wipe.
+  Files: `common.sh` (selective_upper_cleanup 3rd arg + comm -12), `atomic_write_layer.sh`
+  (AICLI_BAKE_MANIFEST_OUT emission), `storage_ops.sh` op_bake (manifest threading).
 
-### #7 — launch⇄mount-op lock (WP #1263)
-The race: a launch's mount racing a reclaim remount while the home looks idle (the
-ttyd doesn't exist yet during `ensureHomeMounted`). **EVERY overlay (re)mount
-routes through `op_mount`** (launch, post-bake reclaim refresh, post-consolidate
-remount), so the fix is a single flock at that chokepoint:
-- **`common.sh mount_op_lock_path <type> <id>`** → `/var/run/aicli-mount-op-<type>-<id>.lock`.
-- **`op_mount`** takes `flock -w 30` on it around the umount+overlay-mount. It is a
-  SEPARATE lock from the bake lock (which guards the whole multi-minute squashfs
-  write — must NOT block a launch) and from PHP's home_mount lock (locking the same
-  file there would deadlock the op_mount exec). `-w 30` bounds the wait so a wedged
-  holder degrades to "proceed", never deadlock.
+- **WP #1278 (Fix #3) — consolidate lowerdir-completeness guard.** After the WP#1246
+  pre-consolidate mount refresh, `op_consolidate` asserts the live overlay's lowerdir count
+  == on-disk layer count; on mismatch (≥1 layer) it DEFERS (exit 2 — preserves upper AND
+  every delta; no marker/lock taken yet) with defer reason `consolidate_lowerdir_incomplete`.
+  So a stale/short lowerdir can't bake a lossy consolidated then delete un-captured deltas
+  (the May-29 Tower vector). Helpers in `common.sh`: `_overlay_lowerdir_string` (reads
+  /proc/mounts), `_count_lowerdirs_in_opts` (ERE, no PCRE), `_mounted_lower_count`.
+  Guard wired in `storage_ops.sh` op_consolidate right after the #1246 refresh.
 
-## Tests (all green)
-- **Bash units (new, run anywhere incl. .4):** `tests/unit/escalation_test.sh`
-  (19/19), `tests/unit/mount_op_lock_test.sh` (path 4/4; flock mutual-exclusion
-  runs on .4 — skips on git-bash which lacks `grep -P`/`flock`).
-- **L2 PHPUnit:** 397 tests, 1206 assertions, 0 failures (104 env-skips).
-  `TerminalSessionFilterTest` 7/7; RegressionGuards 147/147 incl. 4 new guards
-  (source-guard, escalation wiring, bash↔PHP force-close contract, op_mount lock).
-- **Factory:** v2026.05.31.03 deployed to .4, smoke passed (L4 skipped — missing
-  `storageState.json`). Two .4 scripts proved it live (FAILS=0):
-  `C:/tmp/verify_wp1262_1263.sh` (deployed functions + flock mutual-exclusion +
-  forceCloseHome present) and `C:/tmp/live_escalation_check.sh` (real deployed
-  `_check_force_reclaim_escalation`: arm→hold→fire→stand-down).
+- **Canonical spec:** `docs/specs/CONVERSATION_RECLAIM_DATALOSS.md` (documents all 4 layers:
+  #1 allowlist + #4 upgrade-flush shipped v.07; #2 + #3 this change). Set as `canonical_spec`
+  on OP #1277 + #1278 (both now **Developed**).
 
-## NEXT STEPS
-1. **Push to storefront** when you give the go (`/jpw-unraid-storefront`) — promotes
-   v2026.05.31.03 to Tower's update channel. Both fixes are live-verified on .4.
-2. Optional: capture `tests/e2e/.auth/storageState.json` once to re-enable L4 and
-   get a visual review of the countdown banner.
-3. Optional hardening: a durable L3.5 integration case for the full force-close
-   (real ttyd session → deadline → close → idle → consolidate). The state machine
-   is already unit + live tested; this would add a real-session end-to-end gate.
+### Tests — ALL GREEN
+- **Bash units (root-free, ran on git-bash):** `tests/unit/bake_confirmed_reclaim_test.sh`
+  (7 — captured wiped / uncaptured survives / no-manifest=legacy / empty=wipe-nothing),
+  `tests/unit/consolidate_completeness_test.sh` (6 — lowerdir-count parsing),
+  `tests/unit/reclaim_protect_test.sh` (10 — still green, no regression).
+- **L2 PHPUnit:** 403/403 (0 failures, 104 env-skips). 2 new RegressionGuards:
+  `testReclaimConfinedToBakedManifest`, `testConsolidateLowerdirCompletenessGuard` (the
+  latter also pins guard ordering: after the #1246 refresh, before the old-layer delete).
+- **L3.5 integration on .4 (REAL kernel overlayfs/squashfs): 44/44 green, Ring-3 intact.**
+  4 new cases in `tests/integration/cases/reclaim_completeness.sh`: R01 (real bake manifest +
+  uncaptured file survives reclaim — the loss repro), R02 (full production bake no-loss), C01
+  (live short-overlay detection), C02 (complete 3-layer consolidate proceeds, all data
+  survives). The 40 pre-existing cases (M01 stale-mount consolidate, H02/H04 bake/consolidate,
+  P01–P05 concurrency, F10/F11 busy paths) all still pass → op_bake/op_consolidate edits are
+  behaviour-preserving.
+- **L3 smoke (publish gate on .4): 163 assertions, SMOKE PASS.** L4 skipped (storageState.json
+  missing — known, unrelated).
 
-## GOTCHAS
-- Don't publish/redeploy while John's .4 session is live without his OK.
-- `grep -P`/`flock` are absent on Windows git-bash → the new bash units use `sed`
-  for the deadline read and skip the flock test off-.4. Keep new unit-tested bash
-  logic PCRE-free.
-- The escalation state filename uses `tr '/ ' '__'` on the user; the PHP endpoint
-  matches with `str_replace(['/',' '],'_',$user)`. The mount-op lock uses a broader
-  `[^a-zA-Z0-9_-]` sanitisation (internal to bash; no PHP parity needed).
-- Ephemeral in C:/tmp: phpunit.phar (PHPUnit 10.5 — `php C:/tmp/phpunit.phar -c
-  phpunit.xml`), verify_wp1262_1263.sh, live_escalation_check.sh.
+### GOTCHA — the deployed package does NOT include tests/
+`plugin install` ships `src/`, `bin/`, `includes/`, etc. but NOT `tests/`. To run L3.5 on .4
+you must sync the harness first:
+  `scp -r tests root@192.168.1.4:/usr/local/emhttp/plugins/unraid-aicliagents/`
+then `ssh root@192.168.1.4 "bash /usr/local/emhttp/plugins/unraid-aicliagents/tests/integration/run.sh [--filter X]"`.
+The storage CODE under test IS deployed (src/scripts/storage/), so the harness measures the
+live v.08 scripts. (Wrapper used this session: `C:/tmp/sync_run_itest.sh`.)
 
-## FILES TOUCHED
-- `src/scripts/supervisor/aicli-supervisor.sh` (source-guard, escalation state
-  machine + helpers, _work_tick wiring)
-- `src/scripts/storage/common.sh` (mount_op_lock_path)
-- `src/scripts/storage/storage_ops.sh` (op_mount flock)
-- `src/includes/services/TerminalService.php` (forceCloseHome,
-  listActiveSessionsForHome, filterSessionsByHome, .user persistence)
-- `src/includes/services/UtilityService.php` (getUserIdPath)
-- `src/includes/services/ProcessManager.php` (.user cleanup x2)
-- `src/includes/handlers/StorageHandler.php` (get_force_reclaim_state)
-- `ui-build/src/components/AICliAgentsTerminal.tsx` (countdown banner)
-- `tests/unit/escalation_test.sh` (new), `tests/unit/mount_op_lock_test.sh` (new),
-  `tests/php/TerminalSessionFilterTest.php` (new), `tests/php/RegressionGuardsTest.php` (4 guards)
-- `docs/specs/QUIESCENT_WORKSPACE_LIFECYCLE.md` (status + requirements)
+### NEXT STEP — storefront promote (PENDING John's OK)
+Run `/jpw-unraid-storefront` to promote v2026.05.31.08 to Tower's public update channel once
+John confirms. This is the ONLY remaining step; everything is factory-verified. CHANGES.public
+should net-on the #1277/#1278 lines (genuine data-loss hardening — public-worthy). NOTE: a
+storefront publish fails if the Bash shell cwd is inside ui-build (Windows handle lock) — cd
+out first (memory: storefront-publish-uibuild-cwd-lock).
 
-## OpenProject (project 21)
-- #1260 Bug (ENOENT race) — Closed; #1261 Bug (antigravity resume) — Closed (both v2026.05.31.02)
-- #1262 Feature (force-reclaim) — Developed; #1263 Feature (mount-op lock) — Developed (both v2026.05.31.03)
+### Other gotchas
+- Local ESLint gate (regress.sh L1.6) is "not skippable" and needs `ui-build/node_modules`,
+  which is currently ABSENT → the publish wrapper's pre-publish regress fails on it. Worked
+  around with `--skip-regress` (publish-factory.php auto-installs node_modules + its ESLint is
+  non-blocking; L2/PHPStan already verified locally). For a clean full-gate run, `npm --prefix
+  ui-build install` first.
+- `tower` SSH alias works for READ-ONLY production diagnosis; all mutating ops → .4.
+- Ephemeral wrappers in C:/tmp: publish_dataloss.sh, sync_run_itest.sh, run_bash_units.sh,
+  run_phpunit_full.sh, run_guards.sh, op_status.sh. phpunit.phar at C:/tmp/phpunit.phar.
 
 ## SKILLS TO LOAD FIRST
-`/jpw-unraid-testing` (L1–L3.5), `/jpw-unraid-storefront` (promote), `/jpw-openproject` (WPs).
+`/jpw-unraid-storefront` (promote), `/jpw-unraid-testing` (L1–L3.5), `/jpw-openproject` (WPs).
+
+## FILES TOUCHED
+- `src/scripts/storage/common.sh` (selective_upper_cleanup 3rd-arg intersection;
+  _overlay_lowerdir_string / _count_lowerdirs_in_opts / _mounted_lower_count)
+- `src/scripts/storage/atomic_write_layer.sh` (AICLI_BAKE_MANIFEST_OUT emission)
+- `src/scripts/storage/storage_ops.sh` (op_bake manifest threading; op_consolidate #1278 guard)
+- `tests/unit/bake_confirmed_reclaim_test.sh` (new), `tests/unit/consolidate_completeness_test.sh` (new)
+- `tests/integration/cases/reclaim_completeness.sh` (new — R01/R02/C01/C02)
+- `tests/php/RegressionGuardsTest.php` (2 new guards)
+- `docs/specs/CONVERSATION_RECLAIM_DATALOSS.md` (new canonical spec)
+
+## OpenProject (project 21)
+- #1276 Bug (root cause) — Developed (shipped v2026.05.31.07)
+- #1277 Feature (bake-confirmed reclaim) — **Developed** (v2026.05.31.08, canonical_spec set)
+- #1278 Feature (consolidate completeness guard) — **Developed** (v2026.05.31.08, canonical_spec set)

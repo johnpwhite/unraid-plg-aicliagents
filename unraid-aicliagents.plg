@@ -1,8 +1,11 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.31.07" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.31.08" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.05.31.08
+- **Improve (data durability): stronger guarantees that your conversation history is safe before RAM is reclaimed.** Building on the v2026.05.31.07 fix, the plugin now reclaims a file from RAM only once it has been *proven* written to a storage layer — so a save that didn't capture a file can never lead to that file being discarded — and storage consolidation now refuses to run from an incomplete view of your saved layers (which could otherwise drop data). Together these close the conversation-loss issue at its root, for every agent, rather than by listing known file locations.
+
 ## 2026.05.31.07
 - **Fix (data loss — important): agent conversation history could be lost during storage maintenance or a plugin upgrade.** The routine that reclaims RAM after saving to Flash could, in certain timing windows, delete an agent's conversation files (Claude, Antigravity, and others) from RAM before they were durably written to Flash — and an upgrade performed while a session was active could proceed without first flushing recent conversations. Both are now fixed: conversation/chat-history files are never reclaimed from RAM, and an upgrade always flushes your unsaved work to Flash first. **Already-lost history is not recoverable by upgrading.** If you are on v2026.05.31.06, please update to this release as soon as possible.
 
@@ -235,7 +238,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.31.07"
+export VERSION="2026.05.31.08"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -275,12 +278,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.31.07" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.31.08" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.31.07" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.31.07" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.31.08" | sort -V | tail -1)
+        if [ "$_newest" = "2026.05.31.08" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.31.07)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.31.08)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

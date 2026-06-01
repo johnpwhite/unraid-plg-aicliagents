@@ -321,6 +321,14 @@ fi
 # the current cause via write_defer_reason; exit-0 leaves no marker.
 rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
 
+# WP #1277 (bake-confirmed reclaim): the layer writer records the files it
+# actually captured into this manifest; we map them onto UPPER_DIR below and
+# pass them to selective_upper_cleanup so the post-bake reclaim only wipes
+# proven-baked files. Stable per-entity path (overwritten each bake); cleared
+# now so a prior run's list can never be mistaken for this bake's truth.
+_BAKE_MANIFEST="/tmp/unraid-aicliagents/.bake_manifest_${TYPE}_${_LOCK_ID}"
+rm -f "$_BAKE_MANIFEST" "${_BAKE_MANIFEST}.abs" 2>/dev/null || true
+
 log() {
     local msg="[$(get_ts)] [INFO] [COMMIT] $1"
     echo "$msg"
@@ -476,6 +484,12 @@ fi
 # Apps continue writing freely; the bake reads at file level via the merged FS.
 _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend"
 
+# WP #1277: ask the layer writer (both the direct and overlay-merge paths run
+# atomic_write_layer as a sourced function in THIS process) to record the files
+# it captures. A plain shell var suffices — the command-substitution subshells
+# inherit it without an export, and it does not leak into mksquashfs's env.
+AICLI_BAKE_MANIFEST_OUT="$_BAKE_MANIFEST"
+
 NEW_BASENAME=""
 if [ "$SQLITE_DB_COUNT" -gt 0 ] && [ -n "$SQLITE_STAGE" ] && [ -d "$SQLITE_STAGE" ]; then
     log "Baking changes to $PERSIST_PATH/ (atomic delta, overlay-merge with $SQLITE_DB_COUNT SQLite backup(s))..."
@@ -567,9 +581,22 @@ op_mount "$TYPE" "$ID" "$PERSIST_PATH"
 # exposed the new lower. Per-file: a file is wiped only if (a) its mtime is not
 # newer than the marker AND (b) no process holds an open write fd to it. Bytes
 # that satisfy the invariant are reclaimed; the rest stay in ZRAM safely.
-log "Performing selective ZRAM cleanup (per-file mtime + open-fd invariant)..."
-CLEANUP_JSON=$(selective_upper_cleanup "$UPPER_DIR" "$MARKER")
-rm -f "$MARKER"
+log "Performing selective ZRAM cleanup (per-file mtime + open-fd + bake-confirmed invariant)..."
+# WP #1277: build the confirmed-baked manifest of ABSOLUTE upper paths from the
+# writer's relative file list, then pass it as the third arg so the reclaim only
+# wipes files PROVEN in this layer. The manifest is passed UNCONDITIONALLY (even
+# if empty) — never fall back to the legacy candidates−excludes wipe, which is
+# the aggressive behaviour that risked loss. An empty manifest => wipe nothing
+# (the upper is simply not trimmed this cycle; a later bake reclaims it).
+CONFIRMED_MANIFEST="${_BAKE_MANIFEST}.abs"
+: > "$CONFIRMED_MANIFEST"
+if [ -s "$_BAKE_MANIFEST" ]; then
+    while IFS= read -r _rel; do
+        [ -n "$_rel" ] && printf '%s\n' "$UPPER_DIR/$_rel"
+    done < "$_BAKE_MANIFEST" >> "$CONFIRMED_MANIFEST"
+fi
+CLEANUP_JSON=$(selective_upper_cleanup "$UPPER_DIR" "$MARKER" "$CONFIRMED_MANIFEST")
+rm -f "$MARKER" "$_BAKE_MANIFEST" "$CONFIRMED_MANIFEST" 2>/dev/null || true
 # Idle reclaim succeeded — the upper is trimmed, so clear any busy-bake cooldown
 # left over from a prior in-session bake. The next session starts fresh.
 [ "$TYPE" = "home" ] && rm -f "/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
@@ -711,6 +738,33 @@ op_mount "$TYPE" "$ID" "$PERSIST_PATH" || {
     update_task_status "Failed" 0 "Mount refresh failed"
     exit 1
 }
+
+# WP #1278 (#3): lowerdir-completeness backstop. The refresh above re-discovers
+# ALL on-disk layers and mounts them all-or-nothing, so in normal operation the
+# live overlay's lowerdir count equals the on-disk layer count. Assert that
+# BEFORE trusting the merged view enough to bake-and-delete: if the live overlay
+# is SHORT (fewer lowers than layers on disk), some delta is absent from the
+# view — consolidating would bake a lossy layer and the old-layer delete (step
+# 4b below) would then destroy that delta permanently. This is the May-29 Tower
+# vector (a stale/short consolidate lowerdir baked a consolidated missing the
+# user's conversations). Abort with exit 2 (deferred — preserves the upper AND
+# every delta; no marker/lock taken yet) so a later idle tick retries from a
+# complete mount. Only enforced when >=1 layer exists on disk: the empty-stack
+# mount uses a synthetic single EMPTY_LOWER which would otherwise read as a
+# 1-vs-0 mismatch. A concurrent bake landing a delta between the refresh and this
+# check trips it too — a benign deferral (retry picks up the new layer), never a
+# loss, mirroring the bake-landed-during-consolidate guard further down.
+_DISCOVERED_COUNT=$(_layer_discover_sorted "$PERSIST_PATH" "$TYPE" "$ID" | awk 'NF{c++}END{print c+0}')
+_MOUNTED_COUNT=$(_mounted_lower_count "$MNT_POINT")
+case "$_MOUNTED_COUNT" in ''|*[!0-9]*) _MOUNTED_COUNT=0 ;; esac
+if [ "$_DISCOVERED_COUNT" -ge 1 ] && [ "$_MOUNTED_COUNT" -ne "$_DISCOVERED_COUNT" ]; then
+    error "WP #1278: mounted lowerdir count ($_MOUNTED_COUNT) != on-disk layer count ($_DISCOVERED_COUNT) after refresh — refusing to consolidate from an incomplete view (would risk deleting un-captured deltas). Deferring."
+    update_task_status "Deferred" 0 "Incomplete mount — retry when stack is complete"
+    lifecycle_log "warn" "consolidate_layers" "bash_consolidate_deferred" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"lowerdir_incomplete\",\"mounted\":$_MOUNTED_COUNT,\"discovered\":$_DISCOVERED_COUNT}" 2>/dev/null || true
+    write_defer_reason "$TYPE" "$ID" "consolidate_lowerdir_incomplete"
+    exit 2
+fi
 
 # 2. Preparation: Pruning
 if [ "$TYPE" == "agent" ]; then

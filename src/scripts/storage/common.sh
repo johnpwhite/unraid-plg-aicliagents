@@ -332,6 +332,46 @@ mount_op_lock_path() {
     echo "/var/run/aicli-mount-op-${_type}-${_safe}.lock"
 }
 
+# WP #1278 (#3): consolidate lowerdir-completeness guard helpers.
+#
+# op_consolidate bakes the consolidated layer from the MERGED overlay view, then
+# DELETES the old delta layers. If the overlay it reads is "short" — fewer
+# lowerdirs mounted than there are .sqsh layers on disk — the consolidated layer
+# omits the missing layers' data and the delete destroys those deltas
+# permanently (the May-29 Tower vector: the consolidated was missing the user's
+# conversations). WP #1246 added a pre-consolidate mount refresh; this pair is
+# the assertion backstop so a still-short mount aborts BEFORE any delete.
+
+# _count_lowerdirs_in_opts <overlay-options-string> -> number of lowerdir entries
+# (0 if there is no lowerdir token). The options string is field 4 of a
+# /proc/mounts overlay line: lowerdir is a colon-joined path list, comma-
+# separated from upperdir/workdir. Our loop-mount lower paths never contain a
+# comma, so [^,] safely delimits the lowerdir value. ERE only — no PCRE.
+_count_lowerdirs_in_opts() {
+    local opts="${1:-}" lower
+    lower=$(printf '%s' "$opts" | sed -n -E 's/.*lowerdir=([^,]*).*/\1/p')
+    [ -n "$lower" ] || { printf '0'; return 0; }
+    printf '%s' "$lower" | awk -F: '{print NF}'
+}
+
+# _overlay_lowerdir_string <mnt_point> -> the options field of the overlay
+# mounted at <mnt_point> ('' if none). Reads /proc/mounts directly: findmnt can
+# truncate very long option strings, and /proc/mounts is always present on the
+# live box. The LAST matching overlay line wins (the most recent mount), so a
+# refresh's new mount is the one measured.
+_overlay_lowerdir_string() {
+    local mnt="${1:-}"
+    [ -n "$mnt" ] || return 0
+    awk -v m="$mnt" '$2==m && $3=="overlay"{o=$4} END{if(o!="")print o}' /proc/mounts 2>/dev/null
+}
+
+# _mounted_lower_count <mnt_point> -> number of lowerdirs in the live overlay at
+# <mnt_point> (0 if not an overlay mount). Convenience composition of the two
+# helpers above for callers that just want the count.
+_mounted_lower_count() {
+    _count_lowerdirs_in_opts "$(_overlay_lowerdir_string "${1:-}")"
+}
+
 # WP #922: Flash-backed failure-snapshot helpers.
 #
 # When a storage script (consolidate_layers.sh, commit_stack.sh, …) exits
@@ -454,15 +494,31 @@ sqlite_backup_all() {
     return 0
 }
 
-# selective_upper_cleanup <upper_dir> <marker_file>
-# Wipes files in upper_dir that satisfy BOTH:
+# selective_upper_cleanup <upper_dir> <marker_file> [confirmed_manifest]
+# Wipes files in upper_dir that satisfy ALL of:
 #   (a) mtime not newer than the marker (no writes during bake), AND
-#   (b) no process holds an open write fd to the file
+#   (b) no process holds an open write fd to the file, AND
+#   (c) WP #1277 — if a confirmed_manifest is supplied, the file is PROVEN to be
+#       in the just-baked layer (its absolute path appears in the manifest).
 # Prints a JSON status line to stdout for the caller to inline into a
 # lifecycle event. Best-effort — never fails the caller.
+#
+# WP #1277 (bake-confirmed reclaim — THE generic data-loss fix): the optional
+# third argument is a file listing the absolute upper paths the bake actually
+# captured (atomic_write_layer emits the baked file list during its verify RO-
+# mount; op_bake maps those relative paths onto UPPER_DIR and passes the result
+# here). When supplied, the wipe set is intersected with it, so a CLOSED file
+# (no open write fd, mtime ≤ marker) that the bake FAILED to capture — stale
+# lowerdir, a busy-cooldown-skipped bake, or a silent capture failure — is never
+# reclaimed. It lingers harmlessly in zram until a later bake captures it. This
+# protects every agent's durable store generically, without depending on the
+# per-agent chat-store allowlist below (which stays as belt-and-braces). When
+# the argument is omitted (legacy callers / agent bakes that don't thread it),
+# behaviour is unchanged: wipe set = candidates − excludes.
 selective_upper_cleanup() {
     local upper="$1"
     local marker="$2"
+    local confirmed="${3:-}"
     if [ ! -d "$upper" ] || [ ! -f "$marker" ]; then
         echo '{"wiped_bytes":0,"wiped_count":0,"residual_bytes":0,"residual_files":0}'
         return 0
@@ -552,6 +608,19 @@ selective_upper_cleanup() {
 
     # Wipe set = candidates - excludes
     comm -23 "$tmpdir/candidates" "$tmpdir/excludes" > "$tmpdir/wipe" 2>/dev/null
+
+    # (c) WP #1277 bake-confirmed intersection. When the caller supplies the
+    # confirmed-baked manifest, restrict the wipe set to files PROVEN present in
+    # the just-written layer: wipe = (candidates − excludes) ∩ confirmed. Both
+    # inputs must be sorted for comm; `wipe` already is (comm -23 preserves order
+    # over sorted candidates), so we only sort the manifest. An EMPTY manifest
+    # (a bake that captured zero files) authorises NO wipe — absence of proof is
+    # not proof of capture.
+    if [ -n "$confirmed" ]; then
+        sort -u "$confirmed" > "$tmpdir/confirmed.sorted" 2>/dev/null || : > "$tmpdir/confirmed.sorted"
+        comm -12 "$tmpdir/wipe" "$tmpdir/confirmed.sorted" > "$tmpdir/wipe.confirmed" 2>/dev/null
+        mv -f "$tmpdir/wipe.confirmed" "$tmpdir/wipe" 2>/dev/null
+    fi
 
     local wiped_bytes=0 wiped_count=0 bytes
     while IFS= read -r f; do

@@ -24,6 +24,9 @@
 #
 # Environment:
 #   MKSQUASHFS_ARGS — override mksquashfs flags (default: xz, x86 BCJ, 1M block)
+#   AICLI_BAKE_MANIFEST_OUT — if set, write the list of files captured in the
+#     verified layer (one relative path per line) to this file. WP #1277: lets
+#     op_bake confine the post-bake reclaim to proven-baked files.
 #
 # Lifecycle log events emitted:
 #   atomic_write_start, atomic_write_verify_failed, atomic_write_ok, atomic_write_failed
@@ -172,6 +175,21 @@ atomic_write_layer() {
                 echo "[atomic_write_layer] ERROR: $bad_reads file(s) failed readability check" >&2
             else
                 echo "[atomic_write_layer] Verify: readability check passed" >&2
+            fi
+
+            # WP #1277 (bake-confirmed reclaim): if the caller asked for a baked-
+            # file manifest, emit the FULL list of regular files actually present
+            # in the verified layer, relative to the bake root. This is the
+            # authoritative "what got captured" set — op_bake maps these onto
+            # UPPER_DIR and passes them to selective_upper_cleanup so the post-bake
+            # reclaim only wipes files PROVEN to be in this layer. Written while the
+            # layer is still RO-mounted; only on a passing verify (a corrupt layer
+            # must never authorise a wipe). Relative paths are derived by stripping
+            # the scratch mountpoint prefix (portable — no find -printf dependency).
+            if [ "$verify_ok" -eq 1 ] && [ -n "${AICLI_BAKE_MANIFEST_OUT:-}" ]; then
+                find "$scratch_mnt" -type f 2>/dev/null | while IFS= read -r _bf; do
+                    printf '%s\n' "${_bf#"$scratch_mnt"/}"
+                done > "$AICLI_BAKE_MANIFEST_OUT" 2>/dev/null || true
             fi
 
             umount -l "$scratch_mnt" 2>/dev/null || umount "$scratch_mnt" 2>/dev/null || true
