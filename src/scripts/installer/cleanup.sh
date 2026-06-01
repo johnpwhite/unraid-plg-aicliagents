@@ -175,59 +175,26 @@ fi
 if [ "$MIGRATION_NEEDED" = "0" ] && [ "$UPGRADE_MODE" = "1" ]; then
     log_status "    > Hot-swap upgrade: sessions, overlays, and agent processes stay up."
 
-    # C3 fix (v2026.05.18.08): best-effort synchronous bake of every active
-    # ZRAM UPPER before exit. Without this, dirty data accumulated in tmpfs
-    # since the last periodic bake is lost if the box loses power between
-    # cleanup.sh exit and the next supervisor bake tick (typically ~2 min
-    # after restart). The supervisor's eventual bake handles the typical
-    # graceful upgrade, but a power loss in that window is unrecoverable
-    # because ZRAM is tmpfs. Call commit_stack.sh per-entity — it holds
-    # its own flock and uses the v2026.05.18.08 atomic-append protocol.
-    log_status "    > Hot-swap pre-bake: flushing any dirty ZRAM UPPER to Flash..."
-    ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
-    EMHTTP_DEST_CLEANUP="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}"
-    COMMIT_STACK="$EMHTTP_DEST_CLEANUP/src/scripts/storage/commit_stack.sh"
-    # Source resolve_paths for home_persist_path / agent_persist_path
-    if ! declare -f home_persist_path >/dev/null 2>&1; then
-        source "$EMHTTP_DEST_CLEANUP/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
-    fi
-    if [ -f "$COMMIT_STACK" ] && [ -d "$ZRAM_UPPER/homes" ]; then
-        for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
-            [ -d "$upper_dir" ] || continue
-            [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ] && continue
-            user=$(basename "$(dirname "$upper_dir")")
-            PERSIST_DIR=$(home_persist_path "$user" 2>/dev/null || echo "")
-            [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/persistence"
-            log_status "      [hot-swap] Pre-upgrade bake: home/$user -> $PERSIST_DIR"
-            # DATA-LOSS fix: AICLI_BUSY_BAKE_COOLDOWN_SEC=0 forces this pre-upgrade
-            # flush to run even if a session is live AND within the busy-bake
-            # cooldown window — otherwise the bake is SKIPPED (exit 2) and the
-            # upgrade proceeds with the ZRAM upper un-flushed, losing any
-            # conversation data written since the last bake (the upgrade that ate
-            # a user's Claude/Antigravity history). The bake persists the delta;
-            # only the reclaim still defers while busy (harmless — data is on Flash).
-            # exit 2/1 stay non-blocking so the upgrade never wedges.
-            AICLI_BUSY_BAKE_COOLDOWN_SEC=0 bash "$COMMIT_STACK" "home" "$user" "$PERSIST_DIR" >/dev/null 2>&1 \
-                || log_status "      [hot-swap] Bake for home/$user returned non-zero — continuing"
-        done
-    fi
-    if [ -f "$COMMIT_STACK" ] && [ -d "$ZRAM_UPPER/agents" ]; then
-        for upper_dir in "$ZRAM_UPPER/agents"/*/upper; do
-            [ -d "$upper_dir" ] || continue
-            [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ] && continue
-            agent=$(basename "$(dirname "$upper_dir")")
-            PERSIST_DIR=$(agent_persist_path "$agent" 2>/dev/null || echo "")
-            [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/persistence"
-            log_status "      [hot-swap] Pre-upgrade bake: agent/$agent -> $PERSIST_DIR"
-            # DATA-LOSS fix: bypass the busy-bake cooldown so the upgrade flush is
-            # authoritative (see the home pre-bake above).
-            AICLI_BUSY_BAKE_COOLDOWN_SEC=0 bash "$COMMIT_STACK" "agent" "$agent" "$PERSIST_DIR" >/dev/null 2>&1 \
-                || log_status "      [hot-swap] Bake for agent/$agent returned non-zero — continuing"
-        done
-    fi
+    # WP #1277/#1278: NO pre-upgrade bake on the hot-swap path. ZRAM stays
+    # mounted across a hot-swap, so the upgrade poses no data risk — the dirty
+    # upper is exactly as safe as a second before, and persists to Flash via the
+    # normal bake triggers (array-stop / shutdown / manual / low-RAM / scheduled).
+    # The former pre-bake here was off-policy (an upgrade is not a bake trigger)
+    # and, worse, ran commit_stack = bake + RECLAIM — and that reclaim was part of
+    # the original conversation-loss mechanism (#1276). The genuine fix is
+    # bake-confirmed reclaim (#1277, the reclaim can no longer destroy un-baked
+    # data) + the consolidate completeness guard (#1278); with those in place the
+    # post-restart supervisor bake is the safe, on-policy persistence path. The
+    # earlier "power loss in the ~2-min window before the first post-restart bake"
+    # rationale is no different from the inter-bake exposure the RAM-buffering
+    # design already accepts everywhere — an upgrade is not special.
+    #
+    # The TEARDOWN / layout-bump path below (MIGRATION_NEEDED=1) still bakes,
+    # because there ZRAM IS destroyed (agents killed, stacks unmounted) — a
+    # mandatory flush, the same class as a shutdown/array-stop teardown event.
 
     lifecycle_log "info" "installer_cleanup" "installer_hotswap" "{\"layout_version\":\"$NEW_LAYOUT_VERSION\"}" 2>/dev/null || true
-    log_ok "Pre-upgrade cleanup complete (hot-swap path)."
+    log_ok "Pre-upgrade cleanup complete (hot-swap path — no bake; ZRAM persists in RAM)."
     exit 0
 fi
 

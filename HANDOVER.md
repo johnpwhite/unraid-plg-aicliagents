@@ -1,10 +1,31 @@
 I'm resuming work on unraid-plg-aicliagents. Context from previous session (2026-06-01).
 
-## ⚠️ MOST RECENT — STRUCTURAL DATA-LOSS FIXES SHIPPED TO FACTORY (storefront promote PENDING John's go)
+## ⚠️ MOST RECENT — HOT-SWAP PRE-BAKE REMOVED (#1279, factory v2026.06.01.01; storefront PENDING)
+
+Follow-up from John's review of the upgrade flow. The hot-swap upgrade path was
+running `commit_stack` = bake + **reclaim** per entity before exit (old C3 fix /
+data-loss Fix #4). That violated the bake-trigger policy (bakes belong to
+array-stop / shutdown / manual / low-RAM / scheduled only) and re-ran the very
+reclaim that was part of the original loss (#1276). Since #1277/#1278 made
+reclaim/consolidate non-destructive, the post-restart supervisor bake is now the
+safe on-policy path — so the hot-swap pre-bake is **removed** (`cleanup.sh`). The
+**teardown/layout-bump** path still bakes (pure `atomic_write_layer` delta, no
+reclaim) because it destroys ZRAM. Two inverse guards replace the old C3/Fix-4
+guards (`testHotSwapUpgradeDoesNotBakeOrReclaim`, `testV08C3HotSwapPreBakeRemoved`).
+**Shipped factory v2026.06.01.01, deployed to .4 — and the deploy itself was a
+hot-swap upgrade, so the modified branch ran live and smoke passed (163).** L2
+403/403. OP **#1279 Developed**. **NOT yet on storefront** — it's an internal
+storage-policy refactor with no user-facing change, so no new public CHANGES line;
+promote (or fold into the next user-facing release) at John's discretion.
+
+## EARLIER THIS SESSION — STRUCTURAL DATA-LOSS FIXES SHIPPED PUBLIC (v2026.05.31.08)
 
 The two structural follow-ups to the conversation-data-loss incident (#1276) are
-**BUILT, fully tested, published to factory v2026.05.31.08, and verified on .4** —
-but NOT yet promoted to storefront (public). Awaiting John's go for the public push.
+**COMPLETE**: built (TDD), fully tested, published to factory v2026.05.31.08,
+verified on .4 (L3.5 44/44), and **PROMOTED TO STOREFRONT (public GitHub + CA
+index) on 2026-06-01** (commit b06de07..a5d422e → main). Nothing outstanding for
+#1277/#1278. The public CHANGES.public.xml v.08 entry is the clean net-off
+data-durability line (no WP numbers / factory churn).
 
 ### What shipped (factory v2026.05.31.08 → deployed + verified on 192.168.1.4)
 
@@ -59,12 +80,12 @@ then `ssh root@192.168.1.4 "bash /usr/local/emhttp/plugins/unraid-aicliagents/te
 The storage CODE under test IS deployed (src/scripts/storage/), so the harness measures the
 live v.08 scripts. (Wrapper used this session: `C:/tmp/sync_run_itest.sh`.)
 
-### NEXT STEP — storefront promote (PENDING John's OK)
-Run `/jpw-unraid-storefront` to promote v2026.05.31.08 to Tower's public update channel once
-John confirms. This is the ONLY remaining step; everything is factory-verified. CHANGES.public
-should net-on the #1277/#1278 lines (genuine data-loss hardening — public-worthy). NOTE: a
-storefront publish fails if the Bash shell cwd is inside ui-build (Windows handle lock) — cd
-out first (memory: storefront-publish-uibuild-cwd-lock).
+### NEXT STEP — none for #1277/#1278 (shipped public)
+The conversation-data-loss class is fully closed across all 4 layers (allowlist +
+upgrade-flush in v.07; bake-confirmed reclaim + consolidate completeness guard in v.08),
+factory + .4 + storefront. Tower will pull v.08 from the public CA channel on its own
+schedule. If a NEW agent is onboarded later, its store is already protected generically by
+#1277 — but still add its path to the selective_upper_cleanup allowlist as belt-and-braces.
 
 ### Other gotchas
 - Local ESLint gate (regress.sh L1.6) is "not skippable" and needs `ui-build/node_modules`,
