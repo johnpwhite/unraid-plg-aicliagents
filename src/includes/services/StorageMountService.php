@@ -371,7 +371,25 @@ class StorageMountService {
         // WP #748 J — agents always collapse to a single layer on every install
         // /upgrade. Bypass commit_stack.sh's delta path entirely.
         if ($type === 'agent') {
-            return self::consolidate($type, $id) ? 0 : 1;
+            $deferred = false;
+            $ok = self::consolidate($type, $id, $deferred);
+            if ($ok) return 0;
+            if (!$deferred) return 1; // real consolidation failure
+
+            // Consolidation deferred (overlay busy) — fall back to a delta bake so
+            // the ZRAM data is at least safe on Flash. Without this, all agent data
+            // lives only in ZRAM and is lost on reboot. The next install consolidates
+            // the delta layers back to a single layer.
+            $agentPersistPath = StoragePathResolver::agentPersistPath();
+            $bakeScript = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            exec("bash " . escapeshellarg($bakeScript) . " bake --type agent --id " . escapeshellarg($id) . " --persist " . escapeshellarg($agentPersistPath), $bakeOut, $bakeRes);
+            if ($bakeRes !== 0) {
+                LogService::log("Agent $id: consolidation deferred AND fallback delta bake failed (rc=$bakeRes) — data remains in ZRAM only.", LogService::LOG_ERROR, "StorageMountService");
+                return 1;
+            }
+            LogService::log("Agent $id: consolidation deferred; delta bake succeeded — data is safe on Flash, consolidation deferred to next install.", LogService::LOG_WARN, "StorageMountService");
+            return 2;
         }
 
         $persistPath = ($type === 'home')
@@ -456,7 +474,7 @@ class StorageMountService {
     /**
      * Consolidates layers into a single base volume.
      */
-    public static function consolidate($type, $id) {
+    public static function consolidate($type, $id, bool &$deferred = false) {
         $persistPath = ($type === 'home')
             ? StoragePathResolver::homePersistPath($id)
             : StoragePathResolver::agentPersistPath();
@@ -498,6 +516,10 @@ class StorageMountService {
                 ];
                 LayerManifestService::replaceLayers("$type/$id", [$newLayer], $persistPath);
             }
+        } elseif ($res === 2) {
+            $deferred = true;
+            LogService::log("Consolidation deferred for $type $id (overlay busy) — supervisor will retry.", LogService::LOG_WARN, "StorageMountService");
+            LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, 'StorageMountService', 'consolidate_deferred', ['type' => $type, 'id' => $id]);
         } else {
             LogService::log("FAILED consolidation for $type $id. Check consolidate_layers.sh output.", LogService::LOG_ERROR, "StorageMountService");
             LifecycleLogService::log(LifecycleLogService::LEVEL_ERROR, 'StorageMountService', 'consolidate_failed', ['type' => $type, 'id' => $id, 'result' => $res]);

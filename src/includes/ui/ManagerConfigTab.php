@@ -152,7 +152,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?php endif; ?>
                         </dd>
 
-                        <dt>Consolidate Layer Ceiling</dt>
+                        <dt style="align-self: flex-start; padding-top: 6px;">Consolidate Layer Ceiling</dt>
                         <dd>
                             <div class="input-row">
                                 <input type="number" name="consolidate_max_layers"

@@ -117,6 +117,11 @@ class InstallerService {
             setInstallStatus("Install Failed (Bake Error)", 0, $agentId);
             return ['status' => 'error', 'message' => 'Persistence bake failed'];
         }
+        if ($res === 2) {
+            // Pre-install layer compaction was busy — not fatal. A delta bake preserved the
+            // data to Flash; the next install will compact all layers back to one.
+            LogService::log("Installer: Layer compaction busy for $agentId — install proceeded with delta bake fallback.", LogService::LOG_WARN, "InstallerService");
+        }
 
         setInstallStatus("Installation complete", 100, $agentId);
 
