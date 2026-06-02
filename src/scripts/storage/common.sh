@@ -632,12 +632,17 @@ selective_upper_cleanup() {
         fi
     done < "$tmpdir/wipe"
 
-    # Sweep newly-empty directories. -mindepth 1 is critical: without it, find
-    # will delete $upper itself when it becomes empty after a complete bake —
-    # the kernel overlay stays mounted but the directory entry is gone, causing
-    # all subsequent writes (including token refresh write-back) to fail ENOENT.
-    # See WP #1224 for the incident post-mortem.
-    find "$upper" -mindepth 1 -type d -empty -delete 2>/dev/null
+    # Strip opaque xattr from newly-empty directories rather than deleting them.
+    # Deleting an empty directory from the upper (even with -mindepth 1) causes
+    # subsequent overlayfs copy-up from the squashfs lower to fail with ENOENT —
+    # the same ENOENT seen in WP #1224 when $upper itself was deleted, now one
+    # level down. By stripping trusted.overlay.opaque the directory becomes a
+    # transparent scaffold: lower-layer content stays visible through it, and
+    # new writes land directly in the upper without needing copy-up.
+    find "$upper" -mindepth 1 -type d -empty 2>/dev/null | while IFS= read -r _d; do
+        setfattr -x trusted.overlay.opaque "$_d" 2>/dev/null || true
+        setfattr -x trusted.overlay.redirect "$_d" 2>/dev/null || true
+    done
 
     local residual_bytes residual_files
     residual_bytes=$(du -sb "$upper" 2>/dev/null | awk '{print $1}')

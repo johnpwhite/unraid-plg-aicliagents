@@ -225,9 +225,11 @@ else
     if [ "$KILLED" -gt 0 ]; then
         sleep 2
 
-        # Final sweep: kill any orphaned aicli-shell/node that survived tmux kill
-        # Only kill processes whose CWD is on the array (check /proc/PID/cwd)
-        for pid in $(pgrep -f 'aicli-run-|aicli-shell' 2>/dev/null); do
+        # Final sweep: kill any orphaned plugin processes that survived tmux kill.
+        # Covers bash wrappers AND agent executables (agy, node/claude, node/gemini,
+        # secret-service-daemon) — all inherit their CWD from the launching shell and
+        # can hold /mnt/user open even after the tmux session is gone.
+        for pid in $(pgrep -f 'aicli-run-|aicli-shell|secret-service-daemon|node .*(unraid-aicliagents)' 2>/dev/null); do
             PID_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
             PID_CLASS=$(classify "$PID_CWD")
             if needs_array "$PID_CLASS"; then

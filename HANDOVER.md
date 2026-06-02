@@ -14,9 +14,9 @@ reclaim) because it destroys ZRAM. Two inverse guards replace the old C3/Fix-4
 guards (`testHotSwapUpgradeDoesNotBakeOrReclaim`, `testV08C3HotSwapPreBakeRemoved`).
 **Shipped factory v2026.06.01.01, deployed to .4 — and the deploy itself was a
 hot-swap upgrade, so the modified branch ran live and smoke passed (163).** L2
-403/403. OP **#1279 Developed**. **NOT yet on storefront** — it's an internal
-storage-policy refactor with no user-facing change, so no new public CHANGES line;
-promote (or fold into the next user-facing release) at John's discretion.
+403/403. OP **#1279 Developed**. **PROMOTED TO STOREFRONT (public) on 2026-06-01**
+(commit a5d422e..9c5ee5f → main); public CHANGES.public.xml v.01 entry is a clean
+"lighter plugin upgrades" efficiency line.
 
 ## EARLIER THIS SESSION — STRUCTURAL DATA-LOSS FIXES SHIPPED PUBLIC (v2026.05.31.08)
 

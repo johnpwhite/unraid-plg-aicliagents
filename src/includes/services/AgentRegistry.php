@@ -59,7 +59,7 @@ class AgentRegistry {
             // (delta_<dt>, consolidated_<dt> where dt = YYYYMMDDTHHMMSSZ) formats.
             $sqshExists = false;
             $idQuoted = preg_quote($id, '/');
-            $kindAlt  = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z)';
+            $kindAlt  = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';
             foreach ($allSqshBasenames as $basename) {
                 if (preg_match("/^agent_{$idQuoted}_{$kindAlt}\.sqsh$/", $basename)) {
                     $sqshExists = true;
@@ -555,7 +555,7 @@ class AgentRegistry {
         $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
         $allSqsh = glob("$persistPath/*.sqsh") ?: [];
         $allSqshBasenames = array_map('basename', $allSqsh);
-        $kindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z)';
+        $kindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';
 
         foreach ($registry as $id => $agent) {
             if ($id === 'terminal') continue;

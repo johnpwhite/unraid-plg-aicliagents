@@ -161,6 +161,20 @@ else
 
     if [ "$KILLED" -gt 0 ]; then
         log "Evicted $KILLED session(s) with array/pool workspace paths."
+
+        # Final sweep: tmux kill-session sends SIGHUP to the foreground process but
+        # agent executables (agy, node/claude, node/gemini, secret-service-daemon)
+        # may survive as orphans — all inherit their CWD from the session shell and
+        # keep /mnt/user open even after the tmux session is gone.
+        sleep 2
+        for pid in $(pgrep -f 'aicli-run-|aicli-shell|secret-service-daemon|node .*(unraid-aicliagents)' 2>/dev/null); do
+            PID_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
+            PID_CLASS=$(classify "$PID_CWD")
+            if needs_array "$PID_CLASS"; then
+                warn "  Final sweep: killing orphaned pid $pid (cwd: $PID_CWD)"
+                kill -9 "$pid" 2>/dev/null
+            fi
+        done
     else
         log "No sessions with array/pool workspace paths. Nothing to evict."
     fi

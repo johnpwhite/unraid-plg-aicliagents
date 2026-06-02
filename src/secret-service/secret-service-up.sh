@@ -75,7 +75,7 @@ while [ ! -S "$SOCK" ] && [ "$_i" -lt 25 ]; do sleep 0.2; _i=$((_i + 1)); done
 # reused by the user's next agent launch. It writes DAEMON_PID once it owns
 # org.freedesktop.secrets, which doubles as the readiness signal below.
 mkdir -p "$(dirname "$STORE")" 2>/dev/null
-DBUS_SESSION_BUS_ADDRESS="$ADDR" setsid "$DAEMON" --store "$STORE" --pidfile "$DAEMON_PID" >>"$LOG" 2>&1 &
+( cd / && DBUS_SESSION_BUS_ADDRESS="$ADDR" exec setsid "$DAEMON" --store "$STORE" --pidfile "$DAEMON_PID" >>"$LOG" 2>&1 ) &
 disown 2>/dev/null || true
 
 _i=0
