@@ -1518,9 +1518,39 @@ function av2LoadStoragePanel(panelOrBody, agentIdMaybe) {
         ]);
         body.appendChild(dl);
 
-        // Per-agent action buttons (Sync / Consolidate / Repair) intentionally
-        // omitted here — the Home Storage tab already owns those operations and
-        // duplicating them on every agent card was noise. Stats only.
+        // Show a "Persist to Flash" button when there is unsaved ZRAM data.
+        // Queues a supervisor bake so the data lands on Flash even if the
+        // agent is mounted and a consolidation can't run inline.
+        const dirtyNum = (m.dirty_mb != null) ? Number(m.dirty_mb) : 0;
+        if (dirtyNum > 0) {
+            const persistBtn = av2mkel('button', {
+                class: 'aicli-btn aicli-btn-warning',
+                style: 'margin-top:8px; width:100%; font-size:11px;',
+                type: 'button'
+            }, ['Consolidate (' + String(dirty) + ' MB unsaved)']);
+            persistBtn.addEventListener('click', function() {
+                persistBtn.disabled = true;
+                persistBtn.textContent = 'Persisting…';
+                $.ajax({
+                    url: '/plugins/unraid-aicliagents/AICliAjax.php',
+                    type: 'GET',
+                    dataType: 'json',
+                    data: { action: 'persist_agent', id: agentId, csrf_token: csrf }
+                }).done(function(res) {
+                    if (res && res.status === 'ok') {
+                        persistBtn.textContent = '✓ Queued — refreshing…';
+                        setTimeout(function() { av2LoadAgentStorage(panelOrBody, agentId); }, 3000);
+                    } else {
+                        persistBtn.disabled = false;
+                        persistBtn.textContent = '⚠ Failed — try again';
+                    }
+                }).fail(function() {
+                    persistBtn.disabled = false;
+                    persistBtn.textContent = '⚠ Failed — try again';
+                });
+            });
+            body.appendChild(persistBtn);
+        }
     }).fail(function() {
         body.textContent = '';
         body.appendChild(av2mkel('div', {class: 'av2-help'}, ['Storage stats unavailable.']));

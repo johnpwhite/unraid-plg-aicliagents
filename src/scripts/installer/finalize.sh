@@ -20,39 +20,32 @@ log_ok "Permissions applied."
 rm -rf /tmp/node-extract-* /tmp/fd-extract-* /tmp/ripgrep-extract-*
 
 # --- Unraid Event Hooks ---
-# Unraid fires events via run-parts into /usr/local/emhttp/plugins/dynamix/events/<event>/.
-# The full list (from emhttpd binary): stopping, stopping_array, stopping_svcs,
-# stopping_docker, stopping_libvirt, disks_mounted, svcs_restarting, svcs_restarted.
+# emhttpd calls /usr/local/sbin/emhttp_event <event> which loops over
+# /usr/local/emhttp/plugins/*/event/<event> — the plugin's OWN event/ directory.
+# It does NOT use /usr/local/emhttp/plugins/dynamix/events/.
 #
-# We need `stopping_array` — fires RIGHT BEFORE the user-share unmount, which is
-# exactly when our tmux/ttyd sessions (CWDs under /mnt/user) would block the array.
-# `stopping` only fires at full server shutdown (wrong for array-stop case), so we
-# hook both for belt-and-suspenders: array-stop uses stopping_array, server-shutdown
-# still works via stopping.
+# Event timing (from emhttp_event):
+#   stopping          — beginning of cmdStop (before any unmounting) ← our hook point
+#   unmounting_disks  — about to unmount disks and user shares
+#   stopping_array    — AFTER user shares already unmounted (too late to prevent EBUSY)
+#   disks_mounted     — user shares mounted (array start)
 #
-# run-parts skips symlinks, so we write real wrapper scripts that exec our handler.
+# We hook `stopping` (fires first, before shares unmount) so we can kill agent sessions
+# whose CWDs are under /mnt/user before emhttpd tries umount. stopping_array is too late.
+# The src/event/stopping handler internally detects IS_SHUTDOWN to distinguish a full
+# server shutdown (kill everything) from an array-only stop (selective kill).
 log_step "Registering Unraid event hooks..."
-EVENT_DIR_STOPPING="/usr/local/emhttp/plugins/dynamix/events/stopping"
-EVENT_DIR_STOPPING_ARRAY="/usr/local/emhttp/plugins/dynamix/events/stopping_array"
-EVENT_DIR_MOUNTED="/usr/local/emhttp/plugins/dynamix/events/disks_mounted"
-mkdir -p "$EVENT_DIR_STOPPING" "$EVENT_DIR_STOPPING_ARRAY" "$EVENT_DIR_MOUNTED"
-# Remove old hooks if present (including legacy symlinks)
-rm -f "$EVENT_DIR_STOPPING/aicli_sync" \
-      "$EVENT_DIR_STOPPING_ARRAY/aicli_sync" \
-      "$EVENT_DIR_MOUNTED/aicli_restore"
-# Write the dispatcher — same handler script, same logic; it detects scenario internally.
-for dir in "$EVENT_DIR_STOPPING" "$EVENT_DIR_STOPPING_ARRAY"; do
-    cat > "$dir/aicli_sync" <<HOOK
-#!/bin/bash
-exec bash "$EMHTTP_DEST/src/event/stopping"
-HOOK
-    chmod 755 "$dir/aicli_sync"
-done
-cat > "$EVENT_DIR_MOUNTED/aicli_restore" <<HOOK
-#!/bin/bash
-exec bash "$EMHTTP_DEST/src/event/disks_mounted"
-HOOK
-chmod 755 "$EVENT_DIR_MOUNTED/aicli_restore"
+
+# Create event/ → src/event/ symlink so emhttp_event can find our scripts.
+# emhttp_event checks for $Dir/event/<name> as a file or $Dir/event/<name>/ as a dir.
+rm -f "$EMHTTP_DEST/event" 2>/dev/null || true
+ln -sf "$EMHTTP_DEST/src/event" "$EMHTTP_DEST/event"
+
+# Clean up the legacy dynamix hooks (wrong path — emhttpd never called them).
+rm -f "/usr/local/emhttp/plugins/dynamix/events/stopping/aicli_sync" \
+      "/usr/local/emhttp/plugins/dynamix/events/stopping_array/aicli_sync" \
+      "/usr/local/emhttp/plugins/dynamix/events/disks_mounted/aicli_restore" 2>/dev/null || true
+
 log_ok "Event hooks registered (stopping + stopping_array + disks_mounted)."
 
 # --- Global Shell Integration ---
