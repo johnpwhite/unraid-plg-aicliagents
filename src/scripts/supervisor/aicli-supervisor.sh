@@ -444,6 +444,21 @@ _on_term() {
     _STOPPING=1
 }
 
+# Re-assert pidfile ownership. The live supervisor holds the single-instance
+# lock, so $$ is the canonical owner. If the pidfile was removed or now names a
+# different PID (observed when a hot-swap upgrade's "stop old supervisor" step
+# raced this instance's start and deleted the pidfile), rewrite it. Without this
+# the pidfile-based backstop (SupervisorService::isRunning + the _do_start fast
+# path) can't see the live supervisor and respawns it endlessly — a respawn
+# storm, amplified by every open workspace's status poll. Called each work tick
+# so a transient loss self-corrects within one tick instead of becoming a storm.
+# Test: tests/unit/supervisor_pidfile_selfheal_test.sh.
+_ensure_pidfile() {
+    if [ ! -f "$PIDFILE" ] || [ "$(cat "$PIDFILE" 2>/dev/null)" != "$$" ]; then
+        printf '%d\n' "$$" > "$PIDFILE" 2>/dev/null || true
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Heartbeat loop — runs as a background subshell, independent of work loop
 # ---------------------------------------------------------------------------
@@ -1406,6 +1421,10 @@ _check_force_reclaim_escalation() {
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
 _work_tick() {
+    # Step 0 (storm guard): re-assert the pidfile if it was lost or stolen, so the
+    # pidfile-based backstop always sees us and never respawn-storms the supervisor.
+    _ensure_pidfile
+
     # Step 0a (Bug #757): respawn the heartbeat if it died — otherwise the main
     # loop stays alive but $TICKFILE goes stale and the box looks supervisor-less.
     if [ -n "${_HEARTBEAT_PID:-}" ] && ! _pid_alive "$_HEARTBEAT_PID" 2>/dev/null; then
