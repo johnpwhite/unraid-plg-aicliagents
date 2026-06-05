@@ -367,29 +367,49 @@ class StorageMountService {
      *
      * Returns the exit code: 0=Success, 1=Fail, 2=Busy(Baked but RAM not cleared).
      */
+    /**
+     * Map an agent commit outcome to the commitChanges() exit code.
+     * Pure decision (no I/O) so the #1304 data-safety contract is unit-testable:
+     *   consolidated            -> 0  (success)
+     *   not deferred (real fail)-> 1  (fatal)
+     *   deferred + bake ok      -> 2  (non-fatal; data reached Flash)
+     *   deferred + bake failed  -> 1  (fatal; data NOT on Flash)
+     */
+    public static function mapAgentCommitResult(bool $consolidated, bool $deferred, int $bakeRc): int {
+        if ($consolidated) return 0;
+        if (!$deferred)     return 1;          // genuine consolidation failure
+        return $bakeRc === 0 ? 2 : 1;          // deferred: 2 only if the fallback bake saved it
+    }
+
     public static function commitChanges($type, $id) {
         // WP #748 J — agents always collapse to a single layer on every install
         // /upgrade. Bypass commit_stack.sh's delta path entirely.
         if ($type === 'agent') {
             $deferred = false;
             $ok = self::consolidate($type, $id, $deferred);
-            if ($ok) return 0;
-            if (!$deferred) return 1; // real consolidation failure
 
             // Consolidation deferred (overlay busy) — fall back to a delta bake so
             // the ZRAM data is at least safe on Flash. Without this, all agent data
             // lives only in ZRAM and is lost on reboot. The next install consolidates
             // the delta layers back to a single layer.
-            $agentPersistPath = StoragePathResolver::agentPersistPath();
-            $bakeScript = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            exec("bash " . escapeshellarg($bakeScript) . " bake --type agent --id " . escapeshellarg($id) . " --persist " . escapeshellarg($agentPersistPath), $bakeOut, $bakeRes);
-            if ($bakeRes !== 0) {
-                LogService::log("Agent $id: consolidation deferred AND fallback delta bake failed (rc=$bakeRes) — data remains in ZRAM only.", LogService::LOG_ERROR, "StorageMountService");
-                return 1;
+            $bakeRc = 0;
+            if (!$ok && $deferred) {
+                $agentPersistPath = StoragePathResolver::agentPersistPath();
+                $bakeScript = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+                // nosemgrep: php.lang.security.exec-use.exec-use
+                exec("bash " . escapeshellarg($bakeScript) . " bake --type agent --id " . escapeshellarg($id) . " --persist " . escapeshellarg($agentPersistPath), $bakeOut, $bakeRc);
             }
-            LogService::log("Agent $id: consolidation deferred; delta bake succeeded — data is safe on Flash, consolidation deferred to next install.", LogService::LOG_WARN, "StorageMountService");
-            return 2;
+
+            // Map (consolidated, deferred, bakeRc) -> 0 ok / 1 fatal / 2 deferred-but-safe.
+            // Pure decision extracted to mapAgentCommitResult() so the data-safety
+            // contract (deferred + bake-ok must NOT be fatal) is unit-tested directly.
+            $code = self::mapAgentCommitResult($ok, $deferred, $bakeRc);
+            if ($code === 1 && !$ok && $deferred) {
+                LogService::log("Agent $id: consolidation deferred AND fallback delta bake failed (rc=$bakeRc) — data remains in ZRAM only.", LogService::LOG_ERROR, "StorageMountService");
+            } elseif ($code === 2) {
+                LogService::log("Agent $id: consolidation deferred; delta bake succeeded — data is safe on Flash, consolidation deferred to next install.", LogService::LOG_WARN, "StorageMountService");
+            }
+            return $code;
         }
 
         $persistPath = ($type === 'home')

@@ -185,24 +185,24 @@ class AgentHandler {
 
         @mkdir('/tmp/unraid-aicliagents', 0755, true);
 
+        // Quiesce each agent + capture its resume id via the SHARED pipeline
+        // (TerminalHandler::captureResumeForClose) so the post-upgrade auto-relaunch
+        // (AutoLaunchService::launchAllPending -> getResumeId -> chatId='auto')
+        // resumes the same conversation for EVERY agent type. This runs the exact
+        // exit-key + exit-screen-scrape + disk-fallback + saveResumeId sequence the
+        // UI close uses. Previously this path sent a bare Ctrl-C x3 (no Ctrl-D, so
+        // agy never quiesced) and saved NOTHING — aicli-shell.sh's own post-exit
+        // GUID-sync is short-circuited by the close sentinel below, so resume was
+        // lost on every upgrade. captureResumeForClose runs its own per-session
+        // quiesce wait, so no separate Ctrl-C loop / shared sleep is needed here.
+        require_once __DIR__ . '/TerminalHandler.php';
         foreach ($sessions as $s) {
             $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $s['id']);
-            // Non-root audit: shared multi-user lookup so we close sessions
-            // owned by non-root configured users too.
+            // Non-root audit: shared multi-user lookup (quiesce + capture pass).
             [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
             if ($sessName === '') continue;
-            $escSess = escapeshellarg($sessName);
-            @shell_exec("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
-            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
-            usleep(200000);
-            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
-            usleep(200000);
-            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+            TerminalHandler::captureResumeForClose($sessName, $tmuxSock, $tmuxBin, $agentId, (string)($s['path'] ?? ''), "upgrade id=$safeId");
         }
-
-        // Shared wait window - 1.5s for the agents' exit screens to render
-        // and aicli-shell.sh to persist the resume id.
-        usleep(1500000);
 
         // Touch close sentinels so aicli-shell.sh exits its relaunch loop
         // instead of respawning against the half-upgraded binary.

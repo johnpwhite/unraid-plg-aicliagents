@@ -2,6 +2,75 @@
 
 ---
 
+## 2026-06-03 — Two session-close paths drifted; resume capture must be ONE primitive
+
+**Context:** After upgrading an agent, the workspace relaunched on the new binary but with a
+fresh conversation — no `--resume`. Only claude/opencode/agy were even partially covered.
+
+**Root cause:** there were TWO close paths. `TerminalHandler::gracefulClose` (UI close button)
+scrapes the agent's exit screen for its resume hint (`--resume <id>` / `--conversation <id>`),
+falls back to a disk scan, and calls `ConfigService::saveResumeId`. The pre-upgrade close
+`AgentHandler::_closeSessionsForUpgrade` did **none of that** — it sent Ctrl-C and killed the
+session. So `AutoLaunchService::launchAllPending` read `getResumeId()` → null → relaunched fresh
+(or skipped, depending on `freshIfNoResume`). `aicli-shell.sh`'s own post-exit GUID-sync that
+would write the resume file is deliberately skipped on graceful close (the `close-<id>.flag`
+`break`s the relaunch loop *before* the sync — the comment literally says "graceful-close is
+handled by PHP", but only gracefulClose was doing that handling).
+
+A first patch mirrored a *disk-only* capture into the upgrade path — but that only covers agents
+with a disk session store (opencode/agy/claude). Agents that print their resume id **only on the
+exit screen** (gemini, copilot, kilocode, codex, factory, nanocoder, goose, qwen, pi) still lost
+resume. The exit-screen **scrape** is the agent-agnostic capture; disk discovery is a fallback.
+
+**Fix (#1306):** extracted `TerminalHandler::captureResumeForClose()` — the single quiesce+capture
+pipeline (universal exit keys incl. agy's Ctrl-D, the 3-retry exit-screen scrape, the disk
+fallback, then save). Both callers use it; teardown stays per-caller (gracefulClose lets the
+shell loop break on the sentinel; the upgrade path hard-kills survivors before the binary swap).
+The duplication had *also* hidden a second bug — the upgrade path sent Ctrl-C only, never Ctrl-D,
+so agy never quiesced on upgrade. Guard: `testUpgradeCloseUsesSharedResumeCapture`.
+
+**Lesson:** when two code paths do "the same operation with different teardown," extract the
+shared *operation* and parameterise the teardown. Mirroring is a band-aid that silently drifts —
+this exact capture logic diverged twice. NOTE: the regression guards pin a lot of this logic to
+`TerminalHandler.php` by token (`--conversation[= ]`, `C-d`, `discoverLatestSessionId`,
+`saveResumeId`) — keep the shared primitive IN that file (not moved to a service) or ~10 guards
+break. The L2 PHPUnit guards are NOT run by the publish gate (only L1/PHPStan/ESLint + L3 smoke) —
+run them manually: `php C:/tmp/phpunit.phar --bootstrap tests/bootstrap.php tests/php/RegressionGuardsTest.php`.
+
+---
+
+## 2026-06-03 — Unraid fires events from the plugin's OWN `event/` dir, NOT `dynamix/events/`
+
+**Context:** Array stop hung repeatedly on `/mnt/user: target is busy` — agent sessions held the share open and our `stopping` handler (which evicts them) appeared never to run. The handler had been in the tree for months; it had simply never fired on any install.
+
+**Root cause:** `/usr/local/sbin/emhttp_event <event>` (the script emhttpd calls) loops over `/usr/local/emhttp/plugins/*/event/<event>` — i.e. **each plugin's own `event/` subdirectory**, as either an executable file or a dir of executables. It does **NOT** read `/usr/local/emhttp/plugins/dynamix/events/<event>/`. Our `finalize.sh` had been writing wrapper hooks into the dynamix path (dead — nothing reads it) and never created an `event/` entry for our own plugin. So zero event handlers ever ran.
+
+**Fix:** `finalize.sh` now `ln -sf "$EMHTTP_DEST/src/event" "$EMHTTP_DEST/event"` and deletes the dead dynamix hooks. Verify after deploy: `ls -la /usr/local/emhttp/plugins/unraid-aicliagents/event` should be a symlink → `src/event`, with executable `stopping` / `stopping_array` / `disks_mounted` inside.
+
+**Also non-obvious — event timing (from the emhttp_event header comments):** `stopping` fires at the *start* of cmdStop, **before** any unmount → the correct hook to evict share-holding sessions. `stopping_array` fires **after** shares are already unmounted → too late to prevent EBUSY. Hook `stopping`, not `stopping_array`, for anything that must release `/mnt/user` before unmount.
+
+---
+
+## 2026-06-03 — Deleting an empty dir from a zram overlay upper breaks overlayfs copy-up (ENOENT)
+
+**Context:** "Save failed" on the Manage-Session overlay; PHP `file_put_contents` to `~/.aicli/tmux/*.json` returned ENOENT even though the home overlay was mounted `rw` and the parent appeared to exist (visible via the squashfs lower).
+
+**Root cause:** `selective_upper_cleanup` (common.sh) swept now-empty dirs out of the zram upper with `find -mindepth 1 -type d -empty -delete`. Once `.aicli/` was emptied + removed from the upper, overlayfs copy-up of that directory **from the read-only squashfs lower** failed with ENOENT on kernel 6.18.33 — so every write under that path failed. Writing directly to the upper layer worked; writing through the merged overlay did not (the merged dentry was wedged). Same class as WP #1224 (deleting `$upper` itself), one level down.
+
+**Fix:** don't delete the empty dirs — strip `trusted.overlay.opaque` + `trusted.overlay.redirect` xattrs so they stay as transparent scaffolding and new writes land in the upper without needing copy-up. **Repair a live wedged overlay** by lazy-umount + remount with the correct newest-first lowerdir order (a bare remount re-mounted with `lowerdir=empty` and hid all history — order matters).
+
+---
+
+## 2026-06-03 — `navigator.clipboard` is undefined over plain HTTP (insecure context)
+
+**Context:** The drawer's SSH/key tab did nothing when clicked on the HTTP WebGUI, and the chip falsely flashed "Copied".
+
+**Root cause:** the async Clipboard API only exists in a **secure context** (HTTPS or localhost). Unraid's WebGUI is plain HTTP by default → `navigator.clipboard` is `undefined`. `navigator.clipboard.writeText(...)` therefore threw a *synchronous* `TypeError` that aborted the click handler before any state update; the trailing `.catch()` only catches promise rejections, not the sync throw.
+
+**Lesson:** in any plugin React/JS that copies to clipboard, optional-chain it (`navigator.clipboard?.writeText(...)`) and gate UI that claims success on `window.isSecureContext && !!navigator.clipboard`. When false, offer a manual select-and-copy affordance instead of asserting a copy happened. Platform-aware copy hint: prefer `navigator.userAgentData?.platform` (returns `"macOS"`) → fall back to `navigator.platform` → `navigator.userAgent`.
+
+---
+
 ## 2026-05-28 — Manual deploy workaround when .4 cannot reach factory GitLab
 
 **Context:** The test server at 192.168.1.4 cannot authenticate to the private GitLab at 192.168.1.38 for raw file downloads. `plugin install` gets HTML redirect pages (10580-byte sign-in pages) instead of actual scripts, causing "Modular Engine execution failed".
