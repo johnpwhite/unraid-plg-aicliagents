@@ -2,6 +2,110 @@
 
 ---
 
+## 2026-06-07 — Graceful close races the relaunch loop for fast-exiting agents → relaunch + hard-stop
+
+**Context:** Closing a workspace whose agent was a *fresh* claude (no conversation) didn't close
+cleanly: the log showed `gracefulClose: START` → the agent **relaunched** ~5s later → `tmux session
+did not exit within 3s — falling back to hard stop` → killed. The session did end (via the hard
+kill) but it relaunched once and never took the clean sentinel path. Surfaced during a non-root
+user-switch test, but **not** non-root-specific — it's a timing race any fast-exiting agent hits.
+
+**Root cause:** ordering between `TerminalHandler::gracefulClose` and `aicli-shell.sh`'s relaunch
+loop. gracefulClose deliberately keeps the tmux session ALIVE while it scrapes the agent's exit
+screen for a resume id (`captureResumeForClose`: Ctrl-C×2 + Ctrl-D×2, then a 3-retry capture-pane,
+~4s), and only AFTER that touches `close-<id>.flag` + sends Enter to wake the loop's post-exit
+"Press ENTER to reload" `read`. The relaunch loop checks the close flag **once, right after the
+agent exits** (then parks on the read). A fresh claude exits *instantly* on Ctrl-C — well before
+the ~4s scrape finishes — so the post-exit flag check sees no flag and parks on the read. When
+gracefulClose finally touches the flag + sends Enter, waking the read returns to the **top** of the
+loop, which **re-execs the agent** — the post-exit flag check is never re-evaluated. gracefulClose's
+3s poll then sees the session alive and hard-kills. Slow-exiting sessions (claude with a live
+conversation) exit *after* the flag is set, so they break cleanly — which is why root closes usually
+logged "sentinel observed" and this didn't.
+
+**Fix:** re-check `close-<id>.flag` at the TOP of the `while true` relaunch loop, *before* the agent
+is (re)launched. A flag that lands while the loop is parked on the post-exit read is then caught on
+wake and breaks cleanly — preserving the scrape window (the read still holds the session open during
+the scrape) while eliminating the spurious relaunch and the 3s hard-stop fallback. Guard:
+`testGracefulCloseSentinelCheckedBeforeAgentRelaunch` (asserts the first close-flag check precedes
+the `perf_log agent.exec.begin` launch marker).
+
+**Lesson:** "touch the flag, then wake the blocking read" only works if waking the read re-evaluates
+the break condition. Here waking returned to the loop top and relaunched first. When a sentinel can
+be set *while a worker is parked mid-loop*, check it at the loop top (before the side-effecting work),
+not only at the point it's expected to arrive. The clean-vs-hard-stop outcome silently depended on
+agent exit speed — a classic timing race hidden by a "usually works" fallback.
+
+---
+
+## 2026-06-07 — Non-root agent users: root-side PHP creates `.aicli` root-owned → Permission denied
+
+**Context:** Switched the plugin's run user from `root` to a normal user (`aicliagent`, uid 1003).
+The session launched but the terminal showed:
+`/tmp/unraid-aicliagents/work/aicliagent/aicli-run-XXXX.sh: line NNN:
+.../home/.aicli/.exported_keys_<hash>: Permission denied`.
+
+**Root cause:** an **ownership split** invisible to root sessions. The home overlay upper *is*
+chowned to the session user at mount time (`op_mount --owner`, Bug #1054), so `home/` was
+`1003`-owned. But `home/.aicli/` was `0:0` (root). The web-side PHP — `ConfigService::saveWorkspaces`
+/ `saveResumeId` / env / autolaunch, all routed through `getUserStatePath()` — runs as **root**
+(emhttpd) and creates `.aicli/` (+ `workspaces.json`, `args/`) the moment the browser adds a
+session. Whichever side touches `.aicli` first owns it; root usually wins the race. The agent
+**run-script runs as the session user** and writes `.aicli/.exported_keys_<hash>` (the 5-tier env
+tracker) on every loop — into a root-owned, non-group-writable dir → EACCES. For a `root` run user
+this never appears because root owns everything.
+
+**Fix:** `getUserStatePath()` now calls `ensureStateDirOwnedBy($stateDir, $user)` — ensures `.aicli`
+exists and is `chown -R` to the session user (recursive, to fix root-created children too). The
+decision is a pure predicate `ConfigService::shouldChownStateDir($user, $currentUid, $targetUid)`
+(root/empty → never; unresolvable user → never; already-owned → never (idempotent on reads);
+owned-by-other or absent → chown). Pure-fn unit `UserStateDirOwnershipTest` (6 cases) covers it —
+the real chown needs root+posix+a real user, which only exists at the live/L3.5 layer.
+
+**Lesson:** any path written by BOTH the root web tier AND the per-user agent run-script must be
+owner-reconciled to the session user, not just the overlay upper. The mount-time `--owner` chown is
+necessary but not sufficient — subsequent root writes re-introduce root-owned paths. Audit every
+`getUserStatePath()`-derived writer (and any future `$HOME_DIR/...` root write) for the same trap
+when running non-root. Quick tell: `ls -lan .../work/<user>/home` shows `home/` as the user but a
+child dir as `0 0`.
+
+---
+
+## 2026-06-06 — ttyd reconnects leak tmux clients unless you attach with `-d`
+
+**Context:** Browsing the aicliagents tab with two workspaces open (claude + gemini), the
+terminals were "constantly reconnecting" and the box load climbed to ~5. Closing the browser
+did not drop the load. The agents and chat history were never at risk — one tmux session, one
+agent process each, both healthy throughout.
+
+**Root cause:** ttyd's web client auto-reconnects on **any** websocket drop — and for a web
+terminal those are unavoidable: a hidden/`visibility:hidden` background iframe (the non-active
+workspace) gets throttled by the browser, proxies time out idle sockets, networks blip. Each
+reconnect re-runs ttyd's command (`runuser → aicli-shell.sh → tmux attach-session`), adding a
+**new** client to the session. `aicli-shell.sh` attached **without `-d`**, so the prior client
+was never evicted — and because `runuser`/`setsid` puts each attach in its own session, ttyd
+can't SIGHUP it on disconnect either (same orphan-detachment class as Bug #1067, but for attach
+*clients* not the ttyd process). So "attached" clients accumulate without bound (observed: 7 on
+one gemini session, 3 on claude; `tmux list-clients` shows them all live). tmux mirrors the
+agent TUI to **every** attached client on every redraw → the load is N× the render work, and the
+visible churn is each stale client's pty still being driven.
+
+**Fix:** `aicli-shell.sh` now `exec tmux -u attach-session -d -t "$SESSION"`. `-d` detaches all
+*other* clients on attach, so every (re)connect collapses back to exactly one live client —
+self-healing across reconnects. The freshly-recreated workspace that "was stable" had exactly
+1 client, which is the steady state `-d` restores. Guard:
+`testTtydAttachEvictsStaleClientsToPreventReconnectLeak` (RegressionGuardsTest).
+
+**Lesson:** a web terminal **will** reconnect — treat reconnects as routine, not exceptional. Any
+`tmux attach` reachable from a ttyd command must use `-d`, or every reconnect is a permanent
+leaked client. The diagnostic tell is `tmux list-clients` showing many clients on one session
+while only one browser tab is open; the load is the multi-client redraw, not the agent. (The
+manual SSH-chip attach in DrawerPanel.tsx is a deliberate single attach, not an auto-reconnect
+loop — it intentionally does *not* take `-d`, so a user SSHing in doesn't kick their own browser
+session off.)
+
+---
+
 ## 2026-06-03 — Two session-close paths drifted; resume capture must be ONE primitive
 
 **Context:** After upgrading an agent, the workspace relaunched on the new binary but with a

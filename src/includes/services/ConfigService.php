@@ -235,7 +235,53 @@ class ConfigService {
         }
 
         $homeDir = "/tmp/unraid-aicliagents/work/$user/home";
-        return "$homeDir/.aicli";
+        $statePath = "$homeDir/.aicli";
+
+        // Non-root user permission fix (2026-06-07): this runs as ROOT (web/emhttpd),
+        // but the agent run-script writes .aicli/.exported_keys_* AS the session user.
+        // Whichever side creates .aicli first owns it — and when a root write here
+        // (workspaces.json, resumes, envs, autolaunch) wins, the dir is root-owned and
+        // the non-root agent gets "Permission denied" creating files in it. Make .aicli
+        // owned by the session user so BOTH root (web) and the agent (run-script) can
+        // write. No-op for root sessions (root owns everything already).
+        self::ensureStateDirOwnedBy($statePath, $user);
+
+        return $statePath;
+    }
+
+    /**
+     * Pure decision: should the session user's .aicli state dir be chowned to them?
+     * Extracted so the ownership policy is testable without real OS users / root.
+     *
+     * @param string   $user        Session user ('root' / '' => never).
+     * @param int|null $currentUid  Current owner uid of the dir (null if dir absent/unstattable).
+     * @param int|null $targetUid   The session user's uid (null if unresolvable).
+     */
+    public static function shouldChownStateDir(string $user, ?int $currentUid, ?int $targetUid): bool
+    {
+        if ($user === '' || $user === 'root') return false; // root owns everything
+        if ($targetUid === null) return false;              // can't map user -> uid
+        return $currentUid !== $targetUid;                  // chown unless already owned
+    }
+
+    /**
+     * Ensure $dir exists and is owned by $user (recursively, to fix any root-created
+     * children like workspaces.json / args/ left over from before this fix). Guarded
+     * by shouldChownStateDir() so steady-state reads do no work.
+     */
+    private static function ensureStateDirOwnedBy(string $dir, string $user): void
+    {
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+        if (!function_exists('posix_getpwnam')) return;
+        $pw = @posix_getpwnam($user);
+        $targetUid = is_array($pw) ? (int)$pw['uid'] : null;
+        $stat = @stat($dir);
+        $currentUid = is_array($stat) ? (int)$stat['uid'] : null;
+        if (!self::shouldChownStateDir($user, $currentUid, $targetUid)) return;
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        @shell_exec("chown -R " . escapeshellarg($user) . " " . escapeshellarg($dir));
     }
 
     /**

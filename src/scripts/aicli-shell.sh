@@ -451,6 +451,20 @@ _aicli_load_envs() {
 }
 
 while true; do
+    # Graceful-close sentinel — TOP-of-loop re-check (close-race fix 2026-06-07).
+    # gracefulClose keeps this session alive (so it can scrape the exit screen for a
+    # resume id, ~4s) and only THEN touches the flag + sends Enter to wake the
+    # post-exit "Press ENTER to reload" read below. A fast-exiting agent (a fresh
+    # claude exits instantly on Ctrl-C) has already passed the post-exit flag check
+    # and is parked on that read; waking it returns HERE. Without this check we would
+    # re-exec the agent — relaunching a workspace the user just closed and forcing
+    # gracefulClose into its 3s hard-stop fallback. Checking the flag before the
+    # (re)launch breaks cleanly while still preserving the scrape window.
+    if [ -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" ]; then
+        rm -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" 2>/dev/null
+        log_aicli "INFO" 2 "Graceful close sentinel observed at loop top — exiting before relaunch."
+        break
+    fi
     perf_log agent.exec.begin
     clear
 
@@ -902,4 +916,14 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 1
 fi
 perf_log tmux.attach.exec
-exec tmux -u attach-session -t "$SESSION" 2>>"$DEBUG_LOG"
+# -d (detach-others): ttyd's web client auto-reconnects on ANY websocket drop
+# (hidden/background-iframe throttling, proxy idle-timeout, network blip) — an
+# unavoidable trait of a web terminal. Each reconnect re-runs this script and
+# attaches a NEW client; without -d the prior client is NOT reaped (runuser/setsid
+# detaches each attach into its own session, so ttyd can't SIGHUP it on disconnect),
+# so stale "attached" clients accumulate without bound. tmux mirrors the agent TUI
+# to every attached client on every redraw -> compounding CPU + the visible
+# "constantly reconnecting" churn (reconnect-leak 2026-06-06; observed 7 clients on
+# one session, load avg ~5). -d makes each (re)connect evict all other clients,
+# keeping exactly one live client per session — self-healing across reconnects.
+exec tmux -u attach-session -d -t "$SESSION" 2>>"$DEBUG_LOG"
