@@ -62,6 +62,37 @@ class LayerManifestService {
      *
      * @param array<string, mixed> $layerEntry
      */
+    /**
+     * #1315: Upsert a layer entry by filename instead of appending. Keyed on filename: an existing
+     * entry for the same file is replaced (latest metadata wins) and any pre-existing duplicates of
+     * that filename are collapsed to one; a new file is appended at the end. Entries with no
+     * filename are passed through (cannot be keyed). Pure → unit-testable.
+     *
+     * @param array<int, array<string,mixed>> $existing
+     * @param array<string, mixed> $layerEntry
+     * @return array<int, array<string,mixed>>
+     */
+    public static function upsertLayer(array $existing, array $layerEntry): array {
+        $fn = (string)($layerEntry['filename'] ?? '');
+        $out = [];
+        $replaced = false;
+        foreach ($existing as $e) {
+            if ($fn !== '' && (string)($e['filename'] ?? '') === $fn) {
+                if (!$replaced) {
+                    $out[]    = $layerEntry; // first match -> replace in place
+                    $replaced = true;
+                }
+                // any further entries with this filename are duplicates -> drop
+                continue;
+            }
+            $out[] = $e;
+        }
+        if (!$replaced) {
+            $out[] = $layerEntry;
+        }
+        return array_values($out);
+    }
+
     public static function addLayer(string $entity, array $layerEntry): bool {
         return self::withLock(function () use ($entity, $layerEntry) {
             $manifest = self::readManifest() ?? self::emptyManifest();
@@ -77,7 +108,14 @@ class LayerManifestService {
                 ];
             }
 
-            $manifest['entities'][$entity]['expected_layers'][] = $layerEntry;
+            // #1315: upsert by filename (NOT blind append) so re-baking/re-recording the same
+            // layer doesn't bloat the manifest with duplicates, and any pre-existing duplicates of
+            // this filename collapse to one. Duplicates inflate expected_count and can mask a real
+            // missing-layer count in boot-integrity.
+            $manifest['entities'][$entity]['expected_layers'] = self::upsertLayer(
+                $manifest['entities'][$entity]['expected_layers'] ?? [],
+                $layerEntry
+            );
             $manifest['entities'][$entity]['last_known_good_at'] = self::now();
 
             // Update persistence path if provided in the layer entry

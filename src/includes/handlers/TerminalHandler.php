@@ -468,6 +468,8 @@ class TerminalHandler {
             aicli_log("captureResumeForClose: captured short id via fallback regex | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
         }
 
+        // #1316: a renamed claude-code session's NAME is its resume id (may be short / contain
+        // spaces); the scrape is NOT shape-validated — printf %q in the run-script escapes it.
         $capturedId = null;
         if (!empty($m)) {
             $capturedId = $m[1];

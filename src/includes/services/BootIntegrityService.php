@@ -135,15 +135,28 @@ class BootIntegrityService {
         // expected non-empty
         if (!empty($activeFiles)) {
             $activeBasenames = array_map('basename', $activeFiles);
-            $missingCount    = 0;
+            $missing = [];
             foreach ($expectedLayers as $layer) {
                 $fn = $layer['filename'] ?? '';
                 if ($fn !== '' && !in_array($fn, $activeBasenames, true)) {
-                    $missingCount++;
+                    $missing[] = $fn;
                 }
             }
+            $missingCount = count($missing);
             if ($missingCount === 0) {
                 // Phase 4a: sha256 verify deferred to Phase 4b strict mode.
+                return ['state' => self::STATE_HEALTHY, 'evidence' => $evidence];
+            }
+            // #1314: a missing EXPECTED layer is benign ONLY when (a) the on-disk layers already
+            // form a complete, self-consistent chain AND (b) every missing layer sits BELOW/outside
+            // that chain — a superseded base orphaned by a fresh chain or replaced by a consolidate.
+            // A missing layer whose seq is ABOVE the on-disk chain head is a LOST HEAD (the newest
+            // baked layer is gone); chain-completeness alone can't see that, but the manifest is the
+            // only record it ever existed — so it must still flag as real loss. (Pruning the stale
+            // superseded entries is #1315.)
+            if (self::isActiveChainComplete($activeBasenames)
+                && !self::missingLayersAboveChainHead($activeBasenames, $missing)) {
+                $evidence['superseded_count'] = $missingCount;
                 return ['state' => self::STATE_HEALTHY, 'evidence' => $evidence];
             }
             $evidence['missing_count'] = $missingCount;
@@ -158,6 +171,77 @@ class BootIntegrityService {
             return ['state' => self::STATE_PATH_DRIFT, 'evidence' => $evidence];
         }
         return ['state' => self::STATE_TOTAL_LOSS, 'evidence' => $evidence];
+    }
+
+    /**
+     * #1314 refinement: of the manifest-expected layers that are MISSING from disk, is any one of
+     * them ABOVE the on-disk chain's head (a lost newest/head layer)? A complete-looking on-disk
+     * chain (e.g. delta_1..8) can still have lost its head (delta_9) — chain-completeness alone
+     * cannot see that, but the manifest can. Returns true if a lost head is detected (=> real loss);
+     * false if every missing layer sits at/below the on-disk head (superseded base -> benign).
+     * Missing layers with no seq (legacy unseq-keyed names) are treated as below the chain. Pure.
+     *
+     * @param array<int,string> $activeBasenames
+     * @param array<int,string> $missingBasenames
+     */
+    public static function missingLayersAboveChainHead(array $activeBasenames, array $missingBasenames): bool {
+        $activeMax = -1;
+        foreach ($activeBasenames as $fn) {
+            if (preg_match('/_(?:consolidated|delta)_0*(\d+)_/', (string)$fn, $m)) {
+                $activeMax = max($activeMax, (int)$m[1]);
+            }
+        }
+        if ($activeMax < 0) {
+            return false; // no seq-keyed layers on disk to compare against
+        }
+        foreach ($missingBasenames as $fn) {
+            if (preg_match('/_(?:consolidated|delta)_0*(\d+)_/', (string)$fn, $m)
+                && (int)$m[1] > $activeMax) {
+                return true; // a missing layer sits above the on-disk head -> lost head
+            }
+        }
+        return false;
+    }
+
+    /**
+     * #1314: Do the on-disk active layer basenames form a complete, self-consistent chain?
+     *
+     * A complete chain has a self-contained BASE -- either a `consolidated` layer (any seq) or a
+     * `delta` at seq 1 (built on the empty base) -- followed by CONTIGUOUS seqs with no holes.
+     * When the on-disk layers satisfy this, any EXPECTED layer the manifest still references but
+     * that is absent on disk is a SUPERSEDED/stale reference (e.g. an old consolidated orphaned by
+     * a fresh delta chain, or deltas replaced by a consolidate) -- benign, not data loss. A broken
+     * on-disk chain (no base, or a seq gap) is a genuine in-chain loss.
+     *
+     * Pure (operates on filenames only) so the policy is unit-testable without a real overlay.
+     *
+     * @param array<int, string> $activeBasenames on-disk layer basenames for one entity
+     */
+    public static function isActiveChainComplete(array $activeBasenames): bool {
+        $layers = [];
+        foreach ($activeBasenames as $fn) {
+            if (preg_match('/_(consolidated|delta)_0*(\d+)_/', (string) $fn, $m)) {
+                $layers[] = ['kind' => $m[1], 'seq' => (int) $m[2]];
+            }
+        }
+        if (empty($layers)) {
+            return false; // nothing parseable -> cannot vouch for a complete chain
+        }
+        usort($layers, static function ($a, $b) { return $a['seq'] <=> $b['seq']; });
+
+        // Base must be self-contained: a consolidated (any seq) OR a delta at seq 1 (empty base).
+        $base = $layers[0];
+        if (!($base['kind'] === 'consolidated' || ($base['kind'] === 'delta' && $base['seq'] === 1))) {
+            return false; // lowest layer is a mid-chain delta with no base beneath -> genuine gap
+        }
+        // Seqs must be contiguous from the base (no holes).
+        $count = count($layers);
+        for ($i = 1; $i < $count; $i++) {
+            if ($layers[$i]['seq'] !== $layers[$i - 1]['seq'] + 1) {
+                return false; // hole in the chain -> genuine in-chain loss
+            }
+        }
+        return true;
     }
 
     /**
@@ -217,8 +301,10 @@ class BootIntegrityService {
                 }
             } elseif ($state === self::STATE_HEALTHY) {
                 $healthyCount++;
+                self::clearHaltOnRecovery($entityType, $entityId, $state); // #1318
             } else {
                 $freshCount++;
+                self::clearHaltOnRecovery($entityType, $entityId, $state); // #1318
             }
         }
 
@@ -330,6 +416,28 @@ class BootIntegrityService {
         }
 
         return [$allFiles, $siblingPaths];
+    }
+
+    /**
+     * #1318: Does this re-classified state mean a previously-halted entity has RECOVERED, so any
+     * existing halt marker should be cleared? runBootSweep historically only SET halt markers and
+     * never removed them, so after a fix (e.g. a manifest reconcile) the entity classified healthy
+     * yet the UI stayed "HALTED" — even pressing Retry (which re-runs runBootSweep) left the marker.
+     * Pure predicate → unit-testable.
+     */
+    public static function clearsHaltOnRecovery(string $state): bool {
+        return $state === self::STATE_HEALTHY || $state === self::STATE_GENUINE_FRESH;
+    }
+
+    /**
+     * Remove a stale halt marker for an entity that has recovered. No-op for non-recovery states;
+     * HaltService::clearHalt is itself silent/idempotent when no halt record exists.
+     */
+    private static function clearHaltOnRecovery(string $type, string $id, string $state): void {
+        if (!self::clearsHaltOnRecovery($state)) {
+            return;
+        }
+        @HaltService::clearHalt($type, $id, 'recovered_' . $state);
     }
 
     // --- Phase 4b: Halt gate ---------------------------------------------------
