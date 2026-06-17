@@ -26,6 +26,7 @@ class TerminalHandler {
             case 'get_resume_id':    return self::getResumeId();
             case 'log':              return self::log();
             case 'get_log':          return self::getLog();
+            case 'get_log_contexts': return self::getLogContexts();
             case 'clear_log':        return self::clearLog();
             case 'list_sessions_for_agent': return self::listSessionsForAgent();
             default:                 return null;
@@ -34,7 +35,7 @@ class TerminalHandler {
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'agent_signal_reload', 'get_chat_session', 'get_resume_id', 'log', 'get_log', 'clear_log', 'list_sessions_for_agent'];
+        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'agent_signal_reload', 'get_chat_session', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent'];
     }
 
     /**
@@ -100,6 +101,55 @@ class TerminalHandler {
                 'classification' => $wsClassification,
                 'emergency_possible' => false,
             ];
+        }
+
+        // Check 3 — S-08 (#1353, STORAGE_ASYNC_JOBS.md): never block this AJAX
+        // response 10-30 s on a cold home mount. If the home overlay is not
+        // mounted yet, FileStorage::ensureReadyAsync enqueues a supervisor
+        // `mount` job and we return {status:'mounting', job_id} immediately;
+        // the React cold-start flow polls `storage_job_status` and re-fires
+        // `start` when the job lands (the sync ensureReady inside startTerminal
+        // then takes its fast path). ONLY this browser-facing action goes
+        // async: emergency_start, restart, the event scripts and
+        // AutoLaunchService (headless at boot — nobody to poll a job) keep the
+        // synchronous TerminalService path.
+        if (!\AICliAgents\Services\StorageMountService::isEmergencyMode()
+            && !\AICliAgents\Services\StorageMountService::isMigrationInProgress()) {
+            $homeUser = (string)($config['user'] ?? 'root');
+            if ($homeUser === '' || $homeUser === '0') $homeUser = 'root';
+            if (function_exists('posix_getpwnam') && !is_array(@posix_getpwnam($homeUser))) $homeUser = 'root'; // Bug #1053 fallback
+            $ready = \AICliAgents\Services\FileStorage::ensureReadyAsync("home/$homeUser", ['reason' => 'workspace_open']);
+            if (($ready['state'] ?? '') === 'mounting') {
+                // T-09: surface the wait in the start activity so the cold-start
+                // overlay + tray show "mount queued" instead of a silent spinner.
+                \AICliAgents\Services\ActivityService::update("start_$id", [
+                    'type'  => 'start', 'label' => "Starting $agentId",
+                    'step'  => 'mounting_home_queued', 'progress' => 10,
+                    'meta'  => ['sessionId' => $id, 'agentId' => $agentId,
+                                'path' => (string)($workspacePath ?? ''),
+                                'jobId' => (string)($ready['job_id'] ?? '')],
+                ]);
+                return [
+                    'status' => 'mounting',
+                    'job_id' => (string)($ready['job_id'] ?? ''),
+                    'wait_s' => (int)($ready['wait_s'] ?? 300),
+                    'sock'   => "/webterminal/aicliterm-$id/",
+                ];
+            }
+            if (($ready['state'] ?? '') === 'unavailable') {
+                // The async path degraded to sync (queue unavailable) AND the
+                // sync mount failed — same surface as the Check-1 classification.
+                return [
+                    'status'  => 'error',
+                    'reason'  => 'home_unavailable',
+                    'message' => 'Home storage could not be mounted (exit ' . (string)($ready['exit'] ?? '?') . '). Check the Storage tab.',
+                    'path'    => $homePath,
+                    'classification' => \AICliAgents\Services\StorageMountService::classifyPath($homePath),
+                    'emergency_possible' => \AICliAgents\Services\StorageMountService::isPathAvailable($persistPath)
+                        && count(glob("$persistPath/agent_{$agentId}_*.sqsh")) > 0,
+                ];
+            }
+            // state 'ready' (or a deferred-but-usable sync fallback) → proceed.
         }
 
         // Resume flag: if the user clicked "Resume" in the new-session overlay,
@@ -173,7 +223,7 @@ class TerminalHandler {
 
             if (!$binaryExists) {
                 // Binary not in RAM — try normal sqsh mount
-                $agentMounted = \AICliAgents\Services\StorageMountService::ensureAgentMounted($agentId);
+                $agentMounted = \AICliAgents\Services\FileStorage::ensureReady("agent/$agentId")->ok;   // Epic #1310: facade intent
                 if (!$agentMounted) {
                     return ['status' => 'error', 'message' => "Agent $agentId is not available. Install it to RAM first via the emergency installer."];
                 }
@@ -194,6 +244,9 @@ class TerminalHandler {
 
     private static function stop($id) {
         stopAICliTerminal($id, isset($_GET['hard']));
+        // Closing a session frees the home overlay — wake the supervisor so any
+        // deferred consolidate/bake for that home resumes immediately (#1381).
+        \AICliAgents\Services\SupervisorService::wake();
         return ['status' => 'ok'];
     }
 
@@ -235,99 +288,16 @@ class TerminalHandler {
 
             @mkdir('/tmp/unraid-aicliagents', 0755, true);
 
-            // Force the tmux window to 220 cols BEFORE Ctrl-C. After ttyd
-            // disconnects, the window can shrink to the last negotiated size
-            // (often 80 cols or narrower), which wraps copilot's UUID onto two
-            // lines in a way tmux's -J flag cannot always re-join cleanly.
-            // Resizing here guarantees the full resume line fits on one row.
-            @shell_exec("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
-
-            // Two Ctrl-Cs covers both single-press (opencode) and double-press
-            // (claude/gemini/copilot/kilo) exit conventions. The second key on
-            // single-press agents lands on the post-exit shell as a no-op.
-            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
-            usleep(150000);
-            @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
-            // Bug #1071: Antigravity CLI ignores Ctrl-C and exits only on Ctrl-D.
-            // Sending Ctrl-D x2 covers both the agy single-press (REPL line) and
-            // double-press (exit confirmation) conventions. For agents that
-            // already exited from the Ctrl-C pair, the Ctrl-Ds land on the
-            // post-exit shell as a no-op.
-            usleep(150000);
-            @shell_exec("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
-            usleep(150000);
-            @shell_exec("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
-            aicli_log("gracefulClose: sent Ctrl-C x2 + Ctrl-D x2 (Bug #1071) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-
-            // Capture with up to 3 retries - agents that stream their exit
-            // screen character-by-character can be caught mid-render on the
-            // first attempt. If we get a short-looking id, wait and re-capture.
-            //
-            // Claude Code also supports custom session names (via /rename),
-            // in which case the resume line prints the name instead of a UUID
-            // - e.g.  claude --resume "John's coding session"  - so the regex
-            // accepts three forms, tried in order per match attempt:
-            //   1. Full-length bare token ({20,}) - classic UUIDs, strongest
-            //      signal. Always preferred when present.
-            //   2. Double-quoted string ("...") - custom names with spaces
-            //      or apostrophes. Content captured without the surrounding
-            //      quotes; consumer must shell-escape on reuse.
-            //   3. Single-quoted string ('...') - rare but legal bash quoting.
-            //   4. Permissive bare token ({8,}) - short session ids (opencode,
-            //      kilocode ses_xxx) and legacy shapes.
-            $pane = '';
-            $m = null;
-            // Bug #1071: Antigravity CLI's exit hint uses `--conversation <id>`,
-            // not --resume. Accept either form in all three regex variants so
-            // antigravity-cli benefits from the same pane-scrape pipeline as
-            // the other agents. The leading flag list is the same shape:
-            // {--resume|--conversation|-s} followed by `= ` or whitespace.
-            $regexFull   = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{20,})/';
-            $regexQuoted = '/(?:--resume[= ]|--conversation[= ]|-s\s+)(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\')/';
-            $regexShort  = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{8,})/';
-            for ($attempt = 0; $attempt < 3; $attempt++) {
-                usleep($attempt === 0 ? 1800000 : 1000000);
-                $pane = (string) shell_exec("$tmuxBin capture-pane -p -J -S -200 -t $escSess 2>/dev/null");
-                if (preg_match($regexFull, $pane, $m)) {
-                    aicli_log("gracefulClose: captured full-length id on attempt " . ($attempt + 1) . " (" . strlen($pane) . " bytes of pane) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-                    break;
-                }
-                if (preg_match($regexQuoted, $pane, $qm)) {
-                    // Collapse either quote group into the standard $m[1] slot.
-                    $m = [$qm[0], !empty($qm[1]) ? $qm[1] : ($qm[2] ?? '')];
-                    aicli_log("gracefulClose: captured quoted name on attempt " . ($attempt + 1) . " | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-                    break;
-                }
-                aicli_log("gracefulClose: attempt " . ($attempt + 1) . " did not yield a full id yet (pane " . strlen($pane) . " bytes) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-            }
-            // Fall back to the permissive 8+ regex if none of the attempts
-            // yielded a full-length id - some agents use short session ids.
-            if (empty($m) && preg_match($regexShort, $pane, $m)) {
-                aicli_log("gracefulClose: captured short id via fallback regex | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
-            }
-
-            if (!empty($m)) {
-                $capturedId = $m[1];
-            } else {
-                // Agent-specific disk-based fallback for CLIs that don't print
-                // a resume hint on exit (opencode). Looks up the most recent
-                // session id from the agent's own metadata store.
-                $capturedId = self::discoverLatestSessionId($agentId, $path);
-                if ($capturedId) {
-                    aicli_log("gracefulClose: exit screen had no resume hint — discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
-                }
-            }
-
-            if (!empty($capturedId)) {
-                if (!empty($path) && !empty($agentId)) {
-                    \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $capturedId);
-                    aicli_log("gracefulClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
-                } else {
-                    aicli_log("gracefulClose: captured resume_id=$capturedId but could not save (missing workspace or agent) | $ctx", AICLI_LOG_WARN, "TerminalHandler");
-                }
-            } else {
-                aicli_log("gracefulClose: no resume_id found in exit screen or agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
-            }
+            // Quiesce the agent and capture + persist its resume id. Extracted to
+            // captureResumeForClose() so the pre-upgrade bulk close
+            // (AgentHandler::_closeSessionsForUpgrade) runs the IDENTICAL pipeline:
+            // the universal exit keys (Ctrl-C x2 + Ctrl-D x2 for agy), the 3-retry
+            // exit-screen scrape (covers EVERY agent that prints a resume hint —
+            // gemini, copilot, kilo, codex, …), then the disk-based fallback
+            // (opencode/agy/claude). Single source of truth so the two close paths
+            // can never drift on resume capture again (the upgrade path used to do
+            // disk-only, silently dropping resume for all scrape-only agents).
+            $capturedId = self::captureResumeForClose($sessName, $tmuxSock, $tmuxBin, $agentId, $path, $ctx);
 
             // NOW set the sentinel and unblock the shell's "Press ENTER" read
             // so the relaunch loop exits cleanly instead of timing out after
@@ -336,9 +306,14 @@ class TerminalHandler {
             @touch("/tmp/unraid-aicliagents/close-$safeId.flag");
             @shell_exec("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
 
-            // Poll for the tmux session to actually exit. Up to 3s.
+            // Poll for the tmux session to actually exit. Budget is per-session
+            // configurable via `graceful_close_timeout` (seconds, default 3 —
+            // the historical hardcoded value). Clamped to [1, 60] so a typo'd
+            // config value can't hang the close path. See ACTIVITY_TRAY.md.
+            $budget = (int)(getAICliConfig()['graceful_close_timeout'] ?? 3);
+            $budget = max(1, min(60, $budget ?: 3));
             $exited = false;
-            for ($i = 0; $i < 30; $i++) {
+            for ($i = 0; $i < $budget * 10; $i++) {
                 $still = trim((string) shell_exec("$tmuxBin has-session -t $escSess 2>/dev/null && echo y || echo n"));
                 if ($still === 'n') { $exited = true; break; }
                 usleep(100000);
@@ -346,7 +321,7 @@ class TerminalHandler {
             if ($exited) {
                 aicli_log("gracefulClose: tmux session '$sessName' exited cleanly | $ctx", AICLI_LOG_INFO, "TerminalHandler");
             } else {
-                aicli_log("gracefulClose: tmux session '$sessName' did not exit within 3s — falling back to hard stop | $ctx", AICLI_LOG_WARN, "TerminalHandler");
+                aicli_log("gracefulClose: tmux session '$sessName' did not exit within {$budget}s — falling back to hard stop | $ctx", AICLI_LOG_WARN, "TerminalHandler");
             }
         } else {
             aicli_log("gracefulClose: no tmux session found for $ctx — proceeding to hard stop (session may have already died)", AICLI_LOG_WARN, "TerminalHandler");
@@ -375,28 +350,25 @@ class TerminalHandler {
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
         aicli_log("gracefulClose: DONE $resumeStr | $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
-        // WP #748 Phase 1 (E): workspace close does NOT enqueue an immediate bake.
-        // Instead it writes a lightweight "wants-bake" flag file under
-        // /tmp/unraid-aicliagents/supervisor/wants-bake/ so the supervisor's
-        // next tick detects it and bakes — even if we're not yet past the
-        // bake_schedule_minutes window. One flag file, one eventual write.
-        // This collapses rapid workspace-flips into a single bake and removes
-        // a redundant Flash write per close.
-        $config = getAICliConfig();
-        $user = $config['user'] ?? 'root';
-        if (empty($user)) {
-            $user = 'root';
-        }
-        $wantsBakeDir = '/tmp/unraid-aicliagents/supervisor/wants-bake';
-        @mkdir($wantsBakeDir, 0755, true);
-        $safeUser = preg_replace('/[^a-zA-Z0-9_-]/', '_', $user);
-        @file_put_contents("$wantsBakeDir/home_$safeUser", (string) time());
+        // Quiescent-lifecycle (2026-05-31): workspace close NO LONGER forces a
+        // bake (the old "wants-bake" flag is gone). The supervisor bakes home on
+        // its own cadence (bake_schedule_minutes + dirty-pressure), and a full
+        // server shutdown bakes home unconditionally (stop-plugin.sh Step 6), so
+        // persistence is covered without a per-close Flash write. Reclaim happens
+        // when the home goes idle (this close may BE that idle moment). We still
+        // captured + saved the resume id above so the next open resumes the chat.
         \AICliAgents\Services\LifecycleLogService::log(
             \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
             'gracefulClose',
-            'workspace_close_wants_bake_flagged',
-            ['user' => $user, 'session' => $safeId]
+            'workspace_closed_no_forced_bake',
+            ['session' => $safeId, 'resume_id' => $capturedId ?: '']
         );
+
+        // Closing the workspace frees the home overlay — wake the supervisor NOW
+        // so a deferred (mount_busy) consolidate/bake for this home resumes
+        // immediately instead of up to one tick later (#1381 felt like nothing
+        // fired on close).
+        \AICliAgents\Services\SupervisorService::wake();
 
         return ['status' => 'ok', 'resume_id' => $capturedId, 'baking' => false];
     }
@@ -470,13 +442,133 @@ class TerminalHandler {
     }
 
     /**
+     * Quiesce ONE agent inside its tmux session and capture + persist its resume
+     * id. Shared verbatim by gracefulClose() (UI "close" button) and
+     * AgentHandler::_closeSessionsForUpgrade() (pre-upgrade bulk close) so resume
+     * capture is implemented in exactly ONE place and behaves identically for
+     * every agent type — closing the bug where the upgrade path did a disk-only
+     * capture and silently dropped resume for agents that only print their hint
+     * on the exit screen (gemini, copilot, kilo, codex, …).
+     *
+     * Does NOT tear down the session or touch the close sentinel — that is the
+     * caller's job, because the teardown legitimately differs (gracefulClose lets
+     * the shell loop break on the sentinel; the upgrade path hard-kills survivors
+     * before the binary is replaced).
+     *
+     * @return string|null the captured resume id (also saved for (path,agent)), or null.
+     */
+    public static function captureResumeForClose(string $sessName, string $tmuxSock, string $tmuxBin, string $agentId, string $path, string $ctx = ''): ?string {
+        if ($sessName === '') return null;
+        $escSess = escapeshellarg($sessName);
+
+        // Force the tmux window to 220 cols BEFORE Ctrl-C. After ttyd
+        // disconnects, the window can shrink to the last negotiated size
+        // (often 80 cols or narrower), which wraps copilot's UUID onto two
+        // lines in a way tmux's -J flag cannot always re-join cleanly.
+        // Resizing here guarantees the full resume line fits on one row.
+        @shell_exec("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
+
+        // Two Ctrl-Cs covers both single-press (opencode) and double-press
+        // (claude/gemini/copilot/kilo) exit conventions. The second key on
+        // single-press agents lands on the post-exit shell as a no-op.
+        @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+        usleep(150000);
+        @shell_exec("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+        // Bug #1071: Antigravity CLI ignores Ctrl-C and exits only on Ctrl-D.
+        // Sending Ctrl-D x2 covers both the agy single-press (REPL line) and
+        // double-press (exit confirmation) conventions. For agents that
+        // already exited from the Ctrl-C pair, the Ctrl-Ds land on the
+        // post-exit shell as a no-op.
+        usleep(150000);
+        @shell_exec("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
+        usleep(150000);
+        @shell_exec("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
+        aicli_log("captureResumeForClose: sent Ctrl-C x2 + Ctrl-D x2 (Bug #1071) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+
+        // Capture with up to 3 retries - agents that stream their exit
+        // screen character-by-character can be caught mid-render on the
+        // first attempt. If we get a short-looking id, wait and re-capture.
+        //
+        // Claude Code also supports custom session names (via /rename),
+        // in which case the resume line prints the name instead of a UUID
+        // - e.g.  claude --resume "John's coding session"  - so the regex
+        // accepts three forms, tried in order per match attempt:
+        //   1. Full-length bare token ({20,}) - classic UUIDs, strongest
+        //      signal. Always preferred when present.
+        //   2. Double-quoted string ("...") - custom names with spaces
+        //      or apostrophes. Content captured without the surrounding
+        //      quotes; consumer must shell-escape on reuse.
+        //   3. Single-quoted string ('...') - rare but legal bash quoting.
+        //   4. Permissive bare token ({8,}) - short session ids (opencode,
+        //      kilocode ses_xxx) and legacy shapes.
+        $pane = '';
+        $m = null;
+        // Bug #1071: Antigravity CLI's exit hint uses `--conversation <id>`,
+        // not --resume. Accept either form in all three regex variants so
+        // antigravity-cli benefits from the same pane-scrape pipeline as
+        // the other agents. The leading flag list is the same shape:
+        // {--resume|--conversation|-s} followed by `= ` or whitespace.
+        $regexFull   = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{20,})/';
+        $regexQuoted = '/(?:--resume[= ]|--conversation[= ]|-s\s+)(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\')/';
+        $regexShort  = '/(?:--resume[= ]|--conversation[= ]|-s\s+)([A-Za-z0-9_-]{8,})/';
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            usleep($attempt === 0 ? 1800000 : 1000000);
+            $pane = (string) shell_exec("$tmuxBin capture-pane -p -J -S -200 -t $escSess 2>/dev/null");
+            if (preg_match($regexFull, $pane, $m)) {
+                aicli_log("captureResumeForClose: captured full-length id on attempt " . ($attempt + 1) . " (" . strlen($pane) . " bytes of pane) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+                break;
+            }
+            if (preg_match($regexQuoted, $pane, $qm)) {
+                // Collapse either quote group into the standard $m[1] slot.
+                $m = [$qm[0], !empty($qm[1]) ? $qm[1] : ($qm[2] ?? '')];
+                aicli_log("captureResumeForClose: captured quoted name on attempt " . ($attempt + 1) . " | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+                break;
+            }
+            aicli_log("captureResumeForClose: attempt " . ($attempt + 1) . " did not yield a full id yet (pane " . strlen($pane) . " bytes) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+        }
+        // Fall back to the permissive 8+ regex if none of the attempts
+        // yielded a full-length id - some agents use short session ids.
+        if (empty($m) && preg_match($regexShort, $pane, $m)) {
+            aicli_log("captureResumeForClose: captured short id via fallback regex | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+        }
+
+        // #1316: a renamed claude-code session's NAME is its resume id (may be short / contain
+        // spaces); the scrape is NOT shape-validated — printf %q in the run-script escapes it.
+        $capturedId = null;
+        if (!empty($m)) {
+            $capturedId = $m[1];
+        } else {
+            // Agent-specific disk-based fallback for CLIs that don't print
+            // a resume hint on exit (opencode). Looks up the most recent
+            // session id from the agent's own metadata store.
+            $capturedId = self::discoverLatestSessionId($agentId, $path);
+            if ($capturedId) {
+                aicli_log("captureResumeForClose: exit screen had no resume hint — discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+            }
+        }
+
+        if (!empty($capturedId)) {
+            if (!empty($path) && !empty($agentId)) {
+                \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $capturedId);
+                aicli_log("captureResumeForClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+            } else {
+                aicli_log("captureResumeForClose: captured resume_id=$capturedId but could not save (missing workspace or agent) | $ctx", AICLI_LOG_WARN, "TerminalHandler");
+            }
+        } else {
+            aicli_log("captureResumeForClose: no resume_id found in exit screen or agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+        }
+
+        return $capturedId !== '' ? $capturedId : null;
+    }
+
+    /**
      * Agent-specific fallback for the most recent session id when the exit
-     * screen doesn't print a resume hint. Used by gracefulClose() only when
-     * the pane regex misses.
+     * screen doesn't print a resume hint. Used by captureResumeForClose() only
+     * when the pane regex misses.
      *
      * Returns null if unavailable or unsupported for the agent.
      */
-    private static function discoverLatestSessionId(string $agentId, string $workspacePath = ''): ?string {
+    public static function discoverLatestSessionId(string $agentId, string $workspacePath = ''): ?string {
         $config = getAICliConfig();
         $username = $config['user'] ?? 'root';
         if (empty($username)) $username = 'root';
@@ -493,10 +585,17 @@ class TerminalHandler {
         }
 
         if ($agentId === 'antigravity-cli') {
-            // Bug #1071: agy stores each conversation as a separate
-            // <uuid>.pb file under <HOME>/.gemini/antigravity-cli/conversations/.
-            // Most recently modified = last active. The basename (sans .pb)
-            // is the conversation id passed to `agy --conversation <id>`.
+            // agy maps {workspace cwd -> conversation id} in its own authoritative
+            // index (cache/last_conversations.json). Prefer it — it is
+            // workspace-correct. A global-newest .pb mtime scan picks a DIFFERENT
+            // workspace's chat (the claude-code branch below documents exactly this
+            // hazard; the stale resume_*.json entries observed on .4 — pointing at
+            // conversations that no longer exist — are that scan misfiring).
+            $byWorkspace = \AICliAgents\Services\TerminalService::antigravityResumeId($homeDir, $workspacePath);
+            if ($byWorkspace !== null) return $byWorkspace;
+
+            // Fallback: newest <uuid>.pb by mtime — covers a conversation not yet
+            // in the index (or a blank $workspacePath). Validate the id shape.
             $dir = "$homeDir/.gemini/antigravity-cli/conversations";
             if (!is_dir($dir)) return null;
             $newestMtime = 0;
@@ -581,18 +680,94 @@ class TerminalHandler {
         return ['status' => 'ok'];
     }
 
+    /**
+     * R-07 (#1370): server-side filtered log fetch. Optional params:
+     *   ctx=<string>   — substring match on the [Context] field (or JSONL "ctx")
+     *   trace=<hex>    — exact match on the [t:<id>] field (R-06 join key)
+     *   level=<0-3>    — only lines at or below this level (0=ERR! … 3=DBUG)
+     *   tail=<N>       — last N lines AFTER filtering (default 500, hard cap 2000)
+     * Never ships the whole file: scans at most the last 2000 raw lines.
+     */
     private static function getLog() {
         $type = $_GET['type'] ?? 'debug';
         $logFile = self::resolveLogFile($type);
-        $content = "";
-        if (file_exists($logFile)) {
-            $lines = aicli_tail($logFile, 500);
-            $content = implode("\n", $lines);
-            $content = mb_convert_encoding($content, 'UTF-8', 'UTF-8');
-        } else {
-            $content = "No log entries found for [" . ucfirst($type) . "].";
+        if (!file_exists($logFile)) {
+            return ['status' => 'ok', 'content' => "No log entries found for [" . ucfirst($type) . "]."];
         }
-        return ['status' => 'ok', 'content' => $content];
+
+        $tail = (int)($_GET['tail'] ?? 500);
+        $tail = max(1, min(2000, $tail ?: 500));
+        $ctx   = trim((string)($_GET['ctx'] ?? ''));
+        $trace = trim((string)($_GET['trace'] ?? ''));
+        if ($trace !== '' && !preg_match('/^[a-z0-9]{4,16}$/', $trace)) $trace = '';
+        $levelRaw = $_GET['level'] ?? '';
+        $level = ($levelRaw !== '' && is_numeric($levelRaw)) ? max(0, min(3, (int)$levelRaw)) : null;
+
+        $lines = aicli_tail($logFile, 2000);
+        if ($ctx !== '' || $trace !== '' || $level !== null) {
+            $lines = array_values(array_filter($lines, function ($line) use ($ctx, $trace, $level) {
+                $f = self::parseLogLine($line);
+                if ($f === null) return false; // filters active → unparseable lines drop
+                if ($ctx !== '' && stripos($f['ctx'], $ctx) === false) return false;
+                if ($trace !== '' && $f['trace'] !== $trace) return false;
+                if ($level !== null && ($f['lvl'] === null || $f['lvl'] > $level)) return false;
+                return true;
+            }));
+        }
+        $lines = array_slice($lines, -$tail);
+        $content = mb_convert_encoding(implode("\n", $lines), 'UTF-8', 'UTF-8');
+        return ['status' => 'ok', 'content' => $content, 'lines' => count($lines)];
+    }
+
+    /**
+     * R-07: distinct [Context] values from the recent tail of the debug log —
+     * feeds the Debug Console context-filter dropdown.
+     */
+    private static function getLogContexts() {
+        $logFile = self::resolveLogFile($_GET['type'] ?? 'debug');
+        $contexts = [];
+        if (file_exists($logFile)) {
+            foreach (aicli_tail($logFile, 2000) as $line) {
+                $f = self::parseLogLine($line);
+                if ($f !== null && $f['ctx'] !== '') $contexts[$f['ctx']] = true;
+            }
+        }
+        $list = array_keys($contexts);
+        sort($list, SORT_NATURAL | SORT_FLAG_CASE);
+        return ['status' => 'ok', 'contexts' => $list];
+    }
+
+    /** Levels as logged by LogService, in LOG_* numeric order. */
+    private const LEVEL_STRINGS = ['ERR!' => 0, 'WARN' => 1, 'INFO' => 2, 'DBUG' => 3];
+
+    /**
+     * Parse one debug-log line into ['ctx','trace','lvl'] — handles BOTH the
+     * text format "[ts] [LEVL] [Context] [t:id] msg" and JSONL
+     * {"ts","lvl","ctx","trace","msg"} (debug_log_format=jsonl). Returns null
+     * for lines in neither shape (raw shell echoes parse via the text regex
+     * since they share the [ts] [LEVL] [ctx] prefix convention).
+     * @return array{ctx:string,trace:?string,lvl:?int}|null
+     */
+    private static function parseLogLine(string $line): ?array {
+        $line = trim($line);
+        if ($line === '') return null;
+        if ($line[0] === '{') {
+            $j = json_decode($line, true);
+            if (!is_array($j)) return null;
+            return [
+                'ctx'   => (string)($j['ctx'] ?? ''),
+                'trace' => isset($j['trace']) && $j['trace'] !== null ? (string)$j['trace'] : null,
+                'lvl'   => self::LEVEL_STRINGS[(string)($j['lvl'] ?? '')] ?? null,
+            ];
+        }
+        if (!preg_match('/^\[[^\]]*\] \[([A-Z!]{4})\] \[([^\]]*)\](?: \[t:([a-z0-9]{4,16})\])?/', $line, $m)) {
+            return null;
+        }
+        return [
+            'ctx'   => $m[2],
+            'trace' => isset($m[3]) && $m[3] !== '' ? $m[3] : null,
+            'lvl'   => self::LEVEL_STRINGS[$m[1]] ?? null,
+        ];
     }
 
     private static function clearLog() {

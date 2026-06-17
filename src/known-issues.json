@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "_doc": [
+    "Known-issues feed for the AI CLI Agents plugin diagnostics surface (R-08, Feature #1371).",
+    "MAINTENANCE: this file is published via the storefront repo (https://github.com/johnpwhite/unraid-plg-aicliagents)",
+    "and fetched by installed plugins from https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/known-issues.json",
+    "ONLY when the user clicks 'Check known issues' in the Debug Console (never automatically; 24h client cache).",
+    "Issue fields:",
+    "  id                — stable identifier, KI-NNN",
+    "  title             — short human-readable summary",
+    "  signature_regex   — PCRE body (no delimiters), case-insensitive, matched server-side against the",
+    "                      last 500 REDACTED debug+lifecycle log lines on the user's box",
+    "  affected_versions — ['*'] for all, or a list of exact versions / version prefixes (YYYY.MM.DD…)",
+    "  fixed_in          — plugin version carrying the fix, or '' if unfixed",
+    "  forum_url         — Unraid forum thread (or post) for the issue",
+    "  workaround        — one-paragraph user-facing mitigation text"
+  ],
+  "issues": [
+    {
+      "id": "KI-001",
+      "title": "Unraid 7.3.0 WebGUI 'codeAZ' ReferenceError floods the plugin debug log",
+      "signature_regex": "ReferenceError[^\\n]*codeAZ|codeAZ[^\\n]*ReferenceError|Can.{0,3}t find variable[^\\n]*codeAZ",
+      "affected_versions": ["*"],
+      "fixed_in": "2026.05.13.08",
+      "forum_url": "https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/",
+      "workaround": "This is an upstream Unraid 7.3.0 regression in the minified webGui dynamix.js bundle, not a plugin defect. Update the plugin to 2026.05.13.08 or later — that release filters webGui-sourced errors out of the plugin debug log (full detail still reaches the browser console). The error itself is harmless to plugin functionality."
+    }
+  ]
+}

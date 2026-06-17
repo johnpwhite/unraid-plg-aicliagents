@@ -18,7 +18,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     <dl>
                         <dt>Enable Main Tab</dt>
                         <dd>
-                            <select name="enable_tab" style="width: 100%;" <?=$autoSave?>>
+                            <select name="enable_tab" aria-label="Enable Main Tab" style="width: 100%;" <?=$autoSave?>>
                                 <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
                                 <?=mk_option($config['enable_tab'], "0", _('No'))?>
                             </select>
@@ -26,7 +26,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
 
                         <dt>Logging Level</dt>
                         <dd>
-                            <select name="log_level" style="width: 100%;" <?=$autoSave?>>
+                            <select name="log_level" aria-label="Logging Level" style="width: 100%;" <?=$autoSave?>>
                                 <?=mk_option($config['log_level'], "0", _('Errors Only'))?>
                                 <?=mk_option($config['log_level'], "1", _('Warnings'))?>
                                 <?=mk_option($config['log_level'], "2", _('Normal (Info)'))?>
@@ -37,10 +37,10 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>Backup Interval</dt>
                         <dd>
                             <div class="input-row">
-                                <select name="sync_interval_hours" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <select name="sync_interval_hours" aria-label="Backup interval, hours" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
                                     <?php for($i=0; $i<=23; $i++): echo mk_option($config['sync_interval_hours']??0, $i, $i."h"); endfor; ?>
                                 </select>
-                                <select name="sync_interval_mins" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <select name="sync_interval_mins" aria-label="Backup interval, minutes" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
                                     <?php for($i=0; $i<=59; $i++): echo mk_option($config['sync_interval_mins']??30, $i, $i."m"); endfor; ?>
                                 </select>
                                 <button type="button" class="aicli-btn-slim" onclick="persistEntity('home', activeTerminalUser)"><i class="fa fa-save"></i> Persist</button>
@@ -49,7 +49,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
 
                         <dt>Version Check Schedule</dt>
                         <dd>
-                            <select name="version_check_schedule" <?=$autoSave?>>
+                            <select name="version_check_schedule" aria-label="Version check schedule" <?=$autoSave?>>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 */6 * * *', 'Every 6 hours')?>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 6 * * *', 'Daily at 6am')?>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 6 * * 1', 'Weekly (Monday 6am)')?>
@@ -59,7 +59,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
 
                         <dt>Version History (months)</dt>
                         <dd>
-                            <select name="version_check_months" <?=$autoSave?>>
+                            <select name="version_check_months" aria-label="Version history retention in months" <?=$autoSave?>>
                                 <?=mk_option($config['version_check_months']??'3', '1', '1 month')?>
                                 <?=mk_option($config['version_check_months']??'3', '3', '3 months')?>
                                 <?=mk_option($config['version_check_months']??'3', '6', '6 months')?>
@@ -76,7 +76,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     <dl>
                         <dt>Terminal Theme</dt>
                         <dd>
-                            <select name="theme" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                            <select name="theme" aria-label="Terminal theme" style="flex: 1; min-width: 0;" <?=$autoSave?>>
                                 <?=mk_option($config['theme']??'dark', "dark", _('Dark'))?>
                                 <?=mk_option($config['theme']??'dark', "light", _('Light'))?>
                                 <?=mk_option($config['theme']??'dark', "solarized", _('Solarized'))?>
@@ -86,8 +86,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>Font Size</dt>
                         <dd>
                             <div class="input-row">
-                                <input type="number" name="font_size" value="<?=$config['font_size'] ?? 12?>" min="8" max="32" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="opacity:0.5; font-size:11px;">px</span>
+                                <input type="number" name="font_size" aria-label="Terminal font size in pixels" value="<?=$config['font_size'] ?? 12?>" min="8" max="32" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">px</span>
                             </div>
                         </dd>
 
@@ -100,7 +100,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                    any other per-user UI state stay populated from the previous user's home
                                    overlay (since the textareas are PHP-pre-rendered from the old request). */ ?>
                                 <input type="hidden" id="aicli-original-user" value="<?=htmlspecialchars($config['user'] ?? 'root', ENT_QUOTES, 'UTF-8')?>">
-                                <select name="user" id="user_select" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                <select name="user" id="user_select" aria-label="Terminal user" style="flex: 1; min-width: 0;" <?=$autoSave?>>
                                     <?php // Bug #1053: getUnraidUsers() returns a numeric-indexed LIST of
                                           // usernames, so iterate as a list (the value is $u, the username),
                                           // not as an associative array with $u => $d (which made the option
@@ -117,18 +117,23 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>Workspace Root</dt>
                         <dd>
                             <div class="input-row">
-                                <input type="text" name="root_path" id="root_path" value="<?=htmlspecialchars($config['root_path'] ?? '/mnt/user', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                <input type="text" name="root_path" id="root_path" aria-label="Workspace root path" value="<?=htmlspecialchars($config['root_path'] ?? '/mnt/user', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;" <?=$autoSave?>>
                                 <button type="button" class="aicli-btn-slim" onclick="openPathPicker('root_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
                             </div>
                         </dd>
 
                         <dt>Home Storage</dt>
                         <dd>
+                            <?php /* S-11 (#1355): storage target picker. The path input is read-only —
+                               the value is set by the picker (ranked candidates from
+                               enumerate_storage_targets, or a probed custom path) and routes through
+                               the EXISTING preflight_migrate → swal → execute_migrate flow via
+                               saveAICliAgentsManager. */ ?>
                             <div class="input-row">
-                                <input type="text" name="home_storage_path" id="home_storage_path" value="<?=htmlspecialchars($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;">
-                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('home_storage_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
-                                <button type="button" class="aicli-btn-slim" onclick="saveAICliAgentsManager(document.getElementById('aicli-settings-form'), false)" title="Move storage to this path"><i class="fa fa-truck"></i></button>
+                                <input type="text" name="home_storage_path" id="home_storage_path" readonly value="<?=htmlspecialchars($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current home storage location — use Change to move it">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('home')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
+                            <div id="aicli-storage-picker-home" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
                             <?php $homeClass = \AICliAgents\Services\StorageMountService::classifyPath($config['home_storage_path'] ?? ''); ?>
                             <?php if ($homeClass === 'array'): ?>
                                 <div style="font-size:10px; color:#eab308; margin-top:2px; padding:3px 6px; background:rgba(234,179,8,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-exclamation-triangle"></i> On array — unavailable when stopped. Emergency mode will activate.</div>
@@ -140,16 +145,36 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dt>Agent Storage</dt>
                         <dd>
                             <div class="input-row">
-                                <input type="text" name="agent_storage_path" id="agent_storage_path" value="<?=htmlspecialchars($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;">
-                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('agent_storage_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
-                                <button type="button" class="aicli-btn-slim" onclick="saveAICliAgentsManager(document.getElementById('aicli-settings-form'), false)" title="Move storage to this path"><i class="fa fa-truck"></i></button>
+                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('agent')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
+                            <div id="aicli-storage-picker-agent" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
                             <?php $agentClass = \AICliAgents\Services\StorageMountService::classifyPath($config['agent_storage_path'] ?? ''); ?>
                             <?php if ($agentClass === 'array'): ?>
                                 <div style="font-size:10px; color:#eab308; margin-top:2px; padding:3px 6px; background:rgba(234,179,8,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-exclamation-triangle"></i> On array — agents unavailable when stopped.</div>
                             <?php elseif (strpos($agentClass, 'pool:') === 0): ?>
                                 <div style="font-size:10px; color:#3b82f6; margin-top:2px; padding:3px 6px; background:rgba(59,130,246,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-info-circle"></i> On pool '<?=htmlspecialchars(substr($agentClass, 5), ENT_QUOTES, 'UTF-8')?>' — unavailable if pool is stopped.</div>
                             <?php endif; ?>
+                            <?php /* S-11: informational record of the /mnt/user path the user actually
+                               picked when the picker stored a resolved exclusive-share pool path.
+                               Serialized with every form save (action=save). */ ?>
+                            <input type="hidden" name="storage_picked_via" id="storage_picked_via" value="<?=htmlspecialchars($config['storage_picked_via'] ?? '', ENT_QUOTES, 'UTF-8')?>">
+                        </dd>
+
+                        <dt style="align-self: flex-start; padding-top: 6px;">Consolidate Layer Ceiling</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="consolidate_max_layers" aria-label="Consolidate layer ceiling"
+                                       value="<?=\AICliAgents\Services\ConfigService::getConsolidateMaxLayers()?>"
+                                       min="4" max="40" step="1" style="width: 90px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">layers</span>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Home overlay layer ceiling. Consolidation runs automatically at this minus 2
+                                (or under disk-space pressure, or on a manual "Consolidate Layers" click).
+                                Higher = fewer consolidations (less Flash churn) but slower cold mounts.
+                                Range 4–40; default 30 (consolidates at 28). Agents are unaffected — one layer per install.
+                            </div>
                         </dd>
                     </dl>
                 </div>
@@ -184,7 +209,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <i class="fa fa-plus"></i> Add Key
                         </button>
                     </div>
-                    <p style="font-size:10px; opacity:0.55; margin-top:8px;">
+                    <p style="font-size:10px; opacity:0.75; margin-top:8px;">
                         <strong>Connect:</strong> <code>ssh <?=htmlspecialchars($config['user'] ?? 'root', ENT_QUOTES)?> aicli-agent-&lt;name&gt;</code>
                     </p>
                 </div>
@@ -233,8 +258,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
         row.appendChild(icon);
         var info = mkEl('div', 'flex:1; min-width:0;');
         info.appendChild(mkEl('div', 'font-size:12px; font-weight:600;', label));
-        info.appendChild(mkEl('div', 'font-size:10px; font-family:monospace; opacity:0.6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', fp));
-        if (dt) info.appendChild(mkEl('div', 'font-size:10px; opacity:0.45;', dt));
+        info.appendChild(mkEl('div', 'font-size:10px; font-family:monospace; opacity:0.75; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', fp));
+        if (dt) info.appendChild(mkEl('div', 'font-size:10px; opacity:0.75;', dt));
         row.appendChild(info);
         var btn = mkEl('button', 'flex-shrink:0;'); btn.type = 'button'; btn.className = 'aicli-btn-slim'; btn.title = 'Remove key';
         var trashIcon = document.createElement('i'); trashIcon.className = 'fa fa-trash-o';
@@ -248,11 +273,11 @@ $autoSave = 'onchange="autoSaveConfig()"';
         var list = document.getElementById('aicli-ssh-keys-list');
         if (!list) return;
         clearNode(list);
-        list.appendChild(mkEl('span', 'opacity:0.5; font-size:11px;', 'Loading…'));
+        list.appendChild(mkEl('span', 'opacity:0.75; font-size:11px;', 'Loading…'));
         aicliSshAjax('list_keys', {}).then(function (data) {
             clearNode(list);
             if (!data.keys || data.keys.length === 0) {
-                list.appendChild(mkEl('span', 'opacity:0.5; font-size:11px;', 'No keys registered.')); return;
+                list.appendChild(mkEl('span', 'opacity:0.75; font-size:11px;', 'No keys registered.')); return;
             }
             data.keys.forEach(function (k) { list.appendChild(buildKeyRow(k)); });
         }).catch(function () {
@@ -446,6 +471,169 @@ $autoSave = 'onchange="autoSaveConfig()"';
         var cfgTab = document.querySelector('[data-tab="config"]');
         if (cfgTab) cfgTab.addEventListener('click', window.aicliLoadSshKeys);
     });
+}());
+
+/* ---------------------------------------------------------------------------
+ * S-11 (#1355): storage target picker — ranked candidates from the
+ * enumerate_storage_targets AJAX (StorageTargetService + probeTarget), plus a
+ * 'Custom path…' escape hatch probed through the existing preflight_migrate.
+ * Applying a pick sets the (read-only) path input and hands off to
+ * saveAICliAgentsManager → the UNCHANGED preflight → swal → execute_migrate
+ * migration flow. Read-only until the user confirms the migration swal.
+ * ------------------------------------------------------------------------- */
+(function () {
+    'use strict';
+
+    var state = { home: {}, agent: {} };
+
+    function tok() { return window.csrf_token || window.csrf || ''; }
+    function esc(s) { return $('<div>').text(s == null ? '' : String(s)).html(); }
+
+    function fmtBytes(b) {
+        b = Number(b) || 0;
+        if (b >= 1099511627776) return (b / 1099511627776).toFixed(1) + ' TB';
+        if (b >= 1073741824)   return (b / 1073741824).toFixed(1) + ' GB';
+        if (b >= 1048576)      return (b / 1048576).toFixed(0) + ' MB';
+        return b + ' B';
+    }
+
+    var WARN_LABEL = {
+        via_user_share:    'FUSE user share',
+        user_share:        'FUSE overhead',
+        array_rotational:  'HDD — spins on every persist',
+        posix_none:        'no symlinks/xattrs',
+        facts_uncertain:   'device facts uncertain',
+        network_target:    'network share',
+        rejected_for_home: 'not allowed for home storage',
+        remote_agent_warn: 'remote — agents only, not recommended',
+        volatile_target:   'RAM-backed — data lost on reboot',
+        probe_unavailable: 'probe unavailable'
+    };
+
+    function chip(text, fg, bg) {
+        return '<span style="display:inline-block; font-size:9px; padding:1px 6px; border-radius:8px; margin:1px 3px 1px 0; color:' + fg + '; background:' + bg + '; white-space:nowrap;">' + esc(text) + '</span>';
+    }
+    function warnChips(warnings) {
+        var html = '';
+        $.each(warnings || [], function (i, w) {
+            html += chip(WARN_LABEL[w] || w, '#eab308', 'rgba(234,179,8,0.12)');
+        });
+        return html;
+    }
+    function errBox(msg) {
+        return '<div style="padding:8px 10px; font-size:11px; color:#f87171; background:rgba(248,113,113,0.08); border-radius:4px;"><i class="fa fa-exclamation-circle"></i> ' + esc(msg) + '</div>';
+    }
+
+    window.aicliToggleStoragePicker = function (kind) {
+        var panel = $('#aicli-storage-picker-' + kind);
+        if (panel.is(':visible')) { panel.hide().empty(); return; }
+        state[kind] = {};
+        panel.show().html('<div style="padding:10px; font-size:11px; opacity:.6;"><i class="fa fa-spinner fa-spin"></i> Probing storage targets…</div>');
+        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=enumerate_storage_targets&kind=' + encodeURIComponent(kind) + '&csrf_token=' + encodeURIComponent(tok()), function (data) {
+            if (data.status !== 'ok') { panel.html(errBox(data.message || 'Enumeration failed')); return; }
+            renderPicker(panel, kind, data.targets || []);
+        }).fail(function () { panel.html(errBox('Server error during target enumeration')); });
+    };
+
+    function candidateRow(kind, t) {
+        var disabled = t.refuse ? ' disabled' : '';
+        var badges = '';
+        if (t.recommended) badges += chip('recommended', '#22c55e', 'rgba(34,197,94,0.14)');
+        if (t.current)     badges += chip('current', 'var(--alt-text-color, #888)', 'rgba(128,128,128,0.15)');
+        if (t.advanced)    badges += chip('advanced', '#a78bfa', 'rgba(167,139,250,0.12)');
+        if (t.refuse)      badges += chip('unavailable', '#f87171', 'rgba(248,113,113,0.12)');
+        var meta = chip(t.mount_class, '#3b82f6', 'rgba(59,130,246,0.10)')
+                 + chip(fmtBytes(t.free_bytes) + ' free', 'var(--alt-text-color, #888)', 'rgba(128,128,128,0.10)')
+                 + warnChips(t.warnings);
+        var note = t.note ? '<div style="font-size:10px; opacity:.6; margin-top:1px;"><i class="fa fa-link"></i> ' + esc(t.note) + '</div>' : '';
+        return '<label style="display:flex; gap:8px; align-items:flex-start; padding:6px 8px; border:1px solid var(--border-color, rgba(128,128,128,0.25)); border-radius:4px; margin-bottom:4px; cursor:' + (t.refuse ? 'not-allowed' : 'pointer') + ';' + (t.refuse ? ' opacity:.55;' : '') + '">'
+            + '<input type="radio" name="aicli-target-' + kind + '" value="' + esc(t.path) + '" data-picked-via="' + esc(t.picked_via || '') + '" style="margin-top:3px;"' + disabled + (t.current && !t.refuse ? ' checked' : '') + '>'
+            + '<div style="flex:1; min-width:0;">'
+            +   '<div style="font-size:12px; font-weight:600;">' + esc(t.label) + ' ' + badges + '</div>'
+            +   '<div style="font-family:monospace; font-size:10px; opacity:.75; word-break:break-all;">' + esc(t.path) + '</div>'
+            +   note
+            +   '<div style="margin-top:2px;">' + meta + '</div>'
+            + '</div></label>';
+    }
+
+    function renderPicker(panel, kind, targets) {
+        var html = '<div style="border:1px solid var(--border-color, rgba(128,128,128,0.25)); border-radius:5px; padding:8px; background:var(--mild-background-color, rgba(128,128,128,0.04));">';
+        $.each(targets, function (i, t) { html += candidateRow(kind, t); });
+        // Custom path escape hatch — probed through preflight_migrate on change/blur
+        html += '<label style="display:flex; gap:8px; align-items:center; padding:6px 8px; border:1px dashed var(--border-color, rgba(128,128,128,0.25)); border-radius:4px; cursor:pointer;">'
+            + '<input type="radio" name="aicli-target-' + kind + '" value="__custom__">'
+            + '<span style="font-size:12px; font-weight:600;"><i class="fa fa-pencil"></i> Custom path…</span></label>'
+            + '<div id="aicli-custom-row-' + kind + '" style="display:none; margin:4px 0 0 24px;">'
+            +   '<div style="display:flex; gap:6px;">'
+            +     '<input type="text" id="aicli-custom-path-' + kind + '" placeholder="/mnt/…" style="flex:1; min-width:0; font-family:monospace; font-size:11px;">'
+            +     '<button type="button" class="aicli-btn-slim" id="aicli-custom-browse-' + kind + '" title="Browse"><i class="fa fa-folder-open"></i></button>'
+            +   '</div>'
+            +   '<div id="aicli-custom-result-' + kind + '" style="font-size:10px; margin-top:3px; min-height:14px;"></div>'
+            + '</div>'
+            + '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">'
+            +   '<button type="button" class="aicli-btn-slim" id="aicli-picker-cancel-' + kind + '">Cancel</button>'
+            +   '<button type="button" class="aicli-btn-slim" id="aicli-picker-apply-' + kind + '" style="font-weight:700;"><i class="fa fa-truck"></i> Move storage here</button>'
+            + '</div></div>';
+        panel.html(html);
+
+        panel.find('input[name="aicli-target-' + kind + '"]').on('change', function () {
+            $('#aicli-custom-row-' + kind).toggle($(this).val() === '__custom__');
+        });
+        $('#aicli-custom-path-' + kind).on('blur change', function () { probeCustom(kind); });
+        $('#aicli-custom-browse-' + kind).on('click', function () { openPathPicker('aicli-custom-path-' + kind); });
+        $('#aicli-picker-cancel-' + kind).on('click', function () { panel.hide().empty(); });
+        $('#aicli-picker-apply-' + kind).on('click', function () { applyPick(kind); });
+    }
+
+    function probeCustom(kind) {
+        var typed = ($('#aicli-custom-path-' + kind).val() || '').trim();
+        var box = $('#aicli-custom-result-' + kind);
+        state[kind] = {};
+        if (!typed) { box.empty(); return; }
+        var h = (kind === 'home')  ? typed : ($('#home_storage_path').val() || '');
+        var a = (kind === 'agent') ? typed : ($('#agent_storage_path').val() || '');
+        box.html('<i class="fa fa-spinner fa-spin"></i> Probing…');
+        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_migrate&agent_storage_path=' + encodeURIComponent(a) + '&home_storage_path=' + encodeURIComponent(h) + '&csrf_token=' + encodeURIComponent(tok()), function (pf) {
+            if (pf.status !== 'ok') {
+                state[kind] = { error: pf.message || 'Target rejected' };
+                box.html('<span style="color:#f87171;"><i class="fa fa-times-circle"></i> ' + esc(state[kind].error) + '</span>');
+                return;
+            }
+            var warns = (pf.warnings && pf.warnings[kind]) || [];
+            var resolved = pf['resolved_' + kind + '_path'] || null;
+            state[kind] = { resolved: resolved };
+            var html = '<span style="color:#22c55e;"><i class="fa fa-check-circle"></i> Valid target</span> ' + warnChips(warns);
+            if (resolved) {
+                html += '<div style="opacity:.7; margin-top:2px;"><i class="fa fa-link"></i> Exclusive share — will be stored as <code>' + esc(resolved) + '</code></div>';
+            }
+            box.html(html);
+        }).fail(function () {
+            state[kind] = { error: 'Server error during probe' };
+            box.html('<span style="color:#f87171;">Server error during probe</span>');
+        });
+    }
+
+    function applyPick(kind) {
+        var sel = $('input[name="aicli-target-' + kind + '"]:checked');
+        if (!sel.length) { swal('No target', 'Select a storage target first.', 'warning'); return; }
+        var path, pickedVia = '';
+        if (sel.val() === '__custom__') {
+            var typed = ($('#aicli-custom-path-' + kind).val() || '').trim();
+            if (!typed) { swal('No path', 'Enter a custom path first.', 'warning'); return; }
+            if (state[kind].error) { swal('Invalid target', state[kind].error, 'error'); return; }
+            path = state[kind].resolved || typed;
+            if (state[kind].resolved) pickedVia = typed;
+        } else {
+            path = sel.val();
+            pickedVia = sel.attr('data-picked-via') || '';
+        }
+        $('#' + kind + '_storage_path').val(path);
+        if (pickedVia) $('#storage_picked_via').val(pickedVia);
+        $('#aicli-storage-picker-' + kind).hide().empty();
+        // Same machinery as before the picker existed: preflight → confirm swal
+        // (size/disk-space summary) → execute_migrate with Nchan progress.
+        saveAICliAgentsManager(document.getElementById('aicli-settings-form'), false);
+    }
 }());
 </script>
 

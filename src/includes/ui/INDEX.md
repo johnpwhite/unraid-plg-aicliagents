@@ -10,10 +10,13 @@ This directory contains the modular UI fragments of the AICliAgents plugin, deco
 | `ManagerLayout.php` | Shared HTML fragments (Overlays, Tab headers). | `$csrf_token`. |
 | `ManagerConfigTab.php` | HTML for the "Configuration" tab. | `$config`, `$csrf_token`, `$users`. |
 | `ManagerStoreTab.php` | HTML for the "Agent Store" marketplace. | `$registry`, `$csrf_token`. |
-| `ManagerLogScripts.php` | JS logic for log viewer (copy, clear, switch). | jQuery, SweetAlert. |
+| `ManagerLogScripts.php` | JS logic for log viewer (copy, clear, switch) + R-08 support/share UX (bundle download, forum post, GitHub issue, known issues). | jQuery, SweetAlert. |
 | `ManagerStorageScripts.php` | JS logic for storage status and maintenance. | jQuery, SweetAlert. |
 | `ManagerStoreScripts.php` | JS logic for agent marketplace actions. | jQuery, SweetAlert. |
+| `ManagerHubTab.php` | HTML for the "Config Hub" tab (MCP server hub, OP #1362). | ManagerHubScripts. |
+| `ManagerHubScripts.php` | JS logic for the Config Hub (fetch() pattern, drift UI). | window.csrf_token, SweetAlert. |
 | `ManagerScripts.php` | Core JS initialization and tab management. | ManagerLogScripts, ManagerStorageScripts, ManagerStoreScripts. |
+| `ManagerHealthScripts.php` | JS for the header health status chip (R-09 #1372): health_status poll on load + 60s, colour/tooltip mapping, click → Debug Console. | CommonLogging (aicliAjax), ManagerLayout chip markup, ManagerScripts (switchMainTab). |
 | `TerminalStyles.php` | CSS for the main terminal and upload overlay. | Unraid 7.2 Flexbox. |
 | `UploadOverlay.php` | HTML for the drag-and-drop file upload UI. | |
 | `TerminalUploadScripts.php` | JS logic for terminal file uploads (paste, drag-drop). | jQuery, SweetAlert. |

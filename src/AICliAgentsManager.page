@@ -33,12 +33,18 @@ require_once "$ui_path/ManagerLayout.php";
 require_once "$ui_path/ManagerConfigTab.php";
 require_once "$ui_path/ManagerStoreTab.php";
 require_once "$ui_path/ManagerStorageTab.php";
+require_once "$ui_path/ManagerHubTab.php";
 require_once "$ui_path/ManagerLogTab.php";
 require_once "$ui_path/ManagerGlobalState.php";
 require_once "$ui_path/ManagerLogScripts.php";
 require_once "$ui_path/ManagerStorageScripts.php";
 require_once "$ui_path/ManagerStoreScripts.php";
+require_once "$ui_path/ManagerHubScripts.php";
 require_once "$ui_path/ManagerScripts.php";
+require_once "$ui_path/ManagerHealthScripts.php";
 require_once "$ui_path/NchanSubscribers.php";
 ?>
+
+<!-- T-08 (ACTIVITY_TRAY.md): activity tray web component — self-mounts to body -->
+<script src="/plugins/unraid-aicliagents/assets/ui/activity-tray.js?v=<?= htmlspecialchars($version) ?>"></script>
 

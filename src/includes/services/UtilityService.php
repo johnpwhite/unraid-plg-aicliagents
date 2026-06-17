@@ -152,6 +152,27 @@ class UtilityService {
         // D-402: Publish install progress via Nchan for real-time UI updates
         if (!empty($agentId)) {
             NchanService::publishInstallProgress($agentId, $progress, $message, $reason);
+            // T-08 (ACTIVITY_TRAY.md): mirror every install step into the activity
+            // registry. This is the single choke point all install/upgrade/emergency
+            // steps flow through, so the heartbeat refreshes per step — the legacy
+            // install-status file + per-agent Nchan channel are kept unchanged.
+            // Convention (matches the frontend pollers): progress<=0 = failure,
+            // progress>=100 = completion, anything else = a live step.
+            $opId = "install_$agentId";
+            if ($progress >= 100) {
+                ActivityService::finish($opId, (string)$message);
+            } elseif ($progress <= 0) {
+                ActivityService::fail($opId, $reason !== '' ? (string)$reason : (string)$message, null, [
+                    'type' => 'install', 'label' => "Installing $agentId", 'step' => (string)$message,
+                ]);
+            } else {
+                ActivityService::update($opId, [
+                    'type'     => 'install',
+                    'label'    => "Installing $agentId",
+                    'step'     => (string)$message,
+                    'progress' => (int)$progress,
+                ]);
+            }
         }
     }
 
@@ -194,5 +215,9 @@ class UtilityService {
 
     public static function getWorkDirFilePath($id = 'default') {
         return "/var/run/unraid-aicliagents-$id.workdir";
+    }
+
+    public static function getUserIdPath($id = 'default') {
+        return "/var/run/unraid-aicliagents-$id.user";
     }
 }

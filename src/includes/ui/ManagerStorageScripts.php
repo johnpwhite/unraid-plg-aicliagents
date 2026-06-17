@@ -19,7 +19,9 @@ function refreshStats() {
             $('#tab-storage .aicli-cards').prepend('<div id="aicli-storage-warning" style="background:rgba(234,179,8,0.12); border:1px solid #eab308; border-radius:6px; padding:10px 16px; margin-bottom:12px; display:flex; align-items:center; gap:8px; font-size:12px; color:#eab308;"><i class="fa fa-exclamation-triangle"></i> ' + msg + ' Storage operations may be limited.</div>');
         }
     }
-    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_storage_status&csrf_token=' + csrf, function(data) {
+    // R-06: routed through aicliAjax (CommonLogging.php) so this high-traffic
+    // poll carries an X-Aicli-Trace id — its server/shell log lines join up.
+    aicliAjax('get_storage_status', {}, function(data) {
         if (data.migration_in_progress) {
             $('#migration-overlay').css('display', 'flex');
             if (data.migration_progress) {
@@ -147,11 +149,20 @@ function renderHomeStats(homes) {
                     '<div class="stat-bar-wrap" style="height:12px; opacity:' + (h.mounted ? 1 : 0.3) + ';"><div class="stat-bar-base" style="width:' + (100 - h.percent) + '%;"></div><div class="stat-bar-dirty" style="width:' + h.percent + '%;"></div><div class="stat-bar-text">' + (h.mounted ? (h.percent > 0 ? h.percent + '% Uncommitted' : 'Synced') : 'OFFLINE') + '</div></div>' +
                     '<div class="se-mount-label"><i class="fa fa-hdd-o"></i> ' + h.mount_point + '</div>' +
                     renderLayerList(h.layer_files, h.dirty_mb) +
+                    // Bug #1380: non-modal relocation offer — shown ONLY when this
+                    // entity's data sits on a GENUINE USB flash drive AND a durable
+                    // non-array non-flash target exists to move it to.
+                    (h.can_graduate ?
+                        '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(76,175,80,0.08); border:1px solid rgba(76,175,80,0.35); border-radius:4px;">' +
+                            '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-hdd-o" style="color:#4caf50; margin-right:5px;"></i>This data is on a USB flash drive — move it to a durable disk (faster, no USB wear)</span>' +
+                            '<button type="button" class="aicli-btn-slim" style="background:#4caf50; white-space:nowrap;" onclick="graduateStorage(\'home\', \'' + u + '\', ' + (h.physical_mb || 0) + '); return false;">Move off USB flash drive</button>' +
+                        '</div>' : '') +
                 '</div>' +
                 '<div class="se-actions">' +
                     '<a href="#" class="stat-icon-btn" onclick="persistEntity(\'home\', \'' + u + '\'); return false;" title="Persist to storage"><i class="fa fa-save"></i></a>' +
                     '<a href="#" class="stat-icon-btn" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate Layers' : 'Requires 2+ layers') + '"><i class="fa fa-compress"></i></a>' +
                     '<a href="#" class="stat-icon-btn" onclick="repairStorage(\'home\', \'' + u + '\'); return false;" title="Repair Mount"><i class="fa fa-wrench"></i></a>' +
+                    '<a href="#" class="stat-icon-btn" onclick="deleteHomeStorage(\'' + u + '\'); return false;" title="Delete home data (permanent)" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
                 '</div>' +
                 '</div>';
         });
@@ -207,12 +218,12 @@ function persistEntity(type, id) {
         const token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
         aicli_log_to_server("User requested manual " + type + " persistence for " + id, 2);
         
-        let url = '/plugins/unraid-aicliagents/AICliAjax.php?action=persist_home&csrf_token=' + token;
-        if (type === 'agent') {
-            url = '/plugins/unraid-aicliagents/AICliAjax.php?action=persist_agent&id=' + id + '&csrf_token=' + token;
-        }
-        
-        $.getJSON(url, function(r) {
+        // R-06: aicliAjax stamps the X-Aicli-Trace header — this is the canonical
+        // AJAX→PHP→shell mutation path the trace id is designed to join.
+        const req = (type === 'agent')
+            ? aicliAjax('persist_agent', { id: id })
+            : aicliAjax('persist_home', {});
+        req.done(function(r) {
             if (r && r.status === 'ok') { 
                 swal({ title: "Persisted", text: "Data persisted.", type: "success", timer: 2000, showConfirmButton: false });
                 clearChanged();
@@ -231,7 +242,7 @@ function persistEntity(type, id) {
 function repairStorage(type, id) {
     swal({ title: "Repair " + type + " storage?", text: "Unmount and remount the OverlayFS stack for " + id + ". This may briefly interrupt active sessions.", type: "warning", showCancelButton: true, confirmButtonText: "Repair", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
         const action = (type === 'agent') ? 'repair_agent_storage' : 'repair_home_storage';
-        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=' + action + '&id=' + id + '&csrf_token=' + csrf, function(r) {
+        aicliAjax(action, { id: id }, function(r) {
             if (r.status === 'ok') swal({ title: "Repaired", text: "Storage stack remounted.", type: "success", timer: 1500, showConfirmButton: false });
             else swal("Repair Failed", r.message, "error");
             refreshStats();
@@ -241,9 +252,12 @@ function repairStorage(type, id) {
 
 function consolidateStorage(type, id) {
     swal({ title: "Consolidate " + type + " layers?", text: "Merge SquashFS deltas into a single base volume. This saves memory.", type: "warning", showCancelButton: true, showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
-        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=consolidate_storage&type=' + type + '&id=' + id + '&csrf_token=' + csrf, function(r) {
+        aicliAjax('consolidate_storage', { type: type, id: id }, function(r) {
             if (r.status === 'ok') {
-                swal({ title: "Consolidated", type: "success", timer: 1500 });
+                // #2: the backend only QUEUES a supervisor job — don't claim it's
+                // already consolidated. Tell the truth (incl. the "waits for open
+                // sessions" reason for homes) and point at the activity tray.
+                swal({ title: "Queued", text: r.message || "Consolidation queued.", type: "info", timer: 4000, showConfirmButton: false });
                 clearChanged();
             }
             else swal("Failed", r.message, "error");
@@ -252,9 +266,83 @@ function consolidateStorage(type, id) {
     });
 }
 
+// Bug #1380: "Move off USB flash drive" — relocate an entity's data from a
+// genuine USB-flash persist device to a durable non-array non-flash target the
+// user picks. Lists the QUALIFYING targets (the same filtered list the offer
+// gate uses), then drives the proven relocation (execute_migrate: verified
+// per-file copy + config + manifest re-point under a crash-safe marker).
+function graduateStorage(type, id, physicalMb) {
+    const mb = parseFloat(physicalMb) || 0;
+    function fmtBytes(b) {
+        b = parseFloat(b) || 0;
+        if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB free';
+        if (b >= 1048576)    return (b / 1048576).toFixed(0) + ' MB free';
+        return 'free space unknown';
+    }
+    // Step 1: fetch the qualifying durable targets for this kind.
+    aicliAjax('graduate_targets', { type: type }, function(tr) {
+        if (!tr || tr.status !== 'ok') {
+            swal("Couldn't list targets", (tr && tr.message) || "Unknown error. Check debug.log.", "error");
+            return;
+        }
+        var targets = tr.targets || [];
+        if (targets.length === 0) {
+            swal("No durable target available",
+                 "There is no durable, non-array, non-flash location to move this data to. Add a pool or an Unassigned Device, then try again.",
+                 "info");
+            return;
+        }
+        // Step 2: build a radio picker of the qualifying targets.
+        var opts = '';
+        $.each(targets, function(i, t) {
+            var checked = (i === 0) ? ' checked' : '';
+            var sub = (t.label ? t.label : t.path) + ' — ' + fmtBytes(t.free_bytes);
+            opts += '<label style="display:flex; align-items:flex-start; gap:8px; padding:6px 4px; cursor:pointer; text-align:left;">' +
+                        '<input type="radio" name="aicli-grad-target" value="' + String(t.path).replace(/"/g, '&quot;') + '"' + checked + ' style="margin-top:3px;">' +
+                        '<span style="font-size:12px; line-height:1.4;"><strong>' + sub + '</strong>' +
+                        '<br><span style="font-family:monospace; font-size:10px; opacity:0.65;">' + t.path + '</span></span>' +
+                    '</label>';
+        });
+        // Rough wall-clock estimate: decompress + verified copy ≈ 2 min/GB, min 2 min.
+        var estMin = Math.max(2, Math.round((mb / 1024) * 2));
+        var html =
+            '<div style="text-align:left; font-size:12px; line-height:1.5;">' +
+                '<p>This home\'s data is on a USB flash drive. Pick a durable disk to move it to — the layers are copied and verified before anything on the stick is touched, then the persistence path is switched.</p>' +
+                '<div style="border:1px solid var(--border-color,#ddd); border-radius:4px; padding:4px 8px; margin:8px 0; max-height:180px; overflow-y:auto;">' + opts + '</div>' +
+                '<p style="font-size:11px; opacity:0.7;">Estimated time: ~' + estMin + ' min. Close any terminals for this user first or the copy will wait for the mount to go idle.</p>' +
+            '</div>';
+        swal({
+            title: "Move " + id + " off the USB flash drive",
+            text: html,
+            html: true,
+            type: "info",
+            showCancelButton: true,
+            confirmButtonText: "Move data",
+            showLoaderOnConfirm: true,
+            closeOnConfirm: false
+        }, function(confirmed) {
+            if (confirmed === false) return;
+            var chosen = $('input[name="aicli-grad-target"]:checked').val();
+            if (!chosen) {
+                swal.showInputError && swal.showInputError("Pick a target disk.");
+                return false;
+            }
+            aicli_log_to_server("User requested move-off-USB for " + type + "/" + id + " → " + chosen, 2);
+            aicliAjax('graduate_storage', { type: type, target: chosen }, function(r) {
+                if (r && r.status === 'ok') {
+                    swal({ title: "Move started", text: "The data is being copied and verified, then the path is switched. Watch progress on this tab.", type: "success", timer: 4000, showConfirmButton: false });
+                } else {
+                    swal("Move failed", (r && r.message) || "Unknown error. Check debug.log.", "error");
+                }
+                refreshStats();
+            });
+        });
+    });
+}
+
 function wipeStorage(type, id) {
     swal({ title: "Wipe Storage: " + id + "?", text: "PERMANENTLY WIPE all storage for this " + type + ". This cannot be undone.", type: "error", showCancelButton: true, confirmButtonColor: "#f44336", confirmButtonText: "YES, WIPE IT", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
-        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=wipe_storage&type=' + type + '&id=' + id + '&csrf_token=' + csrf, function(r) {
+        aicliAjax('wipe_storage', { type: type, id: id }, function(r) {
             if (r.status === 'ok') {
                 swal({ title: "Wiped", type: "success", timer: 1500 });
                 clearChanged();
@@ -266,6 +354,63 @@ function wipeStorage(type, id) {
 }
 // Legacy alias for backwards compatibility
 function nuclearRebuild(type, id) { wipeStorage(type, id); }
+
+// Bug #1379: permanently delete a home entity and ALL its layers.
+// "root" and "aicliagent" require typed confirmation (they are the primary homes).
+// All other homes get a single-confirm swal.
+function deleteHomeStorage(id) {
+    var isRoot = (id === 'root' || id === 'aicliagent');
+
+    if (isRoot) {
+        // Extra-stern typed confirmation for the primary home.
+        swal({
+            title: 'Delete home data for \'' + id + '\'?',
+            text: 'This is the primary user home — all stored layers, settings and session data for \'' + id + '\' will be permanently destroyed.\n\nType DELETE in the box below to confirm.',
+            type: 'input',
+            inputPlaceholder: 'Type DELETE to confirm',
+            showCancelButton: true,
+            closeOnConfirm: false,
+            animation: 'slide-from-top',
+            confirmButtonColor: '#c0392b',
+            confirmButtonText: 'Delete permanently'
+        }, function(inputValue) {
+            if (inputValue === false) return;
+            if (inputValue !== 'DELETE') {
+                swal.showInputError('Type DELETE exactly (uppercase) to confirm — or Cancel to back out.');
+                return false;
+            }
+            aicliAjax('delete_home_storage', { id: id, root_confirmed: '1' }, function(r) {
+                if (r && r.status === 'ok') {
+                    swal({ title: 'Deleted', text: r.message || 'Home storage deleted.', type: 'success', timer: 2500, showConfirmButton: false });
+                    refreshStats();
+                } else {
+                    swal('Delete Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+                }
+            });
+        });
+    } else {
+        // Single-confirm for non-root homes.
+        swal({
+            title: 'Delete home data for \'' + id + '\'?',
+            text: 'This permanently removes all stored layers and session data for \'' + id + '\'. This cannot be undone.',
+            type: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#c0392b',
+            confirmButtonText: 'Delete permanently',
+            showLoaderOnConfirm: true,
+            closeOnConfirm: false
+        }, function() {
+            aicliAjax('delete_home_storage', { id: id }, function(r) {
+                if (r && r.status === 'ok') {
+                    swal({ title: 'Deleted', text: r.message || 'Home storage deleted.', type: 'success', timer: 2500, showConfirmButton: false });
+                    refreshStats();
+                } else {
+                    swal('Delete Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+                }
+            });
+        });
+    }
+}
 
 // ---- Phase 0 + 4a: Boot Integrity Banner with Sibling-Restore ----
 // Fetches the boot integrity status once when the storage tab is opened.

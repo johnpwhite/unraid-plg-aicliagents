@@ -92,6 +92,7 @@ rm -f /usr/local/emhttp/plugins/dynamix/events/stopping/aicli_sync
 rm -f /usr/local/emhttp/plugins/dynamix/events/stopping_array/aicli_sync
 rm -f /usr/local/emhttp/plugins/dynamix/events/disks_mounted/aicli_restore
 rm -f /etc/cron.d/unraid-aicliagents.agent-check
+rm -f /etc/cron.d/unraid-aicliagents.health-check
 /usr/local/sbin/update_cron 2>/dev/null || true
 if [ -d "$EMHTTP_DEST" ]; then
     rm -f /usr/local/bin/aicli-repair

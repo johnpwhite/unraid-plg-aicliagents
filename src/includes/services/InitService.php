@@ -117,12 +117,15 @@ class InitService {
             return;
         }
 
-        // Phase 3: Lazy backstop — if the supervisor died, re-spawn it on the next page
-        // load. Throttled: only attempt if isRunning() returns false, so a live supervisor
-        // is not disturbed on every request. start() is a no-op if the daemon is already up.
-        if (!SupervisorService::isRunning()) {
-            SupervisorService::start();
-        }
+        // Phase 3 + OP#1381: Lazy backstop / self-heal — restore exactly one
+        // healthy supervisor on the next page load. ensureHealthy() covers the
+        // plain dead-supervisor case (start one) AND the wedged states a bare
+        // isRunning() check misses: >1 instance, an empty/stale pidfile while a
+        // wedged proc still holds the flock, or a supervisor that stopped ticking.
+        // It is cheap (one /proc scan + a stat) and never disturbs a healthy
+        // supervisor — including one mid-bake, which keeps ticking via its
+        // separate heartbeat process, so a fresh tick reads as healthy.
+        SupervisorService::ensureHealthy();
 
         // Bug #521: one-shot per-boot autolaunch sweep. The disks_mounted event hook
         // and the PLG INLINE block are the primary triggers, but a fresh boot or a

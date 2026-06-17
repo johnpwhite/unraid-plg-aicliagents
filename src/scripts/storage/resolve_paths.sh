@@ -93,11 +93,13 @@ home_persist_path() {
 }
 
 manifest_path() {
-    echo "$PLUGIN_BASE/layer_manifest.json"
+    # #1254: AICLI_MANIFEST_PATH redirects the manifest off USB flash for the L3.5
+    # suite (test-only hook; unset in production -> the flash path).
+    echo "${AICLI_MANIFEST_PATH:-$PLUGIN_BASE/layer_manifest.json}"
 }
 
 lifecycle_log_path() {
-    echo "$PLUGIN_BASE/lifecycle.log"
+    echo "${AICLI_LIFECYCLE_LOG:-$PLUGIN_BASE/lifecycle.log}"
 }
 
 # home_mount <user>
@@ -159,6 +161,26 @@ lifecycle_log() {
 
     # Auto-rotate before writing
     _lifecycle_rotate_if_needed "$log_file"
+
+    # R-06 (#1370): merge the inherited trace id into the payload as an additive
+    # "_trace" key (mirrors PHP LifecycleLogService). Only when the payload is a
+    # JSON object AND doesn't already carry one; the id shape is validated at
+    # every producer ([a-z0-9]{4,16}), and a malformed env value is dropped here
+    # too so it can never corrupt the JSON.
+    if [ -n "${AICLI_TRACE_ID:-}" ]; then
+        case "$AICLI_TRACE_ID" in
+            *[!a-z0-9]*) : ;;  # malformed — skip
+            *)
+                if [ "${#AICLI_TRACE_ID}" -ge 4 ] && [ "${#AICLI_TRACE_ID}" -le 16 ]; then
+                    case "$payload_json" in
+                        *'"_trace"'*) : ;;  # already present
+                        "{}") payload_json="{\"_trace\":\"$AICLI_TRACE_ID\"}" ;;
+                        \{*)  payload_json="{\"_trace\":\"$AICLI_TRACE_ID\",${payload_json#\{}" ;;
+                    esac
+                fi
+                ;;
+        esac
+    fi
 
     # Build the log line
     local ts

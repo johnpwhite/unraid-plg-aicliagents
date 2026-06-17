@@ -43,6 +43,23 @@ if (empty($agentId)) {
 $verLabel = $targetVersion ? " (version: $targetVersion)" : " (latest)";
 aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmypid() . ")", AICLI_LOG_INFO);
 
+// T-08 (ACTIVITY_TRAY.md): (re-)register the install activity with this worker's
+// pid/pgid so cancel_activity can kill the whole process group (npm children
+// included). Every setInstallStatus call from here on refreshes heartbeatAt via
+// the UtilityService choke point; the lazy watchdog in ActivityService marks the
+// op stalled at 120s of silence and failed at the 20-min hard cap.
+\AICliAgents\Services\ActivityService::register(
+    "install_$agentId",
+    $targetVersion !== null ? 'upgrade' : 'install',
+    ($targetVersion !== null ? "Upgrading $agentId to $targetVersion" : "Installing $agentId"),
+    [
+        'step'     => 'Starting installation job...',
+        'progress' => 5,
+        'pid'      => getmypid(),
+        'pgid'     => function_exists('posix_getpgid') ? @posix_getpgid(getmypid()) : null,
+    ]
+);
+
 // WP #859: gate the binary swap on the pre-install home bake completing.
 // AgentHandler::install enqueued a home bake before spawning this script;
 // wait for the supervisor to pick it up and drain. Bounded by 30s; on

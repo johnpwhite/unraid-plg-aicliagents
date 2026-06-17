@@ -307,7 +307,11 @@ function av2_secrets_schema(array $agent): array {
                         </div>
 
                         <?php if ($agent['is_installed']): ?>
-                        <div class="av2-strip" role="tablist">
+                        <?php /* WP #903 a11y: role="group", not "tablist" — the chips are
+                           aria-expanded disclosure toggles (accordion vocabulary), and
+                           tablist requires role="tab" children (axe aria-required-children,
+                           critical). group permits button/span children as-is. */ ?>
+                        <div class="av2-strip" role="group" aria-label="<?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?> settings">
                             <button type="button" class="av2-chip" data-target="channel" title="Release channel" onclick="av2ChipToggle(this)"><?=$av2_chip_icons['channel']?><span class="av2-label">Channel</span></button>
 
                             <?php
@@ -498,7 +502,8 @@ function av2_secrets_schema(array $agent): array {
                              three are rendered as disabled placeholders (.av2-chip.disabled) so every
                              card has identical visual rhythm without implying functionality that isn't
                              available pre-install. -->
-                        <div class="av2-strip" role="tablist">
+                        <?php /* WP #903 a11y: role="group" — see installed-variant note above. */ ?>
+                        <div class="av2-strip" role="group" aria-label="<?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?> settings">
                             <button type="button" class="av2-chip" data-target="channel" title="Release channel — pick a version, then install" onclick="av2ChipToggle(this)">
                                 <span class="av2-label">Channel</span>
                             </button>

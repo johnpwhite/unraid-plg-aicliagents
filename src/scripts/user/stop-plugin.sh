@@ -19,6 +19,8 @@ export PATH="$EMHTTP_DEST/bin:$EMHTTP_DEST/src/scripts/storage:$PATH"
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
 source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 source "$EMHTTP_DEST/src/scripts/storage/atomic_write_layer.sh" 2>/dev/null || true
+# F6 (WP#1331): the SINGLE manifest writer (shutdown delta bake's manifest record).
+source "$EMHTTP_DEST/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
 
 PERSIST_PATH=$(agent_persist_path 2>/dev/null)
 [ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
@@ -163,6 +165,13 @@ if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
             if [ -n "$DELTA_NAME" ]; then
                 BAKED=$((BAKED + 1))
                 status "  Saved $DELTA_NAME for $user."
+                # Follow-on 3: track the shutdown delta in the manifest IMMEDIATELY
+                # (mirror op_bake Step 7a) instead of leaving it untracked-until-
+                # reconcile. LEAN — bake + manifest record only, no refresh/reclaim
+                # (wrong under the shutdown budget). addLayer is idempotent + upserts.
+                # F6 (WP#1331): the SINGLE manifest writer.
+                manifest_record_layer "home" "$user" "$home_path" "$DELTA_NAME" \
+                    || warn "  Manifest record failed for $DELTA_NAME (reconcile will recover)."
             else
                 warn "Home delta bake failed for $user."
             fi

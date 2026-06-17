@@ -6,6 +6,13 @@
  *     <dependencies>StoragePathResolver, LifecycleLogService</dependencies>
  *     <constraints>All mutating methods are flock-protected. Writes are atomic (tmp + fsync + rename). Never modifies manifests with schema_version > 1.</constraints>
  * </module_context>
+ *
+ * @internal Storage-component internal (Epic #1310). The layer manifest is a PRIVATE
+ *           storage concern. Consumers must use the FileStorage facade intent verbs
+ *           (dropManifestEntry / pointManifestAtLayers); the manifest mutators
+ *           (addLayer / replaceLayers / removeEntity) are authored only by the
+ *           component's own internals + bash bake/consolidate under the lock.
+ *           Enforced by RegressionGuardsTest::testEpic1310ConsumersUseFacadeNotOwnerMethods.
  */
 
 namespace AICliAgents\Services;
@@ -19,7 +26,10 @@ class LayerManifestService {
     private const COMPONENT = 'LayerManifestService';
 
     // -----------------------------------------------------------------------
-    // Read methods (no locking required — reads are atomic on ext4/vfat)
+    // Read methods. S-04 (#1352): reads go through readManifest(), which takes a
+    // best-effort shared lock + retries transient empty/torn reads (the tmp+rename
+    // write is atomic on ext4; on vfat a transient zero-byte window exists on some
+    // implementations — see readManifest()).
     // -----------------------------------------------------------------------
 
     /**
@@ -62,6 +72,38 @@ class LayerManifestService {
      *
      * @param array<string, mixed> $layerEntry
      */
+    /**
+     * #1315: Upsert a layer entry by filename instead of appending. Keyed on filename: an existing
+     * entry for the same file is replaced (latest metadata wins) and any pre-existing duplicates of
+     * that filename are collapsed to one; a new file is appended at the end. Entries with no
+     * filename are passed through (cannot be keyed). Pure → unit-testable.
+     *
+     * @param array<int, array<string,mixed>> $existing
+     * @param array<string, mixed> $layerEntry
+     * @return array<int, array<string,mixed>>
+     */
+    public static function upsertLayer(array $existing, array $layerEntry): array {
+        $fn = (string)($layerEntry['filename'] ?? '');
+        $out = [];
+        $replaced = false;
+        foreach ($existing as $e) {
+            if ($fn !== '' && (string)($e['filename'] ?? '') === $fn) {
+                if (!$replaced) {
+                    $out[]    = $layerEntry; // first match -> replace in place
+                    $replaced = true;
+                }
+                // any further entries with this filename are duplicates -> drop
+                continue;
+            }
+            $out[] = $e;
+        }
+        if (!$replaced) {
+            $out[] = $layerEntry;
+        }
+        // $out is built solely via $out[] above, so it is already a 0-indexed list.
+        return $out;
+    }
+
     public static function addLayer(string $entity, array $layerEntry): bool {
         return self::withLock(function () use ($entity, $layerEntry) {
             $manifest = self::readManifest() ?? self::emptyManifest();
@@ -77,7 +119,14 @@ class LayerManifestService {
                 ];
             }
 
-            $manifest['entities'][$entity]['expected_layers'][] = $layerEntry;
+            // #1315: upsert by filename (NOT blind append) so re-baking/re-recording the same
+            // layer doesn't bloat the manifest with duplicates, and any pre-existing duplicates of
+            // this filename collapse to one. Duplicates inflate expected_count and can mask a real
+            // missing-layer count in boot-integrity.
+            $manifest['entities'][$entity]['expected_layers'] = self::upsertLayer(
+                $manifest['entities'][$entity]['expected_layers'] ?? [],
+                $layerEntry
+            );
             $manifest['entities'][$entity]['last_known_good_at'] = self::now();
 
             // Update persistence path if provided in the layer entry
@@ -195,6 +244,87 @@ class LayerManifestService {
     }
 
     /**
+     * F3 (WP#1327): PURE — re-point a single persistence path from $oldPrefix to
+     * $newPrefix, matched on a path boundary (exact, or a "$oldPrefix/" sub-path).
+     * Returns $current UNCHANGED when it is not under $oldPrefix. Pure so the prefix
+     * logic is unit-testable in the hermetic container (the I/O round-trip needs a
+     * writable /boot and is skipped there).
+     */
+    public static function repointPath(string $current, string $oldPrefix, string $newPrefix): string {
+        $oldN = rtrim($oldPrefix, '/');
+        $newN = rtrim($newPrefix, '/');
+        if ($oldN === '' || $current === '') {
+            return $current;
+        }
+        if ($current === $oldN) {
+            return $newN;
+        }
+        if (strncmp($current, $oldN . '/', strlen($oldN) + 1) === 0) {
+            return $newN . substr($current, strlen($oldN));
+        }
+        return $current;
+    }
+
+    /**
+     * F3 (WP#1327): re-point every entity's current_persistence_path from $oldPrefix
+     * to $newPrefix, IN-TRANSACTION under the manifest lock. Called from the migration
+     * marker bracket so a completed path migration leaves the manifest at the NEW path
+     * — otherwise the supervisor/boot DISCOVERS a stale path and false-halts path_drift
+     * (executeMigrate previously left re-pointing to future bakes/consolidates, which
+     * only fire for >1-layer entities). $entityPrefix scopes the change to one entity
+     * type ('home/' or 'agent/') so a shared old base with diverging new paths can't
+     * cross-point. Returns the number of entities moved (0 on no-op or failure).
+     */
+    public static function repointPathPrefix(string $oldPrefix, string $newPrefix, string $entityPrefix = ''): int {
+        $moved = 0;
+        self::withLock(function () use ($oldPrefix, $newPrefix, $entityPrefix, &$moved) {
+            $manifest = self::readManifest();
+            if ($manifest === null || !self::checkSchemaVersion($manifest)) {
+                return false;
+            }
+            $count = 0;
+            foreach (($manifest['entities'] ?? []) as $entity => &$e) {
+                if ($entityPrefix !== '' && strncmp((string)$entity, $entityPrefix, strlen($entityPrefix)) !== 0) {
+                    continue;
+                }
+                $cur = $e['current_persistence_path'] ?? '';
+                if ($cur === '') {
+                    continue;
+                }
+                $new = self::repointPath((string)$cur, $oldPrefix, $newPrefix);
+                if ($new !== $cur) {
+                    $e['current_persistence_path'] = $new;
+                    $count++;
+                }
+            }
+            unset($e);
+            if ($count === 0) {
+                return true; // nothing under the old prefix — clean no-op
+            }
+            $manifest['updated_at'] = self::now();
+            $ok = self::atomicWrite($manifest);
+            if ($ok) {
+                $moved = $count;
+                LifecycleLogService::log(
+                    LifecycleLogService::LEVEL_INFO,
+                    self::COMPONENT,
+                    'paths_repointed',
+                    ['from' => $oldPrefix, 'to' => $newPrefix, 'entity_prefix' => $entityPrefix, 'count' => $count]
+                );
+            } else {
+                LifecycleLogService::log(
+                    LifecycleLogService::LEVEL_ERROR,
+                    self::COMPONENT,
+                    'paths_repoint_failed',
+                    ['from' => $oldPrefix, 'to' => $newPrefix]
+                );
+            }
+            return $ok;
+        });
+        return $moved;
+    }
+
+    /**
      * Marks a specific layer as corrupt without removing it.
      * Adds a 'corrupt' sub-key to the layer entry: {reason, marked_at}.
      */
@@ -250,6 +380,55 @@ class LayerManifestService {
                     ['entity' => $entity, 'filename' => $filename]
                 );
             }
+            return $ok;
+        });
+    }
+
+    /**
+     * S-10 (#1354): record the entity's storage backend (additive per-entity
+     * "backend" field — "flash" | "passthrough"). Setting PASSTHROUGH also clears
+     * the entity's expected_layers in the SAME locked atomic write: this is the
+     * graduate migration's single authority flip (layers were already moved to
+     * .graduated/ under the write-ahead intent; after this write the plain
+     * passthrough dir is authoritative and the bash classifier's
+     * _entity_manifest_expects_layers un-pins the entity). Setting FLASH only
+     * writes the field (the manual rollback path; reconcile re-records the
+     * restored layers as untracked→recovered). Creates the entity entry if
+     * absent (idempotent).
+     */
+    public static function setBackend(string $entity, string $backend): bool {
+        if (!in_array($backend, ['flash', 'passthrough'], true)) {
+            return false;
+        }
+        return self::withLock(function () use ($entity, $backend) {
+            $manifest = self::readManifest() ?? self::emptyManifest();
+            if (!self::checkSchemaVersion($manifest)) {
+                return false;
+            }
+
+            if (!isset($manifest['entities'][$entity])) {
+                $manifest['entities'][$entity] = [
+                    'expected_layers'          => [],
+                    'last_known_good_at'       => null,
+                    'current_persistence_path' => null,
+                ];
+            }
+            $manifest['entities'][$entity]['backend'] = $backend;
+            if ($backend === 'passthrough') {
+                // ONE locked write: backend flip + expected-layers clear together,
+                // so no reader can ever observe passthrough-with-expected-layers.
+                $manifest['entities'][$entity]['expected_layers'] = [];
+            }
+            $manifest['entities'][$entity]['last_known_good_at'] = self::now();
+            $manifest['updated_at'] = self::now();
+
+            $ok = self::atomicWrite($manifest);
+            LifecycleLogService::log(
+                $ok ? LifecycleLogService::LEVEL_INFO : LifecycleLogService::LEVEL_ERROR,
+                self::COMPONENT,
+                $ok ? 'backend_set' : 'backend_set_failed',
+                ['entity' => $entity, 'backend' => $backend]
+            );
             return $ok;
         });
     }
@@ -403,6 +582,15 @@ class LayerManifestService {
     /**
      * Reads and JSON-decodes the manifest. Returns null on missing or decode error.
      *
+     * S-04 (#1352): torn-read hardening against the bash-side writer (manifest_write.sh
+     * runs atomicWrite under LOCK_EX via php -r one-shots). The tmp+rename write is
+     * atomic on ext4, but on vfat (/boot) some implementations expose a transient
+     * zero-byte window — a single unretried read could decode to null and be treated
+     * as "empty manifest", mis-classifying healthy entities (false total_loss).
+     * Mitigation: a best-effort SHARED lock on the writer's lock file (non-blocking,
+     * so a reader inside withLock's LOCK_EX can never self-deadlock) + a 3×50 ms
+     * retry on empty-read / decode failure.
+     *
      * @return array<string, mixed>|null
      */
     private static function readManifest(): ?array {
@@ -410,15 +598,35 @@ class LayerManifestService {
         if (!file_exists($path)) {
             return null;
         }
-        $raw = @file_get_contents($path);
-        if ($raw === false || $raw === '') {
+        // Best-effort LOCK_SH (belt-and-braces vs the bash writer's LOCK_EX).
+        // MUST be non-blocking: readManifest is also called from inside withLock's
+        // LOCK_EX (same process, different fd — flock treats those as conflicting),
+        // so a blocking LOCK_SH here would self-deadlock every mutator.
+        $lockFd   = @fopen(self::LOCK_PATH, 'c');
+        $haveLock = ($lockFd !== false) && @flock($lockFd, LOCK_SH | LOCK_NB);
+        try {
+            for ($attempt = 0; $attempt < 3; $attempt++) {
+                if ($attempt > 0) {
+                    usleep(50000); // 50 ms between retries
+                }
+                $raw = @file_get_contents($path);
+                if ($raw === false || $raw === '') {
+                    continue;
+                }
+                $decoded = json_decode($raw, true);
+                if (is_array($decoded)) {
+                    return $decoded;
+                }
+            }
             return null;
+        } finally {
+            if ($haveLock) {
+                @flock($lockFd, LOCK_UN);
+            }
+            if ($lockFd !== false) {
+                @fclose($lockFd);
+            }
         }
-        $decoded = json_decode($raw, true);
-        if (!is_array($decoded)) {
-            return null;
-        }
-        return $decoded;
     }
 
     /**

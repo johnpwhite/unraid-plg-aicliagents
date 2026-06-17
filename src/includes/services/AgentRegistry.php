@@ -59,7 +59,7 @@ class AgentRegistry {
             // (delta_<dt>, consolidated_<dt> where dt = YYYYMMDDTHHMMSSZ) formats.
             $sqshExists = false;
             $idQuoted = preg_quote($id, '/');
-            $kindAlt  = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z)';
+            $kindAlt  = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';
             foreach ($allSqshBasenames as $basename) {
                 if (preg_match("/^agent_{$idQuoted}_{$kindAlt}\.sqsh$/", $basename)) {
                     $sqshExists = true;
@@ -118,7 +118,7 @@ class AgentRegistry {
         return $registry;
     }
 
-    private static function getDefaultAgents() {
+    public static function getDefaultAgents() {
         $agentBase = self::AGENT_BASE;
         return [
             'gemini-cli' => [
@@ -132,6 +132,8 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --resume",
                 'env_prefix' => 'GEMINI',
                 'changelog_url' => 'https://github.com/google-gemini/gemini-cli/releases',
+                // T-12: first-run wizard auth hint — shown in step 3 checklist.
+                'auth_hint' => 'Run `gemini auth login` on first launch to authenticate with your Google account (OAuth). Credentials persist in your managed home directory across reboots.',
                 // No `default_envs` shipped. (GEMINI_CLI_ENABLE_AUTO_UPDATE was
                 // tried 2026-05-11 but Gemini CLI doesn't yet honour it — removed.)
                 // The manifest-seeding infrastructure stays wired (EnvService::
@@ -158,6 +160,18 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --resume",
                 'env_prefix' => 'CLAUDE',
                 'changelog_url' => 'https://github.com/anthropics/claude-code/releases',
+                // T-12: first-run wizard auth hint — shown in step 3 checklist.
+                'auth_hint' => 'Run /login on first launch; your Anthropic credentials are stored in your managed home directory and persist across reboots and plugin upgrades.',
+                // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys
+                // for Shift+Enter to be delivered as a distinct key chord (vs. plain Enter).
+                // This is agent-specific: applied as tier 1.5 (after BUILTIN, before user JSON
+                // tiers) so user overrides always win. escape-time 10 gives a small guard
+                // against ESC-sequence mis-parse while still being fast enough for TUI use.
+                'tmux_profile' => [
+                    'extended-keys'     => 'on',
+                    'terminal-features' => 'xterm*:extkeys',
+                    'escape-time'       => '10',
+                ],
             ],
             'opencode' => [
                 'id' => 'opencode',
@@ -262,6 +276,10 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'CODEX',
                 'changelog_url' => 'https://github.com/openai/codex/releases',
+                // T-12: codex-cli supports two auth paths: interactive login via
+                // `codex login` (browser OAuth), or set the OPENAI_API_KEY env var
+                // in the Secrets panel. The env-var path requires no interactive step.
+                'auth_hint' => 'Either run `codex login` on first launch (browser OAuth), or add your OPENAI_API_KEY in the Secrets panel — the env-var path requires no interactive authentication.',
             ],
             'factory-cli' => [
                 'id' => 'factory-cli',
@@ -387,6 +405,8 @@ class AgentRegistry {
                 // No default_secrets — auth is interactive Google OAuth (the CLI
                 // prints an authorization URL and accepts a pasted code), not an
                 // API-key env var.
+                // T-12: first-run wizard auth hint — shown in step 3 checklist.
+                'auth_hint' => 'On first launch, `agy` prints a Google authorization URL — open it in a browser, approve access, and paste the code back into the terminal. Credentials persist in your managed home directory.',
             ],
 
         ];
@@ -555,7 +575,7 @@ class AgentRegistry {
         $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
         $allSqsh = glob("$persistPath/*.sqsh") ?: [];
         $allSqshBasenames = array_map('basename', $allSqsh);
-        $kindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z)';
+        $kindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';
 
         foreach ($registry as $id => $agent) {
             if ($id === 'terminal') continue;
@@ -587,8 +607,8 @@ class AgentRegistry {
             }
             // Mount the overlay so node_modules/<pkg>/package.json (or the
             // source-specific version probe) can read its data.
-            if (class_exists('\AICliAgents\Services\StorageMountService')) {
-                @\AICliAgents\Services\StorageMountService::ensureAgentMounted($id);
+            if (class_exists('\AICliAgents\Services\FileStorage')) {
+                @\AICliAgents\Services\FileStorage::ensureReady("agent/$id");   // Epic #1310: facade intent
             }
             $v = self::discoverVersion($id, $agent);
             if ($v && $v !== 'unknown' && preg_match('/^\d+\.\d+\.\d+/', (string)$v)) {

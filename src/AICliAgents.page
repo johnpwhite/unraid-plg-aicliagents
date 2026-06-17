@@ -36,6 +36,8 @@ require_once "$ui_path/UploadOverlay.php";
 
 <link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= htmlspecialchars($version) ?>">
 <script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($version) ?>"></script>
+<!-- T-08 (ACTIVITY_TRAY.md): activity tray web component — self-mounts to body -->
+<script src="/plugins/unraid-aicliagents/assets/ui/activity-tray.js?v=<?= htmlspecialchars($version) ?>"></script>
 
 <?php
 require_once "$ui_path/TerminalGlobalState.php";

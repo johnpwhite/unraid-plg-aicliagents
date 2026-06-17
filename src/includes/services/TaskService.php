@@ -21,7 +21,7 @@ class TaskService {
         }
         // empty($username) already catches '0' and 0, so we only reach here
         // with a truthy username. No additional normalisation needed.
-        return StorageMountService::ensureHomeMounted($username);
+        return FileStorage::ensureReady("home/$username")->ok;   // Epic #1310: facade intent
     }
 
     /**
@@ -38,8 +38,8 @@ class TaskService {
             return false;
         }
 
-        StorageMountService::ensureHomeMounted($username);
-        $res = StorageMountService::commitChanges('home', $username);
+        FileStorage::ensureReady("home/$username");   // Epic #1310: facade intent
+        $res = FileStorage::persist("home/$username")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
 
         flock($fp, LOCK_UN);
         fclose($fp);
@@ -80,9 +80,60 @@ class TaskService {
                 return 'Data persisted to Flash, but a concurrent bake is in flight. The current operation will retry automatically on the next cycle.';
             case 'bake_landed_during_consolidate':
                 return 'Consolidation deferred: a new delta bake landed mid-flight and took priority. The consolidate will retry automatically on the next cycle.';
+            case 'target_not_mounted':
+                // S-02 (#1352): UD devices can mount up to ~2 min after array start.
+                return 'Storage deferred: the persistence target\'s backing device is not mounted yet. Is the Unassigned Device attached? The operation will retry automatically.';
+            case 'fat32_size_cap':
+                // S-09 (#1352): exit-4 precondition, surfaced when a caller maps it here.
+                return 'Operation refused: the projected layer size is approaching the FAT32 4 GiB per-file limit on the persistence target. Move persistence to a POSIX pool (see the Storage tab).';
+            case 'upper_not_empty':
+                // S-10 (#1354): graduate found unflushed writes after its flush+consolidate.
+                return 'Graduation deferred: new writes landed during the flush. The migration will retry automatically once the home is idle.';
+            case 'graduate_precondition':
+                // S-10 (#1354): exit-4 precondition (wrong device/engine, not flash, no layers, or an occupied passthrough dir).
+                return 'Graduation refused: this entity does not meet the migration preconditions (a layered entity on a passthrough-capable device). Nothing was changed.';
             case 'mount_busy':
             default:
                 return 'Data persisted to Flash, but ZRAM could not be cleared because a terminal session is still active. Please close all terminal tabs for this user to fully reset RAM usage.';
+        }
+    }
+
+    /**
+     * SINGLE SOURCE for the human-readable "why is this deferred" string, keyed
+     * by the raw defer-reason token (mount_busy, busy_cooldown, …) rather than a
+     * marker file — so the activity tray, queued toasts, and the bash task
+     * status all say the SAME plain-English thing instead of leaking jargon like
+     * "deferred (mount_busy)". $op tailors the phrasing (consolidate vs bake vs
+     * graduate). Confirmed cause for the common case (#1381 live evidence): an
+     * active agent session is running in the home, so home_mount_in_use() trips
+     * on its live-ttyd-with-AICLI_HOME scan and the live unmount/remount is held
+     * off until the session closes (the supervisor auto-retries — not a lock,
+     * not a reboot).
+     */
+    public static function deferReasonHuman(string $reason, string $op = ''): string {
+        $verb = $op === 'consolidate' ? 'consolidate'
+              : ($op === 'graduate' ? 'move this home' : 'continue');
+        switch ($reason) {
+            case 'mount_busy':
+            case 'busy_cooldown':
+                return "Waiting for this home's open agent session(s) to close — it will $verb automatically the moment you close the session.";
+            case 'bake_lock_held':
+            case 'bake_landed_during_consolidate':
+                return "Waiting for another storage operation on this home to finish — it will $verb automatically on the next cycle.";
+            case 'target_not_mounted':
+                return 'Waiting for the storage device to mount (is the Unassigned Device attached?) — it will retry automatically.';
+            case 'upper_not_empty':
+                return 'Flushing pending writes first — it will continue automatically once this home is idle.';
+            case 'sqlite_backup_deferred':
+                return 'A database backup deferred (the DB was busy) — it will retry automatically on the next cycle.';
+            case 'fat32_size_cap':
+                return 'Refused: the layer is approaching the FAT32 4 GiB per-file limit on this device. Move storage to a pool (Storage tab).';
+            case 'graduate_precondition':
+                return 'Refused: this home does not meet the move preconditions. Nothing was changed.';
+            default:
+                return $op !== ''
+                    ? "Queued — it will $verb on the next storage cycle."
+                    : 'Waiting for the storage subsystem — it will continue automatically.';
         }
     }
 
@@ -104,8 +155,8 @@ class TaskService {
             return ['status' => 'skipped', 'message' => 'Another bake in progress. Data safe in ZRAM.'];
         }
 
-        StorageMountService::ensureHomeMounted($username);
-        $res = StorageMountService::commitChanges('home', $username);
+        FileStorage::ensureReady("home/$username");   // Epic #1310: facade intent
+        $res = FileStorage::persist("home/$username")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
 
         flock($fp, LOCK_UN);
         fclose($fp);

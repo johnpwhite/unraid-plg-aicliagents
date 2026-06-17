@@ -110,11 +110,34 @@ class AutoLaunchService
                 $chatId = $resumeId !== null ? 'auto' : '';
                 self::log("Auto-launching workspace $sid for $agentId (trigger=$reason)", AICLI_LOG_INFO);
                 TerminalService::startTerminal($sid, $path, $chatId, $agentId);
+
+                // T-10 (ACTIVITY_TRAY.md): startTerminal reports its own failures by
+                // returning silently (mount/ttyd errors don't throw), so verify the
+                // session actually came up. On failure, surface a recoverable
+                // `type:start` activity — the tray's "Retry" button re-runs JUST
+                // this workspace via the retry_auto_launch action.
+                if (!ProcessManager::isRunning($sid)) {
+                    $failed++;
+                    self::log("Auto-launch failed for $sid ($agentId): session did not start (trigger=$reason)", AICLI_LOG_WARN);
+                    ActivityService::fail("start_$sid", "Auto-launch failed: session did not start", 'retry', [
+                        'type'  => 'start',
+                        'label' => "Auto-launch $agentId",
+                        'meta'  => ['sessionId' => $sid, 'agentId' => $agentId, 'path' => $path, 'chatId' => $chatId],
+                    ]);
+                    continue;
+                }
+
                 $launched++;
                 $started[] = ['id' => $sid, 'agentId' => $agentId, 'path' => $path];
             } catch (\Throwable $e) {
                 $failed++;
                 self::log("Auto-launch failed for $sid ($agentId): " . $e->getMessage(), AICLI_LOG_WARN);
+                // T-10: same recoverable activity for the exception path.
+                ActivityService::fail("start_$sid", "Auto-launch failed: " . $e->getMessage(), 'retry', [
+                    'type'  => 'start',
+                    'label' => "Auto-launch $agentId",
+                    'meta'  => ['sessionId' => $sid, 'agentId' => $agentId, 'path' => $path, 'chatId' => (isset($resumeId) && $resumeId !== null) ? 'auto' : ''],
+                ]);
             }
         }
 

@@ -11,6 +11,11 @@ mkdir -p /tmp/unraid-aicliagents
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
 export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
 
+# S-05 (#1352): path resolver (lifecycle_log + persist-path probe) and the
+# durable degraded flag helpers — both best-effort.
+source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+source "$EMHTTP_DEST/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventDisksMounted] $1" >> "$LOG"
 }
@@ -48,8 +53,14 @@ if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
         kill -9 "$_pid" >/dev/null 2>&1 || true
     done
 
-    # Remove emergency home and flag
+    # Remove emergency home and flag.
+    # S-05 (#1352): degraded_clear removes BOTH the tmpfs flag and the durable
+    # state/degraded.json; the plain rm stays as the fallback when the helper
+    # failed to source.
     rm -rf /tmp/unraid-aicliagents/emergency_home
+    if declare -f degraded_clear >/dev/null 2>&1; then
+        degraded_clear
+    fi
     rm -f /tmp/unraid-aicliagents/.emergency_mode
 
     # Remove any symlinks to emergency home in work dirs
@@ -71,6 +82,22 @@ if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
     done
 
     log "Emergency mode cleaned up."
+fi
+
+# 1b. S-05 (#1352) boot reconciliation: the durable degraded.json survives the
+# recovery reboot (the tmpfs flag does not). The array just came up — if the
+# persist target is reachable again, the degraded condition is over: autoclear
+# and log it. If the target is still unreachable, the flag stays for the boot
+# integrity sweep / storage status to surface.
+if declare -f degraded_get >/dev/null 2>&1 && [ -n "$(degraded_get)" ]; then
+    _DEG_REASON="$(degraded_get)"
+    _DEG_PERSIST="$(agent_persist_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents')"
+    if [ -d "$_DEG_PERSIST" ]; then
+        log "Durable degraded flag present (reason=$_DEG_REASON) and persist target reachable — auto-clearing."
+        degraded_clear "degraded_autocleared_boot"
+    else
+        log "Durable degraded flag present (reason=$_DEG_REASON) but persist target $_DEG_PERSIST still unavailable — leaving flag for the integrity sweep."
+    fi
 fi
 
 # 2. Publish UI refresh via PHP (config-aware storage status) and run an

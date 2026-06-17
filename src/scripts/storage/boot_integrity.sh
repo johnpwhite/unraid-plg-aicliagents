@@ -1,9 +1,9 @@
 #!/bin/bash
 # boot_integrity.sh -- Phase 4a boot-time integrity classifier (bash mirror of BootIntegrityService).
 #
-# Usage: source this file, then call boot_integrity_classify <type> <id>
+# Usage: source this file, then call boot_integrity_classify <type> <id> <persist_path>
 #
-# boot_integrity_classify <type> <id>
+# boot_integrity_classify <type> <id> <persist_path>
 #   Echoes one of: genuine_fresh, healthy, legacy_unmanaged, partial_loss,
 #                  path_drift, total_loss, untracked, host_mismatch, unknown.
 #   Side-effect: writes one lifecycle log line via lifecycle_log().
@@ -19,7 +19,7 @@ if [ -z "${PLUGIN_BASE:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# boot_integrity_classify <type> <id>
+# boot_integrity_classify <type> <id> <persist_path>
 #
 # type: 'home' or 'agent'
 # id:   username or agent id
@@ -29,20 +29,19 @@ fi
 boot_integrity_classify() {
     local type="${1:-}"
     local id="${2:-}"
+    # Follow-on 1b / L2 (WP#1333): the persist path is REQUIRED — the caller (op_mount)
+    # always passes the exact directory it is mounting, so the classifier's active-layer
+    # + legacy-data verdict can never diverge from the dir being mounted (and the itest
+    # harness points it at its loopback persist). The old "optional 2-arg" form that
+    # re-resolved the path independently was DEAD (no 2-arg caller) and was precisely
+    # the caller-vs-classifier divergence Follow-on 1b exists to eliminate, so it is
+    # removed; an empty path is a usage error → 'unknown'.
+    local persist_path="${3:-}"
 
-    if [ -z "$type" ] || [ -z "$id" ]; then
+    if [ -z "$type" ] || [ -z "$id" ] || [ -z "$persist_path" ]; then
         echo "unknown"
         return 0
     fi
-
-    local persist_path
-    if [ "$type" = "home" ]; then
-        persist_path="$(home_persist_path "$id" 2>/dev/null)"
-    else
-        persist_path="$(agent_persist_path 2>/dev/null)"
-    fi
-
-    [ -z "$persist_path" ] && persist_path="$PLUGIN_BASE"
 
     local manifest_json
     manifest_json="$(manifest_path 2>/dev/null)"
@@ -52,29 +51,39 @@ boot_integrity_classify() {
     local manifest_persist_path=""
     local manifest_host_id=""
 
-    if [ -f "$manifest_json" ] && command -v python3 >/dev/null 2>&1; then
+    # F2/F7 (WP#1326/#1329): read the manifest with PHP, NOT python3 — Unraid ships
+    # php but NOT python3, so the old python3 path always yielded expected_count=0 on
+    # the real box, silently disabling total_loss/path_drift detection (op_mount would
+    # then mount an empty stack over manifest-expected-but-missing layers). Single-
+    # quoted php -r with $argv (no backslash-namespace anti-pattern) + a direct
+    # json_decode of the manifest file (no 36-require bootstrap). Pure-bash grep
+    # fallback keeps expected_count a safe floor (>=1 when the entity is recorded) if
+    # php is somehow absent, so the loss is never masked.
+    if [ -f "$manifest_json" ]; then
         local entity="${type}/${id}"
-        local manifest_data
-        manifest_data="$(python3 -c "
-import json, sys
-try:
-    m = json.load(open('$manifest_json'))
-    e = m.get('entities', {}).get('$entity', {})
-    layers = e.get('expected_layers', [])
-    path   = e.get('current_persistence_path', '')
-    hid    = m.get('host_id', '')
-    print(len(layers))
-    print(path)
-    print(hid)
-except Exception as ex:
-    print(0)
-    print('')
-    print('')
-" 2>/dev/null)"
-        expected_count=$(echo "$manifest_data" | sed -n '1p')
-        manifest_persist_path=$(echo "$manifest_data" | sed -n '2p')
-        manifest_host_id=$(echo "$manifest_data" | sed -n '3p')
-        expected_count="${expected_count:-0}"
+        if command -v php >/dev/null 2>&1; then
+            local manifest_data
+            manifest_data="$(php -d display_errors=0 -r '
+                $m = json_decode(@file_get_contents($argv[1]), true);
+                $e = (is_array($m) && isset($m["entities"][$argv[2]]) && is_array($m["entities"][$argv[2]]))
+                    ? $m["entities"][$argv[2]] : [];
+                echo count((array)($e["expected_layers"] ?? [])), "\n";
+                echo (string)($e["current_persistence_path"] ?? ""), "\n";
+                echo (string)($m["host_id"] ?? ""), "\n";
+            ' "$manifest_json" "$entity" 2>/dev/null)"
+            expected_count=$(echo "$manifest_data" | sed -n '1p')
+            manifest_persist_path=$(echo "$manifest_data" | sed -n '2p')
+            manifest_host_id=$(echo "$manifest_data" | sed -n '3p')
+            expected_count="${expected_count:-0}"
+        else
+            # php-less fallback: the manifest records an entity ONLY with baked layers,
+            # so its key appearing means expected>0. Fail-closed floor of 1; the exact
+            # persist-path/host-id refinements degrade to empty (no path_drift/host
+            # check) but the total_loss-vs-genuine_fresh decision stays safe.
+            if grep -q "\"${entity}\"[[:space:]]*:" "$manifest_json" 2>/dev/null; then
+                expected_count=1
+            fi
+        fi
     fi
 
     # ---------- Active layer count ------------------------------------------
@@ -141,7 +150,15 @@ except Exception as ex:
 
     if [ "$expected_count" -eq 0 ]; then
         if [ "$active_count" -eq 0 ] && [ "$sibling_count" -eq 0 ]; then
-            state="genuine_fresh"
+            # Follow-on 1b: fold op_mount's LEGACY_FOUND probe into the single
+            # classifier — legacy .img/raw-folder data with no managed layers must
+            # HALT (legacy_unmanaged → recovery) not read as genuine_fresh + mount
+            # an empty stack over the unmigrated data.
+            if _boot_integrity_has_legacy_data "$persist_path" "$type" "$id"; then
+                state="legacy_unmanaged"
+            else
+                state="genuine_fresh"
+            fi
         elif [ "$active_count" -eq 0 ] && [ "$sibling_count" -gt 0 ]; then
             state="legacy_unmanaged"
         else
@@ -173,6 +190,27 @@ except Exception as ex:
 
     echo "$state"
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# _boot_integrity_has_legacy_data <persist> <type> <id>
+# Follow-on 1b: pure predicate mirroring BootIntegrityService::hasLegacyData.
+# Returns 0 (true) if the persist dir holds UNMIGRATED legacy data — pre-squashfs
+# *.img images or raw legacy home folders — with no managed .sqsh layers. Folds the
+# old op_mount LEGACY_FOUND probe (D-298 / D-342) into the single classifier. The
+# raw-folder signals are home-only (an agent persist dir legitimately has subdirs).
+# ---------------------------------------------------------------------------
+_boot_integrity_has_legacy_data() {
+    local persist="${1:-}" type="${2:-}" id="${3:-}"
+    [ -z "$persist" ] && return 1
+    [ -f "$persist/aicli-agents.img" ] && return 0
+    [ -f "$persist/persistence/home_$id.img" ] && return 0
+    [ -f "$persist/home_$id.img" ] && return 0
+    if [ "$type" = "home" ]; then
+        [ -d "$persist/persistence/$id" ] && return 0
+        [ -d "$persist/$id" ] && return 0
+    fi
+    return 1
 }
 
 # ---------------------------------------------------------------------------

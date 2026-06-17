@@ -139,6 +139,32 @@ export COLORTERM=truecolor
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
+# Bundled terminfo: Unraid ships a minimal terminfo db (xterm* only) with no
+# tmux/tmux-256color entry, so default-terminal=tmux-256color would fail with
+# "missing or unsuitable terminal". Compile our bundled source once into a tmpfs
+# dir and expose it via TERMINFO_DIRS (trailing ':' keeps the system db, where
+# xterm-256color lives). Guarded: only if tic exists and it isn't already built.
+_AICLI_TI_DIR="/tmp/unraid-aicliagents/terminfo"
+_AICLI_TI_SRC="/usr/local/emhttp/plugins/unraid-aicliagents/src/terminfo/tmux.terminfo"
+if [ ! -e "$_AICLI_TI_DIR/t/tmux-256color" ] && command -v tic >/dev/null 2>&1 && [ -f "$_AICLI_TI_SRC" ]; then
+    mkdir -p "$_AICLI_TI_DIR" 2>/dev/null
+    if tic -x -o "$_AICLI_TI_DIR" "$_AICLI_TI_SRC" >/dev/null 2>&1; then
+        log_aicli "DEBUG" 3 "compiled bundled tmux terminfo -> $_AICLI_TI_DIR"
+    else
+        log_aicli "WARN" 1 "tic failed to compile bundled tmux terminfo (tmux-256color unavailable)"
+    fi
+fi
+[ -d "$_AICLI_TI_DIR" ] && export TERMINFO_DIRS="${_AICLI_TI_DIR}:${TERMINFO_DIRS:-}"
+
+# Default tmux TERM type: prefer tmux-256color (bundled terminfo — enables
+# italics) when it actually resolves; fall back to the always-present
+# xterm-256color if the terminfo couldn't be compiled (e.g. tic missing). This
+# is the built-in default for new/uncustomised agents; a user override via
+# apply-tmux-json still wins. Mirrors TmuxService::BUILTIN['default-terminal']
+# (the parity test treats this key's value as runtime-variable, like history-limit).
+_AICLI_DEFTERM="xterm-256color"
+infocmp tmux-256color >/dev/null 2>&1 && _AICLI_DEFTERM="tmux-256color"
+
 # Cleanup on exit
 cleanup() {
     log_aicli "DEBUG" 3 "Cleaning up tmux session $SESSION"
@@ -331,11 +357,57 @@ FUNCOEF
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> /tmp/unraid-aicliagents/debug.log
 export TERM=xterm-256color
 export LC_ALL=en_US.UTF-8
+# WP #1259: non-interactive defaults for the agent shell + every child it spawns.
+# A TUI agent (notably agy/antigravity) runs child commands with NO controlling
+# TTY and does NOT forward keystrokes to them -- a regression from gemini-cli's
+# node-pty shell, which gave children a PTY and relayed input. So any child that
+# opens an editor or pager, or waits on a y/N prompt, HANGS forever: the prompt
+# re-renders but can never be answered. (Verified on .4: ssh will read a piped
+# password fine even with no TTY -- the block is that agy sends the child no
+# input at all.) These defaults make the common offenders non-interactive so they
+# COMPLETE instead of hanging. Each is a DEFAULT (:-) so an explicit value from
+# the 5-tier env (applied later by _aicli_load_envs) still wins. NOTE: ssh/sudo
+# *password* prompts can't be fixed here -- use key-based ssh; sudo is moot since
+# the agent already runs as root. Harmless to gemini-cli (it forwards input, and
+# the :- defaults respect any editor/pager it was configured with).
+export GIT_PAGER="${GIT_PAGER:-cat}"
+export PAGER="${PAGER:-cat}"
+export SYSTEMD_PAGER="${SYSTEMD_PAGER:-}"
+export LESS="${LESS:-FRX}"
+export GIT_EDITOR="${GIT_EDITOR:-true}"
+export GIT_SEQUENCE_EDITOR="${GIT_SEQUENCE_EDITOR:-true}"
+export EDITOR="${EDITOR:-true}"
+export VISUAL="${VISUAL:-true}"
+export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
+export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-B] before stty sane" >> /tmp/unraid-aicliagents/debug.log
 stty sane 2>/dev/null
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-C] after stty sane (rc=$?)" >> /tmp/unraid-aicliagents/debug.log
 perf_log run.start
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-D] after perf_log run.start" >> /tmp/unraid-aicliagents/debug.log
+
+# WP #1253: keep opost+onlcr asserted on this pane for the life of the session.
+# A TUI agent (e.g. agy) cfmakeraw's the pane (turning opost OFF) for its own UI.
+# Any INTERACTIVE child it then spawns (an ssh password prompt, sudo, etc.)
+# inherits that raw pane and emits bare LF without CR; tmux emulates the bare LF
+# into a diagonal "staircase" (the cursor drops a row but never returns to col 0).
+# Re-asserting opost+onlcr makes the kernel translate LF->CRLF before tmux reads
+# it, so the staircase can never form. This is harmless to the agent's own UI:
+# its explicit \r\n just gains a redundant (no-op) CR, and cursor-positioning
+# escape sequences are unaffected by opost. A low-rate keeper is required because
+# the agent re-raws the pane on (re)launch and on resize; it self-terminates when
+# this run-script (the session) exits. Confirmed live on .4 (WP #1253).
+_AICLI_PANE_TTY="$(tty 2>/dev/null)"
+case "$_AICLI_PANE_TTY" in
+    /dev/*)
+        ( _rs_pid=$$
+          while kill -0 "$_rs_pid" 2>/dev/null; do
+              stty -F "$_AICLI_PANE_TTY" opost onlcr 2>/dev/null
+              sleep 0.5
+          done ) >/dev/null 2>&1 &
+        ;;
+esac
 
 # WP #275c: install a no-op SIGINT trap on the RUN_SCRIPT itself.
 # Why: in a non-interactive bash script with no SIGINT trap, receiving SIGINT
@@ -405,6 +477,20 @@ _aicli_load_envs() {
 }
 
 while true; do
+    # Graceful-close sentinel — TOP-of-loop re-check (close-race fix 2026-06-07).
+    # gracefulClose keeps this session alive (so it can scrape the exit screen for a
+    # resume id, ~4s) and only THEN touches the flag + sends Enter to wake the
+    # post-exit "Press ENTER to reload" read below. A fast-exiting agent (a fresh
+    # claude exits instantly on Ctrl-C) has already passed the post-exit flag check
+    # and is parked on that read; waking it returns HERE. Without this check we would
+    # re-exec the agent — relaunching a workspace the user just closed and forcing
+    # gracefulClose into its 3s hard-stop fallback. Checking the flag before the
+    # (re)launch breaks cleanly while still preserving the scrape window.
+    if [ -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" ]; then
+        rm -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" 2>/dev/null
+        log_aicli "INFO" 2 "Graceful close sentinel observed at loop top — exiting before relaunch."
+        break
+    fi
     perf_log agent.exec.begin
     clear
 
@@ -462,6 +548,7 @@ while true; do
     mkdir -p "$HOME_DIR/.cache/${AGENT_ID}" \
              "$HOME_DIR/.config/${AGENT_ID}" \
              "$HOME_DIR/.local/share/${AGENT_ID}" \
+             "$HOME_DIR/.local/share/aicli-keyring" \
              2>/dev/null
 
     # WP #1227: Antigravity CLI (agy) unconditionally tries to open a log file
@@ -553,6 +640,15 @@ while true; do
         fi
     elif [ "$AGENT_ID" == "pi-coder" ]; then
         if [ -d "$HOME_DIR/.pi/agent/sessions" ] && [ -n "$(find "$HOME_DIR/.pi/agent/sessions" -type f 2>/dev/null)" ]; then
+            can_resume=1
+        fi
+    elif [ "$AGENT_ID" == "antigravity-cli" ]; then
+        # No explicit chat id was handed in, but if agy has any stored conversation
+        # for this home, resume-latest (--continue) so a reopened/relaunched
+        # workspace returns to the last chat instead of a blank session. (The
+        # workspace-correct id normally arrives via getResumeId/findSession ->
+        # frozen_chat_id; this is the safety net when it doesn't.)
+        if [ -d "$HOME_DIR/.gemini/antigravity-cli/conversations" ] && [ -n "$(find "$HOME_DIR/.gemini/antigravity-cli/conversations" -name '*.pb' -type f 2>/dev/null)" ]; then
             can_resume=1
         fi
     fi
@@ -652,7 +748,15 @@ while true; do
     if [ "$status" != "ok" ]; then
         log_aicli "ERROR" 1 "All launch attempts failed for $AGENT_ID. Binary corrupted or Node error. Check $DEBUG_LOG"
     fi
-    
+
+    # Restore PTY line discipline after every agent exit. TUI agents (agy,
+    # gemini-cli, claude-code) call cfmakeraw() which disables ONLCR; on exit
+    # they should restore it via tcsetattr but often don't, leaving the PTY in
+    # raw mode — the next prompt or clear then renders as a diagonal staircase.
+    # Also re-assert TERM in case a dumb parent environment leaked through.
+    stty sane 2>/dev/null
+    { [ "$TERM" = "dumb" ] || [ -z "$TERM" ]; } && export TERM=xterm-256color
+
     if [ "$AGENT_ID" == "terminal" ]; then exit 0; fi
 
     # Graceful-close sentinel: if the UI requested a clean shutdown (Ctrl-C x2
@@ -696,6 +800,17 @@ while true; do
                     fi
                 fi
             done
+        elif [ "$AGENT_ID" == "antigravity-cli" ]; then
+            # After an in-TUI conversation switch, agy writes the active chat's
+            # <uuid>.pb. Newest .pb by mtime = the just-active conversation; sync it
+            # so the next Ctrl-C relaunch resumes THAT chat, not the baked-in one.
+            _acd="$HOME_DIR/.gemini/antigravity-cli/conversations"
+            if [ -d "$_acd" ]; then
+                _newest_pb=$(find "$_acd" -name "*.pb" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+                if [ -n "$_newest_pb" ]; then
+                    _discovered_chat=$(basename "$_newest_pb" .pb)
+                fi
+            fi
         fi
         if [ -n "$_discovered_chat" ] && [ "$_discovered_chat" != "$frozen_chat_id" ]; then
             log_aicli "INFO" 2 "Post-exit GUID sync: $frozen_chat_id -> $_discovered_chat"
@@ -749,27 +864,55 @@ perf_log tmux.options.begin
 
 # ---------- Four-tier tmux configuration ----------
 # Tier 1 — Built-in defaults (safety net; also mirrored in TmuxService::BUILTIN).
+# T-01: every key in TmuxService::BUILTIN must have a matching line here — the
+#        parity is enforced by TmuxBaselineParityTest.php in CI.
 tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
 tmux set-option -g status off 2>/dev/null
+tmux set-option -g mouse off 2>/dev/null
+tmux set-option -g prefix C-b 2>/dev/null
+tmux set-option -g base-index 0 2>/dev/null
+tmux set-option -g bell-action any 2>/dev/null
 tmux set-option -g allow-passthrough on 2>/dev/null
 tmux set-option -g focus-events on 2>/dev/null
+# WP #1253: escape-time 0 — tmux's 500ms default makes a lone ESC ambiguous (key
+# vs. start-of-sequence). When a fast TUI streamer (e.g. antigravity) emits an
+# escape sequence whose bytes arrive SPLIT across reads over the ttyd/websocket
+# pipe, tmux waits then mis-parses the ESC, emitting literal bytes / dropping the
+# sequence -> intermittent blank/garble of streamed output. 0 is the canonical
+# TUI-app setting and is harmless on a fast local-socket terminal.
+tmux set-option -g escape-time 0 2>/dev/null
+# xterm-256color: tells apps inside tmux the correct terminal type (not screen),
+# avoiding line-translation issues when TUI agents (agy, gemini-cli) set raw PTY mode.
+# The terminal-overrides appends enable 24-bit colour pass-through from ttyd/the browser.
+# T-02: set-clipboard on is required for OSC 52 clipboard pass-through (WP#964/T-05).
+# T-02: extended-keys off globally; per-agent quirk profiles (T-07) enable it for Claude Code.
+# T-02: RGB is the modern synonym for Tc; xterm.js 5.x recognises both. Both can coexist
+#        as accumulated -ga entries; the existing Tc entry stays for older clients.
+tmux set-option -g  default-terminal "$_AICLI_DEFTERM" 2>/dev/null
+tmux set-option -g  set-clipboard on 2>/dev/null
+tmux set-option -g  extended-keys off 2>/dev/null
+tmux set-option -ga terminal-overrides ",xterm-256color:Tc" 2>/dev/null
+tmux set-option -ga terminal-overrides ",xterm-256color:RGB" 2>/dev/null
+# tmux-256color (bundled terminfo, opt-in via default-terminal): same truecolor
+# pass-through, and propagate TERMINFO_DIRS into the server env so panes find it.
+tmux set-option -ga terminal-overrides ",tmux-256color:Tc" 2>/dev/null
+tmux set-option -ga terminal-overrides ",tmux-256color:RGB" 2>/dev/null
+[ -n "${TERMINFO_DIRS:-}" ] && tmux set-environment -g TERMINFO_DIRS "$TERMINFO_DIRS" 2>/dev/null
 
 # Helper: apply a JSON file of allow-listed tmux options via a single PHP pass.
+# T-03: allowed/append key lists are single-sourced from TmuxService::ALLOWED_KEYS and
+#        TmuxService::APPEND_KEYS rather than duplicated here as string literals, so any
+#        future extension to the PHP const is automatically reflected in the shell tier.
+# Lives in a script file (apply-tmux-json.php), NOT `php -r`: backslash namespaces in a
+# double-quoted -r body are eaten by bash (publish anti-pattern rule, exit 3). The
+# script also accepts APPEND_KEYS entries (quirk files carry terminal-features) which
+# the old inline filter accidentally dropped.
 apply_tmux_json() {
     local jsonfile="$1"
     [ -f "$jsonfile" ] || return 0
     log_aicli "DEBUG" 3 "Applying tmux settings from $jsonfile"
-    php -r "
-        \$allowed = ['status','mouse','history-limit','prefix','base-index','bell-action','default-terminal','focus-events','allow-passthrough'];
-        \$s = json_decode(@file_get_contents('$jsonfile'), true);
-        if (is_array(\$s)) {
-            foreach (\$s as \$k => \$v) {
-                if (in_array(\$k, \$allowed, true) && \$v !== '' && \$v !== null) {
-                    echo 'tmux set-option -g ' . escapeshellarg(\$k) . ' ' . escapeshellarg((string)\$v) . \"\n\";
-                }
-            }
-        }
-    " 2>>"$DEBUG_LOG" | bash 2>>"$DEBUG_LOG"
+    php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/user/apply-tmux-json.php \
+        "$jsonfile" 2>>"$DEBUG_LOG" | bash 2>>"$DEBUG_LOG"
 }
 
 # Legacy migration: rename pre-4-tier per-(ws,agent) hash files to .legacy so the old
@@ -787,6 +930,14 @@ for _legacy in "$HOME_DIR/.aicli/tmux/"tmux_*.json; do
     fi
 done
 unset _legacy _legacy_base
+
+# Tier 1.5 — Agent quirk profile (not user-editable; written by TerminalService
+# before launch). Sits between BUILTIN and user-editable tiers so structural
+# requirements like Claude Code's extended-keys + terminal-features are applied
+# after the safety-net defaults but can still be overridden by the user.
+# apply_tmux_json supports APPEND_KEYS (-ga semantics) so terminal-features
+# accumulates rather than clobbers the BUILTIN terminal-overrides entries.
+apply_tmux_json "$TMUX_TMPDIR/quirks_${AGENT_ID}.json"
 
 # Tier 2 — Agent-level defaults (edited via the Store card's Terminal panel).
 apply_tmux_json "$HOME_DIR/.aicli/tmux/tmux_agent_${AGENT_ID}.json"
@@ -815,4 +966,14 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 1
 fi
 perf_log tmux.attach.exec
-exec tmux -u attach-session -t "$SESSION" 2>>"$DEBUG_LOG"
+# -d (detach-others): ttyd's web client auto-reconnects on ANY websocket drop
+# (hidden/background-iframe throttling, proxy idle-timeout, network blip) — an
+# unavoidable trait of a web terminal. Each reconnect re-runs this script and
+# attaches a NEW client; without -d the prior client is NOT reaped (runuser/setsid
+# detaches each attach into its own session, so ttyd can't SIGHUP it on disconnect),
+# so stale "attached" clients accumulate without bound. tmux mirrors the agent TUI
+# to every attached client on every redraw -> compounding CPU + the visible
+# "constantly reconnecting" churn (reconnect-leak 2026-06-06; observed 7 clients on
+# one session, load avg ~5). -d makes each (re)connect evict all other clients,
+# keeping exactly one live client per session — self-healing across reconnects.
+exec tmux -u attach-session -d -t "$SESSION" 2>>"$DEBUG_LOG"

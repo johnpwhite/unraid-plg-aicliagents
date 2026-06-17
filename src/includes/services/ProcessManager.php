@@ -15,6 +15,9 @@ class ProcessManager {
      * Checks if a specific terminal session is currently running.
      * @param string $id The session ID.
      * @return bool True if running.
+     * @phpstan-impure Live process probe — the result legitimately changes
+     *                 between calls (e.g. before/after startTerminal), so
+     *                 phpstan must not narrow repeated calls to one value.
      */
     public static function isRunning($id = 'default') {
         $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
@@ -75,6 +78,7 @@ class ProcessManager {
         }
         @unlink("/var/run/unraid-aicliagents-$id.chatid");
         @unlink("/var/run/unraid-aicliagents-$id.agentid");
+        @unlink("/var/run/unraid-aicliagents-$id.user");
 
         if ($killTmux) {
             // Non-root audit: iterate per-uid tmux sockets so non-root
@@ -248,5 +252,6 @@ class ProcessManager {
         @unlink("/var/run/unraid-aicliagents-{$safe}.chatid");
         @unlink("/var/run/unraid-aicliagents-{$safe}.agentid");
         @unlink("/var/run/unraid-aicliagents-{$safe}.workdir");
+        @unlink("/var/run/unraid-aicliagents-{$safe}.user");
     }
 }

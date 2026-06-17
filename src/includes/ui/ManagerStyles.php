@@ -26,8 +26,11 @@
         letter-spacing: 0.05em;
     }
     .aicli-tab-btn:hover { opacity: 1; color: var(--text-color, #eee); }
+    /* WP #903 a11y: dark ink on the brand orange — white-on-#ff8c00 is 2.33:1
+       (fails WCAG AA 4.5:1); #111 on #ff8c00 is ~8:1. Applies to every
+       orange-filled control (active tab, slim buttons, active filter chip). */
     .aicli-tab-btn.active {
-        background: var(--orange, #ff8c00); color: #fff; border-color: var(--orange, #ff8c00); opacity: 1;
+        background: var(--orange, #ff8c00); color: #111; border-color: var(--orange, #ff8c00); opacity: 1;
         box-shadow: 0 -4px 10px rgba(255,140,0,0.2);
         z-index: 2;
     }
@@ -127,24 +130,32 @@
 
     .aicli-btn-slim {
         height: 26px !important; padding: 0 10px !important; border-radius: 4px; cursor: pointer;
-        background: var(--orange, #ff8c00) !important; border: none !important; color: #fff !important;
+        background-color: var(--orange, #ff8c00) !important; border: none !important; color: #111 !important;
         display: inline-flex !important; align-items: center; justify-content: center;
         font-size: 10px !important; font-weight: 800; text-transform: uppercase; gap: 5px;
         flex-shrink: 0 !important; transition: all 0.15s ease; margin: 0 !important;
     }
-    .aicli-btn-slim:hover { background: #e67e00 !important; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.3); }
+    /* Use background-COLOR (not the `background` shorthand) in every hover/variant
+       rule: aicli-btn-slim has a 9px transparent-border 44px hit-box (see the
+       rule near the file end) kept visually 26px by `background-clip: padding-box`.
+       The `background` shorthand RESETS background-clip to border-box, and because
+       these rules carry !important + higher specificity than the hit-box rule, the
+       paint flooded the full 44px box on hover/variant — the button appeared to
+       double in height. background-color leaves background-clip untouched. */
+    .aicli-btn-slim:hover { background-color: #e67e00 !important; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.3); }
     .aicli-btn-slim:active { transform: translateY(0); box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
-    .aicli-btn-slim.danger { background: #600 !important; }
-    .aicli-btn-slim.danger:hover { background: #800 !important; }
-    .aicli-btn-slim.warning { background: #a60 !important; }
-    .aicli-btn-slim.warning:hover { background: #c80 !important; }
-    .aicli-btn-slim.info { background: #007bff !important; }
+    /* Dark variants keep white ink (contrast on #600/#a60 is >4.5:1). */
+    .aicli-btn-slim.danger { background-color: #600 !important; color: #fff !important; }
+    .aicli-btn-slim.danger:hover { background-color: #800 !important; }
+    .aicli-btn-slim.warning { background-color: #a60 !important; color: #fff !important; }
+    .aicli-btn-slim.warning:hover { background-color: #c80 !important; }
+    .aicli-btn-slim.info { background-color: #007bff !important; color: #fff !important; }
     
     .aicli-pill-btn {
-        background: #333; border: 1px solid #444; color: #eee; padding: 2px 8px; border-radius: 10px;
+        background: var(--mild-background-color, #333); border: 1px solid var(--border-color, #444); color: var(--text-color, #eee); padding: 2px 8px; border-radius: 10px;
         font-size: 9px; cursor: pointer; font-weight: bold; transition: all 0.2s;
     }
-    .aicli-pill-btn:hover { background: #444; border-color: #ff8c00; color: #ff8c00; }
+    .aicli-pill-btn:hover { background: var(--border-color, #444); border-color: #ff8c00; color: #ff8c00; }
 
     .stat-icon-btn {
         color: var(--text-color, #888); font-size: 12px; cursor: pointer; transition: all 0.2s;
@@ -155,7 +166,7 @@
     .stat-icon-btn i { pointer-events: none; }
 
     /* Storage & Bars */
-    .stat-bar-wrap { width: 100%; height: 24px; background: #222; border-radius: 4px; overflow: hidden; position: relative; border: 1px solid #333; display: flex; }
+    .stat-bar-wrap { width: 100%; height: 24px; background: var(--mild-background-color, #222); border-radius: 4px; overflow: hidden; position: relative; border: 1px solid var(--border-color, #333); display: flex; }
     .stat-bar-fill { height: 100%; width: 0%; transition: width 0.5s; }
     .stat-bar-base { height: 100%; background: #1e4976; transition: width 0.5s; position: relative; } /* Dark Blue: Flash */
     .stat-bar-dirty { height: 100%; background: var(--orange, #ff8c00); transition: width 0.5s; position: relative; } /* Orange: RAM Delta */
@@ -163,7 +174,7 @@
     
     /* Install Progress Bar (Marketplace) */
     .install-progress { flex: 1; display: none; flex-direction: column; justify-content: center; }
-    .install-bar-wrap { width: 100%; height: 12px; background: #000; border-radius: 6px; overflow: hidden; border: 1px solid #444; margin-top: 4px; display: block !important; }
+    .install-bar-wrap { width: 100%; height: 12px; background: var(--background-color, #000); border-radius: 6px; overflow: hidden; border: 1px solid var(--border-color, #444); margin-top: 4px; display: block !important; }
     .install-bar-fill { height: 100%; width: 0%; background: var(--orange, #ff8c00); transition: width 0.3s ease; box-shadow: 0 0 10px rgba(255,140,0,0.5); display: block !important; }
 
     .legend-item { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; opacity: 0.7; }
@@ -255,7 +266,7 @@
     .agent-filters { display: flex; gap: 5px; }
     .filter-btn { padding: 6px 15px; border-radius: 4px; font-size: 10px; font-weight: bold; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color, rgba(255,255,255,0.15)); transition: all 0.2s; text-transform: uppercase; color: var(--text-color, #ccc); }
     .filter-btn:hover { background: rgba(255,255,255,0.15); border-color: var(--orange, #ff8c00); }
-    .filter-btn.active { background: var(--orange, #ff8c00); color: #fff; border-color: var(--orange, #ff8c00); }
+    .filter-btn.active { background: var(--orange, #ff8c00); color: #111; border-color: var(--orange, #ff8c00); }
 
     /* Sort toggle — a <button>, so reset the UA font/line-height to inherit
        and match .filter-btn's box model exactly so it sits as a 4th chip. */
@@ -273,24 +284,66 @@
 
     .agent-footer { padding: 10px 12px; background: var(--title-header-background-color, rgba(0,0,0,0.4)); border-top: 1px solid var(--border-color, rgba(255,255,255,0.05)); display: flex; align-items: center; justify-content: space-between; min-height: 46px; }
 
-    /* Log Viewer */
+    /* Log Viewer / Debug console.
+       INTENTIONALLY ALWAYS DARK — do NOT theme this with var(--background-color)
+       etc. It is a terminal surface with green (#0f0) monospace text; on a light
+       Unraid theme a theme-aware background turns it into unreadable green-on-white.
+       The v2026.05.29.02 theme audit themed these and broke it; keep them hardcoded
+       dark so the console stays black regardless of the page theme. */
     .log-terminal { background: #000; border-radius: 4px; border: 1px solid #333; overflow: hidden; display: flex; flex-direction: column; }
-    .log-header { background: #222; padding: 0 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; height: 32px; }
-    .log-body { height: 400px; overflow-y: auto !important; padding: 10px; font-family: 'Courier New', monospace; font-size: 11px; color: #0f0; white-space: pre-wrap; position: relative; overscroll-behavior: contain; }
+    .log-header { background: #1a1a1a; padding: 0 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; height: 32px; }
+    .log-body { height: 400px; overflow-y: auto !important; padding: 10px; font-family: 'Courier New', monospace; font-size: 11px; background: #000; color: #0f0; white-space: pre-wrap; position: relative; overscroll-behavior: contain; }
     .log-tab { padding: 0 12px; cursor: pointer; opacity: 0.7; color: #fff; font-size: 9px; font-weight: bold; text-transform: uppercase; line-height: 32px; border-right: 1px solid #333; transition: all 0.15s; letter-spacing: 0.03em; }
     .log-tab:hover { opacity: 1; background: #2a2a2a; }
 
     .log-action-btn {
-        width: 26px; height: 26px; border-radius: 4px; cursor: pointer;
+        /* Auto-width text+icon button. Was a fixed 26x26 icon square, which made
+           the labelled buttons (Reset, Download support bundle, Create GitHub
+           issue, …) overflow their box and overlap each other in the Debug
+           Console support row — every use of this class has a text label. */
+        min-height: 26px; padding: 4px 10px; border-radius: 4px; cursor: pointer;
         background: #333; border: 1px solid #444; color: #ccc;
-        display: inline-flex; align-items: center; justify-content: center;
-        font-size: 11px; transition: all 0.15s;
+        display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+        font-size: 11px; line-height: 1; white-space: nowrap; transition: all 0.15s;
     }
     .log-action-btn:hover { background: #444; color: #fff; border-color: #666; }
     .log-action-btn:active { transform: scale(0.95); }
     .log-action-btn.danger { color: #f88; }
     .log-action-btn.danger:hover { background: #600; color: #fcc; border-color: #800; }
+    /* Debug Console filter + support rows. The console is ALWAYS a dark terminal
+       (.log-terminal/.log-body bg #000), so its text needs a FIXED light tone like
+       .log-tab (#fff) and .log-action-btn (#ccc). The earlier var(--text-color)
+       attempt was WRONG: on light Unraid themes (azure/white) --text-color is DARK,
+       so these labels/selects/values rendered unreadable dark-on-black. */
+    #log-filter-row, #log-filter-row label, #log-filter-row select, #log-filter-row input,
+    #diag-support-row, #diag-support-row label, #diag-known-issues {
+        color: #ccc;
+    }
+    #log-filter-row select, #log-filter-row input {
+        background: #1a1a1a; border: 1px solid #444; border-radius: 3px; padding: 2px 4px;
+    }
+    #log-filter-row input::placeholder { color: #777; }
     .log-tab.active { opacity: 1; background: #333; color: #ff8c00; }
+
+    /* Upgrade "keep a copy" toggle. The backup now defaults OFF (opt-in), so when
+       it's UNticked we pulse a soft orange glow in/out like a heartbeat to draw the
+       user's eye to the opt-in. The pulse stops the moment they tick it (or when the
+       toggle is disabled — insufficient space / bad path — where opting in isn't
+       possible). prefers-reduced-motion gets a static outline instead of the animation. */
+    @keyframes aicli-bk-heartbeat {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255,140,0,0); }
+        50%      { box-shadow: 0 0 7px 3px rgba(255,140,0,0.85); }
+    }
+    #aicli-bk-toggle { border-radius: 3px; }
+    #aicli-bk-toggle:not(:checked):not(:disabled) {
+        animation: aicli-bk-heartbeat 1.8s ease-in-out infinite;
+        outline: 1px solid rgba(255,140,0,0.7);
+        outline-offset: 1px;
+    }
+    #aicli-bk-toggle:checked, #aicli-bk-toggle:disabled { animation: none; outline: none; }
+    @media (prefers-reduced-motion: reduce) {
+        #aicli-bk-toggle:not(:checked):not(:disabled) { animation: none; outline: 2px solid rgba(255,140,0,0.85); }
+    }
     
     .help-text { font-size: 0.85em; opacity: 0.6; font-style: italic; white-space: normal; text-align: left !important; width: 100%; }
 
@@ -304,7 +357,7 @@
         width: 500px; max-height: 80vh; border-radius: 8px; overflow: hidden;
         box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         border: 1px solid var(--border-color, #ccc);
-        background: var(--background-color, var(--body-background, #fff));
+        background: var(--background-color, #fff);
         color: var(--text-color, inherit);
         display: flex; flex-direction: column;
     }
@@ -1125,5 +1178,160 @@
             flex: 1 1 calc(50% - 4px); min-width: 0;
             padding: 8px 6px; font-size: 11px;
         }
+    }
+
+    /* =======================================================================
+       WP #903 — 44x44 effective touch targets (WCAG 2.5.5 / L4 sweep).
+       The Playwright sweep measures each interactive element's OWN bounding
+       box (boundingBox() == border box), so pseudo-element hit-area hacks
+       don't count. Instead the hit area is grown with REAL transparent
+       block borders: the border box reaches >= 44 px tall (borders are
+       genuine click area) while `background-clip: padding-box` keeps the
+       painted pill at its original dense size.
+
+       IMPORTANT cascade context: Unraid's default-base.css styles
+       `button[type="button"]:where(:not(.unapi *))` at specificity (0,1,1),
+       which BEATS our single-class rules (0,1,0). On rendered pages today
+       that dynamix rule already wins border (none), padding (8px),
+       margin (10px 12px 10px 0), min-width (86px) and the gradient-frame
+       background on .av2-chip / .agent-sort-btn / .av2-btn. So:
+         - every contested property here carries !important;
+         - the transparent block borders REPLACE dynamix's 10px block
+           margins (border eats the margin space -> identical outer
+           geometry, identical painted position, zero visual change);
+         - the dynamix gradient frame paints relative to the padding box
+           (background-origin default), so it stays glued to the visible
+           pill, not the enlarged hit box;
+         - border-radius uses the `rx / ry` form so the PAINTED corner
+           radius is unchanged (inner ry = outer ry - block border width).
+       This section deliberately sits AFTER the mobile media query so the
+       expansions also win at phone/tablet widths.
+       ======================================================================= */
+
+    /* Slim buttons (plugin-styled via !important, dynamix never applied):
+       26 px visual -> 44 px border box; negative block margins keep the
+       layout occupancy at the visual 26 px. */
+    .aicli-btn-slim {
+        height: 44px !important;
+        box-sizing: border-box !important;
+        border-top: 9px solid transparent !important;
+        border-bottom: 9px solid transparent !important;
+        background-clip: padding-box !important;
+        border-radius: 4px / 13px !important;
+        margin-top: -9px !important;
+        margin-bottom: -9px !important;
+    }
+    /* Hover/active shadows must follow the painted pill, not the (invisible)
+       44 px border box — swap box-shadow for filter:drop-shadow. */
+    .aicli-btn-slim:hover  { box-shadow: none !important; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3)); }
+    .aicli-btn-slim:active { box-shadow: none !important; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.2)); }
+
+    /* Sort toggle (dynamix-styled today: 32 px = 8px padding + 16px text,
+       no border, block margins 10px): 7px transparent borders -> 46 px hit
+       box; block margins drop 10 -> 3 px so outer rhythm stays 52 px. */
+    .agent-sort-btn {
+        border-top: 7px solid transparent !important;
+        border-bottom: 7px solid transparent !important;
+        background-clip: padding-box !important;
+        border-radius: 4px / 11px !important;
+        margin-top: 3px !important;
+        margin-bottom: 3px !important;
+    }
+
+    /* Store-card spec chips (dynamix-styled today: 27 px = 8px padding +
+       11px label, no border, block margins 10px): 10px transparent borders
+       -> 47 px hit box; block margins 10 -> 0 keeps outer rhythm at 47 px.
+       Block padding pinned to today's effective 8px for cross-viewport
+       stability. */
+    .av2-chip {
+        border-top: 10px solid transparent !important;
+        border-bottom: 10px solid transparent !important;
+        padding-top: 8px !important;
+        padding-bottom: 8px !important;
+        background-clip: padding-box !important;
+        border-radius: 4px / 14px !important; /* painted ry = 14 - 10 = 4 = today's dynamix radius */
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+    }
+    .av2-chip[aria-expanded="true"] {
+        /* base rule paints border-color orange — keep the hit border invisible */
+        border-color: transparent !important;
+        border-top-left-radius: 6px 16px !important;
+        border-top-right-radius: 6px 16px !important;
+        /* outer glow must hug the painted pill, not the 47 px hit box */
+        box-shadow: none !important;
+        filter: drop-shadow(0 2px 4px rgba(255,140,0,0.25));
+    }
+
+    /* Panel/footer buttons (plain .av2-btn is dynamix-styled today; the
+       .primary/.danger/.warn variants override paint at (0,2,0) but keep
+       dynamix geometry): 8.5px transparent borders -> 44 px border box from
+       the natural 27 px; block margins 10 -> 1.5 px keeps outer rhythm. */
+    .av2-btn {
+        box-sizing: border-box !important;
+        min-height: 44px !important;
+        border-top: 8.5px solid transparent !important;
+        border-bottom: 8.5px solid transparent !important;
+        background-clip: padding-box !important;
+        border-radius: 4px / 12.5px !important;
+        margin-top: 1.5px !important;
+        margin-bottom: 1.5px !important;
+    }
+    /* Variant hover glows painted via drop-shadow so they follow the pill. */
+    .av2-btn.danger:hover { box-shadow: none !important; filter: drop-shadow(0 2px 4px rgba(239,68,68,0.35)); }
+    .av2-btn.warn:hover   { box-shadow: none !important; filter: drop-shadow(0 2px 4px rgba(230,126,34,0.35)); }
+
+    /* Release-notes link: inline element (dynamix button rule doesn't match
+       bare <a>), so vertical borders expand its border box (and hit area)
+       without affecting line layout at all. 15 px text + 2x15 px = 45 px. */
+    .av2-changelog-link {
+        border-top: 15px solid transparent;
+        border-bottom: 15px solid transparent;
+        background-clip: padding-box;
+    }
+
+    /* Config Hub — agent target selection (skills/commands/instructions/MCP).
+       Uniform responsive tile grid replaces a ragged flex-wrap: agent name primary,
+       config path a muted monospace second line, checked tiles accent in the brand
+       orange, not-installed agents dimmed + disabled with a "not installed" pill.
+       Neutral grey alphas + Dynamix theme vars keep it correct in dark AND light. */
+    .hub-agent-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+        gap: 8px;
+        margin-top: 6px;
+    }
+    .hub-agent-tile {
+        display: flex; align-items: flex-start; gap: 8px;
+        padding: 7px 10px; min-height: 38px; box-sizing: border-box;
+        border: 1px solid rgba(128,128,128,0.22); border-radius: 6px;
+        background: rgba(128,128,128,0.05); cursor: pointer;
+        transition: border-color 0.12s ease, background 0.12s ease;
+    }
+    .hub-agent-tile:hover {
+        border-color: rgba(128,128,128,0.45);
+        background: rgba(128,128,128,0.11);
+    }
+    /* Selected: brand-orange accent (matches the plugin's primary controls). */
+    .hub-agent-tile:has(input:checked) {
+        border-color: var(--orange, #ff8c00);
+        background: rgba(255,140,0,0.10);
+    }
+    .hub-agent-tile input { margin: 1px 0 0 0; flex: 0 0 auto; cursor: pointer; }
+    .hub-agent-tile-body { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+    .hub-agent-tile-name { font-size: 12px; font-weight: 600; line-height: 1.3; }
+    .hub-agent-tile-path {
+        font-size: 10px; font-family: monospace; opacity: 0.55;
+        line-height: 1.3; margin-top: 1px; max-width: 100%;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Not installed: dimmed, non-interactive, with an explicit pill (not colour alone). */
+    .hub-agent-tile[data-off] { opacity: 0.5; cursor: default; background: transparent; }
+    .hub-agent-tile[data-off]:hover { border-color: rgba(128,128,128,0.22); background: transparent; }
+    .hub-agent-tile[data-off] input { cursor: default; }
+    .hub-agent-tile-badge {
+        align-self: center; flex: 0 0 auto; white-space: nowrap;
+        font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+        padding: 2px 6px; border-radius: 8px; background: rgba(128,128,128,0.25);
     }
 </style>

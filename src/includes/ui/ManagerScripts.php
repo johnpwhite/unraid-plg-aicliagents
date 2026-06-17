@@ -292,6 +292,7 @@ $(function() {
         logBox[0].addEventListener('wheel', function(e) { e.stopPropagation(); }, { passive: false });
     }
     refreshLog();
+    refreshLogContexts(); // R-07 (#1370): seed the Debug Console context filter dropdown
     refreshStats();
     resetStatsTimer();
     setInterval(refreshLog, 5000);

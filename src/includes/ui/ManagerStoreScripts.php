@@ -239,7 +239,10 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
             '<div style="text-align:left; font-size:13px; line-height:1.5;">'
           + sessionHtml
           + '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px; cursor:pointer;">'
-          +   '<input type="checkbox" id="aicli-bk-toggle" checked style="margin-top:2px;">'
+          // Default OFF: a backup is opt-in. _aicliRenderBackupEstimate's
+          // success branch only enables the toggle, never re-checks it, so an
+          // unchecked default stays unchecked unless the user ticks it.
+          +   '<input type="checkbox" id="aicli-bk-toggle" style="margin-top:2px;">'
           +   '<span>Keep a copy of the current version'
           +     (curVer ? ' (<b>v' + _escAttr(curVer) + '</b>)' : '')
           +     ' so you can roll back if the upgrade goes wrong.</span>'
@@ -1180,7 +1183,7 @@ const AV2_TMUX_HELP = {
     'prefix':            'Command prefix key (default C-b). Every tmux keybinding is triggered by this combo first.',
     'base-index':        'Index of the first window — 0 matches shell conventions, 1 matches keyboard number row.',
     'bell-action':       'Which pane triggers a bell alert: any, none, current (focused only), other (unfocused only).',
-    'default-terminal':  'TERM value exported to programs. screen-256color is safe; tmux-256color enables italics.',
+    'default-terminal':  'TERM value exported to programs (default: tmux-256color). tmux-256color enables italics and ships its terminfo bundled with the plugin; the shell falls back to xterm-256color automatically if that terminfo cannot be compiled.',
     'focus-events':      'Forward focus-gained/focus-lost escape codes to apps (needed for vim/nvim auto-reload).',
     'allow-passthrough': 'Allow OSC escape sequences to pass through tmux — enables inline images, hyperlinks.',
 };
@@ -1515,9 +1518,39 @@ function av2LoadStoragePanel(panelOrBody, agentIdMaybe) {
         ]);
         body.appendChild(dl);
 
-        // Per-agent action buttons (Sync / Consolidate / Repair) intentionally
-        // omitted here — the Home Storage tab already owns those operations and
-        // duplicating them on every agent card was noise. Stats only.
+        // Show a "Persist to Flash" button when there is unsaved ZRAM data.
+        // Queues a supervisor bake so the data lands on Flash even if the
+        // agent is mounted and a consolidation can't run inline.
+        const dirtyNum = (m.dirty_mb != null) ? Number(m.dirty_mb) : 0;
+        if (dirtyNum > 0) {
+            const persistBtn = av2mkel('button', {
+                class: 'aicli-btn aicli-btn-warning',
+                style: 'margin-top:8px; width:100%; font-size:11px;',
+                type: 'button'
+            }, ['Consolidate (' + String(dirty) + ' MB unsaved)']);
+            persistBtn.addEventListener('click', function() {
+                persistBtn.disabled = true;
+                persistBtn.textContent = 'Persisting…';
+                $.ajax({
+                    url: '/plugins/unraid-aicliagents/AICliAjax.php',
+                    type: 'GET',
+                    dataType: 'json',
+                    data: { action: 'persist_agent', id: agentId, csrf_token: csrf }
+                }).done(function(res) {
+                    if (res && res.status === 'ok') {
+                        persistBtn.textContent = '✓ Queued — refreshing…';
+                        setTimeout(function() { av2LoadAgentStorage(panelOrBody, agentId); }, 3000);
+                    } else {
+                        persistBtn.disabled = false;
+                        persistBtn.textContent = '⚠ Failed — try again';
+                    }
+                }).fail(function() {
+                    persistBtn.disabled = false;
+                    persistBtn.textContent = '⚠ Failed — try again';
+                });
+            });
+            body.appendChild(persistBtn);
+        }
     }).fail(function() {
         body.textContent = '';
         body.appendChild(av2mkel('div', {class: 'av2-help'}, ['Storage stats unavailable.']));

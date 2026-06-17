@@ -30,21 +30,61 @@ require_once __DIR__ . '/services/HaltService.php';
 require_once __DIR__ . '/services/SupervisorService.php';
 require_once __DIR__ . '/services/StorageMountService.php';
 require_once __DIR__ . '/services/StorageMetricsService.php';
+require_once __DIR__ . '/services/FileStorage.php';   // Epic #1310 — the storage facade (now consumed)
 require_once __DIR__ . '/services/StorageMigrationService.php';
+require_once __DIR__ . '/services/StorageTargetService.php';   // S-11 #1355 — target picker enumeration
 require_once __DIR__ . '/services/TaskService.php';
 require_once __DIR__ . '/services/InstallerService.php';
 require_once __DIR__ . '/services/TerminalService.php';
 require_once __DIR__ . '/services/AutoLaunchService.php';
 require_once __DIR__ . '/services/UtilityService.php';
 require_once __DIR__ . '/services/NchanService.php';
+require_once __DIR__ . '/services/ActivityService.php';
 require_once __DIR__ . '/services/VersionClassifier.php';
 require_once __DIR__ . '/services/VersionCheckService.php';
 require_once __DIR__ . '/services/TmuxService.php';
 require_once __DIR__ . '/services/ArgsService.php';
 require_once __DIR__ . '/services/SecretService.php';
 require_once __DIR__ . '/services/EnvService.php';
+// R-08 (Feature #1371) — diagnostics bundle + fail-closed redaction
+require_once __DIR__ . '/services/RedactionService.php';
+require_once __DIR__ . '/services/DiagnosticsService.php';
+// R-09/R-14 (Feature #1372) — proactive health checks + status chip + cron notify
+require_once __DIR__ . '/services/HealthService.php';
+// Feature #1382 — programmatic state-invariant auditor (live-box twin of the
+// tests/lib/state-ledger.sh harness ledger). Depends on HealthService above.
+require_once __DIR__ . '/services/StorageStateAuditService.php';
+// T-11 (Feature #1360) — workspace export/import bundles
+require_once __DIR__ . '/services/WorkspaceBundleService.php';
+// Config Hub (OP #1362 / H-01 phase 1 — canonical MCP store + per-vendor projectors)
+require_once __DIR__ . '/services/hub/HubStore.php';
+require_once __DIR__ . '/services/hub/Transpiler.php';
+require_once __DIR__ . '/services/hub/VendorProjector.php';
+require_once __DIR__ . '/services/hub/JsonMcpProjector.php';
+require_once __DIR__ . '/services/hub/OpencodeStyleMcpProjector.php'; // mcp-key base (OpenCode/Kilo) — before its subclasses
+require_once __DIR__ . '/services/hub/ClaudeProjector.php';
+require_once __DIR__ . '/services/hub/GeminiProjector.php';
+require_once __DIR__ . '/services/hub/QwenProjector.php';
+require_once __DIR__ . '/services/hub/OpencodeProjector.php';
+require_once __DIR__ . '/services/hub/KilocodeProjector.php';
+require_once __DIR__ . '/services/hub/AntigravityProjector.php'; // extends GeminiProjector — after it
+require_once __DIR__ . '/services/hub/FactoryProjector.php';
+require_once __DIR__ . '/services/hub/NanocoderProjector.php';
+require_once __DIR__ . '/services/hub/CopilotProjector.php';
+require_once __DIR__ . '/services/hub/CodexProjector.php';
+require_once __DIR__ . '/services/hub/GooseProjector.php';
+// Config Hub phase 2 (OP #1363 / H-02 — instruction-file projection)
+require_once __DIR__ . '/services/hub/InstructionProjector.php';
+require_once __DIR__ . '/services/hub/KiloInstructionProjector.php'; // extends InstructionProjector
+// Config Hub phase 3 (OP #1364 / H-03 — skills/commands mirrored-tree projection)
+require_once __DIR__ . '/services/hub/TreeProjector.php';
+require_once __DIR__ . '/services/hub/GeminiCommandsProjector.php'; // extends TreeProjector
+require_once __DIR__ . '/services/hub/HubProjector.php';
+// Config Hub git layer (OP #1365 / H-04 — git-backed home config, opt-in)
+require_once __DIR__ . '/services/hub/GitHomeService.php';
 require_once __DIR__ . '/services/sources/AgentSource.php';
 require_once __DIR__ . '/services/sources/NpmSource.php';
+require_once __DIR__ . '/services/sources/UrlValidator.php';
 require_once __DIR__ . '/services/sources/GithubReleaseSource.php';
 require_once __DIR__ . '/services/sources/CurlInstallSource.php';
 require_once __DIR__ . '/services/sources/TarballSource.php';
@@ -58,6 +98,7 @@ use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\ProcessManager;
 use AICliAgents\Services\StorageMountService;
 use AICliAgents\Services\StorageMetricsService;
+use AICliAgents\Services\FileStorage;
 use AICliAgents\Services\StorageMigrationService;
 use AICliAgents\Services\InstallerService;
 use AICliAgents\Services\TerminalService;
@@ -182,7 +223,7 @@ if (!function_exists('command_exists')) {
  * Wrapper for ensuring agent storage is mounted.
  */
 function aicli_ensure_agent_mounted($agentId) {
-    return StorageMountService::ensureAgentMounted($agentId);
+    return FileStorage::ensureReady("agent/$agentId")->ok;   // Epic #1310: facade intent
 }
 
 /**
@@ -229,7 +270,7 @@ function aicli_shrink_storage($type, $dec) {
  * Wrapper for repairing agent storage.
  */
 function aicli_repair_agent_storage($id = 'default') {
-    return StorageMountService::ensureAgentMounted($id);
+    return FileStorage::ensureReady("agent/$id")->ok;   // Epic #1310: facade intent
 }
 
 /**

@@ -1,9 +1,0 @@
-Regression Guards
- [x] V 08 c1 selective cleanup excludes sqlite unconditionally
- [x] V 08 c2 append uses tempfile and defers on failure
- [x] V 08 c3 hot swap path bakes before exit
- [x] V 08 m1 detect sqlite dbs sniffs all files
- [ ] V 08 m2 marker gap after touch
- [x] V 08 m3 sqlite backup all return codes distinguished
- [x] V 08 m4 layout version sanitized in plg and cleanup
-

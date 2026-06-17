@@ -38,6 +38,12 @@ require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/EnvHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/SshKeyService.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/SshHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/ActivityHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/HubHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/GitHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/DiagnosticsHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/WorkspaceBundleService.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/BundleHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
@@ -67,6 +73,16 @@ if (isset($_GET['action'])) {
         exit;
     }
 
+    // R-06 trace correlation: adopt the client's X-Aicli-Trace header (or the
+    // `trace` query param — the React ajaxUrl() builder can't set headers), else
+    // generate a fresh 8-hex id. Format-validated by TraceContext::setId, so a
+    // hostile value can never reach a log line or a shell env prefix. Every
+    // aicli_log line below (including "Handling AJAX Request") carries [t:<id>].
+    $rawTrace = (string)($_SERVER['HTTP_X_AICLI_TRACE'] ?? ($_REQUEST['trace'] ?? ''));
+    if (!\AICliAgents\Services\TraceContext::setId($rawTrace)) {
+        \AICliAgents\Services\TraceContext::setId(\AICliAgents\Services\TraceContext::generate());
+    }
+
     try {
         // Log milestone actions at INFO, everything else at DEBUG
         $milestones = ['start', 'stop', 'restart', 'install_agent', 'uninstall_agent', 'consolidate_storage', 'persist_home', 'repair_agent_storage', 'repair_home_storage', 'save', 'wipe_storage'];
@@ -91,6 +107,16 @@ if (isset($_GET['action'])) {
         } elseif ($action === 'get_install_status') {
             ob_end_clean();
             \AICliAgents\Handlers\AgentHandler::rawInstallStatus();
+        } elseif ($action === 'diag_bundle_download') {
+            // R-08: raw zip stream (path-traversal guarded basename under the
+            // support dir — see DiagnosticsHandler::safeBundleName).
+            ob_end_clean();
+            \AICliAgents\Handlers\DiagnosticsHandler::rawBundleDownload();
+        } elseif ($action === 'workspace_export_download') {
+            // T-11: raw tar.gz stream (path-traversal guarded basename under
+            // the bundles dir — see BundleHandler::safeBundleName).
+            ob_end_clean();
+            \AICliAgents\Handlers\BundleHandler::rawBundleDownload();
         } elseif ($action === 'get_task_status') {
             // Task status file is already JSON - read and output directly.
             // SECURITY: $user gets interpolated into a filesystem path so
@@ -122,6 +148,11 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\AutoLaunchHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\EnvHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\SshHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\ActivityHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\HubHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\GitHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\DiagnosticsHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\BundleHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
             ob_end_clean();

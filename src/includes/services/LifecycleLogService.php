@@ -3,12 +3,14 @@
  * <module_context>
  *     <name>LifecycleLogService</name>
  *     <description>Persistent, durable lifecycle log for AICliAgents storage events. Survives reboots.</description>
- *     <dependencies>StoragePathResolver</dependencies>
- *     <constraints>Must NOT depend on LayerManifestService. Never calls error_log or Unraid notify on failure — silent false return only.</constraints>
+ *     <dependencies>StoragePathResolver, TraceContext</dependencies>
+ *     <constraints>Must NOT depend on LayerManifestService. Never calls error_log or Unraid notify on failure — silent false return only. TraceContext is an allowed exception to the no-deps rule: it is tiny, static and dependency-free (R-06 trace correlation) — it must never grow dependencies of its own.</constraints>
  * </module_context>
  */
 
 namespace AICliAgents\Services;
+
+require_once __DIR__ . '/TraceContext.php';
 
 class LifecycleLogService {
     public const LEVEL_INFO     = 'info';
@@ -45,6 +47,12 @@ class LifecycleLogService {
 
         // Auto-rotate before writing if over threshold
         self::rotateIfNeeded();
+
+        // R-06: merge the per-request trace id into the payload (via TraceContext
+        // directly, NOT via LogService — preserves the no-LogService constraint).
+        if (TraceContext::getId() !== null && !isset($payload['_trace'])) {
+            $payload['_trace'] = TraceContext::getId();
+        }
 
         $ts      = date('Y-m-d\TH:i:s\Z', time());
         $payJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

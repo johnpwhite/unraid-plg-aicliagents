@@ -34,6 +34,11 @@ class ConfigService {
             'enable_tab' => '1',
             'version_check_schedule' => '0 6 * * *',
             'version_check_months' => '3',
+            // R-09 (Feature #1372): plugin health check cron — empty disables.
+            'health_check_schedule' => '*/30 * * * *',
+            // T-08 follow-on (ACTIVITY_TRAY.md): per-session graceful-close poll
+            // budget in seconds. Default matches the historical hardcoded 3s.
+            'graceful_close_timeout' => '3',
             // Storage Durability Supervisor (Phase 3)
             'supervisor_enabled'                => '1',
             'supervisor_tick_seconds'           => '5',
@@ -53,11 +58,29 @@ class ConfigService {
             'dirty_threshold_critical_pct'      => '50',
             'consolidate_layer_threshold_flash' => '30',
             'consolidate_layer_threshold_array' => '5',
+            // Phase 5: homes-only consolidate policy — overlay layer ceiling.
+            // Consolidation is recommended at this value MINUS 2. Read-time clamp to
+            // [4, 40] via getConsolidateMaxLayers() (mirrors bash _consolidate_max_layers).
+            // Default + bounds measured Phase 0.2 — see PHASE5_STORAGECTL_DISPATCHER.md.
+            'consolidate_max_layers'            => '30',
             'emergency_bake_compression'        => 'lz4',
+            // S-08 (#1353, STORAGE_ASYNC_JOBS.md): total wall-clock budget for a
+            // deferred mount job's supervisor requeue-with-backoff (10→30→60 s)
+            // before it fails + notifies. Covers UD devices mounting up to ~2 min
+            // after array start.
+            'storage_target_wait_s'             => '300',
             // Boot Integrity (Phase 4b)
             'boot_integrity_strict'             => '1',
             'verify_sha256_on_boot'             => '0',
             'lifecycle_log_max_bytes'           => '1048576',
+            // R-05/R-07 (Feature #1370): debug.log rotation bound (tmpfs RAM
+            // pressure, 1 kept generation) + structured format (text | jsonl).
+            'debug_log_max_bytes'               => '5242880',
+            'debug_log_format'                  => 'text',
+            // T-12 (FIRST_RUN_WIZARD.md): empty = wizard not yet completed.
+            // Set to 'yes' by the React wizard via the `save` action on completion.
+            // No UI toggle — the wizard is deliberately one-shot.
+            'first_run_done'                       => '',
             // Bug #537: array-stop / shutdown supervisor flush budget. Default
             // 60 s. Lift to 120-300 s if you have 100+ entities or run on slow
             // USB / contended memory.
@@ -83,6 +106,30 @@ class ConfigService {
         return $merged;
     }
 
+    // Phase 5 consolidate-policy bounds (mirror bash common.sh constants).
+    const CONSOLIDATE_MAX_LAYERS_DEFAULT = 30;
+    const CONSOLIDATE_MAX_LAYERS_FLOOR   = 4;
+    const CONSOLIDATE_MAX_LAYERS_CEILING = 40;
+
+    /**
+     * Effective home overlay layer ceiling for the consolidate policy. The settings
+     * page persists the raw value; this applies the read-time clamp to [4, 40], mirroring
+     * the bash _consolidate_max_layers() helper so PHP and shell agree. Consolidation is
+     * recommended at this value minus 2.
+     * @return int Clamped layer ceiling.
+     */
+    public static function getConsolidateMaxLayers(): int {
+        $config = self::getConfig();
+        $raw = $config['consolidate_max_layers'] ?? self::CONSOLIDATE_MAX_LAYERS_DEFAULT;
+        if (!is_numeric($raw)) {
+            $raw = self::CONSOLIDATE_MAX_LAYERS_DEFAULT;
+        }
+        $val = (int)$raw;
+        if ($val < self::CONSOLIDATE_MAX_LAYERS_FLOOR)   $val = self::CONSOLIDATE_MAX_LAYERS_FLOOR;
+        if ($val > self::CONSOLIDATE_MAX_LAYERS_CEILING) $val = self::CONSOLIDATE_MAX_LAYERS_CEILING;
+        return $val;
+    }
+
     /**
      * Saves the plugin configuration.
      * @param array $newConfig The configuration array to save.
@@ -98,6 +145,7 @@ class ConfigService {
         $oldHomePath = $config['home_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents/persistence";
         $newHomePath = $newConfig['home_storage_path'] ?? $oldHomePath;
         $oldVersionSchedule = $config['version_check_schedule'] ?? '0 6 * * *';
+        $oldHealthSchedule  = $config['health_check_schedule'] ?? '*/30 * * * *';
 
         $changedKeys = [];
         foreach ($newConfig as $key => $val) {
@@ -138,6 +186,12 @@ class ConfigService {
             self::updateVersionCheckCron($newSchedule);
         }
 
+        // R-09: update cron job if health check schedule changed
+        $newHealthSchedule = $config['health_check_schedule'] ?? '';
+        if ($newHealthSchedule !== $oldHealthSchedule) {
+            self::updateHealthCheckCron($newHealthSchedule);
+        }
+
         return true;
     }
 
@@ -157,6 +211,25 @@ class ConfigService {
         }
         exec("/usr/local/sbin/update_cron 2>/dev/null");
         LogService::log("Version check cron updated: " . ($schedule ?: 'disabled'), LogService::LOG_INFO, "ConfigService");
+    }
+
+    /**
+     * R-09 (Feature #1372): updates the cron job for the plugin health check.
+     * Mirrors updateVersionCheckCron — empty schedule removes the cron file.
+     */
+    public static function updateHealthCheckCron(string $schedule): void {
+        $cronFile = '/etc/cron.d/unraid-aicliagents.health-check';
+        $script = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/healthcheck.php';
+
+        if (empty($schedule)) {
+            // Disabled — remove cron file
+            @unlink($cronFile);
+        } else {
+            $content = "# AICliAgents: plugin health check schedule\n$schedule /usr/bin/php $script &> /dev/null\n";
+            @file_put_contents($cronFile, $content);
+        }
+        exec("/usr/local/sbin/update_cron 2>/dev/null");
+        LogService::log("Health check cron updated: " . ($schedule ?: 'disabled'), LogService::LOG_INFO, "ConfigService");
     }
 
     /**
@@ -201,12 +274,58 @@ class ConfigService {
         if (empty($user)) $user = 'root';
 
         // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
-        if (!StorageMountService::ensureHomeMounted($user)) {
+        if (!FileStorage::ensureReady("home/$user")->ok) {   // Epic #1310: facade intent
             LogService::log("getUserStatePath: home mount unavailable for '$user' — reads/writes will target bare tmpfs and may be lost", LogService::LOG_WARN, "ConfigService");
         }
 
         $homeDir = "/tmp/unraid-aicliagents/work/$user/home";
-        return "$homeDir/.aicli";
+        $statePath = "$homeDir/.aicli";
+
+        // Non-root user permission fix (2026-06-07): this runs as ROOT (web/emhttpd),
+        // but the agent run-script writes .aicli/.exported_keys_* AS the session user.
+        // Whichever side creates .aicli first owns it — and when a root write here
+        // (workspaces.json, resumes, envs, autolaunch) wins, the dir is root-owned and
+        // the non-root agent gets "Permission denied" creating files in it. Make .aicli
+        // owned by the session user so BOTH root (web) and the agent (run-script) can
+        // write. No-op for root sessions (root owns everything already).
+        self::ensureStateDirOwnedBy($statePath, $user);
+
+        return $statePath;
+    }
+
+    /**
+     * Pure decision: should the session user's .aicli state dir be chowned to them?
+     * Extracted so the ownership policy is testable without real OS users / root.
+     *
+     * @param string   $user        Session user ('root' / '' => never).
+     * @param int|null $currentUid  Current owner uid of the dir (null if dir absent/unstattable).
+     * @param int|null $targetUid   The session user's uid (null if unresolvable).
+     */
+    public static function shouldChownStateDir(string $user, ?int $currentUid, ?int $targetUid): bool
+    {
+        if ($user === '' || $user === 'root') return false; // root owns everything
+        if ($targetUid === null) return false;              // can't map user -> uid
+        return $currentUid !== $targetUid;                  // chown unless already owned
+    }
+
+    /**
+     * Ensure $dir exists and is owned by $user (recursively, to fix any root-created
+     * children like workspaces.json / args/ left over from before this fix). Guarded
+     * by shouldChownStateDir() so steady-state reads do no work.
+     */
+    private static function ensureStateDirOwnedBy(string $dir, string $user): void
+    {
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+        if (!function_exists('posix_getpwnam')) return;
+        $pw = @posix_getpwnam($user);
+        $targetUid = is_array($pw) ? (int)$pw['uid'] : null;
+        $stat = @stat($dir);
+        $currentUid = is_array($stat) ? (int)$stat['uid'] : null;
+        if (!self::shouldChownStateDir($user, $currentUid, $targetUid)) return;
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        @shell_exec("chown -R " . escapeshellarg($user) . " " . escapeshellarg($dir));
     }
 
     /**

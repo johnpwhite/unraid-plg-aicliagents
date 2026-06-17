@@ -22,6 +22,10 @@ mkdir -p /tmp/unraid-aicliagents
 
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+# F6 (WP#1331): the SINGLE manifest writer (shutdown delta bake's manifest record).
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
+# S-05 (#1352): durable degraded flag (dual-write tmpfs + boot config).
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventStopping] $1" >> "$LOG"
@@ -167,7 +171,14 @@ if needs_array "$STORAGE_CLASS"; then
     run_full_stop
 
     if [ "$IS_SHUTDOWN" = false ]; then
-        touch /tmp/unraid-aicliagents/.emergency_mode
+        # S-05 (#1352): dual-write — tmpfs .emergency_mode (existing consumers)
+        # + durable state/degraded.json (survives a recovery reboot, so the boot
+        # integrity sweep knows the prior session ended degraded).
+        if declare -f degraded_set >/dev/null 2>&1; then
+            degraded_set "array_stopped_storage_on_array"
+        else
+            touch /tmp/unraid-aicliagents/.emergency_mode
+        fi
         log "Emergency mode flag set (array stopped, server still running)."
         # Notify UI: home gone, agents gone (both on array), emergency mode active
         nchan_notify false false true
@@ -221,19 +232,33 @@ else
         done
     fi
 
-    # Wait for child processes to exit after tmux kill
-    if [ "$KILLED" -gt 0 ]; then
-        sleep 2
+    # Authoritative array-cwd sweep — ALWAYS runs, independent of the tmux pass
+    # above. The tmux enumeration is best-effort and can return EMPTY at stop-time
+    # if the server is momentarily unresponsive (observed on the test server: a
+    # live claude-code session was invisible to `tmux ls`, so the kill loop saw
+    # nothing, KILLED stayed 0, and the array hung forever on "umount /mnt/user:
+    # target is busy"). The kernel blocks the unmount on /proc/*/cwd — so we evict
+    # by that EXACT signal, the same one `fuser -m /mnt/user` reports: every plugin
+    # process (cmdline references the plugin) whose cwd is on the array/pool gets
+    # SIGKILLed. Hypervisor/init are excluded belt-and-braces (the cmdline match is
+    # already plugin-scoped, so this never touches a VM). This is the guarantee;
+    # the tmux pass is just the graceful-first nicety. (WP #1301 follow-up.)
+    sleep 1
+    SWEPT=0
+    for pid in $(pgrep -f 'unraid-aicliagents' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        PID_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
+        needs_array "$(classify "$PID_CWD")" || continue
+        PID_EXE=$(readlink "/proc/$pid/exe" 2>/dev/null || echo "")
+        case "$PID_EXE" in */qemu*|*/libvirt*|*/kvm|*/systemd|*/init|/sbin/init) continue ;; esac
+        warn "  Array-cwd sweep: killing pid $pid (cwd=$PID_CWD)"
+        kill -9 "$pid" 2>/dev/null
+        SWEPT=$((SWEPT + 1))
+    done
 
-        # Final sweep: kill any orphaned aicli-shell/node that survived tmux kill
-        # Only kill processes whose CWD is on the array (check /proc/PID/cwd)
-        for pid in $(pgrep -f 'aicli-run-|aicli-shell' 2>/dev/null); do
-            PID_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
-            PID_CLASS=$(classify "$PID_CWD")
-            if needs_array "$PID_CLASS"; then
-                kill -9 "$pid" 2>/dev/null
-            fi
-        done
+    # Wait for child processes to exit after tmux kill
+    if [ "$KILLED" -gt 0 ] || [ "$SWEPT" -gt 0 ]; then
+        sleep 2
 
         # Persist home to Flash via atomic writer (finding I/E/F closed).
         # Bug #538: Source atomic_write_layer.sh here — distinguish "script
@@ -264,15 +289,28 @@ else
                 DELTA_NAME=$(atomic_write_layer "home" "$user" "$HOME_PERSIST" "$upper_dir" "delta" 2>/dev/null)
                 if [ -n "$DELTA_NAME" ]; then
                     log "  Saved $DELTA_NAME for $user."
+                    # Follow-on 3: record the manifest entry for the shutdown delta
+                    # IMMEDIATELY (mirror op_bake Step 7a) so the layer is TRACKED, not
+                    # untracked-until-reconcile. This is the LEAN variant — bake +
+                    # manifest record ONLY; it deliberately does NOT run op_bake's
+                    # refresh/reclaim (wrong under the shutdown time budget). addLayer is
+                    # idempotent + upserts by filename, so the next boot/reconcile sweep
+                    # re-recording the same layer is harmless.
+                    # F6 (WP#1331): the SINGLE manifest writer; lifecycle event gated on success.
+                    if manifest_record_layer "home" "$user" "$HOME_PERSIST" "$DELTA_NAME"; then
+                        lifecycle_log "info" "event_stopping" "shutdown_manifest_recorded" "{\"user\":\"$user\",\"sqsh\":\"$DELTA_NAME\"}" 2>/dev/null || true
+                    else
+                        lifecycle_log "warn" "event_stopping" "shutdown_manifest_record_failed" "{\"user\":\"$user\",\"sqsh\":\"$DELTA_NAME\"}" 2>/dev/null || true
+                    fi
                 else
                     warn "  Home delta bake failed for $user."
                 fi
             done
         fi
 
-        log "Selectively stopped $KILLED session(s)."
+        log "Selectively stopped $KILLED tmux session(s); swept $SWEPT array-cwd process(es)."
     else
-        log "No sessions have array/pool workspace paths. Nothing to do."
+        log "No sessions or processes with array/pool workspace paths. Nothing to do."
     fi
 fi
 

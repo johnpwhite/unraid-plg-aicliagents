@@ -1,8 +1,90 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.05.24.03" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.06.17.05" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.06.17.05
+
+**Config Hub — manage every agent's setup from one place (new)**
+
+- **Feat: Central MCP server management.** Define a Model Context Protocol server once, tick which agents should have it, and the plugin writes each agent's native config in the correct format — Claude, Gemini, Qwen, Codex, OpenCode, Kilo, GitHub Copilot, Factory, Goose, and Antigravity, across JSON, TOML, YAML, and each vendor's own MCP grammar. Edits you make by hand in an agent's own config are detected as drift and never silently overwritten.
+- **Feat: Shared global instructions.** Write one instruction document and project it into every agent's instruction file (CLAUDE.md, GEMINI.md, QWEN.md, AGENTS.md, Kilo rules, Goose hints, and more) inside a managed block, so your own content in those files is left untouched. Applying shows an Unraid notification of exactly which agents were added, updated, or removed.
+- **Feat: Skills &amp; commands library.** Keep your agent skills and slash commands in one place and project them into every agent that supports them.
+- **Feat: Optional git-backed config history.** Version your entire agent configuration in a git repo — local, or pushed to your own http or https remote. Secrets stay out of git automatically: OAuth tokens and the secrets vault are never tracked, and any secret values inside an agent's MCP config are reduced to placeholders in the commit while your working files keep the real values. Your plugin settings and workspace list are versioned too, with a one-click confirmed restore. The gigabytes of agent home data stay on flash where they belong.
+
+**Terminal &amp; copy-paste**
+
+- **Feat: First-class copy-paste.** Copying inside any agent's terminal now reaches your clipboard automatically, with a Paste button and a per-session Mouse toggle in the terminal bar. Shift+drag always selects natively.
+- **Feat: Per-agent terminal profiles.** Claude Code's Shift+Enter, escape timing, and extended keys are configured automatically — no hand-tuned tmux settings per agent.
+- **Feat: First-run wizard.** Storage choice in plain language, a copy-paste primer, and a per-agent sign-in checklist the first time you open the plugin.
+
+**Storage**
+
+- **Feat: Storage target picker.** Choose where agent data lives from a ranked list of real candidates — appdata pool (recommended), other pools, Unassigned Devices, or the array — with free space and warnings, instead of a raw path box. Unraid 7.3 Internal Boot is detected and treated as durable storage.
+- **Feat: Unassigned Devices support**, including disks that mount after boot (the plugin waits and retries rather than failing).
+- **Feat: Background mounts.** Opening a workspace no longer freezes the browser while storage mounts; progress streams into the activity tray and the terminal opens when ready.
+- **Feat: One-click "Graduate" migration.** When your data is on a durable disk, move it off the flash-protection layering engine onto plain storage — faster, with crash-safe move-then-delete and a 14-day rollback copy.
+- **Fix: Storage reliability.** Degraded-storage state now survives reboots, stale defer markers self-clear, manifest reads are safe against torn writes, and FAT32's 4 GiB file-size limit is enforced before writing rather than after.
+
+**Visibility &amp; support**
+
+- **Feat: Activity tray.** Installs, upgrades, storage operations, and session starts report step-by-step progress in a non-blocking tray on every page, with stall detection and retry.
+- **Feat: Health indicator.** A live green/amber/red chip in the header runs quick self-checks (supervisor, manifest, mounts, disk space, boot integrity) with one-time Unraid notifications on trouble and an optional scheduled check.
+- **Feat: Support bundle.** One click builds a redacted diagnostics zip — secret values are scrubbed and the build refuses to ship if any survive — plus copy-ready forum text, a prefilled GitHub issue link, and an opt-in known-issues checker.
+- **Feat: Workspace export/import.** Bundle a workspace's settings (secrets excluded by default) and import it onto another path or another server.
+- **Improve: Richer diagnostics.** A trace id follows each action from the browser through to the storage scripts, the Debug Console gained context/level/trace filters, and the debug log now rotates instead of growing without bound.
+
+## 2026.06.09.01
+- **Fix: the "Storage Attention Needed" warning is now much more accurate.** In some cases it appeared on a workspace whose data was completely intact, and once shown it could linger even after the problem had already cleared. The plugin now confirms a workspace's saved data is genuinely incomplete before warning, and clears the warning automatically as soon as the workspace is healthy again — while still reliably detecting and flagging genuine loss of your most recent work.
+
+## 2026.06.07.02
+- **Fix: closing a workspace now shuts the agent down cleanly instead of briefly relaunching it.** When you closed a workspace whose agent had just started (for example a fresh Claude Code session), the agent could be relaunched for a few seconds before the plugin force-closed it. Closing is now clean and immediate, with no flicker of the session coming back.
+
+## 2026.06.07.01
+- **Fix: running agents as a non-root user now works.** When the plugin is configured to run agents as a normal (non-root) user, starting a session failed with a "Permission denied" error because part of that user's home folder was created owned by root. The plugin now makes sure the session's own user owns its state folder, so non-root sessions start cleanly.
+
+## 2026.06.06.01
+- **Fix: terminals no longer get stuck in a reconnect loop that slowly bogs the server down.** When a workspace terminal's connection dropped and re-established (for example after a browser tab was left in the background), each reconnection left the previous one behind. Those orphaned connections piled up, multiplying the terminal's drawing work and steadily driving up CPU. Each reconnection now cleanly replaces the previous one, so exactly one connection stays live per session.
+
+## 2026.06.05.02
+- **Fix: the plugin's background storage service no longer repeatedly restarts itself after an upgrade.** In a specific timing window during a plugin upgrade the service could lose track of its own status and get relaunched over and over (more noticeable with workspaces open), wasting CPU. It now re-confirms its own status each cycle so a single instance stays running.
+
+## 2026.06.05.01
+- **Fix: agents now reliably resume your last conversation after an upgrade — for every agent type.** Previously a workspace could reopen to a blank session after an agent upgrade (most visible with Claude Code). Resume now works across every agent, not just some.
+- **Fix: stopping the array is now reliable even when the running-session list is momentarily unreadable.** The earlier fix registered the array-stop handler, but the array could still hang if the list of open sessions couldn't be read at that instant. The plugin now releases the array using the same low-level signal the kernel itself uses, so a lingering agent process can no longer hold "user shares" open and block the stop.
+
+## 2026.06.02.10
+- **Fix: Stopping the array now reliably closes running agent sessions instead of hanging.** The handler that shuts agents down before the array unmounts was never actually being triggered by Unraid, so an array stop could stall indefinitely on "user share(s) still busy" while agent sessions held the share open. The handler is now correctly registered and fires on every array stop and shutdown.
+- **Fix: The drawer's SSH connect button now works over a plain-HTTP connection.** Clicking the key/clipboard tab did nothing when the Unraid GUI is accessed over HTTP. It now opens a panel with the ready-to-use SSH command. Where the browser allows it the command is copied automatically; on an insecure (HTTP) connection — where browsers block automatic copy — the panel clearly says so and lets you click to select the command, with a hint showing the right shortcut for your platform (⌘C on Mac, Ctrl+C elsewhere).
+- **Feat: Manually persist an agent's in-memory storage from the Resources tab.** When an agent has unsaved changes held in RAM, its Resources panel now shows a Consolidate button reporting how much is unsaved, so you can flush it to disk on demand rather than waiting for the next scheduled save.
+
+## 2026.06.02.04
+- **Fix: Upgrading multiple agents at the same time could silently leave one agent's new installation only in RAM, with no Flash backup.** If a second upgrade started while another was still running, it could fail with "Install Failed" and leave the newly-installed agent version unprotected — a server reboot would lose it entirely. The install sequence now always writes a Flash backup even when the full layer compaction step has to wait, so the data is safe regardless of timing.
+
+## 2026.06.02.02
+- **Fix: Stopping the Unraid array now correctly waits for running agent sessions to close.** The array-stop sequence now shuts down active agents (Claude Code, Antigravity CLI, Gemini CLI, etc.) before allowing `/mnt/user` to unmount, so the array stop completes cleanly instead of retrying indefinitely.
+- **Fix: Session settings (tmux, workspace) save reliably after the plugin flushes RAM to disk.** A storage maintenance step was removing a directory entry from RAM that subsequent writes depended on, causing a "Save failed" error in the Manage Session overlay.
+- **Fix: Agents installed before a reboot now show their correct installed status.** The installed-agent detector wasn't recognising the current storage layer naming format, causing recently-installed agents to appear as "not installed" after a restart.
+
+## 2026.06.01.01
+- **Improve: lighter plugin upgrades.** A routine upgrade no longer performs a redundant save-to-disk of in-memory data — that data is already protected and is written to disk on the normal schedule — so an upgrade does a little less flash I/O and finishes cleaner.
+
+## 2026.05.31.08
+- **Improve (data durability): stronger guarantees that your conversation history is safe before RAM is reclaimed.** Building on the v2026.05.31.07 fix, the plugin now reclaims a file from RAM only once it has been *proven* written to a storage layer — so a save that didn't capture a file can never lead to that file being discarded — and storage consolidation now refuses to run from an incomplete view of your saved layers (which could otherwise drop data). Together these close the conversation-loss issue at its root, for every agent, rather than by listing known file locations.
+
+## 2026.05.31.07
+- **Fix (data loss — important): agent conversation history could be lost during storage maintenance or a plugin upgrade.** The routine that reclaims RAM after saving to Flash could, in certain timing windows, delete an agent's conversation files (Claude, Antigravity, and others) from RAM before they were durably written to Flash — and an upgrade performed while a session was active could proceed without first flushing recent conversations. Both are now fixed: conversation/chat-history files are never reclaimed from RAM, and an upgrade always flushes your unsaved work to Flash first. **Already-lost history is not recoverable by upgrading.** If you are on v2026.05.31.06, please update to this release as soon as possible.
+
+## 2026.05.31.06
+- **Feat: Automatic memory reclaim for long-lived workspaces.** When a workspace stays open long enough to build up unsaved changes in RAM and the plugin needs that memory back (storage pressure, or many pending storage layers), it now warns you and counts down 5 minutes, then gracefully closes the session — saving your place so you can reopen and resume exactly where you left off.
+- **Fix: Agent commands no longer intermittently fail with "No such file or directory" during a live session.** While the plugin saved a workspace's RAM to disk, a refresh could briefly remount your home directory out from under a running agent (for example Claude Code creating a session folder). The save no longer disturbs a connected session.
+- **Fix: Antigravity CLI now reopens to your last conversation** instead of a blank one — the plugin reads agy's own conversation index when you reopen a workspace.
+- **Fix: Tools an agent runs for you — git, editors, pagers — no longer hang** waiting for input that never arrives; they now run non-interactively and complete.
+- **Fix: Interactive prompts inside a full-screen agent render cleanly.** A prompt such as an SSH password requested by a tool running inside a TUI agent no longer "staircases" diagonally down the screen.
+- **Fix: The copied SSH connect command now actually attaches.** The one-click "copy SSH command" produced a command that reported "no sessions" because it didn't point at the plugin's private tmux socket; it now connects to your live session.
+- **Improve: The plugin UI now follows your Unraid light or dark theme** — panels, bars, and dialogs adapt instead of always rendering dark. (The debug/log console stays dark on purpose — it's a terminal.)
+- **Improve: "Keep a copy on upgrade" now defaults to off** — a backup is a deliberate opt-in — and the option gently pulses while unticked so it's easy to spot.
+
 ## 2026.05.24.03
 - **Fix: Antigravity CLI sessions displayed corrupted terminal output on first launch.** Go's internal log messages were being written directly to the terminal, overlapping with the agent's own display. The log directory the agent uses to redirect those messages away from the screen now exists before the agent starts.
 - **Fix: Agent could fail on first launch with an authentication error after a full sync to persistent storage** (complete fix — v2026.05.24.02 contained the right logic but an unrelated packaging issue meant the fix was not installed on upgrade; this release ensures it lands correctly).
@@ -35,12 +117,12 @@
 - **Improve: Qwen Code's DashScope API key now appears as a labelled password field on the agent's Store card** — previously users had to discover the `DASHSCOPE_API_KEY` env variable name themselves from the qwen-code README. Alternative providers (Ollama, vLLM, …) can still be configured via the general env panel.
 
 ## 2026.05.18.05
-- Fix (data loss): Storage consolidation no longer deletes the `.gemini/tmp/` directory during its pre-bake prune. That path holds gemini-cli's per-project session chat logs (`.gemini/tmp/<projectId>/chats/session-*.jsonl`) — durable user state, not cache. The previous behaviour was silently wiping chat history on every consolidate, and crashing the next gemini launch with an ENOENT on the session log. If you've used gemini-cli with this plugin before this release, past chat history is unfortunately not recoverable; from this release forward, it persists. (Verified on the test box: a synthetic chat log survives a full consolidate with content intact.)
+- Fix (data loss): Storage consolidation no longer deletes the `.gemini/tmp/` directory during its pre-bake prune. That path holds gemini-cli's per-project session chat logs (`.gemini/tmp/&lt;projectId&gt;/chats/session-*.jsonl`) — durable user state, not cache. The previous behaviour was silently wiping chat history on every consolidate, and crashing the next gemini launch with an ENOENT on the session log. If you've used gemini-cli with this plugin before this release, past chat history is unfortunately not recoverable; from this release forward, it persists. (Verified on the test box: a synthetic chat log survives a full consolidate with content intact.)
 - Fix: Workspace session resume now works correctly for Kilo Code, Pi Coder, GitHub Copilot, and Goose. The resume flags wired into the "attach to existing session" command had drifted from each agent's current upstream CLI:
-  - Kilo Code: `resume_latest` now passes `--continue` (previously plain `{binary} {args}`, which started a new session). Per-ID resume uses `--session <id>` (canonical form of `-s`).
-  - Pi Coder: `resume_latest` now uses `--continue` (previously `--resume`, which opens an interactive picker that hangs in the SSH-attach flow with no TTY input). Per-ID resume uses `--session <id>`.
-  - GitHub Copilot CLI: `resume_latest` now uses `--continue` (previously plain `{binary} {args}`). Per-ID resume keeps `--resume=<id>`.
-  - Goose: per-ID resume now uses `session --resume -n <id>` (previously `session --name <id>`, which CREATED a new session named `<id>` instead of resuming an existing one).
+  - Kilo Code: `resume_latest` now passes `--continue` (previously plain `{binary} {args}`, which started a new session). Per-ID resume uses `--session &lt;id&gt;` (canonical form of `-s`).
+  - Pi Coder: `resume_latest` now uses `--continue` (previously `--resume`, which opens an interactive picker that hangs in the SSH-attach flow with no TTY input). Per-ID resume uses `--session &lt;id&gt;`.
+  - GitHub Copilot CLI: `resume_latest` now uses `--continue` (previously plain `{binary} {args}`). Per-ID resume keeps `--resume=&lt;id&gt;`.
+  - Goose: per-ID resume now uses `session --resume -n &lt;id&gt;` (previously `session --name &lt;id&gt;`, which CREATED a new session named `&lt;id&gt;` instead of resuming an existing one).
 - Fix: OpenCode is detected as installed reliably. The plugin's installed-state check was looking at `bin/opencode`, but the npm package ships `bin/opencode.exe` (a cross-platform naming convention also used by Claude Code — the postinstall replaces the file with the platform-matched binary). The agent worked anyway via the resolved `node_modules/.bin/opencode` symlink, but the inconsistency could surface as "INSTALL" reappearing on the Store card under some refresh paths.
 
 ## 2026.05.18.02
@@ -71,7 +153,7 @@
 - Improve: After a plugin install or upgrade, the agent Store cards now show each uninstalled agent's available version straight away — a background version-cache refresh runs on install, so you no longer have to press "Check for Updates" first.
 
 ## 2026.05.12.01
-- Feat: Environment & secrets management. Every agent's Store card and every workspace now has an "Environment" panel covering general env vars AND API keys/secrets, with full add / edit / delete for both. Secrets are masked and stored separately under tightened (0600) permissions; general vars are managed more loosely. Per-workspace values override the per-agent defaults, and values apply automatically to newly opened terminal sessions ("hot-apply") with no workspace rebuild. Agents that ship default env vars seed them on install as an editable starting set. Replaces the old hardcoded-only API-key vault (the Config-tab "Secrets Vault" card is removed); clearing a value via the UI now actually clears it.
+- Feat: Environment &amp; secrets management. Every agent's Store card and every workspace now has an "Environment" panel covering general env vars AND API keys/secrets, with full add / edit / delete for both. Secrets are masked and stored separately under tightened (0600) permissions; general vars are managed more loosely. Per-workspace values override the per-agent defaults, and values apply automatically to newly opened terminal sessions ("hot-apply") with no workspace rebuild. Agents that ship default env vars seed them on install as an editable starting set. Replaces the old hardcoded-only API-key vault (the Config-tab "Secrets Vault" card is removed); clearing a value via the UI now actually clears it.
 - Feat: Per-agent and per-workspace CLI arguments. A new "Args" panel on each Store card sets default extra flags for that agent (e.g. --max-turns 5), and a workspace can override them in its drawer. Arguments are validated against shell metacharacters. Changing args while a session is open offers "Apply now" — the agent is reloaded in place (Ctrl-C + relaunch) with the new flags, no destroy/recreate.
 - Feat: Auto-launch workspaces. A per-workspace toggle in the Terminal panel marks a workspace to start its session automatically — on page load, and after an agent install or upgrade — so your usual workspaces come back without clicking through.
 - Feat: Agent Store cards redesigned. Each agent is now one card with five progressive-disclosure panels: Channel, Environment/Secrets, Runtime (RAM, storage stats), Terminal (tmux), and Storage. tmux settings have four tiers of precedence — built-in then agent default then workspace override then a .conf escape hatch — with only divergent keys persisted. Per-agent secret schemas can carry multiple fields (Goose, for instance, registers Provider / Model / provider keys).
@@ -121,9 +203,9 @@
 
 ## 2026.04.04.05
 - Improve: Storage Intelligence - Implemented advanced Btrfs management including tail-block evacuation for reliable image shrinking, intelligent expansion guards to protect Flash drive headroom, and automated self-healing for corrupted loopback images.
-- Improve: UI & UX Refinement - Redesigned the Agent Store and configuration drawers with a high-density layout, improved spacing, and automated drawer management for a smoother workspace transition.
+- Improve: UI &amp; UX Refinement - Redesigned the Agent Store and configuration drawers with a high-density layout, improved spacing, and automated drawer management for a smoother workspace transition.
 - Improve: Terminal Resilience - Significantly hardened terminal session stability and connection reliability through improved user isolation and robust environment variable propagation.
-- Improve: Diagnostics & Transparency - Enhanced the storage dashboard with "Truthful Capacity Reporting" showing both logical data size and physical disk footprint, along with better error visibility for system maintenance tasks.
+- Improve: Diagnostics &amp; Transparency - Enhanced the storage dashboard with "Truthful Capacity Reporting" showing both logical data size and physical disk footprint, along with better error visibility for system maintenance tasks.
 - Fix: Storage Permissions - Resolved edge cases where agent storage could become write-protected or inaccessible due to kernel-level loopback locks.
 
 ## 2026.03.28.05
@@ -145,7 +227,7 @@
 ## 2026.03.27.18
 - Feat: Added Support for OpenCode, Claude Code, and NanoCoder agents.
 - Feat: Global Shell Integration providing native 'claude', 'gemini', and 'opencode' aliases in all SSH and local terminal sessions.
-- Feat: Integrated "User & Architecture Guide" links within the Settings page and Terminal Drawer for instant help access.
+- Feat: Integrated "User &amp; Architecture Guide" links within the Settings page and Terminal Drawer for instant help access.
 - Improve: Terminal Stability with optimized shell environment propagation and automated SQLite self-healing for agent history.
 - Fix: Reinforced recursive permission enforcement for agent binaries to prevent 'Permission denied' / EACCES errors in RAM.
 
@@ -160,7 +242,7 @@
 - Feat: Hybrid Home Persistence - Implemented a decoupled background sync daemon that asynchronously mirrors the high-performance RAM home directory to the Flash drive.
 - Feat: Multi-User Migration - Seamlessly migrates AI agent data when switching the active Unraid user, ensuring chat history is preserved.
 - Improve: Premium UI Theming - Unified orange button theme, consistent card layouts, and professional blue-sidebar help styling throughout the manager.
-- Improve: Performance & Stability - Optimized terminal initialization to eliminate 502 Bad Gateway errors and implemented atomic locking for background sync operations.
+- Improve: Performance &amp; Stability - Optimized terminal initialization to eliminate 502 Bad Gateway errors and implemented atomic locking for background sync operations.
 - Improve: Clipboard Synchronization - Enabled OSC 52 support for dual-direction clipboard synchronization between the AI terminal and your browser.
 - Improve: TrueColor Support - Full 24-bit TrueColor environment propagation across the entire terminal stack for better syntax highlighting.
 - Fix: Terminal Rendering - Resolved scrolling and corruption issues in terminal sessions, particularly for limited-user contexts.
@@ -176,6 +258,7 @@
 - Improve: Boot Resiliency - Implemented persistent USB source caching for instant UI availability on reboot.
 - Improve: Hardware Optimization - Moved all runtime logs to RAM (/tmp) to minimize USB flash drive wear.
 </CHANGES>
+
 
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
 <FILE Name="/tmp/aicli-clean.sh">
@@ -221,7 +304,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.05.24.03"
+export VERSION="2026.06.17.05"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -261,12 +344,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.05.24.03" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.06.17.05" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.05.24.03" | sort -V | tail -1)
-        if [ "$_newest" = "2026.05.24.03" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.06.17.05" | sort -V | tail -1)
+        if [ "$_newest" = "2026.06.17.05" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.05.24.03)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.06.17.05)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done
@@ -584,6 +667,24 @@ else
     fi
     _fb_safe_kill 'node .*(unraid-aicliagents|/\.aicli/)'
 fi
+
+# 2.B STORAGE TEARDOWN (MANDATORY before any rm -rf)
+# Historical bug (uninstall log 2026-05): the remove path went straight to
+# recursively deleting the runtime dir while SquashFS loop mounts, agent/home
+# OverlayFS mounts, and the ZRAM upper were still mounted. rm then failed with
+# "Device or resource busy" on every mountpoint, orphaning the mounts and loop
+# devices. The correct teardown already lives in stop-plugin.sh (array-stop
+# path) but the PLG remove block never called it. We now unmount everything
+# under the plugin roots BEFORE removing anything. Generic + deepest-first +
+# lazy so it is robust to layout changes and to mounts held open a moment ago.
+log_status "Unmounting storage layers before cleanup..."
+for mnt in $(awk '{print $2}' /proc/mounts 2&gt;/dev/null | grep -E '^/tmp/unraid-aicliagents(/|$)|^'"$EMHTTP_DEST"'/agents(/|$)' | sort -r); do
+    umount -l "$mnt" 2&gt;/dev/null || true
+done
+# Detach any loop devices still backing our SquashFS layer files.
+for loop in $(losetup -a 2&gt;/dev/null | grep 'unraid-aicliagents' | cut -d: -f1); do
+    losetup -d "$loop" 2&gt;/dev/null || true
+done
 
 # MANDATORY: Clear stale installation states and runtime logs
 rm -rf /tmp/unraid-aicliagents

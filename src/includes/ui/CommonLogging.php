@@ -1,13 +1,46 @@
 <?php
 /**
  * <module_context>
- * Description: Shared JavaScript logging helper for AICliAgents.
+ * Description: Shared JavaScript logging + AJAX helpers for AICliAgents.
  * Dependencies: AICliAjax.php?action=log.
- * Constraints: Atomic UI fragment (< 50 lines).
+ * Constraints: Atomic UI fragment (< 110 lines). aicliAjax() is the canonical
+ * jQuery AJAX wrapper (R-06): it stamps every call with an X-Aicli-Trace id so
+ * server/shell log lines are grep-joinable per request.
  * </module_context>
  */
 ?>
 <script>
+// R-06 trace correlation: 4-hex per-page-load prefix + 4-hex per-call suffix
+// = an 8-char [a-z0-9] id the server adopts verbatim (validated server-side).
+// The shared prefix groups all calls from one page visit; the suffix separates
+// individual requests.
+window._aicliTracePrefix = window._aicliTracePrefix ||
+    ('0000' + Math.floor(Math.random() * 0xffff).toString(16)).slice(-4);
+function aicliTraceId() {
+    return window._aicliTracePrefix +
+        ('0000' + Math.floor(Math.random() * 0xffff).toString(16)).slice(-4);
+}
+
+/**
+ * Canonical AJAX helper (R-06): GET to AICliAjax.php with the csrf token and a
+ * fresh X-Aicli-Trace header. Returns the jqXHR (use .done/.fail), so existing
+ * `$.getJSON(url, cb)` call sites convert as `aicliAjax(action, params, cb)`.
+ * @param {string} action  AJAX action name.
+ * @param {Object} [params] Extra query params (values URL-encoded here).
+ * @param {Function} [done] Optional success callback (parsed JSON).
+ */
+function aicliAjax(action, params, done) {
+    const token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+    const qs = $.param(Object.assign({ action: action, csrf_token: token }, params || {}));
+    const xhr = $.ajax({
+        url: '/plugins/unraid-aicliagents/AICliAjax.php?' + qs,
+        dataType: 'json',
+        headers: { 'X-Aicli-Trace': aicliTraceId() }
+    });
+    if (done) xhr.done(done);
+    return xhr;
+}
+
 /**
  * Sends a log message from the client to the server debug.log.
  * @param {string} msg The message to log.
@@ -16,11 +49,16 @@
  */
 function aicli_log_to_server(msg, level = 2, context = "Frontend") {
     const token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
-    $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=log&csrf_token=' + token, {
-        message: msg,
-        level: level,
-        context: context,
-        csrf_token: token
+    $.ajax({
+        url: '/plugins/unraid-aicliagents/AICliAjax.php?action=log&csrf_token=' + token,
+        method: 'POST',
+        headers: { 'X-Aicli-Trace': aicliTraceId() },
+        data: {
+            message: msg,
+            level: level,
+            context: context,
+            csrf_token: token
+        }
     }).fail(function() {
         console.error("[AICliAgents] Failed to send log to server:", msg);
     });

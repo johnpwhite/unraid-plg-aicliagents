@@ -19,6 +19,8 @@ export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
 
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
 source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
+# S-05 (#1352): durable degraded flag (dual-write tmpfs + boot config).
+source "$EMHTTP_DEST/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
 
 log() {
     printf '[%s] [INFO] [EventStoppingArray] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"
@@ -101,7 +103,13 @@ if needs_array "$STORAGE_CLASS"; then
     fi
 
     nchan_notify false false true
-    touch /tmp/unraid-aicliagents/.emergency_mode
+    # S-05 (#1352): dual-write — tmpfs .emergency_mode (existing consumers) +
+    # durable state/degraded.json (survives a recovery reboot).
+    if declare -f degraded_set >/dev/null 2>&1; then
+        degraded_set "array_stopped_storage_on_array"
+    else
+        touch /tmp/unraid-aicliagents/.emergency_mode
+    fi
     log "Emergency mode flag set (array stopped, plugin storage was on array)."
 
 else
@@ -159,10 +167,30 @@ else
         done
     fi
 
-    if [ "$KILLED" -gt 0 ]; then
-        log "Evicted $KILLED session(s) with array/pool workspace paths."
+    # Authoritative array-cwd sweep — ALWAYS runs, independent of the tmux pass.
+    # tmux enumeration can return empty at stop-time (server momentarily
+    # unresponsive — seen on the test server: a live claude session invisible to
+    # `tmux ls`, array hung on umount-busy). The kernel blocks the unmount on
+    # /proc/*/cwd, so evict by that exact signal: any plugin process (cmdline
+    # references the plugin) with cwd on the array/pool gets SIGKILLed.
+    # Hypervisor/init excluded belt-and-braces. (WP #1301 follow-up.)
+    sleep 1
+    SWEPT=0
+    for pid in $(pgrep -f 'unraid-aicliagents' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        PID_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
+        needs_array "$(classify "$PID_CWD")" || continue
+        PID_EXE=$(readlink "/proc/$pid/exe" 2>/dev/null || echo "")
+        case "$PID_EXE" in */qemu*|*/libvirt*|*/kvm|*/systemd|*/init|/sbin/init) continue ;; esac
+        warn "  Array-cwd sweep: killing pid $pid (cwd=$PID_CWD)"
+        kill -9 "$pid" 2>/dev/null
+        SWEPT=$((SWEPT + 1))
+    done
+
+    if [ "$KILLED" -gt 0 ] || [ "$SWEPT" -gt 0 ]; then
+        log "Evicted $KILLED tmux session(s); swept $SWEPT array-cwd process(es)."
     else
-        log "No sessions with array/pool workspace paths. Nothing to evict."
+        log "No sessions or processes with array/pool workspace paths. Nothing to evict."
     fi
 
     nchan_notify true true false

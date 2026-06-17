@@ -34,7 +34,7 @@ class InstallerService {
         
         // 1. D-321: Ensure storage is mounted before install so changes go to ZRAM upperdir
         // If already mounted, this is a no-op. If not, it sets up the OverlayFS stack.
-        if (!StorageMountService::ensureAgentMounted($agentId)) {
+        if (!FileStorage::ensureReady("agent/$agentId")->ok) {   // Epic #1310: facade intent
             LogService::log("Failed to mount storage stack for $agentId", LogService::LOG_ERROR, "InstallerService");
             setInstallStatus("Storage error", 0, $agentId, "Mount failure");
             return ['status' => 'error', 'message' => 'Could not mount agent storage'];
@@ -111,11 +111,16 @@ class InstallerService {
         // Bug #512: previously a sync StorageMigrationService::consolidateEntity
         // call ran here (D-332 phase 6), redundant with the post-bake trigger
         // and a source of install-time mount races.
-        $res = StorageMountService::commitChanges('agent', $agentId);
+        $res = FileStorage::persist("agent/$agentId")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
         if ($res === 1) {
             LogService::log("Installer: Critical error during persistence bake for $agentId.", LogService::LOG_ERROR, "InstallerService");
             setInstallStatus("Install Failed (Bake Error)", 0, $agentId);
             return ['status' => 'error', 'message' => 'Persistence bake failed'];
+        }
+        if ($res === 2) {
+            // Pre-install layer compaction was busy — not fatal. A delta bake preserved the
+            // data to Flash; the next install will compact all layers back to one.
+            LogService::log("Installer: Layer compaction busy for $agentId — install proceeded with delta bake fallback.", LogService::LOG_WARN, "InstallerService");
         }
 
         setInstallStatus("Installation complete", 100, $agentId);
@@ -302,7 +307,7 @@ class InstallerService {
         // active_count == 0` and creates a total_loss halt for an agent the
         // user just deliberately uninstalled — surfacing a scary "Storage
         // Unavailable / drive may be disconnected" overlay for a ghost.
-        @\AICliAgents\Services\LayerManifestService::removeEntity("agent/$agentId");
+        @\AICliAgents\Services\FileStorage::dropManifestEntry("agent/$agentId");   // Epic #1310 facade intent
 
         // 10. Clear any pending halt for the agent. If uninstall is happening
         // BECAUSE the agent was halted, the halt sentinel survives the
@@ -442,6 +447,10 @@ class InstallerService {
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_version_backed_up',
             ['agent' => $agentId, 'version' => $version, 'dir' => $backupDir, 'bytes' => $bytes]);
 
+        // WP #964: enforce the retention cap NOW that a new version is retained, so the
+        // aicli-rollback tree can't grow unbounded on Flash across many upgrades.
+        self::pruneRetainedBackups($agentId, $destPath, self::rollbackRetainMax());
+
         return ['status' => 'ok', 'dir' => $backupDir, 'version' => $version, 'layers' => $copied, 'bytes' => $bytes];
     }
 
@@ -488,6 +497,61 @@ class InstallerService {
             $deduped[] = $entry;
         }
         return $deduped;
+    }
+
+    /** Configured rollback retention cap — how many DISTINCT versions to keep per
+     *  agent. Default 2 (the previous + one older); clamped to [1, 10]. WP #964. */
+    public static function rollbackRetainMax(): int {
+        $raw = (int)(ConfigService::getConfig()['rollback_retain_max'] ?? 2);
+        if ($raw < 1)  $raw = 1;
+        if ($raw > 10) $raw = 10;
+        return $raw;
+    }
+
+    /**
+     * WP #964: enforce the rollback retention cap. Keeps only the newest $keep
+     * DISTINCT versions under <dest>/aicli-rollback/<agent>, deleting older versions
+     * AND any same-version duplicate dirs — so retained backups can't grow unbounded
+     * on Flash (an agent layer is ~100 MB). The surviving set is exactly what the
+     * picker / listRetainedBackups show. Returns the directories pruned.
+     */
+    public static function pruneRetainedBackups(string $agentId, string $destPath, int $keep): array {
+        if (empty($agentId) || $destPath === '') return [];
+        if ($keep < 1) $keep = 1;
+        $base = rtrim($destPath, '/') . "/aicli-rollback/$agentId";
+        if (!is_dir($base)) return [];
+
+        // (version, created_at, dir), newest-first — same ordering as listRetainedBackups.
+        $entries = [];
+        foreach (glob("$base/*/meta.json") ?: [] as $metaFile) {
+            $meta = json_decode((string)@file_get_contents($metaFile), true);
+            if (!is_array($meta) || empty($meta['version'])) continue;
+            $entries[] = [
+                'version'    => (string)$meta['version'],
+                'created_at' => (string)($meta['created_at'] ?? ''),
+                'dir'        => dirname($metaFile),
+            ];
+        }
+        usort($entries, fn($a, $b) => strcmp($b['created_at'], $a['created_at']));
+
+        $keptVersions = [];
+        $pruned = [];
+        foreach ($entries as $e) {
+            $known = isset($keptVersions[$e['version']]);
+            if (!$known && count($keptVersions) < $keep) {
+                $keptVersions[$e['version']] = true; // newest of a new version, within cap → keep
+                continue;
+            }
+            // an older duplicate of a kept version, or a version beyond the cap → prune
+            self::rmdirContents($e['dir']);
+            @rmdir($e['dir']);
+            $pruned[] = $e['dir'];
+        }
+        if (!empty($pruned)) {
+            LogService::log("Pruned " . count($pruned) . " retained backup(s) for $agentId (cap=$keep): "
+                . implode(', ', array_map('basename', $pruned)), LogService::LOG_INFO, "InstallerService");
+        }
+        return $pruned;
     }
 
     /** PHP-native recursive delete of a directory's contents (leaves the dir). */
@@ -566,7 +630,7 @@ class InstallerService {
             }
 
             // 3. Point the manifest at the restored layer set.
-            \AICliAgents\Services\LayerManifestService::replaceLayers("agent/$agentId", $manifestLayers, $persistPath);
+            \AICliAgents\Services\FileStorage::pointManifestAtLayers("agent/$agentId", $manifestLayers, $persistPath);   // Epic #1310 facade intent
 
             // 4. Remove the superseded current-version layers (preserved in
             //    aicli-rollback by step 1). Under the lock — race-free.
@@ -583,7 +647,7 @@ class InstallerService {
             if (StorageMountService::isMounted($mnt)) {
                 StorageMountService::unmount($mnt);
             }
-            $remounted = StorageMountService::ensureAgentMounted($agentId);
+            $remounted = FileStorage::ensureReady("agent/$agentId")->ok;   // Epic #1310: facade intent
 
             // 7. Record the restored version.
             AgentRegistry::saveVersion($agentId, $restoreVersion);

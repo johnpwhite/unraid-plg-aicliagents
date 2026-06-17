@@ -16,8 +16,15 @@ class StorageMetricsService {
      */
     public static function getStatus() {
         $config = ConfigService::getConfig();
-        $agentPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
-        $homePath = $config['home_storage_path'] ?? $agentPath;
+        // F8 (WP#1332): resolve the persist paths through StoragePathResolver — the
+        // SAME chain the engine uses — so the UI globs the same directory the engine
+        // bakes to (incl. the empty-config `/persistence` fallback + normalize). The
+        // old ad-hoc `home_storage_path ?? agent_storage_path` lacked the fallback, so
+        // on default config the UI counted layers in a different dir than the engine
+        // and the effective-backend verdict could diverge.
+        require_once __DIR__ . '/StoragePathResolver.php';
+        $agentPath = StoragePathResolver::agentPersistPath();
+        $homePath  = StoragePathResolver::homePersistPath('');
 
         $agents = [];
         $homes = [];
@@ -97,6 +104,52 @@ class StorageMetricsService {
             }
         }
 
+        // Epic #1310 Step 3: surface the backend capabilities (the GENUINE device
+        // test) per entity via the FileStorage facade — so the UI can render the
+        // Bake/Consolidate controls conditionally (wired in Step 6). Computed once
+        // per persist path (stable) and merged ADDITIVELY, so the existing status
+        // shape is unchanged. This is the first READ consumer routed through the
+        // facade (it is no longer dark).
+        require_once __DIR__ . '/FileStorage.php';
+        // F8 (WP#1332): the device verdict is the RAW backendForPath (memoised per
+        // request); the effective caps come from the SINGLE shared invariant helper
+        // FileStorage::effectiveBackendCaps (mirrors bash effective_backend_from_facts)
+        // — the UI no longer re-implements the layers-stay-flash rule inline, so it
+        // cannot gate on a different rule than the engine.
+        $homeDev  = FileStorage::backendForPath($homePath)['backend'];
+        $agentDev = FileStorage::backendForPath($agentPath)['backend'];
+        // Bug #1380: per-entity graduate OFFER = "move the data off a USB flash
+        // drive". Offered ONLY when the persist device is a GENUINE USB-flash
+        // device (v1 verdict flash AND the v2 probe wear axis is wear_sensitive
+        // — an internal-boot ZFS/SSD is wear_normal and never qualifies) AND a
+        // qualifying durable non-array non-flash target exists to move TO. The
+        // qualifying-target check is per-KIND (same for every entity of a kind),
+        // so it is evaluated ONCE here (one enumerateTargets per kind, memoised
+        // probes). probeTarget is memoised per path per request.
+        require_once __DIR__ . '/StorageTargetService.php';
+        $config = (isset($config) && is_array($config)) ? $config : [];
+        $homeWear  = (string)(FileStorage::probeTarget($homePath)['wear'] ?? 'wear_normal');
+        $agentWear = (string)(FileStorage::probeTarget($agentPath)['wear'] ?? 'wear_normal');
+        // Only bother enumerating targets when the device side could possibly
+        // qualify (genuine USB flash) — saves the target probe sweep on the
+        // common durable-box case where the offer is moot anyway.
+        $homeFlashStick  = ($homeDev === 'flash'  && $homeWear  === 'wear_sensitive');
+        $agentFlashStick = ($agentDev === 'flash' && $agentWear === 'wear_sensitive');
+        $homeHasTarget  = $homeFlashStick
+            && count(StorageTargetService::qualifyingGraduateTargets('home', $config)) > 0;
+        $agentHasTarget = $agentFlashStick
+            && count(StorageTargetService::qualifyingGraduateTargets('agent', $config)) > 0;
+        foreach ($homes as $_u => $_st)  {
+            $_hasLayers = (($_st['layers'] ?? 0) > 0);
+            $homes[$_u] = array_merge($_st, FileStorage::effectiveBackendCaps($homeDev, $_hasLayers),
+                ['can_graduate' => FileStorage::canGraduate($homeDev, $homeWear, $_hasLayers, $homeHasTarget)]);
+        }
+        foreach ($agents as $_a => $_st) {
+            $_hasLayers = (($_st['layers'] ?? 0) > 0);
+            $agents[$_a] = array_merge($_st, FileStorage::effectiveBackendCaps($agentDev, $_hasLayers),
+                ['can_graduate' => FileStorage::canGraduate($agentDev, $agentWear, $_hasLayers, $agentHasTarget)]);
+        }
+
         // Rootfs (RAM Disk) stats
         $rootUsage = 0;
         $rootTotal = 0;
@@ -115,6 +168,10 @@ class StorageMetricsService {
             'home_available' => StorageMountService::isPathAvailable($homePath),
             'agents_available' => StorageMountService::isPathAvailable($agentPath),
             'emergency_mode' => StorageMountService::isEmergencyMode(),
+            // S-05 (#1352): durable degraded flag — survives the reboot that wipes
+            // the tmpfs emergency_mode flag, so the UI can surface a prior-session
+            // failure the boot reconciliation could not auto-clear.
+            'degraded' => StorageMountService::degradedState(),
             'rootfs' => [
                 'total_mb' => $rootTotal,
                 'used_mb'  => $rootUsage,
