@@ -415,6 +415,27 @@ final class FileStorage
     }
 
     /**
+     * Unconditionally remount an agent overlay, bypassing the healthy-mount
+     * fast-path in ensureReady/ensureAgentMounted. Used by
+     * InstallerService::forceAgentRefresh (R3 verify-live gate) to swap a
+     * stale lowerdir for the newest baked layer after a deferred refresh.
+     *
+     * Entity format: "agent/<id>" — same as ensureReady; home entities are
+     * rejected (home overlays have no stale-lowerdir problem).
+     *
+     * Returns true when op_mount exits usably (exit 0 or 2).
+     */
+    public static function forceRemount(string $entity): bool
+    {
+        ['type' => $type, 'id' => $id] = self::parseEntity($entity);
+        if ($type !== 'agent') {
+            throw new \InvalidArgumentException("forceRemount only supports agent entities, got: '$type'");
+        }
+        require_once __DIR__ . '/StorageMountService.php';
+        return StorageMountService::remountAgent($id);
+    }
+
+    /**
      * S-08 (#1353, docs/specs/STORAGE_ASYNC_JOBS.md): NON-BLOCKING readiness.
      *
      * Fast path: the entity's merged overlay is already mounted → {state:'ready'}

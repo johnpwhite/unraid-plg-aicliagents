@@ -115,10 +115,57 @@ try {
         // A redundant SupervisorService::enqueue('bake') was the second concurrent bake
         // that raced the install bake's remount step, causing "Install Failed (Bake Error)".
 
-        // After successful install: auto-launch any workspaces configured for this agent.
-        // Errors here are non-fatal — install itself already succeeded. The service
-        // wraps each per-workspace launch so one failure can't skip subsequent ones.
-        \AICliAgents\Services\AutoLaunchService::launchAllPending($agentId, 'agent_install');
+        // R3: verify the freshly-baked agent layer is actually LIVE before we
+        // relaunch. After the bake a new layer is written to the persistence
+        // dir; if a session pinned the agent mount the refresh deferred and the
+        // OLD binary is still live. Sessions are closed now, so force the refresh.
+        // $layerLive stays true when there is no layer file to check (fresh
+        // install with no persistence layer) so that normal relaunch proceeds.
+        $layerLive = true;
+        $persistDir = '/boot/config/plugins/unraid-aicliagents/persistence';
+        $newest = \AICliAgents\Services\InstallerService::newestAgentLayer($agentId, $persistDir);
+        if ($newest !== null) {
+            $mounts = (string)@file_get_contents('/proc/mounts');
+            if (!\AICliAgents\Services\InstallerService::isAgentLayerLive($agentId, $newest, $mounts)) {
+                \AICliAgents\Services\LifecycleLogService::log(
+                    \AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer',
+                    'agent_refresh_forced', ['agent' => $agentId, 'layer' => $newest]);
+                $ok = \AICliAgents\Services\InstallerService::forceAgentRefresh($agentId);
+                $mounts2 = (string)@file_get_contents('/proc/mounts');
+                $layerLive = $ok && \AICliAgents\Services\InstallerService::isAgentLayerLive($agentId, $newest, $mounts2);
+                if (!$layerLive) {
+                    \AICliAgents\Services\LifecycleLogService::log(
+                        \AICliAgents\Services\LifecycleLogService::LEVEL_WARN, 'installer',
+                        'agent_refresh_still_deferred', ['agent' => $agentId, 'layer' => $newest]);
+                }
+            }
+        }
+
+        // R4: relaunch EXACTLY the sessions we closed for this upgrade (resumed),
+        // independent of the autoLaunch flag. Falls back cleanly (no-op) when no
+        // sessions were open. Replaces the autoLaunch-keyed launchAllPending here.
+        // Gate the entire relaunch on $layerLive: if the forced refresh still
+        // left the old binary mounted, relaunching would re-pin the stale layer
+        // and reproduce the original bug (spec: AGENT_UPGRADE_SESSION_RELAUNCH.md
+        // Edge Cases). Leave the manifest in place so a later retry can pick it up.
+        require_once "$pluginDir/includes/services/UpgradeRelaunchService.php";
+        if ($layerLive) {
+            if (!empty(\AICliAgents\Services\UpgradeRelaunchService::readManifest($agentId))) {
+                $rl = \AICliAgents\Services\UpgradeRelaunchService::relaunchClosedSet($agentId);
+                aicli_log("Upgrade relaunch for $agentId: relaunched={$rl['relaunched']} skipped={$rl['skipped']}", AICLI_LOG_INFO);
+            } else {
+                // No upgrade manifest (e.g. fresh install with no prior session):
+                // keep the original autoLaunch sweep so configured workspaces start.
+                \AICliAgents\Services\AutoLaunchService::launchAllPending($agentId, 'agent_install');
+            }
+        } else {
+            // Layer not live after forced refresh — do NOT relaunch (would pin the
+            // stale binary). Manifest intentionally left in place for a later retry.
+            aicli_log("Upgrade: agent layer for $agentId not live after forced refresh — skipping relaunch to avoid pinning the stale binary; manifest retained", AICLI_LOG_WARN);
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_WARN, 'installer',
+                'relaunch_skipped_layer_stale', ['agent' => $agentId]);
+        }
     }
 } catch (\Throwable $e) {
     aicli_log("Background Install Job EXCEPTION for $agentId: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine(), AICLI_LOG_ERROR);

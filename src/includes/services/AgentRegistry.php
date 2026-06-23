@@ -55,8 +55,10 @@ class AgentRegistry {
             $binExists = (empty($bin) || file_exists($bin)) || (!empty($fallback) && file_exists($fallback));
             
             // D-310: Robust SquashFS discovery using the cached file list.
-            // Matches both legacy (vol1, delta_<epoch>) and canonical
-            // (delta_<dt>, consolidated_<dt> where dt = YYYYMMDDTHHMMSSZ) formats.
+            // Matches both legacy (vol1, delta_<epoch>, no-seq delta_<dt>/
+            // consolidated_<dt>) and canonical seq-keyed (delta_<seq10>_<dt>,
+            // consolidated_<seq10>_<dt> where dt = YYYYMMDDTHHMMSSZ and seq10 =
+            // the monotonic layer-identity seq) formats.
             $sqshExists = false;
             $idQuoted = preg_quote($id, '/');
             $kindAlt  = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';
@@ -67,9 +69,10 @@ class AgentRegistry {
                 }
             }
             
-            // D-312: Relaxed 'is_installed' logic. If binaries exist, it is installed.
-            // A missing version in versions.json should not block the 'Installed' state.
-            $agent['is_installed'] = ($binExists || $sqshExists);
+            // D-312/R2: 'is_installed' = binary OR sqsh OR a real version in versions.json.
+            // The third arm covers passthrough-storage agents (e.g. codex-cli) where the
+            // binary may be stale/absent but versions.json records the installed release.
+            $agent['is_installed'] = self::computeIsInstalled($binExists, $sqshExists, $id);
             
             // D-326: Also consider 'installed' if a background installation is currently running
             // This prevents the 'INSTALL' button from reappearing if the user refreshes during install.
@@ -162,6 +165,16 @@ class AgentRegistry {
                 'changelog_url' => 'https://github.com/anthropics/claude-code/releases',
                 // T-12: first-run wizard auth hint — shown in step 3 checklist.
                 'auth_hint' => 'Run /login on first launch; your Anthropic credentials are stored in your managed home directory and persist across reboots and plugin upgrades.',
+                // R-A1 (CLAUDE_RELAUNCH_SURVIVAL): claude 2.1.x refuses
+                // --dangerously-skip-permissions when run as root unless IS_SANDBOX=1
+                // is set. The plugin runs agents as root; shipping this default means
+                // claude works out-of-the-box without a manual user env step.
+                // Seeded additively via EnvService::seedAgentDefaults (additive,
+                // sidecar-tracked, never overwrites a user value, never auto-removed).
+                // A user who already has IS_SANDBOX in their agent-env tier wins
+                // (5-tier merge: default_envs → seeded into tier-4 agent-env, but any
+                // higher-tier value beats it at buildEffectiveEnv time).
+                'default_envs' => ['IS_SANDBOX' => '1'],
                 // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys
                 // for Shift+Enter to be delivered as a distinct key chord (vs. plain Enter).
                 // This is agent-specific: applied as tier 1.5 (after BUILTIN, before user JSON
@@ -270,16 +283,29 @@ class AgentRegistry {
                 // binary_fallback covers pre-v0.99 installs that still have the old
                 // bundled-vendor layout (node_modules/@openai/codex/vendor/...) which
                 // is now the wrong primary path.
-                'binary' => "$agentBase/codex-cli/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex",
-                'binary_fallback' => "$agentBase/codex-cli/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex",
-                'resume_cmd' => "{binary} {args}",
-                'resume_latest' => "{binary} {args}",
+                'binary' => "$agentBase/codex-cli/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+                'binary_fallback' => "$agentBase/codex-cli/node_modules/@openai/codex/bin/codex.js",
+                // Unraid-specific: Unraid's / is a ramfs/rootfs mount where
+                // pivot_root(2) always returns EINVAL, so codex's bundled bwrap
+                // sandbox cannot start. We disable the OS sandbox via the -c CLI
+                // override (takes precedence over ~/.codex/config.toml) and keep
+                // HITL approval (on-request) in place — exactly the posture every
+                // other agent in this plugin already runs under. These flags are a
+                // plugin default, NOT user-editable workspace args.
+                // plugin_args is appended LAST so codex's last-`-c`-wins
+                // makes the plugin sandbox_mode override any user workspace arg.
+                // See docs/specs/CODEX_SANDBOX_MODE_UNRAID.md
+                'plugin_args' => '-c sandbox_mode=danger-full-access -c approval_policy=on-request',
+                'resume_cmd' => "{binary} {args} {plugin_args}",
+                'resume_latest' => "{binary} {args} {plugin_args}",
                 'env_prefix' => 'CODEX',
                 'changelog_url' => 'https://github.com/openai/codex/releases',
                 // T-12: codex-cli supports two auth paths: interactive login via
                 // `codex login` (browser OAuth), or set the OPENAI_API_KEY env var
                 // in the Secrets panel. The env-var path requires no interactive step.
-                'auth_hint' => 'Either run `codex login` on first launch (browser OAuth), or add your OPENAI_API_KEY in the Secrets panel — the env-var path requires no interactive authentication.',
+                // On Unraid, codex runs without an OS sandbox (kernel ramfs root blocks
+                // bwrap); shell commands are gated by HITL approval (on-request).
+                'auth_hint' => 'Either run `codex login` on first launch (browser OAuth), or add your OPENAI_API_KEY in the Secrets panel — the env-var path requires no interactive authentication. Note: on Unraid, codex runs without an OS sandbox (kernel ramfs root blocks bwrap); commands are gated by approval.',
             ],
             'factory-cli' => [
                 'id' => 'factory-cli',
@@ -413,8 +439,9 @@ class AgentRegistry {
     }
 
     public static function getVersions() {
-        if (file_exists(self::VERSIONS_FILE)) {
-            return json_decode(file_get_contents(self::VERSIONS_FILE), true) ?: [];
+        $path = getenv('AICLI_VERSIONS_FILE') ?: self::VERSIONS_FILE;
+        if (file_exists($path)) {
+            return json_decode(file_get_contents($path), true) ?: [];
         }
         return [];
     }
@@ -452,29 +479,102 @@ class AgentRegistry {
     }
 
     public static function saveVersions($versions) {
-        file_put_contents(self::VERSIONS_FILE, json_encode($versions, JSON_PRETTY_PRINT));
+        $path = getenv('AICLI_VERSIONS_FILE') ?: self::VERSIONS_FILE;
+        file_put_contents($path, json_encode($versions, JSON_PRETTY_PRINT));
     }
 
     /**
      * Save installed version, preserving channel/pinned fields if they exist.
+     * Optional $probedMtime (unix timestamp) is stored as 'probed_mtime' to
+     * support mtime-throttled self-heal (maybeRefreshVersion).
      */
-    public static function saveVersion($agentId, $version) {
+    public static function saveVersion($agentId, $version, ?int $probedMtime = null) {
         $versions = self::getVersions();
         $existing = $versions[$agentId] ?? null;
 
         if (is_array($existing)) {
             // Preserve channel/pinned, update installed
             $existing['installed'] = $version;
+            if ($probedMtime !== null) {
+                $existing['probed_mtime'] = $probedMtime;
+            }
             $versions[$agentId] = $existing;
         } else {
             // Migrate from old string format to new object format
-            $versions[$agentId] = [
+            $entry = [
                 'installed' => $version,
                 'channel' => 'latest',
                 'pinned' => null,
             ];
+            if ($probedMtime !== null) {
+                $entry['probed_mtime'] = $probedMtime;
+            }
+            $versions[$agentId] = $entry;
         }
         self::saveVersions($versions);
+    }
+
+    /**
+     * Mtime-throttled version self-heal. Checks whether the binary at $binPath
+     * has changed since the last probe (via stored 'probed_mtime') and, if so,
+     * invokes $discoverFn to re-discover the version and persist the result.
+     *
+     * The injectable $discoverFn(string $agentId): ?string callback makes the
+     * method unit-testable without spawning real processes.
+     *
+     * Throttle logic:
+     *  - If $binPath does not exist: skip (nothing to probe).
+     *  - Compute current filemtime($binPath).
+     *  - If no real version recorded OR current mtime > stored probed_mtime:
+     *      invoke $discoverFn; persist version (and mtime) on success;
+     *      persist mtime even on failure to avoid repeated re-probing.
+     *  - Otherwise: skip (binary unchanged, recorded version still valid).
+     */
+    public static function maybeRefreshVersion(string $agentId, string $binPath, callable $discoverFn): void {
+        if (empty($binPath) || !file_exists($binPath)) {
+            return;
+        }
+
+        clearstatcache(true, $binPath);
+        $mtime = @filemtime($binPath);
+        if ($mtime === false) {
+            return;
+        }
+
+        $versions = self::getVersions();
+        $entry = $versions[$agentId] ?? null;
+
+        $recorded = is_array($entry) ? ($entry['installed'] ?? null) : (is_string($entry) ? $entry : null);
+        $sentinels = ['', '0.0.0', 'unknown', 'installed', null];
+        $hasRealVersion = !in_array($recorded, $sentinels, true) && preg_match('/^\d+\.\d+\.\d+/', (string)$recorded);
+
+        $storedMtime = is_array($entry) ? ($entry['probed_mtime'] ?? 0) : 0;
+
+        if ($hasRealVersion && $mtime <= $storedMtime) {
+            // Binary unchanged — skip probe.
+            return;
+        }
+
+        // Binary is new or changed (or version was missing): probe.
+        $v = $discoverFn($agentId);
+
+        if ($v && !in_array($v, $sentinels, true) && preg_match('/^\d+\.\d+\.\d+/', (string)$v)) {
+            self::saveVersion($agentId, $v, $mtime);
+            LogService::log("maybeRefreshVersion: $agentId -> $v (mtime=$mtime)", LogService::LOG_INFO, "AgentRegistry");
+        } else {
+            // Discovery failed — still record the mtime so we don't hammer the binary.
+            $versions = self::getVersions();
+            $existing = $versions[$agentId] ?? null;
+            if (is_array($existing)) {
+                $existing['probed_mtime'] = $mtime;
+                $versions[$agentId] = $existing;
+            } else {
+                $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
+                $versions[$agentId] = ['installed' => $installed, 'channel' => 'latest', 'pinned' => null, 'probed_mtime' => $mtime];
+            }
+            self::saveVersions($versions);
+            LogService::log("maybeRefreshVersion: $agentId discovery yielded '$v' (mtime recorded=$mtime)", LogService::LOG_WARN, "AgentRegistry");
+        }
     }
 
     /**
@@ -485,11 +585,16 @@ class AgentRegistry {
         $existing = $versions[$agentId] ?? null;
         $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
 
-        $versions[$agentId] = [
+        $probedMtime = is_array($existing) ? ($existing['probed_mtime'] ?? null) : null;
+        $entry = [
             'installed' => $installed,
             'channel' => $channel,
             'pinned' => $pinned,
         ];
+        if ($probedMtime !== null) {
+            $entry['probed_mtime'] = $probedMtime;
+        }
+        $versions[$agentId] = $entry;
         self::saveVersions($versions);
     }
 
@@ -499,6 +604,38 @@ class AgentRegistry {
             unset($versions[$agentId]);
             self::saveVersions($versions);
         }
+    }
+
+    /**
+     * R2: Returns true iff versions.json records a real (non-sentinel) installed version.
+     * False for: null, missing entry, '' (empty string), '0.0.0', 'unknown' (discoverVersion
+     * failure sentinel), 'installed' (background-install placeholder — real version not yet
+     * written by the post-install discovery pass).
+     */
+    public static function hasRealInstalledVersion(string $id): bool {
+        $v = self::getInstalledVersion($id);
+        return $v !== '' && $v !== '0.0.0' && $v !== 'unknown' && $v !== 'installed';
+    }
+
+    /**
+     * R2: Shared is_installed predicate — OR of all three installation signals.
+     * Replaces the inline `$binExists || $sqshExists` at every callsite so that
+     * passthrough-storage agents (no .sqsh, binary may be stale) can still
+     * surface as installed when versions.json carries a real version.
+     */
+    public static function computeIsInstalled(bool $binExists, bool $sqshExists, string $id): bool {
+        return $binExists || $sqshExists || self::hasRealInstalledVersion($id);
+    }
+
+    /**
+     * R4: Remove the versions.json entry for $id and return true.
+     * Called by the uninstall path so the UI no longer shows the agent as installed
+     * after uninstall (important for passthrough-storage agents whose binary path
+     * may continue to exist on the filesystem after uninstall).
+     */
+    public static function clearVersion(string $id): bool {
+        self::removeVersion($id);
+        return true;
     }
 
     /**
@@ -546,13 +683,12 @@ class AgentRegistry {
     }
 
     /**
-     * One-shot recovery for installed agents whose versions.json entry is
-     * the 0.0.0 sentinel — typically because they were installed by a prior
-     * plugin version that didn't write the version eagerly, AND the agent
-     * overlay isn't currently mounted (so getRegistry's lazy discovery can't
-     * read package.json). For each such agent: ensure the overlay is mounted,
-     * call discoverVersion, write the result. Idempotent; cheap on healthy
-     * registries (skips agents that already have a real semver).
+     * Mount-time version self-heal. For every installed agent:
+     *  - If the version is missing/sentinel AND the binary exists: probe the
+     *    binary and record the result (legacy recovery behaviour).
+     *  - If a real version IS recorded: use mtime-throttled probing via
+     *    maybeRefreshVersion so a manual CLI self-update is picked up without
+     *    probing on every call (binary unchanged → skip; binary newer → probe).
      *
      * Called explicitly from PLG INLINE post-install and from a CLI entry
      * point — NOT from getRegistry, which is called on every page render and
@@ -579,11 +715,7 @@ class AgentRegistry {
 
         foreach ($registry as $id => $agent) {
             if ($id === 'terminal') continue;
-            $current = $versions[$id]['installed'] ?? null;
-            if (!in_array($current, $sentinels, true) && preg_match('/^\d+\.\d+\.\d+/', (string)$current)) {
-                $skipped++;
-                continue;
-            }
+
             // Determine "is this agent installed?" via the SAME logic as
             // getRegistry's is_installed gate: binary path exists OR a
             // matching .sqsh layer exists in storage. Without the sqsh
@@ -600,36 +732,58 @@ class AgentRegistry {
                     break;
                 }
             }
-            if (!$binExists && !$sqshExists) {
-                // Not installed — nothing to recover.
+            if (!self::computeIsInstalled($binExists, $sqshExists, $id)) {
+                // Not installed by any signal — nothing to recover.
                 $skipped++;
                 continue;
             }
-            // Mount the overlay so node_modules/<pkg>/package.json (or the
-            // source-specific version probe) can read its data.
-            if (class_exists('\AICliAgents\Services\FileStorage')) {
-                @\AICliAgents\Services\FileStorage::ensureReady("agent/$id");   // Epic #1310: facade intent
-            }
-            $v = self::discoverVersion($id, $agent);
-            if ($v && $v !== 'unknown' && preg_match('/^\d+\.\d+\.\d+/', (string)$v)) {
-                $existing = $versions[$id] ?? null;
-                if (is_array($existing)) {
-                    $existing['installed'] = $v;
-                    $versions[$id] = $existing;
-                } else {
-                    $versions[$id] = ['installed' => $v, 'channel' => 'latest', 'pinned' => null];
+
+            $current = $versions[$id]['installed'] ?? null;
+            $hasSentinel = in_array($current, $sentinels, true) || !preg_match('/^\d+\.\d+\.\d+/', (string)$current);
+
+            // Resolve the effective binary path (primary preferred, then fallback).
+            $effectiveBin = ($bin && file_exists($bin)) ? $bin
+                : (($fallback && file_exists($fallback)) ? $fallback : $bin);
+
+            if ($effectiveBin && file_exists($effectiveBin)) {
+                // Mount the overlay so node_modules/<pkg>/package.json (or the
+                // source-specific version probe) can read its data.
+                if (class_exists('\AICliAgents\Services\FileStorage')) {
+                    @\AICliAgents\Services\FileStorage::ensureReady("agent/$id");   // Epic #1310: facade intent
                 }
-                $recovered++;
-                LogService::log("recoverMissingVersions: $id -> $v", LogService::LOG_INFO, "AgentRegistry");
-            } else {
+
+                $agentRef = $agent; // capture for closure
+                $discoverFn = function(string $agentId) use ($agentRef): ?string {
+                    return self::discoverVersion($agentId, $agentRef);
+                };
+
+                $versionsBefore = self::getVersions();
+                $installedBefore = $versionsBefore[$id]['installed'] ?? null;
+
+                self::maybeRefreshVersion($id, $effectiveBin, $discoverFn);
+
+                $versionsAfter = self::getVersions();
+                $installedAfter = $versionsAfter[$id]['installed'] ?? null;
+
+                if ($installedAfter !== $installedBefore &&
+                    $installedAfter && !in_array($installedAfter, $sentinels, true) &&
+                    preg_match('/^\d+\.\d+\.\d+/', (string)$installedAfter)) {
+                    $recovered++;
+                } elseif ($hasSentinel && in_array($installedAfter, $sentinels, true)) {
+                    $failed[] = $id;
+                    LogService::log("recoverMissingVersions: $id failed (discovery returned '$installedAfter' after mount attempt)", LogService::LOG_WARN, "AgentRegistry");
+                } else {
+                    $skipped++;
+                }
+            } elseif ($hasSentinel) {
+                // Binary not present and version missing: can't probe.
                 $failed[] = $id;
-                LogService::log("recoverMissingVersions: $id failed (discovery returned '$v' after mount attempt)", LogService::LOG_WARN, "AgentRegistry");
+                LogService::log("recoverMissingVersions: $id failed (no binary found)", LogService::LOG_WARN, "AgentRegistry");
+            } else {
+                $skipped++;
             }
         }
 
-        if ($recovered > 0) {
-            self::saveVersions($versions);
-        }
         return ['recovered' => $recovered, 'skipped' => $skipped, 'failed' => $failed];
     }
 }

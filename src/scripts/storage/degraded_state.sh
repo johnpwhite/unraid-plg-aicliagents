@@ -50,7 +50,7 @@ _ds_json_escape() {
 degraded_set() {
     local reason="${1:-unknown}"
     local now host
-    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
+    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '1970-01-01T00:00:00Z')"
     host="$(hostname 2>/dev/null || echo unknown)"
 
     # tmpfs flag — the existing consumers' contract, unchanged.

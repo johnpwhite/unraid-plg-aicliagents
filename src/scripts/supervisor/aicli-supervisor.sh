@@ -82,9 +82,12 @@ GRADUATE_WAIT_CAP_S=86400
 # overlay is still held open by a live session. Requeued with 15→60→120 s backoff
 # until the overlay frees (the last session closes → reconcile/session-close path
 # re-enqueues, and this matures the parked retry) or this budget elapses, then it
-# FAILS + notifies. A user can legitimately keep a workspace open a while, so the
-# cap is generous (1 h). cfg key: user_consolidate_wait_cap_s.
-USER_CONSOLIDATE_WAIT_CAP_S="${user_consolidate_wait_cap_s:-3600}"
+# FAILS + notifies AND auto-relaunches the closed sessions in the BACKGROUND so the
+# user is never stranded waiting for the UI (the close phase already closes the
+# sessions itself — it no longer waits for the user to close the workspace — so the
+# old "generous 1 h" rationale is obsolete; a stuck consolidate gives up fast and
+# restores the user's sessions headlessly). cfg key: user_consolidate_wait_cap_s.
+USER_CONSOLIDATE_WAIT_CAP_S="${user_consolidate_wait_cap_s:-180}"
 # Phase 5: the old count-based consolidate thresholds (consolidate_layer_threshold_*)
 # are gone — home consolidation is now driven by the storagectl `status` policy
 # (layers >= consolidate_max_layers-2, or space pressure). See _check_consolidate_policy.
@@ -506,6 +509,10 @@ _LAST_COMPLETED_AT="null"
 # own logging/escalation behaviour unchanged; these are additive records.
 _OP_EXIT=""
 _OP_DEFER_REASON=""
+# H1 fix: carries req_job from the dispatch loop into _op_consolidate's
+# success/failure callsites so _clear/_relaunch can read the epoch from the
+# ledger (keyed by job_id) instead of a per-entity sidecar.
+_CURRENT_JOB_ID=""
 
 _on_term() {
     _STOPPING=1
@@ -1143,6 +1150,14 @@ _op_consolidate() {
     lifecycle_log "info" "supervisor" "consolidate_start" \
         "{\"entity\":\"$entity\",\"reason\":\"$reason\"}" 2>/dev/null || true
 
+    # R2.2 (M1 fix): pre-bake close phase — close the user's sessions + ttyds before
+    # EVERY bake attempt (not once per job — close is idempotent: no sessions → cheap
+    # no-op; re-pinned mount → re-freed). Phase guard (once-flag) REMOVED.
+    if [ "$type" = "home" ]; then
+        log_info "Consolidate close phase: closing sessions for home/$id"
+        _close_home_for_consolidate "$id"
+    fi
+
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake. A consolidate can run for many minutes; an
     # orphaned one must not block a fresh supervisor.
@@ -1184,6 +1199,13 @@ _op_consolidate() {
         log_info "Consolidate completed: $entity"
         lifecycle_log "info" "supervisor" "consolidate_ok" \
             "{\"entity\":\"$entity\"}" 2>/dev/null || true
+        # HOME_CONSOLIDATE_CLOSE_RELAUNCH R3: a successful home consolidate
+        # auto-relaunches the sessions the manual consolidate closed (resumed,
+        # across all the user's agents). Only on success (not exit 2 defer / not
+        # failure), keyed by the consolidate id = the user. No-op if no manifest.
+        if [ "$type" = "home" ]; then
+            _relaunch_home_sessions "$id" "$_CURRENT_JOB_ID"
+        fi
     elif [ "$exit_code" -eq 2 ]; then
         # WP #922: exit 2 = deferred (mount busy / writes during bake). Not a
         # failure — the script declined to proceed because a session was holding
@@ -1221,6 +1243,15 @@ _op_consolidate() {
         lifecycle_log "error" "supervisor" "consolidate_failed" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"fail_count\":$fail_count,\"stderr_tail\":\"$stderr_tail\"}" 2>/dev/null || true
 
+        # HOME_CONSOLIDATE_INPROGRESS_GUARD R4: a FAILED home consolidate is a
+        # terminal outcome (unlike exit 2 = deferred, which retries) — clear the
+        # per-user start guard so the user can launch sessions again. We do NOT
+        # relaunch on failure (the home may be in a bad state); the user starts
+        # manually. id == the user for a home consolidate.
+        if [ "$type" = "home" ]; then
+            _clear_home_consolidating "$id" "$_CURRENT_JOB_ID"
+        fi
+
         if [ "$fail_count" -ge 2 ]; then
             _write_halt "$entity" "consolidate-disabled" "Two consecutive consolidate failures"
             _supervisor_notify "critical" "AICliAgents: Consolidation disabled" \
@@ -1230,6 +1261,7 @@ _op_consolidate() {
                 "{\"entity\":\"$entity\",\"fail_count\":$fail_count}" 2>/dev/null || true
         fi
     fi
+
 }
 
 # ---------------------------------------------------------------------------
@@ -1524,6 +1556,12 @@ _job_finalize() {
     case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
     queued_at="$(job_ledger_field "$job_id" queued_at 2>/dev/null)"
     started_at="$(job_ledger_field "$job_id" started_at 2>/dev/null)"
+    # H1' fix: read the epoch written at enqueue time so the defer-finalize ledger
+    # rewrite preserves it; without this the 13-arg write emits no 14th arg so the
+    # next queue_enqueue re-enqueue (7-arg) finds no epoch and
+    # clearHomeConsolidating(user, null) clears unconditionally (cross-clear).
+    local prev_epoch
+    prev_epoch="$(job_ledger_field "$job_id" consolidate_epoch 2>/dev/null)"
     now=$(date +%s)
     case "$queued_at" in ''|*[!0-9]*) queued_at="$now" ;; esac
 
@@ -1589,6 +1627,19 @@ _job_finalize() {
                     "user_consolidate_wait_timeout_${entity}" 3600
                 lifecycle_log "warn" "supervisor" "user_consolidate_wait_exhausted" \
                     "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"op\":\"$op\",\"elapsed_s\":$uc_elapsed,\"cap_s\":$uc_cap,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
+                # HOME_CONSOLIDATE give-up: the user must NEVER be stranded waiting
+                # for the UI. Relaunch the closed sessions in the BACKGROUND
+                # (headless) AND clear the per-user start guard — _relaunch_home_sessions
+                # clears the marker (epoch-aware) then resumes the closed set, exactly
+                # like the success path (~line 1204). The consolidate didn't land
+                # (data is untouched; it will retry on the next trigger), but the
+                # user gets their sessions back without opening the tab. Only home
+                # consolidates set the marker / have a closed-set manifest; the retry
+                # path (else below) must NOT relaunch — sessions must stay closed so
+                # the bake can land on the next idle window.
+                if [ "$op" = "consolidate" ] && [ "$type" = "home" ]; then
+                    _relaunch_home_sessions "$id" "$job_id"
+                fi
             else
                 local uc_delay uc_retry_at
                 uc_delay="$(_user_consolidate_retry_delay "$attempt")"
@@ -1636,7 +1687,7 @@ _job_finalize() {
     fi
 
     job_ledger_write "$job_id" "$op" "$type" "$id" "$state" "$exit_code" "$defer" \
-        "$attempt" "$queued_at" "$started_at" "$now" "$reason" "$trace" || true
+        "$attempt" "$queued_at" "$started_at" "$now" "$reason" "$trace" "$prev_epoch" || true
 }
 
 # _check_job_retries — re-enqueue parked deferred jobs whose retry_at passed.
@@ -2130,15 +2181,111 @@ _home_reclaim_recommended() {
 _force_close_home_sessions() {
     local user="$1"
     [ -n "$user" ] || return 0
+    case "$user" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+    case "$user" in *..*) return 0 ;; esac
     [ "$(command -v php)" ] || return 0
-    local plugin_dir="/usr/local/emhttp/plugins/unraid-aicliagents"
-    php -d display_errors=0 -r "
-        \$_SERVER['DOCUMENT_ROOT']='/usr/local/emhttp';
-        require_once '$plugin_dir/src/includes/AICliAgentsManager.php';
-        if (method_exists('\\AICliAgents\\Services\\TerminalService','forceCloseHome')) {
-            \\AICliAgents\\Services\\TerminalService::forceCloseHome('$user');
+    AICLI_CLOSE_USER="$user" php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        if (method_exists("\AICliAgents\Services\TerminalService","forceCloseHome")) {
+            \AICliAgents\Services\TerminalService::forceCloseHome((string)getenv("AICLI_CLOSE_USER"));
         }
-    " 2>/dev/null || true
+    ' 2>/dev/null || true
+}
+
+# _close_home_for_consolidate <user> — run TerminalService::forceCloseHome for the
+# given user. Called ONCE per home consolidate job (before the mount-busy check) so
+# the home's ttyds and all sessions (including unregistered reconnect sessions) are
+# torn down before storagectl consolidate runs. User travels via env — SECURITY:
+# never splice $user into the php -r script body. Best-effort; never aborts the tick.
+_close_home_for_consolidate() {
+    local user="$1"
+    [ -n "$user" ] || return 0
+    case "$user" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+    case "$user" in *..*) return 0 ;; esac
+    [ "$(command -v php)" ] || return 0
+    AICLI_CLOSE_USER="$user" php -d display_errors=1 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        $th="/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/TerminalHandler.php";
+        if (file_exists($th)) { require_once $th; }
+        if (method_exists("\AICliAgents\Services\TerminalService","forceCloseHome")) {
+            \AICliAgents\Services\TerminalService::forceCloseHome((string)getenv("AICLI_CLOSE_USER"));
+        }
+    ' || true
+}
+
+# _clear_home_consolidating <user> [job_id] — clear the HOME_CONSOLIDATE_INPROGRESS_GUARD
+# (R4) per-user marker so TerminalHandler::start unblocks once the consolidate is
+# DONE — whether it succeeded, failed, or finally gave up. Without this, the start
+# guard would only unwedge via the staleness fallback (600 s). The user travels via
+# env (no interpolation into php -r) — SECURITY: never splice $user into the script.
+# R3.2 (H1 fix): reads the epoch from the job ledger (keyed by job_id — per-job, not
+# per-entity), so each job reads its own epoch back; sidecar removed. Best-effort;
+# never aborts the tick.
+_clear_home_consolidating() {
+    local user="$1"
+    local job_id="${2:-}"
+    [ -n "$user" ] || return 0
+    case "$user" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+    case "$user" in *..*) return 0 ;; esac
+    [ "$(command -v php)" ] || return 0
+    local epoch=""
+    if [ -n "$job_id" ] && declare -f job_ledger_field >/dev/null 2>&1; then
+        epoch="$(job_ledger_field "$job_id" consolidate_epoch 2>/dev/null)"
+    fi
+    AICLI_CLEAR_USER="$user" AICLI_CONSOLIDATE_EPOCH="$epoch" php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        if (method_exists("\AICliAgents\Services\ConsolidateState","clearHomeConsolidating")) {
+            $epoch = (string)getenv("AICLI_CONSOLIDATE_EPOCH");
+            \AICliAgents\Services\ConsolidateState::clearHomeConsolidating(
+                (string)getenv("AICLI_CLEAR_USER"),
+                $epoch !== "" ? $epoch : null
+            );
+        }
+    ' 2>/dev/null || true
+}
+
+# _relaunch_home_sessions <user> [job_id] — relaunch exactly the sessions that the manual
+# home consolidate closed (per-user manifest, per-entry agentId), resumed. Fired
+# ONLY from the consolidate-success path (HOME_CONSOLIDATE_CLOSE_RELAUNCH R3).
+# relaunchHomeSet deletes the manifest, so a repeat tick is a no-op. Best-effort.
+# Also clears the HOME_CONSOLIDATE_INPROGRESS_GUARD marker (R4) so `start`
+# unblocks at the same instant the relaunch fires.
+# R3.2 (H1 fix): reads the epoch from the job ledger (per-job — not per-entity sidecar).
+_relaunch_home_sessions() {
+    local user="$1"
+    local job_id="${2:-}"
+    [ -n "$user" ] || return 0
+    case "$user" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+    case "$user" in *..*) return 0 ;; esac
+    [ "$(command -v php)" ] || return 0
+    local epoch=""
+    if [ -n "$job_id" ] && declare -f job_ledger_field >/dev/null 2>&1; then
+        epoch="$(job_ledger_field "$job_id" consolidate_epoch 2>/dev/null)"
+    fi
+    # R3.5: Drop the single-instance lock fd BEFORE spawning php (which calls
+    # UpgradeRelaunchService::relaunchHomeSet → spawns long-lived ttyd + tmux).
+    # Must run in a subshell so the supervisor's own flock is NOT released.
+    # Without this, orphaned ttyd/tmux inherit $SUP_LOCK_FD and hold the OFD
+    # alive after the supervisor exits — every subsequent `start` blocks for 10s
+    # then exits as a loser, writing no pidfile (smoke symptom: pidfile not found).
+    ( [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+      AICLI_RELAUNCH_USER="$user" AICLI_CONSOLIDATE_EPOCH="$epoch" php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        if (method_exists("\AICliAgents\Services\ConsolidateState","clearHomeConsolidating")) {
+            $epoch = (string)getenv("AICLI_CONSOLIDATE_EPOCH");
+            \AICliAgents\Services\ConsolidateState::clearHomeConsolidating(
+                (string)getenv("AICLI_RELAUNCH_USER"),
+                $epoch !== "" ? $epoch : null
+            );
+        }
+        if (method_exists("\AICliAgents\Services\UpgradeRelaunchService","relaunchHomeSet")) {
+            \AICliAgents\Services\UpgradeRelaunchService::relaunchHomeSet((string)getenv("AICLI_RELAUNCH_USER"));
+        }
+    ' ) 2>/dev/null || true
 }
 
 # The state machine. See block comment above. Stub-overridable boundary helpers:
@@ -2355,7 +2502,9 @@ _work_tick() {
                         _op_bake "$req_type" "$req_id" "$req_reason" "$compression"
                         ;;
                     consolidate)
+                        _CURRENT_JOB_ID="$req_job"
                         _op_consolidate "$req_type" "$req_id" "$req_reason"
+                        _CURRENT_JOB_ID=""
                         ;;
                     mount)
                         _op_mount "$req_type" "$req_id" "$req_reason"

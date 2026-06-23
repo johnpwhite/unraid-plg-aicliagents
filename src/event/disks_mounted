@@ -122,7 +122,11 @@ if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
             // Bug #1067: array start is a natural reconciliation point -- kill
             // any ttyd processes that survived an unclean exit or failed launch
             // so the next page render sees an accurate session list.
-            \AICliAgents\Services\ProcessManager::sweepOrphanSessions(0);
+            // IMPORTANT-2: use the default 30s grace (NOT 0). ensure-session now
+            // does synchronous birth work, so a zero-grace sweep could judge a
+            // just-born session/sock before its tmux session is queryable and reap
+            // it during creation. A non-zero grace can't reap a session being born.
+            \AICliAgents\Services\ProcessManager::sweepOrphanSessions(30);
             \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'array_started');
         } else {
             aicli_log('disks_mounted: Storage path still not available. Will retry on next access.', AICLI_LOG_WARN, 'EventDisks');

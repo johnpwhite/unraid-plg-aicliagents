@@ -416,7 +416,9 @@ class SupervisorService {
         string $op,
         string $reason,
         int $priority,
-        ?string $jobId = null
+        ?string $jobId = null,
+        bool $coalesce = false,
+        ?string $consolidateEpoch = null
     ): bool {
         $helpersPath = self::queueHelpersPath();
         if (!file_exists($helpersPath)) {
@@ -435,6 +437,28 @@ class SupervisorService {
             // AICLI_TRACE_ID env default (the ${6:-default} fallback fires on '').
             $jobArg = " '' $jobId";
         }
+        $epochArg = '';
+        if ($consolidateEpoch !== null && preg_match('/^[A-Za-z0-9._\-]{1,128}$/', $consolidateEpoch)) {
+            // Passed as 8th positional to queue_enqueue (after job_id at position 7).
+            // $jobArg already has a leading space + '' + space + job_id, so only append
+            // when jobArg is non-empty (an untracked consolidate won't carry an epoch).
+            if ($jobArg !== '') {
+                $epochArg = ' ' . escapeshellarg($consolidateEpoch);
+            }
+        }
+
+        $safeIdFs = preg_replace('/[^A-Za-z0-9._\-]/', '_', $id);
+        $guard    = '';
+        if ($coalesce) {
+            // Mirror _check_consolidate_policy's filename-based skip: if a bake for
+            // this entity is already queued, a second pre-install bake is redundant
+            // (both just flush dirty home ZRAM). Keeps concurrent installs from
+            // stacking N home deltas -> layers_near_max -> consolidation storm.
+            // Check runs inside the same bash -c as queue_enqueue so check+enqueue
+            // is one process — shrinks (not eliminates) the race window.
+            $guard = 'ls "$QUEUE_DIR"/*_' . $type . '_' . $safeIdFs . '_' . $op
+                   . '.req >/dev/null 2>&1 && exit 0; ';
+        }
 
         $helpers  = escapeshellarg($helpersPath);
         // R-06: AICLI_TRACE_ID env prefix — queue_enqueue reads it and records an
@@ -449,7 +473,7 @@ class SupervisorService {
             . ' ' . sprintf(
                 'bash -c %s',
                 escapeshellarg(
-                    "source $helpers 2>/dev/null && queue_enqueue $priority $type $id $op $reason$jobArg"
+                    $guard . "source $helpers 2>/dev/null && queue_enqueue $priority $type $id $op $reason$jobArg$epochArg"
                 )
             );
 
@@ -474,7 +498,8 @@ class SupervisorService {
         string $id,
         string $op,
         string $reason,
-        int $priority
+        int $priority,
+        ?string $consolidateEpoch = null
     ): ?string {
         $safeId = preg_replace('/[^A-Za-z0-9._\-]/', '_', $id);
         try {
@@ -483,7 +508,7 @@ class SupervisorService {
             $rand = substr((string)mt_rand(100000, 999999), 0, 6);
         }
         $jobId = sprintf('%s-%s-%s-%d-%s', preg_replace('/[^a-z]/', '', $op), $type, $safeId, time(), $rand);
-        if (!self::enqueue($type, $id, $op, $reason, $priority, $jobId)) {
+        if (!self::enqueue($type, $id, $op, $reason, $priority, $jobId, false, $consolidateEpoch)) {
             return null;
         }
         return $jobId;

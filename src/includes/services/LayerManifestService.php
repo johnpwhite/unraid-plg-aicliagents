@@ -761,7 +761,7 @@ class LayerManifestService {
      * Returns current UTC timestamp in ISO 8601 format.
      */
     private static function now(): string {
-        return date('Y-m-d\TH:i:s\Z', time());
+        return gmdate('Y-m-d\TH:i:s\Z', time());
     }
 
     /**

@@ -67,6 +67,37 @@ class TerminalHandler {
         $agentId = $_GET['agentId'] ?? 'gemini-cli';
         $workspacePath = $_GET['path'] ?? null;
 
+        // R2 (UPGRADE_RELAUNCH_ZOMBIE_SKIP): never spawn a session while this
+        // agent's binary is being swapped — a `start` that races the upgrade
+        // creates a tmux session whose agent dies instantly (a ZOMBIE), which the
+        // post-upgrade relaunch then wrongly skips → "Terminal session not found".
+        // The manifest-driven relaunch resumes this session automatically when the
+        // upgrade finishes, so refuse here without creating anything.
+        require_once __DIR__ . '/AgentHandler.php';
+        if (\AICliAgents\Handlers\AgentHandler::isInstallInProgress($agentId)) {
+            return [
+                'status'  => 'upgrade_in_progress',
+                'message' => 'Upgrade in progress — this session will resume automatically when the upgrade finishes.',
+            ];
+        }
+
+        // HOME_CONSOLIDATE_INPROGRESS_GUARD R2: never spawn a session while this
+        // user's home is being consolidated — a `start` that races the consolidate
+        // re-pins the home overlay (live merged mount) and the consolidate defers
+        // (mount_busy) forever. StorageHandler::consolidate(home) set the per-user
+        // marker before closing the sessions; refuse here without creating anything.
+        // The consolidate-success hook (relaunchHomeSet) resumes the closed set
+        // automatically, so the closed sessions come back on their own.
+        require_once __DIR__ . '/../services/ConsolidateState.php';
+        $consolidateUser = (string)($config['user'] ?? 'root');
+        if ($consolidateUser === '' || $consolidateUser === '0') $consolidateUser = 'root';
+        if (\AICliAgents\Services\ConsolidateState::isHomeConsolidating($consolidateUser)) {
+            return [
+                'status'  => 'consolidate_in_progress',
+                'message' => 'Home consolidation in progress — this session will resume automatically when it finishes.',
+            ];
+        }
+
         // Check 1: Is the home storage path available?
         $homePath = $config['home_storage_path'] ?? $persistPath;
         if (!\AICliAgents\Services\StorageMountService::isPathAvailable($homePath)) {
@@ -243,6 +274,22 @@ class TerminalHandler {
     }
 
     private static function stop($id) {
+        // R5 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the `stop` action is a purely
+        // destructive hard-kill (no quiesce/scrape — that's gracefulClose's job).
+        // Harden it with a fast disk-fallback resume capture BEFORE the kill so
+        // resume isn't lost if this path is ever invoked on a live session.
+        // Prefer the workspace/agent from $_GET (the close button sends them);
+        // fall back to the session's /var/run metadata otherwise.
+        $path    = $_GET['path'] ?? '';
+        $agentId = $_GET['agentId'] ?? '';
+        if ($path !== '' && $agentId !== '') {
+            $diskId = self::discoverLatestSessionId($agentId, $path);
+            if ($diskId !== null && $diskId !== '') {
+                \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $diskId);
+            }
+        } else {
+            \AICliAgents\Services\ProcessManager::captureFallbackBeforeKill((string)$id);
+        }
         stopAICliTerminal($id, isset($_GET['hard']));
         // Closing a session frees the home overlay — wake the supervisor so any
         // deferred consolidate/bake for that home resumes immediately (#1381).
@@ -260,6 +307,29 @@ class TerminalHandler {
      * session id is preg_replace'd to alnum+_- only, so no unsafe data can
      * reach any command line.
      */
+    /**
+     * Derive the agentId from a tmux session name of the form
+     * `aicli-agent-<agentId>-<safeId>`. agentId may itself contain dashes
+     * (claude-code, antigravity-cli, codex-cli), so we strip the fixed
+     * `aicli-agent-` prefix and the trailing `-<safeId>` suffix. Returns '' if
+     * the name doesn't match the expected shape.
+     */
+    public static function agentIdFromSessionName(string $sessName, string $safeId): string {
+        $prefix = 'aicli-agent-';
+        if (strncmp($sessName, $prefix, strlen($prefix)) !== 0) {
+            return '';
+        }
+        $s = substr($sessName, strlen($prefix));
+        if ($safeId !== '') {
+            $suffix = '-' . $safeId;
+            $slen = strlen($suffix);
+            if (strlen($s) > $slen && substr($s, -$slen) === $suffix) {
+                $s = substr($s, 0, -$slen);
+            }
+        }
+        return $s;
+    }
+
     private static function gracefulClose($id) {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
         $path = $_GET['path'] ?? '';
@@ -279,6 +349,30 @@ class TerminalHandler {
         // with every other tmux call-site (agentSignalReload, AgentHandler,
         // ProcessManager, InstallerService).
         [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
+
+        // Bulk/supervisor close path (forceCloseHome → handle('graceful_close',$id),
+        // shutdown-capture) carries NO $_GET, so workspace+agent arrive empty and
+        // captureResumeForClose can SCRAPE the resume id but cannot SAVE it ("could
+        // not save (missing workspace or agent)") — relaunch then loses precise
+        // resume (e.g. a user-renamed chat). Resolve from the live session itself:
+        // workspace from the per-session .workdir metadata, agentId from the tmux
+        // session name (aicli-agent-<agentId>-<safeId>). Works even when the
+        // registry metadata is 'unknown' (reconnect sessions).
+        if ($path === '') {
+            $wdf = \AICliAgents\Services\UtilityService::getWorkDirFilePath($safeId);
+            if (is_file($wdf)) {
+                $path = trim((string)@file_get_contents($wdf));
+            }
+        }
+        if ($agentId === '' && $sessName !== '') {
+            $agentId = self::agentIdFromSessionName($sessName, $safeId);
+        }
+        // Refresh the grep-able context with whatever we resolved.
+        $ctx = sprintf("session=%s agent=%s workspace=%s",
+            $safeId,
+            $agentId !== '' ? $agentId : 'unknown',
+            $path !== '' ? $path : 'unknown'
+        );
 
         $capturedId = null;
 

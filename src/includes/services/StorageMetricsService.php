@@ -31,8 +31,11 @@ class StorageMetricsService {
         $artifacts = [];
 
         // 1. Discover Agents from Agent Storage Path.
-        // Matches legacy (vol1, delta_<epoch>) and canonical (_delta_<dt>, _consolidated_<dt>) formats.
-        $agentKindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z)';
+        // Matches legacy (vol1, delta_<epoch>) and canonical formats including the
+        // Phase-5 seq-keyed form: agent_<id>_<kind>_<seq10>_<dt>.sqsh (WP D01-D03).
+        // The (?:\d+_)? group makes the 10-digit sequence before the timestamp optional
+        // so both the current seq-keyed names AND legacy no-seq names are matched.
+        $agentKindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_(?:\d+_)?\d{8}T\d{6}Z|consolidated_(?:\d+_)?\d{8}T\d{6}Z)';
         foreach (glob("$agentPath/agent_*.sqsh") as $file) {
             if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/", basename($file), $m)) {
                 $id = $m[1];

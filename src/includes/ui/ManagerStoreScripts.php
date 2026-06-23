@@ -1374,90 +1374,72 @@ function av2ResetAllTmux(btn) {
 // ----- Auto-Launch workspace section (appended to Terminal chip panel) -----
 
 function av2LoadAutoLaunchSection(agentId, panelBody) {
-    // Sanitise an agent/workspace id for use as an HTML attribute. Server-supplied
-    // but never user-typed in practice; defensive guard so for/id pairings stay valid
-    // even if an id ever contains spaces or punctuation.
+    // Sanitise an agent id for use as an HTML attribute. Server-supplied but never
+    // user-typed in practice; defensive guard so for/id pairings stay valid.
     const sanitiseId = function(s) {
         return String(s == null ? '' : s).replace(/[^a-zA-Z0-9_-]/g, '_');
     };
-    // Resolve a human-friendly workspace label. The terminal UI stores workspace
-    // names under .name; legacy data may carry .title; on bare-/ workspaces both
-    // can be empty, so fall back to the last path segment ("Root" for /).
-    const labelFor = function(ws) {
-        if (ws.name)  return ws.name;
-        if (ws.title) return ws.title;
-        if (!ws.path || ws.path === '/') return 'Root';
-        const tail = ws.path.replace(/\/+$/, '').split('/').pop();
-        return tail || ws.path;
-    };
 
+    // R-C1: auto-launch is now an AGENT-LEVEL setting — one toggle that governs
+    // EVERY workspace of this agent (and relaunches them all after a plugin
+    // upgrade), instead of a row per workspace.
     $.getJSON(
         '/plugins/unraid-aicliagents/AICliAjax.php?action=get_auto_launch&agentId=' +
         encodeURIComponent(agentId) + '&csrf_token=' + csrf,
         function(r) {
-            if (r.status !== 'ok' || !r.workspaces || r.workspaces.length === 0) return;
+            if (r.status !== 'ok') return;
+
+            const armed = !!r.autoLaunch;
+            const count = r.workspaceCount || 0;
+            const uid   = 'al-' + sanitiseId(agentId);
 
             const section = av2mkel('div', {class: 'av2-al-section'}, []);
             section.appendChild(av2mkel('p', {class: 'av2-al-eyebrow'}, ['⚡ Auto-launch on open']));
             section.appendChild(av2mkel('p', {class: 'av2-al-caption'}, [
-                'These workspaces start automatically when the AI Agents page opens or after a plugin upgrade.'
+                'When enabled, ALL of this agent’s workspaces (' + count +
+                ') start automatically when the AI Agents page opens or after a plugin upgrade.'
             ]));
 
             const saveNote = av2mkel('span', {class: 'av2-save-note', style: 'display:inline-block; margin-top:8px;'}, ['']);
 
-            r.workspaces.forEach(function(ws) {
-                const uid    = 'al-' + sanitiseId(agentId) + '-' + sanitiseId(ws.id);
-                const armed  = !!ws.autoLaunch;
-                const wsPath = ws.path || '/';
+            const row = av2mkel('div', {class: 'av2-al-row' + (armed ? ' armed' : '')}, []);
 
-                const row = av2mkel('div', {
-                    class: 'av2-al-row' + (armed ? ' armed' : ''),
-                    title: wsPath,
-                }, []);
+            const chkAuto = av2mkel('input', {type: 'checkbox', id: uid});
+            if (armed) chkAuto.checked = true;
 
-                row.appendChild(av2mkel('div', {class: 'av2-al-id'}, [
-                    av2mkel('span', {class: 'av2-al-name'}, [labelFor(ws)]),
-                    av2mkel('span', {class: 'av2-al-path'}, [wsPath]),
-                ]));
+            const chkFresh = av2mkel('input', {type: 'checkbox', id: uid + '-fresh'});
+            if (r.freshIfNoResume) chkFresh.checked = true;
 
-                const chkAuto = av2mkel('input', {type: 'checkbox', id: uid});
-                if (armed) chkAuto.checked = true;
+            row.appendChild(av2mkel('label', {class: 'av2-al-toggle', 'for': uid}, [
+                chkAuto,
+                av2mkel('span', {}, ['Auto-launch all workspaces']),
+            ]));
 
-                const chkFresh = av2mkel('input', {type: 'checkbox', id: uid + '-fresh'});
-                if (ws.freshIfNoResume) chkFresh.checked = true;
+            row.appendChild(av2mkel('div', {class: 'av2-al-fresh'}, [
+                chkFresh,
+                av2mkel('label', {'for': uid + '-fresh'}, ['Start fresh if no resume']),
+            ]));
 
-                row.appendChild(av2mkel('label', {class: 'av2-al-toggle', 'for': uid}, [
-                    chkAuto,
-                    av2mkel('span', {}, ['Auto-launch']),
-                ]));
-
-                row.appendChild(av2mkel('div', {class: 'av2-al-fresh'}, [
-                    chkFresh,
-                    av2mkel('label', {'for': uid + '-fresh'}, ['Start fresh if no resume']),
-                ]));
-
-                chkAuto.addEventListener('change', function() {
-                    if (chkAuto.checked) {
-                        row.classList.add('armed');
-                    } else {
-                        row.classList.remove('armed');
-                        chkFresh.checked = false;
-                    }
-                    av2SaveAutoLaunch(agentId, ws.path, chkAuto.checked, chkFresh.checked, saveNote);
-                });
-                chkFresh.addEventListener('change', function() {
-                    av2SaveAutoLaunch(agentId, ws.path, chkAuto.checked, chkFresh.checked, saveNote);
-                });
-
-                section.appendChild(row);
+            chkAuto.addEventListener('change', function() {
+                if (chkAuto.checked) {
+                    row.classList.add('armed');
+                } else {
+                    row.classList.remove('armed');
+                    chkFresh.checked = false;
+                }
+                av2SaveAutoLaunch(agentId, chkAuto.checked, chkFresh.checked, saveNote);
+            });
+            chkFresh.addEventListener('change', function() {
+                av2SaveAutoLaunch(agentId, chkAuto.checked, chkFresh.checked, saveNote);
             });
 
+            section.appendChild(row);
             section.appendChild(saveNote);
             panelBody.appendChild(section);
         }
     ).fail(function() {
         // Network error or non-200 — surface a small error line so a silent
-        // miss isn't mistaken for "no workspaces have auto-launch flags".
+        // miss isn't mistaken for "auto-launch unavailable".
         const errEl = av2mkel('div', {class: 'av2-help', style: 'margin-top:12px; opacity:0.6;'}, [
             'Auto-launch section failed to load.',
         ]);
@@ -1465,14 +1447,13 @@ function av2LoadAutoLaunchSection(agentId, panelBody) {
     });
 }
 
-function av2SaveAutoLaunch(agentId, path, autoLaunch, freshIfNoResume, noteEl) {
+function av2SaveAutoLaunch(agentId, autoLaunch, freshIfNoResume, noteEl) {
     if (noteEl) { noteEl.textContent = 'Saving…'; noteEl.className = 'av2-save-note'; }
     $.ajax({
         url: '/plugins/unraid-aicliagents/AICliAjax.php?action=save_auto_launch',
         method: 'POST',
         data: {
             agentId:         agentId,
-            path:            path,
             autoLaunch:      autoLaunch      ? '1' : '0',
             freshIfNoResume: freshIfNoResume ? '1' : '0',
             csrf_token:      csrf,

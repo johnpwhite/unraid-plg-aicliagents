@@ -37,6 +37,18 @@ graceful_kill() {
     fi
 }
 
+# R4 (CAPTURE_RESUME_ALL_CLOSE_PATHS): on uninstall/upgrade, capture resume ids
+# for every live session BEFORE the graceful_kill/tmux-kill sweep below. Resume
+# is moot for a true uninstall but matters for a PLUGIN UPGRADE with live
+# sessions (the new version relaunches + resumes from the saved id). HYBRID
+# entrypoint: disk fallback for all + best-effort full clean close within budget.
+# The kill sweep below is UNCHANGED. Hard-ceilinged + `|| true` — never blocks.
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
+if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
+    log_status "Capturing resume ids before process termination (budget 8s)..."
+    _capture_resume_before_stop 8
+fi
+
 log_status "Terminating AI CLI Agents processes..."
 
 # 1. Terminate all ttyd processes managing aicli sockets

@@ -463,6 +463,44 @@ class StorageMountService {
     }
 
     /**
+     * Unconditionally remount the agent overlay via op_mount, bypassing the
+     * isAgentMountHealthy fast-path. Used by forceAgentRefresh (R3 verify-live)
+     * to swap a stale lowerdir for the newest baked layer after a deferred
+     * refresh — ensureAgentMounted's healthy-mount short-circuit would silently
+     * keep the old overlay, so a dedicated method is required.
+     *
+     * Delegates entirely to the existing storagectl op_mount dispatch so the
+     * Epic #1310 facade rule stays green: storagectl is never called outside
+     * FileStorage / StorageMountService.
+     *
+     * NOTE: a true return means the remount was DISPATCHED usably (exit 0 or
+     * deferred exit 2), NOT a guarantee the new layer is now live — callers
+     * must re-verify liveness after this call (install-bg.php does via
+     * InstallerService::isAgentLayerLive).
+     */
+    public static function remountAgent(string $agentId): bool
+    {
+        $persistPath = StoragePathResolver::agentPersistPath();
+        if (!self::isPathAvailable($persistPath)) {
+            LogService::log("remountAgent($agentId): storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            return false;
+        }
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " mount --type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
+        $mnt = self::AGENT_MNT_BASE . "/$agentId";
+        $usable = self::mountResultIsUsable((int)$res);
+        if ($usable && (int)$res === 2 && !self::isMounted($mnt)) {
+            $usable = false;
+            LogService::log("Agent mount for $agentId deferred with NO live overlay (target not mounted yet?) — treating as unavailable.", LogService::LOG_WARN, "StorageMountService");
+        }
+        if (!$usable) {
+            LogService::log("remountAgent($agentId): storagectl mount failed (exit $res): " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
+        }
+        return $usable;
+    }
+
+    /**
      * Commits changes from ZRAM to SquashFS.
      *
      * For $type === 'home': delta bake via commit_stack.sh + post-bake threshold

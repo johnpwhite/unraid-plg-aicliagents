@@ -34,18 +34,16 @@ class AutoLaunchHandler
 
     private static function saveAutoLaunch(): array
     {
-        // save_auto_launch is called via POST with agentId in the body, so read
-        // from $_REQUEST (covers both GET query and POST body). $_GET alone
-        // would silently fail because the JS only puts `action` in the URL.
+        // R-C1: auto-launch is now an AGENT-LEVEL setting. `path` is accepted but
+        // ignored (kept for backwards-compatible callers) — the flag governs every
+        // workspace of the agent. Read from $_REQUEST (covers GET query + POST body).
         $agentId = ValidationService::validateId($_REQUEST['agentId'] ?? '');
-        $path    = $_REQUEST['path'] ?? '';
         if (!$agentId) return ['status' => 'error', 'message' => 'Missing or invalid agentId'];
-        if (empty($path)) return ['status' => 'error', 'message' => 'Missing path'];
 
         $autoLaunch      = filter_var($_REQUEST['autoLaunch']      ?? '0', FILTER_VALIDATE_BOOLEAN);
         $freshIfNoResume = filter_var($_REQUEST['freshIfNoResume']  ?? '0', FILTER_VALIDATE_BOOLEAN);
 
-        $ok = ConfigService::saveAutoLaunch($path, $agentId, $autoLaunch, $freshIfNoResume);
+        $ok = ConfigService::setAgentAutoLaunch($agentId, $autoLaunch, $freshIfNoResume);
         return $ok ? ['status' => 'ok'] : ['status' => 'error', 'message' => 'Write failed'];
     }
 
@@ -54,25 +52,23 @@ class AutoLaunchHandler
         $agentId = ValidationService::validateId($_GET['agentId'] ?? '');
         if (!$agentId) return ['status' => 'error', 'message' => 'Missing or invalid agentId'];
 
+        // R-C1: return the single agent-level flag plus the count of workspaces it
+        // governs (for the UI caption). No per-workspace rows anymore.
+        $config     = ConfigService::getAgentAutoLaunch($agentId);
         $workspaces = ConfigService::getWorkspaces();
         $sessions   = $workspaces['sessions'] ?? [];
-        $result     = [];
-
+        $count      = 0;
         foreach ($sessions as $session) {
-            if (($session['agentId'] ?? '') !== $agentId) continue;
-            $path   = $session['path'] ?? '';
-            $config = ConfigService::getAutoLaunch($path, $agentId);
-            $result[] = [
-                'id'              => $session['id'],
-                'path'            => $path,
-                'name'            => $session['name'] ?? '',
-                'title'           => $session['title'] ?? '',
-                'autoLaunch'      => $config['autoLaunch'],
-                'freshIfNoResume' => $config['freshIfNoResume'],
-            ];
+            if (($session['agentId'] ?? '') === $agentId) $count++;
         }
 
-        return ['status' => 'ok', 'workspaces' => $result];
+        return [
+            'status'          => 'ok',
+            'agentId'         => $agentId,
+            'autoLaunch'      => $config['autoLaunch'],
+            'freshIfNoResume' => $config['freshIfNoResume'],
+            'workspaceCount'  => $count,
+        ];
     }
 
     /**
@@ -104,10 +100,12 @@ class AutoLaunchHandler
             $sid     = $session['id']      ?? '';
             if (!$agentId || !$path || !$sid) continue;
 
-            // Per-workspace isolation: a corrupt autolaunch_*.json or a
+            // Per-workspace isolation: a corrupt autolaunch map read or a
             // filesystem hiccup on ONE workspace must not skip the rest.
             try {
-                $config = ConfigService::getAutoLaunch($path, $agentId);
+                // R-C2: select by the AGENT-LEVEL flag — every workspace of an
+                // enabled agent is eligible.
+                $config = ConfigService::getAgentAutoLaunch($agentId);
                 if (!$config['autoLaunch']) continue;
 
                 // Skip if agent is not installed — startTerminal would fail and

@@ -184,7 +184,7 @@ lifecycle_log() {
 
     # Build the log line
     local ts
-    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
+    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '1970-01-01T00:00:00Z')
     local line
     line="${ts} | ${level} | ${component} | ${event} | ${payload_json}"
 

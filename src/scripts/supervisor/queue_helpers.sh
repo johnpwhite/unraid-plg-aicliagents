@@ -75,16 +75,19 @@ job_ledger_path() { printf '%s/%s.json' "$JOBS_DIR" "$1"; }
 job_ledger_field() { queue_read_field "$(job_ledger_path "$1")" "$2"; }
 
 # job_ledger_write <job_id> <op> <type> <id> <state> <exit> <defer_reason> \
-#                  <attempt> <queued_at> <started_at> <finished_at> <reason> [trace]
+#                  <attempt> <queued_at> <started_at> <finished_at> <reason> [trace] [consolidate_epoch]
 # Writes the full ledger JSON atomically (tmp + rename). Empty <exit> /
 # <defer_reason> / <started_at> / <finished_at> emit JSON null. The ledger
 # RECORDS the op's exit code verbatim — it never reinterprets the exit-code
 # contract (0 ok / 2 deferred / 4 precondition / other fail).
+# H1 fix: optional 14th param $consolidate_epoch — when non-empty and safe
+# ([A-Za-z0-9._-]{1,128}), appended as "consolidate_epoch":"..." in the JSON
+# so each job owns its epoch (keyed by job_id, not per-entity sidecar).
 job_ledger_write() {
     local job_id="${1:-}" op="${2:-}" type="${3:-}" id="${4:-}" state="${5:-queued}"
     local exit_code="${6:-}" defer="${7:-}" attempt="${8:-1}"
     local queued_at="${9:-}" started_at="${10:-}" finished_at="${11:-}"
-    local reason="${12:-}" trace="${13:-}"
+    local reason="${12:-}" trace="${13:-}" consolidate_epoch="${14:-}"
 
     job_id_valid "$job_id" || return 1
     _jobs_ensure_dir
@@ -108,6 +111,12 @@ job_ledger_write() {
         *[!a-z0-9]*) : ;;
         *) [ "${#trace}" -ge 4 ] && [ "${#trace}" -le 16 ] && trace_json="\"$trace\"" ;;
     esac
+    local epoch_json=""
+    case "$consolidate_epoch" in
+        '') : ;;
+        *[!A-Za-z0-9._-]*) : ;;
+        *) [ "${#consolidate_epoch}" -le 128 ] && epoch_json=",\"consolidate_epoch\":\"$consolidate_epoch\"" ;;
+    esac
     # reason is recorded for diagnostics; restrict to the enqueue-safe charset.
     reason=$(printf '%s' "$reason" | tr -cd 'A-Za-z0-9_:.-')
 
@@ -115,6 +124,7 @@ job_ledger_write() {
     json=$(printf '{"job_id":"%s","op":"%s","entity":"%s/%s","state":"%s","exit":%s,"defer_reason":%s,"phase":null,"attempt":%d,"queued_at":%d,"started_at":%s,"finished_at":%s,"reason":"%s","trace":%s,"updated_at":%d}' \
         "$job_id" "$op" "$type" "$id" "$state" "$exit_json" "$defer_json" \
         "$attempt" "$queued_at" "$started_json" "$finished_json" "$reason" "$trace_json" "$now")
+    json="${json%\}}${epoch_json}}"
 
     local dest tmp
     dest="$(job_ledger_path "$job_id")"
@@ -151,6 +161,7 @@ queue_enqueue() {
     local reason="${5:-manual}"
     local trace="${6:-${AICLI_TRACE_ID:-}}"
     local job_id="${7:-}"
+    local consolidate_epoch="${8:-}"
 
     _queue_ensure_dir
 
@@ -196,12 +207,17 @@ queue_enqueue() {
     # S-08: ledger entry at state=queued. A re-enqueue (defer-requeue) preserves
     # the existing attempt counter and the ORIGINAL queued_at so the supervisor's
     # backoff/elapsed-wait maths hold across requeues.
+    # H1' fix: also preserve consolidate_epoch from the existing ledger row when
+    # no epoch was passed in (the retry re-enqueue from _check_job_retries calls
+    # queue_enqueue with 7 args / no epoch arg).
     if [ -n "$job_id" ]; then
         local prev_attempt prev_queued
         prev_attempt="$(job_ledger_field "$job_id" attempt 2>/dev/null)"
         prev_queued="$(job_ledger_field "$job_id" queued_at 2>/dev/null)"
+        [ -z "$consolidate_epoch" ] && \
+            consolidate_epoch="$(job_ledger_field "$job_id" consolidate_epoch 2>/dev/null)"
         job_ledger_write "$job_id" "$op" "$type" "$id" "queued" "" "" \
-            "${prev_attempt:-1}" "${prev_queued:-$epoch}" "" "" "$reason" "$trace" || true
+            "${prev_attempt:-1}" "${prev_queued:-$epoch}" "" "" "$reason" "$trace" "$consolidate_epoch" || true
     fi
     return 0
 }

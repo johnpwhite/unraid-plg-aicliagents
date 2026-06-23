@@ -93,6 +93,20 @@ class AgentHandler {
             if (!is_array($status)) continue;
             $progress = (int)($status['progress'] ?? 0);
             if ($progress > 0 && $progress < 100) {
+                // Honour the same staleness guard as isInstallInProgress: if the
+                // marker is old and no install-bg process is running, skip it (and
+                // best-effort clear) so the UI does not grey-out agents forever
+                // after a crashed install.
+                $age = time() - (int)@filemtime($f);
+                if ($age > self::INSTALL_STALE_THRESHOLD_SECS) {
+                    $agentId = $m[1];
+                    $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
+                    exec($cmd, $ignored, $rc);
+                    if ($rc !== 0) {
+                        @unlink($f);
+                        continue;
+                    }
+                }
                 $active[] = [
                     'agentId'  => $m[1],
                     'progress' => $progress,
@@ -101,6 +115,65 @@ class AgentHandler {
             }
         }
         return ['status' => 'ok', 'active' => $active];
+    }
+
+    /**
+     * True when an install/upgrade is in progress for $agentId. Single source of
+     * truth for both the install() already-running guard and TerminalHandler::start
+     * (UPGRADE_RELAUNCH_ZOMBIE_SKIP R2) — belt-and-suspenders: checks BOTH the
+     * install-status in-progress marker (set EARLY in install(), before sessions
+     * are closed) AND a live `install-bg.php <agentId>` process.
+     *
+     * Staleness guard: if the status-file shows 1–99 but is older than
+     * INSTALL_STALE_THRESHOLD_SECS AND no install-bg process is running, the
+     * install crashed (SIGKILL / OOM) without writing progress=100. Treat as
+     * NOT in progress and best-effort clear the marker so `start` is unblocked.
+     */
+    const INSTALL_STALE_THRESHOLD_SECS = 180;
+
+    public static function isInstallInProgress(string $agentId): bool {
+        if ($agentId === '') return false;
+
+        $statusFile = "/tmp/unraid-aicliagents/install-status-$agentId";
+        $markerInProgress = false;
+        if (is_file($statusFile)) {
+            $status = @json_decode((string)@file_get_contents($statusFile), true);
+            if (is_array($status)) {
+                $progress = (int)($status['progress'] ?? 0);
+                if ($progress > 0 && $progress < 100) {
+                    $markerInProgress = true;
+                }
+            }
+        }
+
+        // Signal 2: a live install-bg.php process for this agent.
+        $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
+        $out = [];
+        exec($cmd, $out, $processRunning);
+        $processRunning = ($processRunning === 0);
+
+        if ($processRunning) {
+            // A live install-bg process is authoritative — in progress regardless
+            // of the marker's age.
+            return true;
+        }
+
+        if ($markerInProgress) {
+            // No process. Check whether the marker is fresh (written recently)
+            // or stale (crash residue from a killed install-bg).
+            $age = time() - (int)@filemtime($statusFile);
+            if ($age <= self::INSTALL_STALE_THRESHOLD_SECS) {
+                // Signal 1 (fresh marker): in progress — process may not have
+                // appeared yet (race between marker write and exec).
+                return true;
+            }
+            // Stale marker with no process → crashed install. Best-effort clear
+            // so subsequent start() calls are not wedged permanently.
+            @unlink($statusFile);
+            return false;
+        }
+
+        return false;
     }
 
     private static function install() {
@@ -116,6 +189,14 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'An installation is already in progress for this agent.'];
         }
 
+        // R2 (UPGRADE_RELAUNCH_ZOMBIE_SKIP): write the in-progress marker as the
+        // FIRST mutating action — BEFORE _closeSessionsForUpgrade — so a racing
+        // `start` reliably observes the upgrade and refuses to spawn a zombie
+        // session during the binary swap. clearInstallStatus runs here (not later)
+        // so this early marker survives; the later setInstallStatus calls update it.
+        \AICliAgents\Services\UtilityService::clearInstallStatus($agentId);
+        setInstallStatus("Upgrade starting…", 5, $agentId);
+
         // Phase 1: graceful-close any active workspace sessions using this
         // agent BEFORE the binary is replaced. Preserves each session's
         // resume id and list them for the UI.
@@ -127,11 +208,13 @@ class AgentHandler {
         $config = getAICliConfig();
         $user = $config['user'] ?? 'root';
         if (empty($user)) $user = 'root';
-        \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_agent_install', 5);
+        \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_agent_install', 5, null, true);
 
         $version = $_GET['version'] ?? '';
 
-        \AICliAgents\Services\UtilityService::clearInstallStatus($agentId);
+        // Advance the marker now that sessions are closed and the job is about to
+        // launch (the early "Upgrade starting…" marker set above remains in place
+        // throughout — do NOT clear it here, or the start guard's window reopens).
         setInstallStatus("Starting installation job...", 5, $agentId);
         // Record pre-closed sessions inside install-status so the UI can
         // surface them on completion.
@@ -260,6 +343,25 @@ class AgentHandler {
                     @shell_exec("kill -KILL " . escapeshellarg((string)$pid) . " 2>/dev/null");
                 }
             }
+        }
+
+        // R2: record the EXACT closed set so the post-install relaunch brings
+        // back precisely these sessions (resumed), independent of the
+        // per-workspace autoLaunch flag. Source of truth for relaunchClosedSet().
+        require_once __DIR__ . '/../services/UpgradeRelaunchService.php';
+        $closedSet = [];
+        $cfgUser = (getAICliConfig()['user'] ?? 'root') ?: 'root';
+        foreach ($sessions as $s) {
+            $wp = (string)($s['path'] ?? '');
+            $closedSet[] = [
+                'sessionId'     => (string)($s['id'] ?? ''),
+                'workspacePath' => $wp,
+                'user'          => $cfgUser,
+                'hadResume'     => $wp !== '' && \AICliAgents\Services\ConfigService::getResumeId($wp, $agentId) !== null,
+            ];
+        }
+        if (\AICliAgents\Services\UpgradeRelaunchService::writeManifest($agentId, $closedSet) === false) {
+            aicli_log("Upgrade: failed to write relaunch manifest for $agentId — sessions will not auto-relaunch", AICLI_LOG_WARN);
         }
 
         return $sessions;

@@ -37,6 +37,8 @@ require_once __DIR__ . '/services/TaskService.php';
 require_once __DIR__ . '/services/InstallerService.php';
 require_once __DIR__ . '/services/TerminalService.php';
 require_once __DIR__ . '/services/AutoLaunchService.php';
+require_once __DIR__ . '/services/UpgradeRelaunchService.php';
+require_once __DIR__ . '/services/ConsolidateState.php';   // HOME_CONSOLIDATE_INPROGRESS_GUARD — per-user consolidate marker
 require_once __DIR__ . '/services/UtilityService.php';
 require_once __DIR__ . '/services/NchanService.php';
 require_once __DIR__ . '/services/ActivityService.php';

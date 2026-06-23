@@ -26,6 +26,14 @@ source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
 # S-05 (#1352): durable degraded flag (dual-write tmpfs + boot config).
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
+# R2 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the shutdown-capture bridge.
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
+
+# Budget (secs) for the pre-kill resume capture. Small slice of the shutdown
+# window — pass 1 (disk fallback) is fast + guaranteed; pass 2 (full clean
+# close) is best-effort within this budget. The bridge is hard-ceilinged at
+# budget+2s and `|| true` so it can NEVER block the array from stopping.
+CAPTURE_BUDGET=8
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [EventStopping] $1" >> "$LOG"
@@ -163,6 +171,19 @@ run_full_stop() {
     ' 2>/dev/null
     [ $? -eq 124 ] && warn "Stop sequence timed out after ${SHUTDOWN_BUDGET}s."
 }
+
+# R2: capture resume ids for ALL live sessions BEFORE any kill/unmount sweep
+# (covers all three scenarios below). The disk fallback is saved for every
+# session and the full clean close is attempted within CAPTURE_BUDGET; the
+# existing kill/unmount sweep that follows is UNCHANGED (the unmount guarantee).
+# We set a short-lived guard marker so the delegated stop-plugin.sh does NOT run
+# a second long capture serially in the same shutdown (saveResumeId is
+# idempotent, but we must not stack budgets and blow the shutdown window).
+log "Capturing resume ids before kill sweep (budget ${CAPTURE_BUDGET}s)..."
+if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
+    _capture_resume_before_stop "$CAPTURE_BUDGET"
+    : > /tmp/unraid-aicliagents/.resume_captured 2>/dev/null || true
+fi
 
 if needs_array "$STORAGE_CLASS"; then
     # ── Scenario 1: Storage on array/pool — full stop ──

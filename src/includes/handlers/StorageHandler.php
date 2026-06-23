@@ -30,6 +30,7 @@ class StorageHandler {
             // Note: get_task_status outputs raw JSON and is dispatched directly
             case 'persist_home':                $result = self::persistHome(); break;
             case 'consolidate_storage':         $result = self::consolidate(); break;
+            case 'get_home_sessions':            return self::getHomeSessions();    // R1: read-only, list open sessions for home consolidate warning
             case 'graduate_targets':            return self::graduateTargets();    // Bug #1380: read-only, qualifying relocation targets
             case 'graduate_storage':            $result = self::graduate(); break; // Bug #1380: relocate off USB flash to a durable target
             case 'expand_storage':              $result = self::expand(); break;
@@ -57,7 +58,7 @@ class StorageHandler {
                 'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
+                'consolidate_storage', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts'];
     }
@@ -524,31 +525,120 @@ class StorageHandler {
         ];
     }
 
+    /**
+     * R1: Return the list of open sessions for a home user, so the UI can warn
+     * before queuing a consolidate that will close them.
+     * Read-only — no Nchan publish.
+     */
+    /**
+     * Read-only: enumerate active terminal sessions for a home user.
+     * Called by the confirm dialog before queuing a consolidate.
+     *
+     * R1.1: each session now includes agent display name and icon from the
+     * registry, plus an explicit 'workspace' alias for the workspace path.
+     */
+    private static function getHomeSessions(): array {
+        $id = $_GET['id'] ?? '';
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+            return ['status' => 'error', 'message' => 'invalid_id'];
+        }
+        require_once __DIR__ . '/../services/AgentRegistry.php';
+        $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
+        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id);
+        $mapped = array_map(function($s) use ($registry) {
+            $agentId  = (string)($s['agentId'] ?? '');
+            $path     = (string)($s['path']    ?? '');
+            $agent    = $registry[$agentId] ?? [];
+            return [
+                'id'        => (string)($s['id'] ?? ''),
+                'agentId'   => $agentId,
+                'name'      => (string)($agent['name']     ?? $agentId),
+                'icon'      => (string)($agent['icon_url'] ?? ''),
+                'path'      => $path,
+                'workspace' => $path,
+            ];
+        }, $sessions);
+        return ['status' => 'ok', 'sessions' => array_values($mapped)];
+    }
+
     private static function consolidate() {
         $type = $_GET['type'] ?? 'agent';
         $id   = $_GET['id']   ?? 'default';
         if ($type === 'home' && ($id === '0')) {
             $id = 'root';
         }
+        // Security: reject non-allowlisted type and any id that contains
+        // characters outside the safe username/agent-id set (HOME_CONSOLIDATE_CLOSE_RELAUNCH fix).
+        if (!in_array($type, ['agent', 'home'], true)) {
+            return ['status' => 'error', 'message' => 'invalid_type'];
+        }
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+            return ['status' => 'error', 'message' => 'invalid_id'];
+        }
         aicli_log("AJAX Request: Consolidate storage for $type: $id", AICLI_LOG_INFO);
-        // Enqueue a user-priority consolidate so the AJAX handler returns immediately
-        // (Phase 3.3). Priority 5 = user-clicked; supervisor resets failure counter
-        // and skips the halt check for user-triggered consolidations.
-        // S-08 (#1353): tracked — job_id ADDED to the response (back-compat).
-        $jobId = \AICliAgents\Services\SupervisorService::enqueueJob($type, $id, 'consolidate', 'user_consolidate', 5);
+
+        // R2.1: home consolidate — write relaunch manifest then mark as in-progress
+        // and enqueue immediately. The slow close (forceCloseHome) is deferred to the
+        // supervisor's pre-bake close phase (R2.2) so this AJAX handler returns in <1 s.
+        // Order: writeHomeManifest → markHomeConsolidating → enqueue → wake.
+        // H1 fix: epoch travels in the job ledger entry (via enqueueJob), not a sidecar.
+        $epoch = null;
+        if ($type === 'home') {
+            require_once __DIR__ . '/../services/UpgradeRelaunchService.php';
+            $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($id);
+            if (!empty($sessions)) {
+                // Write the relaunch manifest BEFORE setting the marker, so the supervisor
+                // has a manifest to relaunch from even if the close phase takes a moment.
+                // Order: writeHomeManifest → markHomeConsolidating → enqueue → wake.
+                $manifest = [];
+                foreach ($sessions as $s) {
+                    $wp      = (string)($s['path'] ?? '');
+                    $agentId = (string)($s['agentId'] ?? '');
+                    $manifest[] = [
+                        'sessionId'     => (string)($s['id'] ?? ''),
+                        'workspacePath' => $wp,
+                        'agentId'       => $agentId,
+                        // hadResume: the supervisor's forceCloseHome will do the actual
+                        // resume capture; this flag signals the relaunch to attempt auto.
+                        'hadResume'     => $wp !== '' && $agentId !== '',
+                    ];
+                }
+                if (\AICliAgents\Services\UpgradeRelaunchService::writeHomeManifest($id, $manifest) === false) {
+                    aicli_log("Consolidate(home): failed to write relaunch manifest for $id — aborting", AICLI_LOG_WARN);
+                    return ['status' => 'error', 'message' => 'Could not write relaunch manifest. Try again.'];
+                }
+            }
+
+            // R2.1: mark the consolidate as in-progress (blocks racing reconnect start),
+            // then enqueue immediately — the slow close happens in the supervisor (R2.2).
+            // markHomeConsolidating returns the epoch token for epoch-safe clearing later.
+            require_once __DIR__ . '/../services/ConsolidateState.php';
+            $epoch = \AICliAgents\Services\ConsolidateState::markHomeConsolidating($id);
+        }
+
+        // Enqueue a user-priority consolidate so the AJAX handler returns immediately.
+        // S-08 (#1353): tracked — job_id in the response.
+        // H1 fix: pass $epoch to enqueueJob so it is stored in the ledger entry (keyed
+        // by job_id) rather than a per-entity sidecar (last-writer-wins race removed).
+        $jobId = \AICliAgents\Services\SupervisorService::enqueueJob($type, $id, 'consolidate', 'user_consolidate', 5, $epoch);
         if ($jobId === null) {
-            \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5);
+            \AICliAgents\Services\SupervisorService::enqueue($type, $id, 'consolidate', 'user_consolidate', 5, null, false, $epoch);
         }
         self::trackJobActivity($jobId, "Consolidate $type/$id");
-        \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'storage', 'storage_consolidate_queued', ['type' => $type, 'id' => $id, 'job_id' => $jobId]);
-        // Honest queued message (#2): the AJAX call only ENQUEUES — it does not
-        // consolidate. If this home has an open agent session the consolidate
-        // waits for it to close (live unmount/remount); otherwise it runs on the
-        // next supervisor tick. Watch the activity tray for progress.
+
+        // R2.1: wake the supervisor so the job starts immediately.
+        \AICliAgents\Services\SupervisorService::wake();
+
+        \AICliAgents\Services\LifecycleLogService::log(
+            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+            'storage', 'storage_consolidate_queued',
+            ['type' => $type, 'id' => $id, 'job_id' => $jobId]
+        );
+
         $msg = $type === 'home'
-            ? "Consolidation queued. It runs on the next storage cycle — if this home has an open agent session, it waits until you close the session. Watch the activity tray for progress."
+            ? "Consolidation queued. Sessions will be closed and automatically resumed on completion. Watch the activity tray for progress."
             : "Consolidation queued. It runs on the next storage cycle. Watch the activity tray for progress.";
-        return ['status' => 'ok', 'message' => $msg, 'queued' => true, 'job_id' => $jobId];
+        return ['status' => 'queued', 'job_id' => (string)$jobId, 'message' => $msg];
     }
 
     /**
@@ -871,6 +961,13 @@ class StorageHandler {
         $__migWork = function () use (&$__migResult, $config, $oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath) {
         // 1. Evict all sessions
         self::migrateProgress('Stopping active sessions...', 5);
+        // R3 (CAPTURE_RESUME_ALL_CLOSE_PATHS): a storage-path migration is an
+        // orderly, user-initiated action — time is available, so run the FULL
+        // clean capture (quiesce + scrape, authoritative resume id) for every
+        // live session BEFORE the hard evict, so chat continuity survives the
+        // migration. Generous-but-bounded budget; never throws (shutdown-safe).
+        aicli_log("Storage Migration: Capturing resume ids before evict (R3)...", AICLI_LOG_INFO);
+        \AICliAgents\Services\TerminalService::captureResumeForShutdown(null, 60);
         aicli_log("Storage Migration: Evicting active sessions...", AICLI_LOG_INFO);
         \AICliAgents\Services\ProcessManager::evictAll();
 

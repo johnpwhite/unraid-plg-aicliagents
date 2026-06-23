@@ -84,7 +84,10 @@ class AutoLaunchService
             }
 
             try {
-                $config = ConfigService::getAutoLaunch($path, $agentId);
+                // R-C2: select by the AGENT-LEVEL flag. Every workspace whose
+                // agent has auto-launch enabled is (re)launched, regardless of any
+                // legacy per-workspace flag — that is the agent-level intent.
+                $config = ConfigService::getAgentAutoLaunch($agentId);
                 if (!$config['autoLaunch']) {
                     $skipped++;
                     continue;
@@ -116,6 +119,12 @@ class AutoLaunchService
                 // session actually came up. On failure, surface a recoverable
                 // `type:start` activity — the tray's "Retry" button re-runs JUST
                 // this workspace via the retry_auto_launch action.
+                //
+                // R-B3 (CLAUDE_RELAUNCH_SURVIVAL): isRunning now requires the AGENT
+                // to be up — a live detached tmux session for this sid — not merely
+                // "ttyd exists". A headless relaunch that brought up ttyd but no
+                // agent (the old Bug #1067 failure mode) now correctly reports
+                // failed here instead of falsely succeeding.
                 if (!ProcessManager::isRunning($sid)) {
                     $failed++;
                     self::log("Auto-launch failed for $sid ($agentId): session did not start (trigger=$reason)", AICLI_LOG_WARN);

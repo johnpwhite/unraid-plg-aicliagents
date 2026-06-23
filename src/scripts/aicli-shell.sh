@@ -1,6 +1,23 @@
 #!/bin/bash
 # AICliAgents CLI Restricted Shell Wrapper
 # v2026.03.17.13 - Pure Terminal Wrapper (No Heartbeats)
+#
+# Modes (R-B1, CLAUDE_RELAUNCH_SURVIVAL):
+#   (default)         interactive — ensure the detached tmux session exists, then
+#                     `exec tmux attach`. This is how ttyd invokes us when a
+#                     browser connects.
+#   --ensure-session  HEADLESS — ensure the detached tmux session + agent exist,
+#                     then RETURN 0 WITHOUT attaching. Run server-side at launch
+#                     (TerminalService) so the agent comes up in a browser-less,
+#                     detached tmux session that survives a deploy and the
+#                     orphan-sweep. A later browser attach (default mode) just
+#                     connects to the already-running session. Idempotent: if the
+#                     session already exists this is a no-op success.
+AICLI_ENSURE_ONLY=0
+case "$1" in
+    --ensure-session) AICLI_ENSURE_ONLY=1 ;;
+esac
+
 ID="${AICLI_SESSION_ID:-default}"
 AGENT_ID="${AGENT_ID:-gemini-cli}"
 SESSION="aicli-agent-$AGENT_ID-$ID"
@@ -85,6 +102,10 @@ frozen_resume_latest="$RESUME_LATEST"
 frozen_agent_name="${AGENT_NAME:-$AGENT_ID}"
 frozen_chat_id="$AICLI_CHAT_SESSION_ID"
 frozen_env_prefix="$ENV_PREFIX"
+# Plugin-level default flags for this agent (e.g. codex sandbox overrides).
+# These are NOT user-editable workspace args — they are always prepended to the
+# launch command and survive fresh + resume + resume-latest paths.
+frozen_plugin_args="${PLUGIN_ARGS:-}"
 
 # Load effective CLI args (workspace → agent-level → "").
 # Mirrors ArgsService::getEffectiveArgs() without namespaced PHP classes.
@@ -178,7 +199,14 @@ trap_exit() {
     php "$BRIDGE_SCRIPT" stop "$ID" true 2>/dev/null
     cleanup
 }
-trap trap_exit EXIT
+# R-B1: in --ensure-session (headless) mode this wrapper process exits the moment
+# the DETACHED tmux session is created. We must NOT run trap_exit then — cleanup()
+# kills the very session we just spawned (the agent would die headless and the
+# orphan-sweep would later reap the ttyd). The trap is only meaningful for the
+# interactive attach path, where the wrapper lives for the duration of the client.
+if [ "$AICLI_ENSURE_ONLY" -eq 0 ]; then
+    trap trap_exit EXIT
+fi
 
 # Bug #1043: point tmux at a plugin-private socket directory instead of the
 # shared /tmp/tmux-<uid>. Other processes on the box (a user's own SSH tmux, a
@@ -282,6 +310,7 @@ FUNCOEF
     printf 'export frozen_binary_fallback=%q\n' "$frozen_binary_fallback" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_cmd=%q\n' "$frozen_resume_cmd" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_latest=%q\n' "$frozen_resume_latest" >> "$RUN_SCRIPT"
+    printf 'export frozen_plugin_args=%q\n' "$frozen_plugin_args" >> "$RUN_SCRIPT"
     printf 'export frozen_chat_id=%q\n' "$frozen_chat_id" >> "$RUN_SCRIPT"
     printf 'export AICLI_ENV_HASH=%q\n'  "$ENV_HASH"       >> "$RUN_SCRIPT"
     printf 'export frozen_effective_args=%q\n' "$frozen_effective_args" >> "$RUN_SCRIPT"
@@ -357,6 +386,12 @@ FUNCOEF
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> /tmp/unraid-aicliagents/debug.log
 export TERM=xterm-256color
 export LC_ALL=en_US.UTF-8
+# Ensure the agent (and every child) runs in the WORKSPACE, not the tmux server's
+# cwd. `new-session -c "$ROOT_DIR"` already pins the pane dir; this is a
+# self-contained belt-and-braces guard so the agent process is in the workspace
+# even if a Tier-4 user .conf overrides tmux options. AICLI_WORKSPACE_PATH is
+# exported just above (= the resolved workspace root).
+cd "$AICLI_WORKSPACE_PATH" 2>/dev/null || cd "${AICLI_ROOT:-/mnt}" 2>/dev/null || true
 # WP #1259: non-interactive defaults for the agent shell + every child it spawns.
 # A TUI agent (notably agy/antigravity) runs child commands with NO controlling
 # TTY and does NOT forward keystrokes to them -- a regression from gemini-cli's
@@ -428,6 +463,19 @@ esac
 # expected. This trap only protects bash itself in the gaps between agent
 # launches.
 trap : INT
+
+# Pure helper: assemble the fresh-launch command from parts.
+# plugin_args is appended AFTER user effective_args so codex's last-`-c`-wins
+# makes the plugin sandbox_mode override any user workspace arg.
+# Arguments: binary effective_args plugin_args
+# Outputs the assembled command string to stdout.
+_build_fresh_cmd() {
+    local _binary="$1" _eff="$2" _plugin="$3"
+    local _cmd="$_binary"
+    [ -n "$_eff" ]    && _cmd="$_cmd $_eff"
+    [ -n "$_plugin" ] && _cmd="$_cmd $_plugin"
+    printf '%s' "$_cmd"
+}
 
 # WP #736 hot-apply: re-read the 5-tier effective env via EnvService on every
 # loop iteration. Diffs against $AICLI_EXPORTED_KEYS_FILE: unsets any key we
@@ -728,7 +776,10 @@ while true; do
 
     # Fallback to Fresh Launch if resume failed or wasn't applicable
     if [ "$status" == "fail" ]; then
-        FRESH_CMD="$frozen_binary${frozen_effective_args:+ $frozen_effective_args}"
+        # Append plugin_args (e.g. codex sandbox overrides) AFTER user workspace
+        # args so codex's last-`-c`-wins makes the plugin value override any
+        # user workspace arg. These are plugin-injected and not user-editable.
+        FRESH_CMD=$(_build_fresh_cmd "$frozen_binary" "$frozen_effective_args" "$frozen_plugin_args")
         log_aicli "INFO" 2 "Attempting Fresh Launch: $FRESH_CMD"
 
         # 1. Command-based Execution
@@ -850,7 +901,12 @@ EOF
     # Bug #1054 diagnostic: capture caller env + cwd so we can compare working
     # vs failing launches. Removed once root cause is fixed.
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-PRE-TMUX] sess=$SESSION uid=$(id -u) cwd=$(pwd) TMUX_TMPDIR=$TMUX_TMPDIR tmux_v=$(tmux -V) script_size=$(wc -c < "$RUN_SCRIPT")" >> "$DEBUG_LOG"
-    tmux -u new-session -d -s "$SESSION" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
+    # Pin the new session's start dir to the workspace. Without -c, new-session
+    # takes the invoking client / tmux-server cwd, so a headless --ensure-session
+    # relaunch landed the agent in the server's /mnt instead of $ROOT_DIR (agy
+    # exposed this; cwd-sensitive agents masked it on browser starts). $ROOT_DIR
+    # is ${AICLI_ROOT:-/mnt} so it's never empty.
+    tmux -u new-session -d -s "$SESSION" -c "$ROOT_DIR" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
     _tmux_rc=$?
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-POST-TMUX] new-session rc=$_tmux_rc has-session-now=$(tmux has-session -t "$SESSION" 2>&1 && echo YES || echo NO)" >> "$DEBUG_LOG"
     if [ $? -ne 0 ]; then
@@ -965,6 +1021,19 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     sleep 5
     exit 1
 fi
+# R-B1: headless ensure-session mode — the detached session now exists (verified
+# by the has-session check above) with the agent running inside it, and all four
+# tmux config tiers have been applied. Return success WITHOUT attaching; the
+# session lives on independent of any browser. A later interactive invocation
+# (ttyd on browser-connect) re-enters this script, finds the session already
+# present (the new-session block is skipped), re-applies options idempotently,
+# and falls through to the attach below.
+if [ "$AICLI_ENSURE_ONLY" -eq 1 ]; then
+    log_aicli "INFO" 2 "ensure-session: detached session $SESSION is live — returning without attach."
+    perf_log ensure.session.done
+    exit 0
+fi
+
 perf_log tmux.attach.exec
 # -d (detach-others): ttyd's web client auto-reconnects on ANY websocket drop
 # (hidden/background-iframe throttling, proxy idle-timeout, network blip) — an

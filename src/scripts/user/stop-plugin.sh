@@ -19,6 +19,13 @@ export PATH="$EMHTTP_DEST/bin:$EMHTTP_DEST/src/scripts/storage:$PATH"
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
 source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 source "$EMHTTP_DEST/src/scripts/storage/atomic_write_layer.sh" 2>/dev/null || true
+# R2 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the shutdown-capture bridge.
+source "$EMHTTP_DEST/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
+
+# Budget (secs) for the pre-kill resume capture when this script is invoked
+# DIRECTLY (not via event/stopping). When event/stopping already captured it
+# drops a guard marker so we skip a second, budget-stacking capture here.
+CAPTURE_BUDGET=8
 # F6 (WP#1331): the SINGLE manifest writer (shutdown delta bake's manifest record).
 source "$EMHTTP_DEST/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
 
@@ -61,6 +68,19 @@ if [ -f "$SUPERVISOR_PIDFILE" ]; then
         fi
         rm -f "$SUPERVISOR_PIDFILE" 2>/dev/null || true
     fi
+fi
+
+# ── Step 0.5: Capture resume ids BEFORE the kill sweep (R2) ──
+# Disk fallback for every live session + best-effort full clean close within
+# the budget, so chat continuity survives the shutdown. The kill sweep below is
+# UNCHANGED (the hard guarantee). If event/stopping already captured (guard
+# marker present), skip — don't stack budgets serially in the same shutdown.
+if [ -f /tmp/unraid-aicliagents/.resume_captured ]; then
+    status "Resume ids already captured by event/stopping — skipping (guard marker)."
+    rm -f /tmp/unraid-aicliagents/.resume_captured 2>/dev/null || true
+elif declare -f _capture_resume_before_stop >/dev/null 2>&1; then
+    status "Capturing resume ids before kill sweep (budget ${CAPTURE_BUDGET}s)..."
+    _capture_resume_before_stop "$CAPTURE_BUDGET"
 fi
 
 # ── Step 1: Graceful agent shutdown, then SIGKILL ──

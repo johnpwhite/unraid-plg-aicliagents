@@ -483,4 +483,114 @@ class ConfigService {
     {
         @unlink(self::getAutoLaunchFilePath($path, $agentId));
     }
+
+    // -----------------------------------------------------------------------
+    // Agent-level auto-launch preference (R-C1/R-C2, CLAUDE_RELAUNCH_SURVIVAL).
+    //
+    // Auto-launch is an AGENT-LEVEL setting: enabling it for an agent makes ALL
+    // of that agent's workspaces auto-launch/relaunch after a deploy, regardless
+    // of how many are open. This supersedes the per-(path,agent) flag above (kept
+    // only for the one-time migration; new writes go agent-scoped). Stored in a
+    // single HOME-resident map so the whole agent set is one read.
+    // -----------------------------------------------------------------------
+
+    private static function getAgentAutoLaunchFilePath(): string
+    {
+        return self::getUserStatePath() . "/autolaunch_agents.json";
+    }
+
+    /**
+     * Reads the full agent-level auto-launch map: { agentId => {autoLaunch, freshIfNoResume} }.
+     */
+    public static function getAgentAutoLaunchMap(): array
+    {
+        $file = self::getAgentAutoLaunchFilePath();
+        if (!file_exists($file)) return [];
+        $data = json_decode((string)file_get_contents($file), true);
+        return is_array($data) ? $data : [];
+    }
+
+    /**
+     * Agent-level auto-launch preference for a single agent.
+     * @return array{autoLaunch:bool, freshIfNoResume:bool}
+     */
+    public static function getAgentAutoLaunch(string $agentId): array
+    {
+        $map = self::getAgentAutoLaunchMap();
+        $entry = $map[$agentId] ?? null;
+        if (!is_array($entry)) return ['autoLaunch' => false, 'freshIfNoResume' => false];
+        return [
+            'autoLaunch'      => !empty($entry['autoLaunch']),
+            'freshIfNoResume' => !empty($entry['freshIfNoResume']),
+        ];
+    }
+
+    /**
+     * Sets the agent-level auto-launch preference. Persists the whole map atomically.
+     */
+    public static function setAgentAutoLaunch(string $agentId, bool $autoLaunch, bool $freshIfNoResume): bool
+    {
+        if ($agentId === '') return false;
+        $map = self::getAgentAutoLaunchMap();
+        $map[$agentId] = ['autoLaunch' => $autoLaunch, 'freshIfNoResume' => $freshIfNoResume];
+        return AtomicWriteService::writeJson(self::getAgentAutoLaunchFilePath(), $map);
+    }
+
+    /**
+     * Removes the agent-level auto-launch entry for one agent. No-op if absent.
+     */
+    public static function clearAgentAutoLaunch(string $agentId): void
+    {
+        if ($agentId === '') return;
+        $map = self::getAgentAutoLaunchMap();
+        unset($map[$agentId]);
+        AtomicWriteService::writeJson(self::getAgentAutoLaunchFilePath(), $map);
+    }
+
+    /**
+     * One-time migration (R-C1): collapse per-(path,agent) auto-launch flags into
+     * the agent-level map. For each agent, if ANY workspace had auto-launch ON, the
+     * agent-level flag becomes ON (freshIfNoResume = OR of the contributing rows).
+     * Idempotent: a marker on the HOME state dir guards against re-running, and the
+     * function never downgrades an agent that is already enabled agent-level.
+     *
+     * @return bool true if the migration ran this call (false = already done / no-op marker)
+     */
+    public static function migrateAutoLaunchToAgentLevel(): bool
+    {
+        $marker = self::getUserStatePath() . "/.autolaunch_agent_migration_done";
+        if (file_exists($marker)) return false;
+
+        try {
+            $workspaces = self::getWorkspaces();
+            $sessions   = $workspaces['sessions'] ?? [];
+
+            // Aggregate per-(path,agent) flags up to the agent level.
+            $agg = self::getAgentAutoLaunchMap();
+            foreach ($sessions as $session) {
+                $path    = $session['path']    ?? '';
+                $agentId = $session['agentId'] ?? '';
+                if ($path === '' || $agentId === '') continue;
+                $ws = self::getAutoLaunch($path, $agentId);
+                if (empty($ws['autoLaunch'])) continue;
+                $cur = $agg[$agentId] ?? ['autoLaunch' => false, 'freshIfNoResume' => false];
+                $agg[$agentId] = [
+                    'autoLaunch'      => true,
+                    'freshIfNoResume' => !empty($cur['freshIfNoResume']) || !empty($ws['freshIfNoResume']),
+                ];
+            }
+
+            if (!empty($agg)) {
+                AtomicWriteService::writeJson(self::getAgentAutoLaunchFilePath(), $agg);
+            }
+        } catch (\Throwable $e) {
+            LogService::log("autolaunch agent-level migration failed: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+            // Do NOT write the marker on failure — retry next boot.
+            return false;
+        }
+
+        @touch($marker);
+        LogService::log("autolaunch migrated to agent-level map.", LogService::LOG_INFO, "ConfigService");
+        return true;
+    }
 }

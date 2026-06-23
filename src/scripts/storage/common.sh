@@ -396,17 +396,49 @@ _entity_paths() {
 # exe on the fs (covers agent overlays and any directly-held handle).
 #
 # Best-effort: runs as root. Transient PIDs vanishing mid-scan are ignored.
+# Classify a mount holder. Args: <pid> [cmdline_override].
+# Returns 0 if the process is the plugin's OWN secret-service-daemon or its
+# session dbus-daemon (whose only hold is upper-dir files that survive a
+# lower-only consolidation remount). Returns 1 otherwise. The cmdline override
+# (NUL- or space-separated) lets unit tests drive it without real PIDs.
+_holder_is_infra_daemon() {
+    local _pid="$1" _cmd="${2:-}"
+    if [ -z "$_cmd" ] && [ -n "$_pid" ]; then
+        _cmd="$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null)"
+    else
+        _cmd="$(printf '%s' "$_cmd" | tr '\0' ' ')"
+    fi
+    case "$_cmd" in
+        */secret-service/secret-service-daemon*|*/src/secret-service/secret-service-daemon*) return 0 ;;
+        *dbus-daemon*--session*unraid-aicliagents/secret-service/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 home_mount_in_use() {
     local mnt="$1"
     [ -n "$mnt" ] || return 1
-    # Fast path: any open fd / cwd / exe / mmap physically on the fs.
-    fuser -sm "$mnt" 2>/dev/null && return 0
     # Live interactive session: a ttyd whose argv carries AICLI_HOME=<mount>.
+    # This is the authoritative "busy" signal and is never filtered.
     local _pid
     for _pid in $(pgrep -x ttyd 2>/dev/null); do
         if tr '\0' '\n' < "/proc/$_pid/cmdline" 2>/dev/null | grep -qxF "AICLI_HOME=$mnt"; then
             return 0
         fi
+    done
+    # Open fd / cwd / exe / mmap holders, EXCLUDING the plugin's own infra
+    # daemons (keyring.json lives in the upper dir; a lower-only consolidation
+    # remount keeps their fds valid). If a non-infra holder remains -> busy.
+    # fuser unavailable or error -> treat as busy (fail safe); rc 1 (no holders) -> proceed to not-busy.
+    command -v fuser >/dev/null 2>&1 || return 0
+    local _fuser_pids _fuser_rc
+    _fuser_pids="$(fuser -m "$mnt" 2>/dev/null)"; _fuser_rc=$?
+    # rc 0 = holders exist; rc 1 = none; anything else = error -> fail safe (busy)
+    if [ "$_fuser_rc" -ne 0 ] && [ "$_fuser_rc" -ne 1 ]; then return 0; fi
+    local _holders
+    _holders="$(printf '%s' "$_fuser_pids" | tr -s ' \t' '\n' | grep -E '^[0-9]+$' || true)"
+    for _pid in $_holders; do
+        _holder_is_infra_daemon "$_pid" || return 0
     done
     return 1
 }
@@ -1066,4 +1098,344 @@ _op_defer() {
     lifecycle_log "$_level" "$_component" "$_event" "$_payload" 2>/dev/null || true
     write_defer_reason "$_type" "$_id" "$_reason"
     exit 2
+}
+
+# ===========================================================================
+# Batch-bake CPU / IO deprioritization (BATCH_BAKE_DEPRIORITIZE.md)
+# ---------------------------------------------------------------------------
+# The squashfs bake (mksquashfs -comp xz) is the heaviest CPU burst the plugin
+# emits, plus a sync/sha256/mv I/O spike. On a hybrid CPU (e.g. 12700K) with a
+# VM pinned to the P-cores it starves the guest. These helpers make the bake a
+# well-behaved background job: nice 19, ionice idle, pinned to efficiency cores
+# when the CPU is hybrid (else a thread cap that leaves host headroom), and a
+# capped mksquashfs -processors. Everything is derived from sysfs at runtime and
+# cached per boot — NOTHING about core counts/IDs is hardcoded.
+#
+# Env overrides (all default to auto):
+#   AICLI_BATCH_NICE        nice level            (default 19)
+#   AICLI_BATCH_IONICE      ionice class spec     (default c3 -> -c3 idle)
+#   AICLI_BATCH_CPUS        explicit taskset list (non-empty -> pin there;
+#                                                  "" set -> no pin; overrides detect)
+#   AICLI_BATCH_PROCESSORS  explicit mksquashfs -processors count
+#   AICLI_BATCH_DISABLE=1   emit nothing / inject nothing (byte-for-byte legacy)
+# ===========================================================================
+
+_BATCH_CACHE_DIR="/tmp/unraid-aicliagents/cache"
+_BATCH_CACHE_FILE="${_BATCH_CACHE_DIR}/batch_cpus.cache"
+
+# _batch_online_cpus <sysfs_root> — print online cpu ids (one per line).
+# Honors cpu/online range list when present; falls back to every cpuN dir.
+_batch_online_cpus() {
+    local root="$1" line id a b
+    if [ -r "$root/online" ]; then
+        IFS=',' read -ra _ranges < <(cat "$root/online" 2>/dev/null)
+        for line in "${_ranges[@]}"; do
+            if [[ "$line" == *-* ]]; then
+                a="${line%%-*}"; b="${line##*-}"
+                for ((id=a; id<=b; id++)); do printf '%s\n' "$id"; done
+            elif [ -n "$line" ]; then
+                printf '%s\n' "$line"
+            fi
+        done
+        return 0
+    fi
+    for d in "$root"/cpu[0-9]*; do
+        [ -d "$d" ] || continue
+        id="${d##*/cpu}"
+        [[ "$id" =~ ^[0-9]+$ ]] || continue
+        # If an online flag exists and says 0, skip; cpu0 usually has no flag.
+        if [ -r "$d/online" ] && [ "$(cat "$d/online" 2>/dev/null)" = "0" ]; then
+            continue
+        fi
+        printf '%s\n' "$id"
+    done | sort -n
+}
+
+# _batch_compact_ranges — read ids (one per line, sorted) from stdin, print a
+# compact "a-b c" range string (for the log line / taskset).
+_batch_compact_ranges() {
+    local out="" start="" prev="" n
+    while read -r n; do
+        [ -n "$n" ] || continue
+        if [ -z "$start" ]; then start="$n"; prev="$n"; continue; fi
+        if [ "$n" -eq $((prev + 1)) ]; then prev="$n"; continue; fi
+        if [ "$start" -eq "$prev" ]; then out+="${out:+ }$start"; else out+="${out:+ }$start-$prev"; fi
+        start="$n"; prev="$n"
+    done
+    if [ -n "$start" ]; then
+        if [ "$start" -eq "$prev" ]; then out+="${out:+ }$start"; else out+="${out:+ }$start-$prev"; fi
+    fi
+    printf '%s' "$out"
+}
+
+# _batch_detect_cpus [sysfs_root]
+# Classify ONLINE cpus and print the efficiency-core id list (compact ranges,
+# e.g. "16-19"), or empty if the machine is homogeneous. Result cached per boot.
+# Layered detection, first decisive signal wins:
+#   (a) cpu/types/ dir  — *atom* = efficiency, *core* = performance (read cpulist)
+#   (b) cpuN/cpu_capacity — >=2 distinct values -> lowest = efficiency (big.LITTLE)
+#   (c) SMT siblings + max freq — efficiency = cpus that are BOTH non-SMT
+#       (1 thread sibling) AND in the lower freq tier, ONLY if >=2 distinct classes.
+_batch_detect_cpus() {
+    local root="${1:-/sys/devices/system/cpu}"
+    local use_cache=0
+    [ "$root" = "/sys/devices/system/cpu" ] && use_cache=1
+
+    if [ "$use_cache" -eq 1 ] && [ -r "$_BATCH_CACHE_FILE" ]; then
+        cat "$_BATCH_CACHE_FILE"
+        return 0
+    fi
+
+    local result
+    result="$(_batch_detect_cpus_impl "$root")"
+
+    if [ "$use_cache" -eq 1 ]; then
+        mkdir -p "$_BATCH_CACHE_DIR" 2>/dev/null || true
+        printf '%s' "$result" > "$_BATCH_CACHE_FILE" 2>/dev/null || true
+    fi
+    printf '%s' "$result"
+}
+
+# _batch_detect_cpus_impl <sysfs_root> — uncached pure classifier (testable).
+_batch_detect_cpus_impl() {
+    local root="$1"
+    local -a online=()
+    local _o
+    while IFS= read -r _o; do [ -n "$_o" ] && online+=("$_o"); done < <(_batch_online_cpus "$root")
+    [ "${#online[@]}" -ge 1 ] || { printf ''; return 0; }
+
+    # ----- (a) cpu/types/ : Intel hybrid exposes atom/core type dirs ----------
+    if [ -d "$root/types" ]; then
+        local td eff="" perf="" name
+        for td in "$root"/types/*/; do
+            [ -d "$td" ] || continue
+            name="$(basename "$td")"
+            if [[ "$name" == *atom* ]] && [ -r "$td/cpulist" ]; then
+                eff="$(cat "$td/cpulist" 2>/dev/null)"
+            elif [[ "$name" == *core* ]] && [ -r "$td/cpulist" ]; then
+                perf="$(cat "$td/cpulist" 2>/dev/null)"
+            fi
+        done
+        if [ -n "$eff" ] && [ -n "$perf" ]; then
+            # Normalize the kernel cpulist (already compact) to our sorted form.
+            _batch_expand_cpulist "$eff" | sort -n | _batch_compact_ranges
+            return 0
+        fi
+    fi
+
+    # ----- (b) cpu_capacity : >=2 distinct values -> lowest is efficiency ------
+    local have_cap=1 cpu cap
+    local -A cap_of=()
+    local -A caps_seen=()
+    for cpu in "${online[@]}"; do
+        if [ -r "$root/cpu$cpu/cpu_capacity" ]; then
+            cap="$(cat "$root/cpu$cpu/cpu_capacity" 2>/dev/null)"
+            [ -n "$cap" ] || { have_cap=0; break; }
+            cap_of[$cpu]="$cap"; caps_seen[$cap]=1
+        else
+            have_cap=0; break
+        fi
+    done
+    if [ "$have_cap" -eq 1 ] && [ "${#caps_seen[@]}" -ge 2 ]; then
+        local mincap=""
+        for cap in "${!caps_seen[@]}"; do
+            if [ -z "$mincap" ] || [ "$cap" -lt "$mincap" ]; then mincap="$cap"; fi
+        done
+        for cpu in "${online[@]}"; do
+            [ "${cap_of[$cpu]}" = "$mincap" ] && printf '%s\n' "$cpu"
+        done | sort -n | _batch_compact_ranges
+        return 0
+    fi
+
+    # ----- (c) SMT siblings + max freq ---------------------------------------
+    # For each online cpu: sibling count (thread_siblings_list) and max freq.
+    local sib freq nsib
+    local -A nsib_of=() freq_of=()
+    local -A freq_seen=()
+    for cpu in "${online[@]}"; do
+        nsib=1
+        if [ -r "$root/cpu$cpu/topology/thread_siblings_list" ]; then
+            sib="$(cat "$root/cpu$cpu/topology/thread_siblings_list" 2>/dev/null)"
+            nsib="$(_batch_expand_cpulist "$sib" | grep -c .)"
+            [ "$nsib" -ge 1 ] || nsib=1
+        fi
+        freq=0
+        if [ -r "$root/cpu$cpu/cpufreq/cpuinfo_max_freq" ]; then
+            freq="$(cat "$root/cpu$cpu/cpufreq/cpuinfo_max_freq" 2>/dev/null)"
+        elif [ -r "$root/cpu$cpu/cpufreq/scaling_max_freq" ]; then
+            freq="$(cat "$root/cpu$cpu/cpufreq/scaling_max_freq" 2>/dev/null)"
+        fi
+        [ -n "$freq" ] || freq=0
+        nsib_of[$cpu]="$nsib"; freq_of[$cpu]="$freq"; freq_seen[$freq]=1
+    done
+
+    # A lower freq tier exists only if >=2 distinct freq values.
+    local maxfreq=""
+    for freq in "${!freq_seen[@]}"; do
+        if [ -z "$maxfreq" ] || [ "$freq" -gt "$maxfreq" ]; then maxfreq="$freq"; fi
+    done
+
+    # efficiency candidate = non-SMT (nsib==1) AND below the top freq tier.
+    local -a eff_cpus=()
+    for cpu in "${online[@]}"; do
+        if [ "${nsib_of[$cpu]}" -eq 1 ] && [ "${freq_of[$cpu]}" -lt "$maxfreq" ]; then
+            eff_cpus+=("$cpu")
+        fi
+    done
+
+    # Heterogeneity guard: only call it hybrid if we found a genuine second class
+    # (at least one efficiency cpu AND at least one non-efficiency cpu).
+    if [ "${#eff_cpus[@]}" -ge 1 ] && [ "${#eff_cpus[@]}" -lt "${#online[@]}" ]; then
+        printf '%s\n' "${eff_cpus[@]}" | sort -n | _batch_compact_ranges
+        return 0
+    fi
+
+    printf ''
+}
+
+# _batch_expand_cpulist <list> — expand a kernel cpulist ("0-3,5 16-19") to one
+# id per line (unsorted; caller sorts).
+_batch_expand_cpulist() {
+    local list="$1" part a b id
+    IFS=',' read -ra _parts <<< "${list// /,}"
+    for part in "${_parts[@]}"; do
+        part="${part// /}"
+        [ -n "$part" ] || continue
+        if [[ "$part" == *-* ]]; then
+            a="${part%%-*}"; b="${part##*-}"
+            for ((id=a; id<=b; id++)); do printf '%s\n' "$id"; done
+        else
+            printf '%s\n' "$part"
+        fi
+    done
+}
+
+# _batch_processors_for_threads <T> — PURE thread-count formula (homogeneous path).
+# processors = clamp(floor(T*0.25),1,8) then min(that, max(1,T-2)).
+# Examples: T=4->1, T=8->2, T=20->5, T=64->8.
+_batch_processors_for_threads() {
+    local t="${1:-1}" p
+    [ "$t" -ge 1 ] 2>/dev/null || t=1
+    p=$(( t / 4 ))                       # floor(T*0.25)
+    [ "$p" -lt 1 ] && p=1
+    [ "$p" -gt 8 ] && p=8
+    local headroom=$(( t - 2 ))
+    [ "$headroom" -lt 1 ] && headroom=1
+    [ "$p" -gt "$headroom" ] && p="$headroom"
+    printf '%s' "$p"
+}
+
+# _batch_count_list <compact-range-string> — count ids in "16-19 22" form.
+_batch_count_list() {
+    _batch_expand_cpulist "${1//,/ }" | grep -c .
+}
+
+# _batch_plan — resolve the bake plan into globals (called by _batch_prefix /
+# _batch_mksquashfs_args). Sets:
+#   _BATCH_CPUS       taskset cpu list (compact) or "" for no pin
+#   _BATCH_PROCESSORS mksquashfs -processors count
+#   _BATCH_PIN        "yes"|"no"
+#   _BATCH_ECORES     compact ecore list or "none" (for logging)
+#   _BATCH_T          online thread count (for logging in homogeneous case)
+_batch_plan() {
+    local nproc_count ecores
+    _BATCH_PIN="no"; _BATCH_CPUS=""; _BATCH_ECORES="none"; _BATCH_T=""
+
+    # Online thread count (sysfs-derived; nproc as a fallback).
+    nproc_count="$(_batch_online_cpus /sys/devices/system/cpu | grep -c .)"
+    [ "$nproc_count" -ge 1 ] 2>/dev/null || nproc_count="$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)"
+    [ "$nproc_count" -ge 1 ] 2>/dev/null || nproc_count=1
+    _BATCH_T="$nproc_count"
+
+    # Explicit CPU override: non-empty -> pin there; empty-but-set -> no pin.
+    if [ "${AICLI_BATCH_CPUS+set}" = "set" ]; then
+        if [ -n "$AICLI_BATCH_CPUS" ]; then
+            if [[ "$AICLI_BATCH_CPUS" =~ ^[0-9]+([,-][0-9]+)*$ ]]; then
+                _BATCH_CPUS="$AICLI_BATCH_CPUS"; _BATCH_PIN="yes"; _BATCH_ECORES="$AICLI_BATCH_CPUS"
+                ecores=""   # suppress auto-detect when explicitly overridden
+            else
+                cmn_log WARN batch-plan "AICLI_BATCH_CPUS='$AICLI_BATCH_CPUS' is not a valid cpu-list — ignored"
+                ecores="$(_batch_detect_cpus)"
+                if [ -n "$ecores" ]; then
+                    _BATCH_CPUS="$ecores"; _BATCH_PIN="yes"; _BATCH_ECORES="$ecores"
+                fi
+            fi
+        else
+            ecores=""   # empty-but-set -> no pin, suppress auto-detect
+        fi
+    else
+        ecores="$(_batch_detect_cpus)"
+        if [ -n "$ecores" ]; then
+            _BATCH_CPUS="$ecores"; _BATCH_PIN="yes"; _BATCH_ECORES="$ecores"
+        fi
+    fi
+
+    # Processors.
+    if [ -n "${AICLI_BATCH_PROCESSORS:-}" ]; then
+        _BATCH_PROCESSORS="$AICLI_BATCH_PROCESSORS"
+    elif [ "$_BATCH_PIN" = "yes" ]; then
+        local ne; ne="$(_batch_count_list "$_BATCH_CPUS")"
+        [ "$ne" -ge 1 ] 2>/dev/null || ne=1
+        [ "$ne" -gt 8 ] && ne=8
+        _BATCH_PROCESSORS="$ne"
+    else
+        _BATCH_PROCESSORS="$(_batch_processors_for_threads "$nproc_count")"
+    fi
+}
+
+# _batch_prefix — print the available subset of
+#   nice -n <N> ionice -c <class> [taskset -c <cpus>]
+# Each tool guarded by `command -v` (missing -> omitted, never a failure).
+# Emits nothing when AICLI_BATCH_DISABLE=1.
+_batch_prefix() {
+    [ "${AICLI_BATCH_DISABLE:-0}" = "1" ] && { printf ''; return 0; }
+    _batch_plan
+    local nice_lvl="${AICLI_BATCH_NICE:-19}"
+    local ionice_spec="${AICLI_BATCH_IONICE:-c3}"
+    local out=""
+
+    if command -v nice >/dev/null 2>&1; then
+        out+="nice -n ${nice_lvl} "
+    fi
+    if command -v ionice >/dev/null 2>&1; then
+        # ionice_spec "c3" -> "-c3"; "c2n7" -> "-c2 -n7" support via simple parse.
+        local iflags=""
+        case "$ionice_spec" in
+            c*n*) iflags="-c ${ionice_spec#c}"; iflags="${iflags/n/ -n }" ;;
+            c*)   iflags="-c ${ionice_spec#c}" ;;
+            *)    iflags="$ionice_spec" ;;
+        esac
+        out+="ionice ${iflags} "
+    fi
+    if [ "$_BATCH_PIN" = "yes" ] && [ -n "$_BATCH_CPUS" ] && command -v taskset >/dev/null 2>&1; then
+        out+="taskset -c ${_BATCH_CPUS// /,} "
+    fi
+    # Trim trailing space.
+    printf '%s' "${out% }"
+}
+
+# _batch_mksquashfs_args <existing_args> — echo existing args, appending
+# "-processors <N>" ONLY if not already present and not disabled.
+_batch_mksquashfs_args() {
+    local existing="${1:-}"
+    if [ "${AICLI_BATCH_DISABLE:-0}" = "1" ]; then printf '%s' "$existing"; return 0; fi
+    case " $existing " in
+        *" -processors "*) printf '%s' "$existing"; return 0 ;;
+    esac
+    _batch_plan
+    printf '%s' "${existing}${existing:+ }-processors ${_BATCH_PROCESSORS}"
+}
+
+# _batch_log_line — one-shot human log describing the resolved plan (stderr).
+_batch_log_line() {
+    [ "${AICLI_BATCH_DISABLE:-0}" = "1" ] && return 0
+    _batch_plan
+    local nice_lvl="${AICLI_BATCH_NICE:-19}" ionice_spec="${AICLI_BATCH_IONICE:-c3}"
+    if [ "$_BATCH_PIN" = "yes" ]; then
+        printf '[batch] ecores=%s pin=yes processors=%s nice=%s ionice=%s\n' \
+            "$_BATCH_ECORES" "$_BATCH_PROCESSORS" "$nice_lvl" "$ionice_spec" >&2
+    else
+        printf '[batch] ecores=none pin=no processors=%s (T=%s) nice=%s ionice=%s\n' \
+            "$_BATCH_PROCESSORS" "$_BATCH_T" "$nice_lvl" "$ionice_spec" >&2
+    fi
 }

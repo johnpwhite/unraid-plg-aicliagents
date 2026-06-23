@@ -21,6 +21,14 @@ export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
 source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 # S-05 (#1352): durable degraded flag (dual-write tmpfs + boot config).
 source "$EMHTTP_DEST/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
+# R2 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the shutdown-capture bridge.
+source "$EMHTTP_DEST/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
+
+# Budget (secs) for the pre-kill resume capture — small slice of the array-stop
+# window. pass 1 (disk fallback) fast + guaranteed; pass 2 best-effort. The
+# bridge is hard-ceilinged (budget+2s) + `|| true` so it can never block the
+# array from stopping.
+CAPTURE_BUDGET=8
 
 log() {
     printf '[%s] [INFO] [EventStoppingArray] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"
@@ -71,6 +79,17 @@ PERSIST_PATH=$(agent_persist_path 2>/dev/null)
 [ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
 STORAGE_CLASS=$(classify "$PERSIST_PATH")
 log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
+
+# R2: capture resume ids for ALL live sessions BEFORE any kill/eviction sweep
+# (covers both branches below). Disk fallback saved for every session; full
+# clean close attempted within CAPTURE_BUDGET. The kill/eviction sweep that
+# follows is UNCHANGED. Set the shared guard marker so a subsequent delegated
+# stop-plugin.sh won't run a second long capture serially.
+log "Capturing resume ids before eviction sweep (budget ${CAPTURE_BUDGET}s)..."
+if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
+    _capture_resume_before_stop "$CAPTURE_BUDGET"
+    : > /tmp/unraid-aicliagents/.resume_captured 2>/dev/null || true
+fi
 
 if needs_array "$STORAGE_CLASS"; then
     # Storage is on the array — must flush and stop everything before array unmounts

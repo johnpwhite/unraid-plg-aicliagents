@@ -299,8 +299,8 @@ class InstallerService {
             LogService::log("Warning: Could not clean workspace sessions: " . $e->getMessage(), LogService::LOG_WARN, "InstallerService");
         }
 
-        // 8. Remove version registration
-        AgentRegistry::removeVersion($agentId);
+        // 8. Remove version registration (R4: clearVersion also purges passthrough-only entries)
+        AgentRegistry::clearVersion($agentId);
 
         // 9. Remove the agent's manifest entry (WP #916). Without this, the
         // boot-integrity sweep on the next reboot finds `expected_layers > 0,
@@ -679,6 +679,101 @@ class InstallerService {
             if (file_exists($f)) @unlink($f);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Verify-live gate helpers (R3)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Pure: extract the agent overlay's lowerdir from /proc/mounts text.
+     * Returns null when the agent is not currently overlay-mounted.
+     */
+    public static function liveAgentLowerdir(string $agentId, string $mountsText): ?string
+    {
+        $safe   = preg_replace('/[^A-Za-z0-9._-]/', '', $agentId);
+        $needle = '/usr/local/emhttp/plugins/unraid-aicliagents/agents/' . $safe . ' ';
+        foreach (explode("\n", $mountsText) as $line) {
+            if (strpos($line, $needle) === false) continue;
+            if (preg_match('/lowerdir=([^,\s]+)/', $line, $m)) return $m[1];
+        }
+        return null;
+    }
+
+    /**
+     * True iff the live overlay lowerdir references the newest baked layer.
+     * $newestLayerBasename is the basename of the highest-numbered .sqsh file
+     * (e.g. "agent_claude-code_consolidated_0000000010_X.sqsh").
+     *
+     * Security fix: empty basename → false (no fail-open via empty strpos).
+     * Correctness fix: exact leaf match (not substring) guards against prefix
+     * collisions between layers. Multi-layer lowerdir (colon-joined A:B:C) is
+     * split and each component's basename is checked individually.
+     */
+    public static function isAgentLayerLive(string $agentId, string $newestLayerBasename, string $mountsText): bool
+    {
+        if ($newestLayerBasename === '') return false;
+        $stem = (string)preg_replace('/\.sqsh$/', '', $newestLayerBasename);
+        if ($stem === '') return false;
+        $ld = self::liveAgentLowerdir($agentId, $mountsText);
+        if ($ld === null) return false;
+        foreach (explode(':', $ld) as $component) {
+            if (basename($component) === $stem) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Newest agent layer basename across both layer kinds (the persisted bake
+     * outputs), or null if none. Globs the persistence dir and delegates the
+     * chronological selection to newestAgentLayerBasename(). Layer filenames
+     * share {type}_{id}_{kind}_{seq10}_{dt}.sqsh, so a lexical sort is
+     * chronological across both the post-bake and delta-fallback kinds.
+     */
+    public static function newestAgentLayer(string $agentId, string $persistDir): ?string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '', $agentId);
+        $glob = array_merge(
+            glob("$persistDir/agent_{$safe}_consolidated_*.sqsh") ?: [],
+            glob("$persistDir/agent_{$safe}_delta_*.sqsh") ?: []
+        );
+        return self::newestAgentLayerBasename($glob);
+    }
+
+    /**
+     * Returns the basename of the newest agent layer file across all layer kinds
+     * (post-bake and delta-fallback), or null if none found.
+     *
+     * Layer filenames share the format {type}_{id}_{kind}_{seq10}_{dt}.sqsh
+     * where seq10 is a zero-padded 10-digit monotonic sequence number
+     * (primary sort key) and dt is a UTC ISO 8601 basic timestamp (secondary
+     * tiebreak). Lexical sort is therefore chronological; newest wins.
+     *
+     * @param array<string> $globResults Absolute or relative paths from glob().
+     */
+    public static function newestAgentLayerBasename(array $globResults): ?string
+    {
+        if (empty($globResults)) {
+            return null;
+        }
+        sort($globResults);
+        return basename(end($globResults));
+    }
+
+    /**
+     * Force a deferred agent overlay refresh now that sessions are closed.
+     * Routes through FileStorage::forceRemount (the force-remount facade) so
+     * storagectl is invoked via the canonical path — never called directly
+     * (Epic #1310). Unlike ensureReady, forceRemount bypasses the
+     * isAgentMountHealthy fast-path that would silently keep a stale lowerdir;
+     * it unconditionally dispatches op_mount to swap in the newest baked layer.
+     * Returns true when storagectl exits usably (exit 0 or 2).
+     */
+    public static function forceAgentRefresh(string $agentId): bool
+    {
+        return FileStorage::forceRemount("agent/$agentId");
+    }
+
+    // -------------------------------------------------------------------------
 
     /**
      * Updates the Unraid Tasks menu visibility.

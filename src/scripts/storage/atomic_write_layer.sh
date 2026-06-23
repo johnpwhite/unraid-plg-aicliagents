@@ -13,9 +13,11 @@
 #   kind         — "delta" or "consolidated"
 #
 # Naming convention (canonical, per STORAGE_DURABILITY_SUPERVISOR.md):
-#   delta:        ${type}_${id}_delta_${dt}.sqsh
-#   consolidated: ${type}_${id}_consolidated_${dt}.sqsh
-#   where ${dt} = $(date -u +%Y%m%dT%H%M%SZ) — UTC, ISO 8601 basic, 16 chars.
+#   ${type}_${id}_${kind}_${seq10}_${dt}.sqsh
+#   where kind ∈ {delta, consolidated}
+#         seq10 = 10-digit zero-padded monotonic sequence (e.g. 0000000012)
+#         ${dt} = $(date -u +%Y%m%dT%H%M%SZ) — UTC, ISO 8601 basic, 16 chars.
+# Legacy formats (no seq10 segment) remain valid lower layers but are not produced.
 # Legacy formats remain valid lower layers but are not produced by this writer.
 #
 # Returns 0 on success and prints the final basename to stdout.
@@ -111,6 +113,11 @@ atomic_write_layer() {
 
     echo "[atomic_write_layer] Writing $kind layer: $final_name (via tempfile)" >&2
 
+    # Resolve + log the batch deprioritization plan once per bake (best-effort).
+    if declare -f _batch_log_line >/dev/null 2>&1; then
+        _batch_log_line || true
+    fi
+
     # ----- Cleanup trap: unlink tempfile on any exit from this function ---------
     # We use a subshell so the trap doesn't escape to the caller.
     # The subshell also gives us a clean 'set -euo pipefail' scope.
@@ -127,19 +134,31 @@ atomic_write_layer() {
         local mksq_args="${MKSQUASHFS_ARGS:-$_AWL_DEFAULT_ARGS}"
         echo "[atomic_write_layer] Running mksquashfs..." >&2
 
+        # BATCH_BAKE_DEPRIORITIZE: prepend nice/ionice/taskset (if available) and
+        # inject a capped -processors. With AICLI_BATCH_DISABLE=1 (or the helper
+        # absent) the prefix is empty and args are unchanged — byte-identical to
+        # legacy behavior. Heavy I/O steps below get the same prefix.
+        local _batch_pfx=""
+        if declare -f _batch_prefix >/dev/null 2>&1; then
+            _batch_pfx="$(_batch_prefix)"
+            mksq_args="$(_batch_mksquashfs_args "$mksq_args")"
+        fi
+
         # shellcheck disable=SC2086
-        if ! mksquashfs "$upper_dir" "$tmp_path" $mksq_args > /dev/null 2>&1; then
+        if ! $_batch_pfx mksquashfs "$upper_dir" "$tmp_path" $mksq_args > /dev/null 2>&1; then
             echo "[atomic_write_layer] ERROR: mksquashfs failed" >&2
             exit 1
         fi
 
         # ----- Step 3: fsync the tempfile (full sync — safe on all filesystems) -
         echo "[atomic_write_layer] Syncing to disk..." >&2
-        sync
+        # shellcheck disable=SC2086
+        $_batch_pfx sync
 
         # ----- Step 4: Compute sha256 ------------------------------------------
         local sha256
-        sha256=$(sha256sum "$tmp_path" 2>/dev/null | awk '{print $1}')
+        # shellcheck disable=SC2086
+        sha256=$($_batch_pfx sha256sum "$tmp_path" 2>/dev/null | awk '{print $1}')
         if [ -z "$sha256" ]; then
             echo "[atomic_write_layer] ERROR: sha256sum failed on tempfile" >&2
             exit 1
@@ -223,7 +242,8 @@ atomic_write_layer() {
         fi
 
         echo "[atomic_write_layer] Renaming to final path: $final_name" >&2
-        if ! mv -n "$tmp_path" "$final_path" 2>/dev/null; then
+        # shellcheck disable=SC2086
+        if ! $_batch_pfx mv -n "$tmp_path" "$final_path" 2>/dev/null; then
             echo "[atomic_write_layer] ERROR: atomic rename failed: $tmp_path -> $final_path" >&2
             exit 1
         fi
@@ -239,7 +259,8 @@ atomic_write_layer() {
 
         # ----- Step 7: fsync parent directory (best-effort) ---------------------
         # 'sync -f <path>' may not be available everywhere; fall back to global sync.
-        sync "$persist_path" 2>/dev/null || sync
+        # shellcheck disable=SC2086
+        $_batch_pfx sync "$persist_path" 2>/dev/null || $_batch_pfx sync 2>/dev/null || sync
 
         # ----- Step 8: Lifecycle log: success -----------------------------------
         lifecycle_log "info" "atomic_write_layer" "atomic_write_ok" \

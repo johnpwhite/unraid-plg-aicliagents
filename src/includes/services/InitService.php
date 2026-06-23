@@ -97,6 +97,15 @@ class InitService {
             BootIntegrityService::runBootSweep();
         }
 
+        // R-C1 (CLAUDE_RELAUNCH_SURVIVAL): one-time migration of per-(path,agent)
+        // auto-launch flags up to the new agent-level map. Idempotent — guarded by
+        // a persistent marker on the HOME state dir; cheap stat on the steady state.
+        try {
+            ConfigService::migrateAutoLaunchToAgentLevel();
+        } catch (\Throwable $e) {
+            LogService::log("autolaunch agent-level migration error: " . $e->getMessage(), LogService::LOG_WARN, "InitService");
+        }
+
         // 2. Cleanup stale sessions and temporary artifacts
         self::cleanupStaleState();
         

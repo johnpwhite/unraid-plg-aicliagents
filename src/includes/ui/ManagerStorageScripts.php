@@ -8,6 +8,17 @@
  */
 ?>
 <script>
+// Top-level HTML escaper — shared by all top-level functions in this script
+// (notably consolidateStorage's calm-card dialog). NOTE: a second escapeHtml is
+// defined inside the consolidate-fail-banner IIFE below; that one is function-
+// local and shadows this only within that IIFE. This top-level copy is what
+// consolidateStorage resolves (the IIFE's is out of scope there).
+function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+}
+
 function refreshStats() {
     // Show storage unavailable banner if needed
     if (window.aicli_storage_available === false) {
@@ -251,17 +262,150 @@ function repairStorage(type, id) {
 }
 
 function consolidateStorage(type, id) {
-    swal({ title: "Consolidate " + type + " layers?", text: "Merge SquashFS deltas into a single base volume. This saves memory.", type: "warning", showCancelButton: true, showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
+    // Runs the consolidate AJAX + reports the result. No confirm of its own — the
+    // caller is responsible for confirming first (a plain confirm for agents/empty
+    // homes via doConsolidate, or the calm action-card for homes with open sessions).
+    // Shared so neither path chains two swals (sweet-alert v1 swallows a new swal
+    // opened from a closeOnConfirm:true callback — that was the "overlay disappears,
+    // nothing happens" bug).
+
+    // R2.3 — backend now returns {status:'queued', job_id, message} almost immediately.
+    // On queued: close the dialog at once; the activity-tray pill is the progress source
+    // of truth. A brief non-blocking toast confirms the hand-off. On any non-queued
+    // response keep the error path.
+    function runConsolidate() {
         aicliAjax('consolidate_storage', { type: type, id: id }, function(r) {
-            if (r.status === 'ok') {
-                // #2: the backend only QUEUES a supervisor job — don't claim it's
-                // already consolidated. Tell the truth (incl. the "waits for open
-                // sessions" reason for homes) and point at the activity tray.
-                swal({ title: "Queued", text: r.message || "Consolidation queued.", type: "info", timer: 4000, showConfirmButton: false });
+            if (r && r.status === 'queued') {
+                // Hand off to the activity tray immediately — no long spin.
+                swal({
+                    title: 'Consolidating ' + id + '’s home',
+                    text: r.message || 'Queued — watch the activity tray for progress.',
+                    type: 'info',
+                    timer: 2500,
+                    showConfirmButton: false
+                });
                 clearChanged();
+            } else if (r && r.status === 'ok') {
+                // Non-home consolidate (agent) or legacy synchronous path — truthful.
+                swal({ title: "Queued", text: r.message || 'Consolidation queued.', type: 'info', timer: 4000, showConfirmButton: false });
+                clearChanged();
+            } else {
+                swal('Failed', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
             }
-            else swal("Failed", r.message, "error");
             refreshStats();
+        });
+    }
+
+    function doConsolidate() {
+        swal({ title: 'Consolidate ' + type + ' layers?', text: 'Merge SquashFS deltas into a single base volume. This saves memory.', type: 'warning', showCancelButton: true, showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+            if (!confirmed) return;
+            runConsolidate();
+        });
+    }
+
+    if (type !== 'home') {
+        doConsolidate();
+        return;
+    }
+
+    // R1.2/R1.3 — For home consolidates: fetch open sessions first.
+    // If sessions exist, show a calm action-card (NOT a destructive warning) because
+    // the operation auto-resumes every session — it is safe and reversible.
+    // If sessions is empty, fall back to the standard doConsolidate confirm.
+    aicliAjax('get_home_sessions', { id: id }, function(r) {
+        var sessions = (r && r.status === 'ok' && r.sessions) ? r.sessions : [];
+        if (sessions.length === 0) {
+            doConsolidate();
+            return;
+        }
+
+        // Build agent-row grid. Each session: {id, agentId, name, icon, path, workspace}.
+        // Fall back defensively: name → agentId → 'unknown'; icon → generic SVG data-uri.
+        var FALLBACK_ICON = 'data:image/svg+xml,%3Csvg xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22 viewBox%3D%220 0 24 24%22 fill%3D%22none%22 stroke%3D%22%23888%22 stroke-width%3D%221.5%22%3E%3Crect x%3D%223%22 y%3D%223%22 width%3D%2218%22 height%3D%2218%22 rx%3D%223%22%2F%3E%3Ccircle cx%3D%2212%22 cy%3D%229%22 r%3D%222.5%22%2F%3E%3Cpath d%3D%22M7 19c0-2.8 2.2-5 5-5s5 2.2 5 5%22%2F%3E%3C%2Fsvg%3E';
+
+        // Determine shared workspace path (shown once if all sessions share the same path).
+        var paths = sessions.map(function(s) { return s.workspace || s.path || ''; });
+        var firstPath = paths[0] || '';
+        var sharedPath = firstPath && paths.every(function(p) { return p === firstPath; }) ? firstPath : '';
+
+        var rowsHtml = '';
+        for (var i = 0; i < sessions.length; i++) {
+            var s = sessions[i];
+            var displayName = s.name || s.agentId || 'unknown';
+            var iconSrc = s.icon || FALLBACK_ICON;
+            // XSS-safe icon src: only image data URIs, https, or root-relative
+            // same-origin paths (registry icons). Anything else -> fallback.
+            if (!/^(data:image\/|https:\/\/|\/[^\/])/.test(iconSrc)) { iconSrc = FALLBACK_ICON; }
+            var rowPath = s.workspace || s.path;
+            var pathHtml = (!sharedPath && rowPath)
+                ? '<span style="display:block; font-size:10px; font-family:monospace; opacity:0.55; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px;">' + escapeHtml(rowPath) + '</span>'
+                : '';
+            rowsHtml +=
+                '<div style="display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:4px; background:var(--mild-background-color,rgba(0,0,0,0.04));">' +
+                    '<img src="' + escapeHtml(iconSrc) + '" alt="" style="width:22px; height:22px; border-radius:4px; flex-shrink:0; object-fit:contain; background:var(--title-header-background-color,#333);" onerror="this.src=\'' + FALLBACK_ICON + '\'">' +
+                    '<div style="min-width:0; flex:1;">' +
+                        '<span style="font-size:12px; font-weight:600; color:var(--text-color,#eee);">' + escapeHtml(displayName) + '</span>' +
+                        pathHtml +
+                    '</div>' +
+                '</div>';
+        }
+
+        var sharedPathHtml = sharedPath
+            ? '<div style="margin-top:8px; padding:5px 8px; border-radius:4px; background:var(--mild-background-color,rgba(0,0,0,0.04)); font-family:monospace; font-size:10px; color:var(--text-color,#ccc); opacity:0.75; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' +
+                  '<svg style="width:12px;height:12px;vertical-align:-2px;margin-right:4px;" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 10l4-4 3 3 5-5"/><path d="M1 13h14"/></svg>' +
+                  escapeHtml(sharedPath) +
+              '</div>'
+            : '';
+
+        // Merge/consolidate SVG icon — two overlapping layers flowing into one. No emoji.
+        var mergeIconSvg =
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" ' +
+                'style="width:52px;height:52px;display:block;margin:0 auto 8px;" ' +
+                'aria-hidden="true">' +
+                // back layer (lighter, offset up-right)
+                '<rect x="14" y="6" width="26" height="18" rx="3" ' +
+                    'stroke="var(--orange,#e68a00)" stroke-width="1.8" stroke-dasharray="3 2" opacity="0.45"/>' +
+                // front layer (solid, offset down-left)
+                '<rect x="8" y="14" width="26" height="18" rx="3" ' +
+                    'stroke="var(--orange,#e68a00)" stroke-width="1.8" opacity="0.7"/>' +
+                // merge arrow pointing down to unified layer
+                '<path d="M24 32 L24 38" stroke="var(--orange,#e68a00)" stroke-width="2" stroke-linecap="round"/>' +
+                '<path d="M20 35 L24 39 L28 35" stroke="var(--orange,#e68a00)" stroke-width="2" ' +
+                    'stroke-linecap="round" stroke-linejoin="round"/>' +
+                // unified bottom layer
+                '<rect x="11" y="39" width="26" height="4" rx="2" ' +
+                    'fill="var(--orange,#e68a00)" opacity="0.85"/>' +
+            '</svg>';
+
+        var cardHtml =
+            '<div style="text-align:center; padding:4px 0 8px;">' +
+                mergeIconSvg +
+                '<div style="font-size:11px; line-height:1.5; color:var(--text-color,#ccc); opacity:0.85; margin-bottom:12px; padding:0 4px;">' +
+                    'Frees memory by merging storage layers. Your sessions close briefly and reopen exactly where you left off.' +
+                '</div>' +
+                '<div style="display:grid; grid-template-columns:1fr 1fr; gap:5px; text-align:left; margin-bottom:0;">' +
+                    rowsHtml +
+                '</div>' +
+                sharedPathHtml +
+            '</div>';
+
+        // R1.2: calm swal — no "warning" type icon. html:true, closeOnConfirm:false keeps
+        // the modal up while the brief AJAX round-trip completes (showLoaderOnConfirm).
+        // Sweet-alert v1 note: do NOT open a new swal from a closeOnConfirm:true callback
+        // — it gets swallowed. closeOnConfirm:false + runConsolidate's own swal replaces it.
+        swal({
+            title: 'Consolidate ' + id + '’s home',
+            text: cardHtml,
+            html: true,
+            type: 'info',
+            showCancelButton: true,
+            confirmButtonText: 'Consolidate',
+            cancelButtonText: 'Cancel',
+            showLoaderOnConfirm: true,
+            closeOnConfirm: false
+        }, function(confirmed) {
+            if (!confirmed) return;
+            runConsolidate();
         });
     });
 }

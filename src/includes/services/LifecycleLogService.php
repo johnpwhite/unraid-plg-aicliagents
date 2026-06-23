@@ -54,13 +54,7 @@ class LifecycleLogService {
             $payload['_trace'] = TraceContext::getId();
         }
 
-        $ts      = date('Y-m-d\TH:i:s\Z', time());
-        $payJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        if ($payJson === false) {
-            $payJson = '{}';
-        }
-
-        $line = implode(' | ', [$ts, $level, $component, $event, $payJson]) . "\n";
+        $line = self::formatLine($level, $component, $event, $payload);
 
         $fd = @fopen($path, 'a');
         if ($fd === false) {
@@ -79,6 +73,25 @@ class LifecycleLogService {
         @fclose($fd);
 
         return ($written !== false && $written > 0);
+    }
+
+    /**
+     * Pure formatter: assembles a structured log line with a UTC timestamp.
+     * Extracted for testability — no I/O side effects.
+     *
+     * @param string   $level     One of the LEVEL_* constants.
+     * @param string   $component Logical component name.
+     * @param string   $event     Event identifier.
+     * @param array    $payload   Arbitrary key-value data.
+     * @param int|null $ts        Unix timestamp (defaults to now).
+     * @return string             The formatted log line (includes trailing newline).
+     */
+    public static function formatLine(string $level, string $component, string $event, array $payload, ?int $ts = null): string
+    {
+        $stamp   = gmdate('Y-m-d\TH:i:s\Z', $ts ?? time());
+        $payJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($payJson === false) { $payJson = '{}'; }
+        return implode(' | ', [$stamp, $level, $component, $event, $payJson]) . "\n";
     }
 
     /**
