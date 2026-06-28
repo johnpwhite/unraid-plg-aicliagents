@@ -589,7 +589,24 @@ class SupervisorService {
             switch ($state) {
                 case 'done':
                     if (($entry['status'] ?? '') !== 'done') {
-                        ActivityService::finish($opId);
+                        // R3 (HOME_PERSIST_PILL_AND_FEEDBACK): for home bake/consolidate
+                        // jobs, check whether the ZRAM upper is still dirty because active
+                        // sessions are holding the mount open; if so, finish with an
+                        // explanatory message instead of a bare "Done".
+                        $op     = (string)($job['op'] ?? '');
+                        $entity = (string)($job['entity'] ?? '');
+                        $step   = 'Done';
+                        if (
+                            ($op === 'bake' || $op === 'consolidate') &&
+                            strpos($entity, 'home/') === 0
+                        ) {
+                            $homeId = substr($entity, 5); // "home/root" → "root"
+                            require_once __DIR__ . '/TerminalService.php';
+                            $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForHome($homeId);
+                            $dirtyMb  = self::zramUpperDirtyMb($homeId);
+                            $step     = self::homeDoneStep($sessions, $dirtyMb);
+                        }
+                        ActivityService::finish($opId, $step);
                     }
                     break;
                 case 'failed':
@@ -644,6 +661,40 @@ class SupervisorService {
                 ActivityService::finish($opId, 'done');
             }
         }
+    }
+
+    /**
+     * R3: Resolve the finish step for a home bake/consolidate job.
+     * Pure function — takes the sessions array (from listActiveSessionsForHome)
+     * and the ZRAM upper dirty-MB count; returns the step string.
+     *
+     * Public so unit tests can invoke it directly without needing live tmux
+     * sessions or a mounted ZRAM device (see HomePersistDirtyUpperTest).
+     */
+    public static function homeDoneStep(array $sessions, int $dirtyMb): string
+    {
+        if (!empty($sessions) && $dirtyMb > 8) {
+            return "Saved to flash — ~{$dirtyMb} MB stays in RAM until this home's open sessions close.";
+        }
+        return 'Done';
+    }
+
+    /**
+     * R3: Returns approximate ZRAM upper-dir dirty data in MB (0 on any error
+     * or missing dir). Called ONCE at done-transition, guarded by the active-
+     * session check so du is not invoked on every poll.
+     */
+    private static function zramUpperDirtyMb(string $id): int
+    {
+        $upper = '/tmp/unraid-aicliagents/zram_upper/homes/' . $id . '/upper';
+        if (!is_dir($upper)) {
+            return 0;
+        }
+        $out = shell_exec('du -sm ' . escapeshellarg($upper) . ' 2>/dev/null');
+        if ($out === null || $out === '') {
+            return 0;
+        }
+        return (int)$out;
     }
 
     /** Ledger dir — AICLI_JOBS_DIR redirects for tests (PHPUnit / smoke isolation). */

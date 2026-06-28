@@ -234,14 +234,25 @@ function persistEntity(type, id) {
         const req = (type === 'agent')
             ? aicliAjax('persist_agent', { id: id })
             : aicliAjax('persist_home', {});
+        // R2 (HOME_PERSIST_PILL_AND_FEEDBACK): never leave the spinner frozen.
+        req.fail(function() {
+            swal("Persistence Failed", "The request did not complete. Check debug.log / network.", "error");
+        });
         req.done(function(r) {
-            if (r && r.status === 'ok') { 
+            if (r && r.status === 'ok' && r.baking && r.job_id) {
+                // Queued path (home persist + agent persist): hand off to the activity tray.
+                swal({ title: "Queued", text: "Queued — watch the activity tray for progress.", type: "info", timer: 2500, showConfirmButton: false });
+                clearChanged();
+                refreshStats();
+            } else if (r && r.status === 'ok') {
+                // Legacy synchronous path (no baking flag) — still used for edge cases.
                 swal({ title: "Persisted", text: "Data persisted.", type: "success", timer: 2000, showConfirmButton: false });
                 clearChanged();
-                refreshStats(); 
-            }
-            else {
-                const err = r.message || "Unknown Error. Check debug.log";
+                refreshStats();
+            } else if (r && r.status === 'busy') {
+                swal({ title: "Busy", text: r.message || "Another operation is in progress. Please wait and try again.", type: "warning", showConfirmButton: true });
+            } else {
+                const err = (r && r.message) || "Unknown Error. Check debug.log";
                 aicli_log_to_server("Manual persistence FAILED: " + err, 0);
                 swal("Persistence Failed", err, "error");
             }

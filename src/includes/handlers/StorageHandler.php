@@ -514,15 +514,21 @@ class StorageHandler {
     }
 
     private static function persistHome() {
+        // R1 (HOME_PERSIST_PILL_AND_FEEDBACK): mirror persistAgent() — enqueue a
+        // tracked home/bake/user_persist/priority-5 job so the activity-tray pill
+        // appears (queued → running → done) just like agent and consolidate operations.
+        // R4: the blocking helper aicli_persist_home is unchanged — still used by
+        // saveWorkspaceEnvs for synchronous env-save persistence.
         $config = getAICliConfig();
         $user = (string)($config['user'] ?? '');
         if ($user === '' || $user === '0') $user = 'root';
-        $result = aicli_persist_home($user, true);
-        if (is_array($result)) return $result;
-        return [
-            'status' => $result ? 'ok' : 'error',
-            'message' => $result ? 'Persistence successful' : 'Persistence (Bake) failed for user ' . $user . '. Check debug.log for details.'
-        ];
+        $jobId = \AICliAgents\Services\SupervisorService::enqueueJob('home', $user, 'bake', 'user_persist', 5);
+        if ($jobId === null) {
+            // Ledger unavailable — preserve the legacy untracked enqueue.
+            \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'user_persist', 5);
+        }
+        self::trackJobActivity($jobId, "Persist home $user");
+        return ['status' => 'ok', 'message' => 'Persistence queued. The supervisor will bake the home layer shortly.', 'baking' => true, 'job_id' => $jobId];
     }
 
     /**
