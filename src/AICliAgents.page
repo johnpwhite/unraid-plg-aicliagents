@@ -19,6 +19,16 @@ if ($config['enable_tab'] !== '1') {
 }
 
 $version = \AICliAgents\Services\ConfigService::getVersion();
+// Cache-bust on the built asset's mtime, not just the plugin version: a dev
+// overlay (or any deploy) that refreshes the bundle in place keeps the same
+// version string, so a version-only ?v= would serve the stale cached module.
+// mtime changes on every copy → the browser always fetches the current bundle.
+$asset_dir = '/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui';
+$asset_ver = (string) max(
+    @filemtime("$asset_dir/index.js") ?: 0,
+    @filemtime("$asset_dir/index.css") ?: 0
+);
+if ($asset_ver === '0') { $asset_ver = $version; }
 $var = @parse_ini_file("/var/local/emhttp/var.ini");
 $csrf_token = $var['csrf_token'] ?? '';
 
@@ -34,10 +44,10 @@ require_once "$ui_path/CommonLogging.php";
 require_once "$ui_path/UploadOverlay.php";
 ?>
 
-<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= htmlspecialchars($version) ?>">
-<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($version) ?>"></script>
+<link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/index.css?v=<?= htmlspecialchars($asset_ver) ?>">
+<script type="module" src="/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($asset_ver) ?>"></script>
 <!-- T-08 (ACTIVITY_TRAY.md): activity tray web component — self-mounts to body -->
-<script src="/plugins/unraid-aicliagents/assets/ui/activity-tray.js?v=<?= htmlspecialchars($version) ?>"></script>
+<script src="/plugins/unraid-aicliagents/assets/ui/activity-tray.js?v=<?= htmlspecialchars($asset_ver) ?>"></script>
 
 <?php
 require_once "$ui_path/TerminalGlobalState.php";

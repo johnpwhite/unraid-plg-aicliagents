@@ -25,6 +25,7 @@ class UtilityHandler {
             case 'save_env':         return self::saveEnv();
             case 'filetree':         return null; // Handled via rawFiletree()
             case 'list_dir':         return self::listDir();
+            case 'check_path':       return self::checkPath();
             case 'upload_chunk':     return self::uploadChunk();
             case 'save_file':        return self::saveFile();
             case 'save_pasted_image': return self::savePastedImage();
@@ -37,7 +38,7 @@ class UtilityHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'get_env', 'save_env',
-                'filetree', 'list_dir', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log', 'log_client_error'];
+                'filetree', 'list_dir', 'check_path', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log', 'log_client_error'];
     }
 
     /**
@@ -304,6 +305,31 @@ class UtilityHandler {
         }
         aicli_log("[Upload] FAILED: Could not open $dest for writing", AICLI_LOG_ERROR, "UtilityHandler");
         return ['status' => 'error', 'message' => 'Failed to write to ' . $dest];
+    }
+
+    /**
+     * #40 (docs/specs/TMUX_PATH_LINKS.md): read-only existence check for a
+     * terminal path-link candidate. The path rides in the POST body (never the
+     * query string → never nginx access logs). validatePath() canonicalises and
+     * enforces the allowlisted bases; anything outside them reports exists=false
+     * rather than leaking whether the path is real.
+     */
+    private static function checkPath() {
+        $rawPath = $_POST['path'] ?? '';
+        if (!is_string($rawPath) || $rawPath === '' || strlen($rawPath) > 4096) {
+            return ['status' => 'error', 'message' => 'Missing or invalid path'];
+        }
+        $resolved = ValidationService::validatePath($rawPath);
+        if ($resolved === false) {
+            return ['status' => 'ok', 'exists' => false, 'isFile' => false, 'path' => ''];
+        }
+        $exists = file_exists($resolved);
+        return [
+            'status' => 'ok',
+            'exists' => $exists,
+            'isFile' => $exists && is_file($resolved),
+            'path'   => $exists ? $resolved : '',
+        ];
     }
 
     /**

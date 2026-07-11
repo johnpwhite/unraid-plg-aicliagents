@@ -15,6 +15,10 @@
     const filenameInput = $('#upload-filename');
     const previewArea = $('#upload-preview');
     let pendingBlob = null;
+    // #41 (docs/specs/TMUX_IMAGE_PASTE_PATH.md): remembers whether the pending
+    // upload came from a clipboard paste. Paste-initiated uploads deliver the
+    // saved file's path into the active agent's tmux session on success.
+    let pendingWasPaste = false;
 
     function logUpload(msg, level) {
         console.log('[AICli-Upload] ' + msg);
@@ -87,6 +91,7 @@
     });
 
     function handleInputFile(blob, isPaste, path) {
+        pendingWasPaste = !!isPaste;
         showUpload(path); dropZone.hide(); previewArea.show();
         let name = blob.name || ('pasted_image_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.png');
         filenameInput.val(name); confirmBtn.show().text('Confirm Upload');
@@ -106,11 +111,24 @@
         $('#upload-progress-container').show(); $(this).prop('disabled', true).text('Uploading...');
         try {
             if (pendingBlob.size === 0) throw new Error('File is empty (0 bytes).');
-            await uploadFileInChunks(pendingBlob, fname, path);
+            var res = await uploadFileInChunks(pendingBlob, fname, path);
             logUpload('Upload complete: ' + fname);
+            // #41: paste-initiated uploads deliver the saved path to the agent's
+            // tmux session (bracketed paste via tmux_paste_text — no clipboard/
+            // X11 access server-side). Use the server-confirmed sanitized
+            // filename, not the raw input value. The helper returns false when
+            // no agent session is active (file still saved, plain toast).
+            var savedName = (res && res.filename) ? res.filename : fname;
+            var savedPath = String(path).replace(/\/+$/, '') + '/' + savedName;
+            var pathSent = pendingWasPaste && window.aicli_paste_saved_path
+                ? window.aicli_paste_saved_path(savedPath) === true
+                : false;
             hideUpload();
             setTimeout(function() {
-                swal({ title: "Uploaded!", text: fname + " saved to workspace.", type: "success", timer: 2000, showConfirmButton: false });
+                var msg = pathSent
+                    ? savedName + " saved — path sent to terminal."
+                    : savedName + " saved to workspace.";
+                swal({ title: "Uploaded!", text: msg, type: "success", timer: 2000, showConfirmButton: false });
             }, 300);
         } catch (err) {
             logUpload('Upload FAILED: ' + (err.message || err), 0);
@@ -171,9 +189,50 @@
             throw new Error(res.message || 'Server rejected the upload');
         }
         $('#upload-bar').css('width', '100%');
+        return res;
+    }
+
+    /**
+     * #41: DIRECT image paste — no upload overlay.
+     *
+     * Ctrl+V of an image in the terminal saves it silently into the workspace
+     * under an auto-generated timestamped name, then bracketed-pastes the saved
+     * path into the agent's tmux session (via aicli_paste_saved_path). The agent
+     * reads the image from that path — it never touches the clipboard, so the
+     * headless-server X11/xclip error can't occur.
+     *
+     * Explicit uploads (drag-drop, the Upload button, non-image pastes) keep the
+     * overlay + confirm step; only a pasted IMAGE takes this silent path.
+     */
+    async function pasteImageDirect(blob, path) {
+        if (!blob || !path) return false;
+        // Always timestamp pasted images: clipboard blobs are usually named
+        // "image.png", which would silently overwrite the previous paste.
+        var name = 'pasted_image_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.png';
+        logUpload('Direct image paste: ' + blob.size + ' bytes -> ' + path + '/' + name);
+        try {
+            if (blob.size === 0) throw new Error('Pasted image is empty (0 bytes).');
+            var res = await uploadFileInChunks(blob, name, path);
+            var savedName = (res && res.filename) ? res.filename : name;
+            var savedPath = String(path).replace(/\/+$/, '') + '/' + savedName;
+            // Delivers the path + toasts. Returns false when no agent session is
+            // active — the image is still on disk, so tell the user where it went.
+            var sent = window.aicli_paste_saved_path
+                ? window.aicli_paste_saved_path(savedPath) === true
+                : false;
+            if (!sent) {
+                swal({ title: "Image saved", text: savedName + " saved to workspace.", type: "success", timer: 2000, showConfirmButton: false });
+            }
+            return sent;
+        } catch (err) {
+            logUpload('Direct image paste FAILED: ' + (err.message || err), 0);
+            swal("Paste Failed", err.message || 'Could not save the pasted image', "error");
+            return false;
+        }
     }
 
     window.aicli_trigger_upload = showUpload;
     window.aicli_handle_file = handleInputFile;
+    window.aicli_paste_image_direct = pasteImageDirect;
 })();
 </script>

@@ -1,0 +1,53 @@
+Menu="Buttons"
+---
+<script>
+/**
+ * AI CLI Agents: Browse editor deep link (#40, docs/specs/TMUX_PATH_LINKS.md).
+ *
+ * The stock file manager has no URL that opens a specific file in its editor —
+ * the Browse page's global fileEdit('name_N') reads the absolute path from the
+ * row proxy <i id="row_N" data="<path>" type="f"> after loadList() populates
+ * the table. This Menu="Buttons" fragment loads on every page but self-gates:
+ * it only acts on a Browse page whose location.hash carries #aicli_edit=<path>
+ * (hash → never in server access logs). It polls for the matching row (the
+ * list loads async), invokes the native editor dialog, and clears the hash so
+ * back/reload doesn't re-open it. Timeout leaves the user in the right
+ * directory with no error — the file row simply wasn't found.
+ */
+(function () {
+    'use strict';
+    if (!/\/Browse$/.test(location.pathname)) return;
+    var m = /^#aicli_edit=(.+)$/.exec(location.hash || '');
+    if (!m) return;
+
+    var target;
+    try { target = decodeURIComponent(m[1]); } catch (e) { return; }
+    if (!target || target.charAt(0) !== '/') return;
+
+    var POLL_MS = 250;
+    var TIMEOUT_MS = 15000;
+    var started = Date.now();
+
+    function tryOpen() {
+        if (typeof window.fileEdit === 'function') {
+            var rows = document.querySelectorAll('i[id^="row_"][type="f"]');
+            for (var i = 0; i < rows.length; i++) {
+                if (rows[i].getAttribute('data') === target) {
+                    // fileEdit takes the name_N id; dfm_proxy maps it back to row_N.
+                    window.fileEdit(rows[i].id.replace('row', 'name'));
+                    // Replace state so reload/back doesn't re-trigger the dialog.
+                    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* no-op */ }
+                    return;
+                }
+            }
+        }
+        if (Date.now() - started < TIMEOUT_MS) setTimeout(tryOpen, POLL_MS);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', tryOpen);
+    } else {
+        tryOpen();
+    }
+})();
+</script>
