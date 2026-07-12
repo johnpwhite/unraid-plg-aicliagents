@@ -57,6 +57,53 @@ class ValidationService {
     }
 
     /**
+     * Like validatePath(), but tolerant of a not-yet-created path at ANY depth.
+     * validatePath() only accepts a missing file whose PARENT dir exists; this
+     * walks up to the nearest EXISTING ancestor, canonicalises THAT against the
+     * allowlist, then re-appends the missing tail. Used for "intended" paths —
+     * a "+ Add <file>" placeholder or a file about to be created whose parent
+     * dir(s) don't exist yet (e.g. a project with no .claude/ directory).
+     * Symlink-safe: only the existing ancestor is realpath()-canonicalised; a
+     * non-existent tail segment cannot be a symlink. Returns the intended
+     * absolute path, or false if it resolves outside the allowlist (or nothing
+     * in the chain exists / it escapes via ..).
+     *
+     * @param string $path
+     * @return string|false
+     */
+    public static function validateIntendedPath($path) {
+        if (empty($path) || !is_string($path)) {
+            return false;
+        }
+        $tail = [];
+        $cur = rtrim($path, '/');
+        // Reject traversal outright — the existing-ancestor realpath below
+        // would collapse ".." but only AFTER we've split; refuse it up front.
+        if (strpos($cur, '/../') !== false || substr($cur, -3) === '/..') {
+            return false;
+        }
+        while ($cur !== '' && $cur !== '/' && realpath($cur) === false) {
+            $tail[] = basename($cur);
+            $parent = dirname($cur);
+            if ($parent === $cur) {
+                return false; // reached the top with nothing existing
+            }
+            $cur = $parent;
+        }
+        $baseReal = realpath($cur);
+        if ($baseReal === false) {
+            return false;
+        }
+        $intended = $baseReal . (empty($tail) ? '' : '/' . implode('/', array_reverse($tail)));
+        foreach (self::$ALLOWED_PATH_BASES as $base) {
+            if ($intended === $base || strpos($intended, $base . '/') === 0) {
+                return $intended;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Sanitizes a filename to prevent directory traversal and special character injection.
      *
      * @param string $filename The user-supplied filename.

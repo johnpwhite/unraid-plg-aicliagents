@@ -44,6 +44,7 @@ require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/DiagnosticsHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/WorkspaceBundleService.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/BundleHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AssetsHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
@@ -153,6 +154,7 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\GitHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\DiagnosticsHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\BundleHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\AssetsHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
             ob_end_clean();

@@ -147,6 +147,18 @@ class InstallerService {
                 LogService::LOG_WARN, "InstallerService");
         }
 
+        // File-path-convention policy block (docs/specs/AGENT_FILE_PATH_CONVENTION.md):
+        // best-effort, immediate injection so a freshly installed/upgraded agent has
+        // the block without waiting for a full hub "Apply to agents" pass. Never
+        // fails the install — same try/catch discipline as the env seed above.
+        try {
+            require_once __DIR__ . '/hub/HubProjector.php';
+            \AICliAgents\Services\Hub\HubProjector::projectPolicy([$agentId]);
+        } catch (\Throwable $e) {
+            LogService::log("Installer: file-path policy projection failed for $agentId: " . $e->getMessage(),
+                LogService::LOG_WARN, "InstallerService");
+        }
+
         return ['status' => 'ok'];
     }
 

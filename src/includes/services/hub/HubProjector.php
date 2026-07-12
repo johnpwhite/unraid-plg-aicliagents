@@ -124,6 +124,44 @@ class HubProjector {
         return $out;
     }
 
+    /** @var FilePathConventionProjector[]|null */
+    private static $policyInstructionVendors = null;
+
+    /**
+     * Always-on "file-path convention" policy projectors (see
+     * docs/specs/AGENT_FILE_PATH_CONVENTION.md), one per agent MIRRORING
+     * instructionVendors() (same primary agentId / relPath / servedAgentIds
+     * — the fence lands in the SAME instruction file, right beside the
+     * aicli-hub fence), EXCEPT Kilo, which has no shared fenced file and
+     * gets its own dedicated ~/.kilo/rules/aicli-file-paths.md (distinct
+     * from the hub-instructions dedicated ~/.kilo/rules/aicli-hub-global.md).
+     * Unlike instructionVendors(), this content is policy, not user-supplied
+     * — see FilePathConventionProjector::desired(), which ignores its input
+     * and always returns the constant block.
+     * @return array<string,FilePathConventionProjector>
+     */
+    public static function policyInstructionVendors(): array {
+        if (self::$policyInstructionVendors === null) {
+            self::$policyInstructionVendors = [];
+            foreach ([
+                new FilePathConventionProjector('claude-code', '.claude/CLAUDE.md', 'Claude Code', ['claude-code'], false),
+                new FilePathConventionProjector('gemini-cli', '.gemini/GEMINI.md', 'Gemini CLI', ['gemini-cli', 'antigravity-cli'], false),
+                new FilePathConventionProjector('qwen-code', '.qwen/QWEN.md', 'Qwen Code', ['qwen-code'], false),
+                new FilePathConventionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
+                new FilePathConventionProjector('gh-copilot', '.copilot/copilot-instructions.md', 'GitHub Copilot CLI', ['gh-copilot'], false),
+                new FilePathConventionProjector('opencode', '.config/opencode/AGENTS.md', 'OpenCode', ['opencode'], false),
+                new FilePathConventionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
+                new FilePathConventionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
+                new FilePathConventionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
+                // Kilo: dedicated fence-free file, distinct from the hub-instructions dedicated file.
+                new FilePathConventionKiloProjector('kilocode', '.kilo/rules/aicli-file-paths.md', 'Kilo Code', ['kilocode'], false),
+            ] as $p) {
+                self::$policyInstructionVendors[$p->agentId()] = $p;
+            }
+        }
+        return self::$policyInstructionVendors;
+    }
+
     /**
      * Per-instruction-file change classification for the post-Apply Unraid notification
      * (the "Claude removed / OpenCode updated / Kilo added" summary). Compares the
@@ -354,6 +392,26 @@ class HubProjector {
             }
         }
 
+        // File-path-convention POLICY pass — always-on (NOT gated by
+        // instructions_enabledFor), reconciled for every targeted agent that
+        // has a policy surface. Own ledger key per projector (see
+        // FilePathConventionProjector::ledgerKey()) so it never collides with
+        // the instruction pass's bookkeeping for the SAME physical file.
+        foreach (self::policyInstructionVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $desired = $projector->desired([]); // always-on: input ignored
+            $r = self::reconcileVendor($projector, $home, $desired, $state, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'],
+                                                'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) {
+                foreach ($serving as $id) {
+                    if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+                }
+            }
+        }
+
         // Skills/commands tree pass (H-03) — same ledger/drift surface, third
         // set of vendor surfaces (mirrored file trees per agent dir).
         $tree = self::reconcileTrees($home, $state, $targets, true);
@@ -368,6 +426,60 @@ class HubProjector {
         if (!empty($writtenAgents)) {
             // H-04 (#1365): debounced auto-commit AFTER the vendor writes — agent ids only.
             GitHomeService::commitIfEnabled('hub: projected to [' . implode(',', $writtenAgents) . ']');
+        }
+        return ['status' => 'ok', 'results' => $results, 'drift' => $driftAll, 'writtenAgents' => $writtenAgents];
+    }
+
+    /**
+     * Project ONLY the always-on file-path-convention policy block (see
+     * docs/specs/AGENT_FILE_PATH_CONVENTION.md), scoped to the given agent
+     * id(s) — used by InstallerService::installAgent() so a freshly
+     * installed/upgraded agent gets the block immediately without running a
+     * full projectAll() pass. Unconditional: never gated by
+     * instructions_enabledFor (it is policy, not user-toggled content).
+     * Same resolveHome()/reconcileVendor()/saveState() machinery as
+     * projectAll(), so it no-ops safely (status=error/home_unavailable) on
+     * an unmounted home, exactly like projectAll().
+     *
+     * @param string[]|null $targetAgentIds restrict to these agents (null = all installed).
+     * @param string[]|null $installedOverride test hook — bypass the AgentRegistry install gate.
+     * @return array status=ok|error; per-file results {written,removed,drift}; flat drift list; written agent ids.
+     */
+    public static function projectPolicy(?array $targetAgentIds = null, ?array $installedOverride = null): array {
+        $homeInfo = self::resolveHome();
+        if (!$homeInfo['ok']) {
+            return ['status' => 'error', 'reason' => 'home_unavailable',
+                    'message' => 'The agent home overlay is not mounted — start a session or the array, then retry. Projection never writes to an unmounted home.'];
+        }
+        $home = $homeInfo['home'];
+        $state = HubStore::getState();
+
+        $installed = $installedOverride ?? self::installedSupportedAgentIds();
+        $targets = ($targetAgentIds === null) ? $installed : array_values(array_intersect($targetAgentIds, $installed));
+
+        $results = [];
+        $driftAll = [];
+        $writtenAgents = [];
+
+        foreach (self::policyInstructionVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $desired = $projector->desired([]); // always-on: input ignored
+            $r = self::reconcileVendor($projector, $home, $desired, $state, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'],
+                                                'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) {
+                foreach ($serving as $id) {
+                    if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+                }
+            }
+        }
+
+        HubStore::saveState($state);
+        LogService::log('hub policy project: agents=[' . implode(',', $targets) . '] changed=[' . implode(',', $writtenAgents) . '] drift=' . count($driftAll), LogService::LOG_INFO, 'HubProjector');
+        if (!empty($writtenAgents)) {
+            GitHomeService::commitIfEnabled('hub: file-path policy projected to [' . implode(',', $writtenAgents) . ']');
         }
         return ['status' => 'ok', 'results' => $results, 'drift' => $driftAll, 'writtenAgents' => $writtenAgents];
     }

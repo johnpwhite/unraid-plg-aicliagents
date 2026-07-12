@@ -1,8 +1,15 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.07.11.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.07.12.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.07.12.01
+
+- **Feat: Workspace config &amp; assets browser.** A new per-workspace view shows every config file the AI agent actually uses — its instructions, skills, commands, hooks, MCP servers and settings — gathered from the agent's home, the project, and parent folders into one collapsible tree you can browse and open.
+- **Feat: Built-in file editor.** Click any file in that tree, or a file path shown in a terminal, to open it in an in-page code/markdown editor over the terminal, with live preview. It also opens the agent's own home config files, which Unraid's standard file browser can't reach. A config file you don't have yet shows an "Add" action that creates it the first time you save.
+- **Feat: Right-click menu on workspace rows.** Close, Rename (edit the name inline on the row), Config/assets, Session settings, Upload and Export now live in one keyboard-navigable menu, and the small close cross is gone.
+- **Improve: Clickable terminal file paths** now also recognise files at the workspace root, and agents are guided to always write workspace-relative paths so those paths stay clickable.
+
 ## 2026.07.11.01
 
 - **Feat: click a file path in a terminal to open it in Unraid's editor.** When an AI agent creates or refers to a file — for example `docs/specs/myspec.md` — the path now appears as a link in the terminal. Clicking it opens that file directly in Unraid's built-in file editor, instead of having to track it down by hand under Shares.
@@ -323,7 +330,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.07.11.01"
+export VERSION="2026.07.12.01"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -363,12 +370,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.07.11.01" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.07.12.01" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.07.11.01" | sort -V | tail -1)
-        if [ "$_newest" = "2026.07.11.01" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.07.12.01" | sort -V | tail -1)
+        if [ "$_newest" = "2026.07.12.01" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.07.11.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.07.12.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done

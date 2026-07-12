@@ -249,6 +249,11 @@ class GitHomeService {
                       '.claude/settings.json', '.claude/agents/**'];
         foreach (HubProjector::supportedVendors() as $p)   $whitelist[] = $p->relPath();              // MCP files
         foreach (HubProjector::instructionVendors() as $p) $whitelist[] = $p->relPath();              // instruction files
+        // File-path-convention policy files (docs/specs/AGENT_FILE_PATH_CONVENTION.md): the fence
+        // agents share relPath() with their instruction-file entry above (de-duped by the
+        // array_unique below); Kilo's dedicated ~/.kilo/rules/aicli-file-paths.md is the only
+        // genuinely NEW path this adds.
+        foreach (HubProjector::policyInstructionVendors() as $p) $whitelist[] = $p->relPath();
         foreach (HubProjector::treeVendors() as $p)        $whitelist[] = rtrim($p->relPath(), '/') . '/**'; // skills/commands dirs
         // Drop anything that is OAuth-excluded (e.g. ~/.claude.json is also Claude's MCP path).
         $whitelist = array_values(array_filter(array_unique($whitelist), fn($x) => !in_array($x, $oauthDeny, true)));

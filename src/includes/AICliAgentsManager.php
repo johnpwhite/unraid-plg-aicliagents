@@ -78,12 +78,19 @@ require_once __DIR__ . '/services/hub/GooseProjector.php';
 // Config Hub phase 2 (OP #1363 / H-02 — instruction-file projection)
 require_once __DIR__ . '/services/hub/InstructionProjector.php';
 require_once __DIR__ . '/services/hub/KiloInstructionProjector.php'; // extends InstructionProjector
+// File-path-convention always-on policy block (docs/specs/AGENT_FILE_PATH_CONVENTION.md)
+require_once __DIR__ . '/services/hub/FilePathConventionProjector.php'; // extends InstructionProjector
+require_once __DIR__ . '/services/hub/FilePathConventionKiloProjector.php'; // extends FilePathConventionProjector
 // Config Hub phase 3 (OP #1364 / H-03 — skills/commands mirrored-tree projection)
 require_once __DIR__ . '/services/hub/TreeProjector.php';
 require_once __DIR__ . '/services/hub/GeminiCommandsProjector.php'; // extends TreeProjector
 require_once __DIR__ . '/services/hub/HubProjector.php';
 // Config Hub git layer (OP #1365 / H-04 — git-backed home config, opt-in)
 require_once __DIR__ . '/services/hub/GitHomeService.php';
+// #43 (docs/specs/WORKSPACE_ASSET_TREE.md): per-agent config-surface resolver.
+// Reuses the Hub projector registries above for the `managed` tag, so this
+// require must come after HubProjector.php.
+require_once __DIR__ . '/services/AssetSurfaceService.php';
 require_once __DIR__ . '/services/sources/AgentSource.php';
 require_once __DIR__ . '/services/sources/NpmSource.php';
 require_once __DIR__ . '/services/sources/UrlValidator.php';

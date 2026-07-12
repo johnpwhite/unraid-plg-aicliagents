@@ -1,99 +1,40 @@
-I'm resuming work on unraid-plg-aicliagents. Context from previous session (2026-06-10).
+I'm resuming work on **unraid-plg-aicliagents** (the AI CLI Agents Unraid plugin). Context from previous session (2026-07-12):
 
-GOAL (this session): full architecture review of the Epic #1310 storage facade work
-("architectural consolidation, optimisations, clearer component design"). **REVIEW COMPLETE,
-NOTHING SHIPPED** — no code changes, no publishes. The deliverable is the findings report:
+**Where this runs:** Claude Code runs directly ON the Unraid test server `.4` (192.168.1.4, hostname `Unraid`) — `/usr/local/emhttp/plugins/…` and `/mnt/user/…` are LOCAL. `.4` is SHARED with other live Claude sessions (e.g. saas-businessOS on runner volume `runner_bos`). Recall memories [[storefront-from-dot4]] and [[session-safe-ui-deploy]] before deploying.
 
-**→ `docs/audits/arch-review-epic-1310-2026-06-10.md`** ← READ THIS FIRST. It is the full
-artefact: 10 ranked confirmed findings (F1-F10), 7 verified low-severity items (L1-L7),
-2 refuted candidates (recorded so they don't get re-flagged), per-finding fix shapes, and a
-suggested OpenProject WP mapping. Findings are **NOT yet triaged with John or filed in OP**.
+**Repo state:**
+- Branch: `master`
+- HEAD: `dd58ca58` Feat: … (v2026.07.12.01) — the session-safe Factory publish of the f54f792b feature set. Clean, pushed, level with origin.
+- Prior: `f54f792b` the feature work (44 files); `959c1d90` this HANDOVER.md.
+- Root workspace repo (`unraid-extensions`): my CI tooling is committed+pushed (`6857272` attestation + GitLab→Forgejo scrub, `f936bb2` visual-review exclusion); a concurrent session's file-editor commits sit on top — leave it alone.
 
-## Review method (for confidence calibration)
-/code-review high effort over `git diff 3f8ddf2...HEAD` (the whole epic, v2026.06.09.02→.21):
-7 parallel finder angles → ~35 candidates → deduped to 15 → 1 independent verifier each
-(recall-biased). 13 survived (12 CONFIRMED with file:line evidence, 1 mixed), 2 REFUTED.
-Every confirmed finding was verified against the actual code, not just the diff.
+**Running state:**
+- Factory (Forgejo) version = **`2026.07.12.01`** — session-safe Factory-published this session (bump + tarball via `publish-factory --no-git`, local git push, then `.4` deploy by direct file overlay + flash/manifest promote — NO `plugin install`, sessions preserved). Forgejo raw `.plg`+`src.tar.gz` serve it, so a `.4` REBOOT now fetches the current features (no longer overlay-only). `.4` flash + `/var/log/plugins` `.plg` = 2026.07.12.01; live plugin code synced to the release (bundle md5 matches `src/assets/ui/index.js`).
+- Public Storefront (GitHub `johnpwhite/unraid-plg-aicliagents` main) = `2026.07.11.01` — NOT yet promoted to `2026.07.12.01`. Promote via `jpw-unraid-storefront` when John's ready (net-off the changelog first).
 
-## Headline findings (severity order — details + fix shapes in the audit doc)
-- **F1** Intent-log prune test is a substring match that also matches the `"keep"` field →
-  a LOST consolidated layer (sole data holder) classifies HEALTHY, masking total loss.
-  3 parser copies: BootIntegrityService.php:272, aicli-supervisor.sh:664, common.sh:848.
-- **F2** `_passthrough_guard mount` runs BEFORE op_mount and never consults manifest or
-  classifier → manifest-expects-layers + disk-empty on a passthrough box bind-mounts an
-  EMPTY dir exit 0, bypassing the total_loss strict-halt. storagectl.sh:314/_pt_mount.
-- **F3** Every successful ≤1-layer path migration false-halts path_drift within ~7s
-  (executeMigrate never re-points manifest current_persistence_path; marker cleared
-  synchronously; the halt then blocks the queued consolidate that would fix it).
-- **F4** Migration marker is global+tmpfs, leaks on SIGKILL/set_time_limit fatal (not
-  finally-protected) → path_drift protection silently OFF plugin-wide for remaining uptime;
-  promised boot resume has NO implementation.
-- **F5** WP#1309 incomplete: ensureAgentMounted still lazy-umounts+rebinds same upper
-  (StorageMountService.php:155-161, live poison path); new do_release verb does the same
-  unconditionally even on cooldown-skipped bakes and maps exit2→ok=true (latent — zero
-  callers yet).
-- **F6** The spec'd manifest_write.sh single writer was never built — 3 drifting `php -r`
-  copies; the op_bake copy is now the SOLE recorder yet best-effort `|| true`; two comments
-  still claim the removed PHP belt-and-braces exists; lifecycle_log fires on failure.
-- **F7** Legacy-data guard regression: old unconditional exit-1 is now strict-gated (warn
-  mode mounts empty over legacy data) AND the `|| true` sourcing fallback silently becomes
-  genuine_fresh, bypassing even strict=1. "No protection removed" was false.
-- **F8** layers-stay-flash invariant implemented twice (bash effective_backend vs PHP
-  $effCaps) with constructible divergence — UI gates on PHP, engine on bash.
-- **F9** Backend probe: ~14-18 subprocess spawns per 5s UI poll (uncached, doubled),
-  expensive device probe runs before the cheap layers short-circuit, on every mutating verb.
-- **F10** "ANY removable member → flash" implemented for zfs only; btrfs members never
-  enumerated → SATA-source+USB-member btrfs pool classifies passthrough.
-- **L1-L7** (audit doc): DTO triplication ×4 exit-decode; dead 3rd-arg fallback in
-  boot_integrity_classify; defer-marker readers ×4 with peek-vs-consume conflict; umount
-  one-liner ×3 vs the arbiter chokepoint; facade verb-depth inconsistency (persist's
-  justification comment now false); FileStorageStatus parses 5 keys emit_json never emits;
-  pre-existing InstallerService rollback umount -l bypasses the arbiter.
-- **Cross-cutting theme:** the epic moved authority into single owners but left each new
-  mechanism's write/repair lifecycle unfinished (intents never retired, manifest path never
-  re-pointed by migration, single writer = 3 copies). Consolidation = finish the lifecycles,
-  not new abstraction.
+**In flight (Forgejo):**
+- #43 Workspace asset tree — IMPLEMENTED + session-safe-deployed (commit f54f792b), NOT released. See its latest comment for the full shipped list. Umbrella issue for the asset-tree + in-page editor + "＋ Add" create flow.
+- Un-ticketed features shipped in the same commit (back-fill issues if you want tracking): the workspace-row context menu + inline rename; the managed file-path-convention instruction block (docs/specs/AGENT_FILE_PATH_CONVENTION.md); the vendored CodeMirror editor.
 
-## Repo / running state
-- Branch master @ 63ea12f, up to date with origin. Uncommitted this session: HANDOVER.md +
-  docs/audits/arch-review-epic-1310-2026-06-10.md (docs-only; commit via the publish wrapper
-  — it auto-routes to commit-only).
-- Factory GitLab = v2026.06.09.21. .4 = .21 (running). Storefront NOT promoted (still
-  .01-era) — promotion remains deliberate + needs John's confirmation.
-- OpenProject 21: Epic #1310 still New; #1321/#1322 (Steps 6/2) shipped but still New;
-  #1320/#1323 → Tested. Review findings NOT filed as WPs yet.
+**Recently shipped this session:**
+- (commit f54f792b) the whole asset-tree/editor/menu/file-path-block/clickable-root feature set — 44 files.
+- Earlier: released 2026.07.11.01 to Factory (Forgejo) + Storefront (GitHub) — #40 clickable terminal paths, #41 direct image paste, #42 pinnable drawer. Plus new CI tooling: session-safe `factory-tested.json` attestation + `ci/attest` + `ci/storefront --force` (root repo).
 
-## Next logical step
-Triage the audit doc with John → file the accepted findings as OP Bugs/Features (suggested
-mapping table is at the bottom of the audit doc) → fix top correctness findings F1-F4 via
-TDD (each has a concrete fix shape + the L3.5 harness already has SIGKILL/fake-reboot
-helpers to regression-test F1's crash windows).
+**Next logical step:**
+Pick one (confirm with John): (a) build the per-agent **"Config surface" panel on the Manager page** (reuses `get_agent_config_surface` with no `path` → global scope only — agreed follow-on to #43); (b) **lazy-load the CodeMirror editor bundle** (grew ~330KB→~950KB — dynamic-import `FileEditorModal` so those deps only download on first file open); or (c) **promote 2026.07.12.01 to the public Storefront** (GitHub) once tested — `jpw-unraid-storefront`, net-off the changelog. (Factory publish already done this session.)
 
-## Active gotchas the next session MUST know (carried forward + new)
-- **`migrate-from-geminicli.sh` is DESTRUCTIVE + deliberately DEAD** — never wire it to any
-  install/upgrade trigger; `migrateFormat` runs nothing by design.
-- **`legacy_unmanaged` is the sibling/backup recovery net** — F7's fix is to STRENGTHEN it
-  (halt regardless of strict), never to remove it.
-- **Anti-pattern check** blocks `php -r "...\Namespace"` double-quoted — use single-quoted
-  `php -d display_errors=0 -r '...'` or a script file (F6's manifest_write.sh fix must
-  respect this).
-- Publish: ALWAYS `--no-root-sync` (workspace root repo diverged → exit 9 otherwise);
-  terse flags `--skip-smoke --skip-l4`, run smoke separately. L3.5 harness not shipped by
-  plugin install — hand-scp tests/integration/ to .4.
-- Standard scope: mutate only .4; Tower read-only.
-- **When fixing F2/F7, mind the verifier nuances** in the audit doc (e.g. F1's masking needs
-  ≥1 surviving file — the all-pruned case already halts; F7's default is strict=1 so the
-  regression is opt-in except the sourcing-failure path).
+**Active constraints / gotchas:**
+- **Session-safe deploy only** — overlay files into the live plugin dir; NEVER `ci/run deploy` / `plugin install` (kills agent sessions). Overlay BOTH `index.js` AND `index.css` (css-only changes are invisible if you forget the css — that bit me: the editor rendered unstyled/behind).
+- **Never run two `ci/run` for aicliagents concurrently** — corrupts `runner_aicliagents/ui-build/node_modules` (tinypool error, looks like a vitest failure but isn't). Use `run_in_background: true`, never trailing `&`. Fix = `rm -rf /mnt/appdata/runner_aicliagents/ui-build/node_modules` then one clean run.
+- **C4 docs are STALE** — big `src/**` + `ui-build/**` changes landed; run `python3 C4-Documentation/tools/c4-drift.py check`, refresh, `… sync`.
+- The `2026.07.11.01` attestation/release-gate artifacts don't cover the WIP; a versioned publish re-gates. Live-GUI L4 still auth-blocked (needs the .4 GUI password in `ci/ci.secrets.conf`) — see [[aicliagents-l4-auth-blocker]].
+- Pre-deploy green check (container-only, session-safe): `cd .. && ci/run lint unit build --plugin=aicliagents`. Last run GREEN: phpunit 1118, vitest (assetTree 42 / fileEditorApi 11 / fileEditorRouting 6 / menuNav 14), build.
 
-## Skills to load first
-superpowers:test-driven-development, /jpw-unraid-factory, /jpw-unraid-testing,
-/jpw-openproject (for the triage→WP step).
+**Skills to load first (only if doing that work):**
+- `jpw-unraid-factory` / `jpw-unraid-storefront` — only if cutting a release.
+- `jpw-forgejo-backlog` — if back-filling issues.
 
-## Files to read before editing storage
-- docs/audits/arch-review-epic-1310-2026-06-10.md (this session's findings — the work queue)
-- docs/specs/STORAGE_FACADE_IMPLEMENTATION_PLAN.md (esp. lines 130-145, the unbuilt
-  manifest_write.sh design F6 resurrects) + docs/00-governance/adr/0001-…md
-- src/includes/services/FileStorage.php, BootIntegrityService.php (F1 :272, F4 :336-369)
-- src/scripts/storage/{storagectl.sh (F2 :314, F5 :428), storage_ops.sh (F6 :545, F7 :196),
-  detect_backend.sh (F9 :139, F10 :81), common.sh (:848)}
-- src/scripts/supervisor/aicli-supervisor.sh (F3 :612-622, :664)
+**Files to read before editing:**
+- `docs/specs/WORKSPACE_ASSET_TREE.md` + `docs/specs/AGENT_FILE_PATH_CONVENTION.md` (the two feature specs).
+- Backend: `src/includes/services/AssetSurfaceService.php` (descriptors + tree + creatable), `src/includes/handlers/AssetsHandler.php` (get_agent_config_surface, read_file), `src/includes/services/ValidationService.php` (validateIntendedPath), `src/includes/services/hub/FilePathConventionProjector.php` + `HubProjector.php` (policy fence).
+- Frontend: `ui-build/src/components/AssetTreePanel.tsx`, `ui-build/src/lib/assetTree.ts`, `ui-build/src/components/fileEditor/` (vendored editor), `ui-build/src/components/AICliAgentsTerminal.tsx` (openFileEditor + openTerminalPath wiring), `ui-build/src/components/DrawerPanel.tsx` + `WorkspaceRowMenu.tsx` (context menu).
