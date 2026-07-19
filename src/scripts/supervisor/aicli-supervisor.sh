@@ -51,6 +51,13 @@ JOBS_DIR="${SUPERVISOR_DIR}/jobs"
 JOB_RETRY_DIR="${SUPERVISOR_DIR}/jobs-retry"
 ORPHAN_LOCK_DIR="/var/run"
 
+# Bug #55: short-lived smoke-only gate used to observe a deliberately dead
+# supervisor without racing page-load/health-poll self-healing. Exact content +
+# a 120-second TTL ensure a leaked marker fails open automatically.
+SUPPRESS_START_FILE="${AICLI_SUPERVISOR_START_SUPPRESS_FILE:-${SUPERVISOR_DIR}/.health-test-suppress-start}"
+SUPPRESS_START_MAGIC="aicli-health-smoke-v1"
+SUPPRESS_START_MAX_AGE=120
+
 DAEMON_VERSION="3.2.0"
 
 # Config key — defaults (overridden by sourcing the cfg below)
@@ -137,6 +144,23 @@ _log() {
 log_info()  { _log INFO  "$@"; }
 log_warn()  { _log WARN  "$@"; }
 log_error() { _log ERROR "$@"; }
+
+# _supervisor_start_suppressed — true only for a fresh, exact smoke marker.
+# A stale/invalid marker is removed and cannot strand production self-healing.
+_supervisor_start_suppressed() {
+    [ -f "$SUPPRESS_START_FILE" ] || return 1
+    local marker age now mtime
+    marker="$(cat "$SUPPRESS_START_FILE" 2>/dev/null || true)"
+    now=$(date +%s)
+    mtime=$(stat -c '%Y' "$SUPPRESS_START_FILE" 2>/dev/null || echo 0)
+    age=$(( now - mtime ))
+    if [ "$marker" = "$SUPPRESS_START_MAGIC" ] && [ "$age" -ge 0 ] \
+       && [ "$age" -le "$SUPPRESS_START_MAX_AGE" ]; then
+        return 0
+    fi
+    rm -f "$SUPPRESS_START_FILE" 2>/dev/null || true
+    return 1
+}
 
 # ---------------------------------------------------------------------------
 # Atomic JSON write helper
@@ -392,26 +416,87 @@ _manifest_entity_layers() {
     _manifest_read "$mpath" | grep -oP "\"filename\":\s*\"\K[^\"]*" 2>/dev/null | head -100 || true
 }
 
-# _manifest_entity_persist_path <entity>
+# _manifest_entity_persist_path <entity> [manifest_json]
+#
+# When a snapshot is supplied, read from that exact snapshot. Reconcile takes one
+# shared-locked snapshot per pass so the entity list, persistence path, filenames,
+# and hashes can never come from different manifest generations.
 _manifest_entity_persist_path() {
     local entity="${1:-}"
-    local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
-    [ -f "$mpath" ] || return 0
-    _manifest_read "$mpath" | grep -A5 "\"${entity}\"" 2>/dev/null | \
-        grep -oP '"current_persistence_path":\s*"\K[^"]*' | head -1 || true
+    local manifest_json="${2:-}"
+    if [ -z "$manifest_json" ]; then
+        local mpath
+        mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+        [ -f "$mpath" ] || return 0
+        manifest_json="$(_manifest_read "$mpath")"
+    fi
+    [ -n "$manifest_json" ] || return 0
+    printf '%s' "$manifest_json" | php -d display_errors=0 -r '
+        $m = json_decode(stream_get_contents(STDIN), true);
+        $path = $m["entities"][$argv[1]]["current_persistence_path"] ?? "";
+        if (is_string($path)) echo $path;
+    ' "$entity" 2>/dev/null || true
 }
 
-# _manifest_entity_sha256 <filename>
-# Extracts sha256 for a filename from the manifest
-_manifest_sha256() {
-    local filename="${1:-}"
-    local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
-    [ -f "$mpath" ] || return 0
-    # Find sha256 near filename — look for the filename line and the sha256 after it
-    _manifest_read "$mpath" | grep -A3 "\"filename\":\s*\"${filename}\"" 2>/dev/null | \
-        grep -oP '"sha256":\s*"\K[^"]*' | head -1 || true
+# _manifest_entity_layer_records <entity> <manifest_json>
+# Emits filename<TAB>sha256 from one entity in one immutable manifest snapshot.
+# This replaces the old regex lookup, which independently re-read the live
+# manifest for every layer and could pair a disk hash with a different manifest
+# generation.
+_manifest_entity_layer_records() {
+    local entity="${1:-}"
+    local manifest_json="${2:-}"
+    [ -n "$manifest_json" ] || return 0
+    printf '%s' "$manifest_json" | php -d display_errors=0 -r '
+        $m = json_decode(stream_get_contents(STDIN), true);
+        foreach (($m["entities"][$argv[1]]["expected_layers"] ?? []) as $layer) {
+            $filename = $layer["filename"] ?? "";
+            $sha256 = $layer["sha256"] ?? "";
+            if (is_string($filename) && $filename !== "" && strpos($filename, "\t") === false) {
+                echo $filename, "\t", (is_string($sha256) ? $sha256 : ""), PHP_EOL;
+            }
+        }
+    ' "$entity" 2>/dev/null || true
+}
+
+# _verify_layer_sha256 <path> <expected_sha256>
+# Return 0=verified, 1=confirmed stable mismatch, 2=inconclusive/transient.
+#
+# A mismatch is destructive evidence: it creates a persistent storage halt. Do
+# not accept one read as proof. Pin the file identity (device, inode, size,
+# mtime, ctime) around the read, then repeat a mismatching hash. Only two equal
+# mismatches against one stable identity are confirmed corruption. This filters
+# transient reads and makes a concurrently replaced layer an explicit retry,
+# rather than falsely accusing the replacement of corruption.
+_verify_layer_sha256() {
+    local path="${1:-}"
+    local expected="${2:-}"
+    _LAYER_VERIFY_ACTUAL=""
+    _LAYER_VERIFY_IDENTITY=""
+
+    [ -f "$path" ] && [ -n "$expected" ] || return 2
+
+    local identity_before identity_after identity_final actual_first actual_second
+    identity_before=$(stat -Lc '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null) || return 2
+    actual_first=$(sha256sum "$path" 2>/dev/null | awk '{print $1}') || return 2
+    identity_after=$(stat -Lc '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null) || return 2
+    _LAYER_VERIFY_ACTUAL="$actual_first"
+    _LAYER_VERIFY_IDENTITY="$identity_after"
+
+    [ -n "$actual_first" ] || return 2
+    [ "$identity_before" = "$identity_after" ] || return 2
+    [ "$actual_first" = "$expected" ] && return 0
+
+    actual_second=$(sha256sum "$path" 2>/dev/null | awk '{print $1}') || return 2
+    identity_final=$(stat -Lc '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null) || return 2
+    _LAYER_VERIFY_ACTUAL="$actual_second"
+    _LAYER_VERIFY_IDENTITY="$identity_final"
+
+    [ -n "$actual_second" ] || return 2
+    [ "$identity_after" = "$identity_final" ] || return 2
+    [ "$actual_second" = "$expected" ] && return 2
+    [ "$actual_first" = "$actual_second" ] || return 2
+    return 1
 }
 
 # _manifest_last_known_good <entity>
@@ -631,16 +716,23 @@ _op_reconcile() {
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
     [ -f "$mpath" ] || return 0
 
-    # Read entities from manifest using PHP to avoid bash JSON parsing complexity
-    # Fall back to empty if PHP unavailable
+    # One shared-locked manifest generation governs this whole pass. Previously
+    # the entity list, persistence path, layer list, and each expected hash were
+    # independent reads of the live file. A writer between those reads could
+    # manufacture a mismatch from two individually valid generations.
+    local manifest_snapshot=""
+    manifest_snapshot="$(_manifest_read "$mpath")"
+    [ -n "$manifest_snapshot" ] || return 0
+
+    # Read entities from the captured snapshot using PHP to avoid bash JSON
+    # parsing complexity. Fall back to empty if PHP is unavailable.
     local entities_json=""
     if command -v php >/dev/null 2>&1; then
-        local plugin_dir="/usr/local/emhttp/plugins/unraid-aicliagents"
-        entities_json=$(php -d display_errors=0 -r "
-            \$m = json_decode(@file_get_contents('$mpath'), true);
-            if (!is_array(\$m)) exit;
-            foreach (array_keys(\$m['entities'] ?? []) as \$k) echo \$k . PHP_EOL;
-        " 2>/dev/null || true)
+        entities_json=$(printf '%s' "$manifest_snapshot" | php -d display_errors=0 -r '
+            $m = json_decode(stream_get_contents(STDIN), true);
+            if (!is_array($m)) exit;
+            foreach (array_keys($m["entities"] ?? []) as $k) echo $k, PHP_EOL;
+        ' 2>/dev/null || true)
     fi
 
     [ -n "$entities_json" ] || return 0
@@ -711,7 +803,7 @@ _op_reconcile() {
             _mig_fresh=1
         fi
         local manifest_stored_path
-        manifest_stored_path=$(_manifest_entity_persist_path "$entity")
+        manifest_stored_path=$(_manifest_entity_persist_path "$entity" "$manifest_snapshot")
         if [ -n "$manifest_stored_path" ] && [ "$manifest_stored_path" != "$persist_path" ] \
            && [ "$_mig_fresh" = "0" ]; then
             _write_halt "$entity" "path_drift" "Manifest path $manifest_stored_path != current $persist_path"
@@ -723,17 +815,25 @@ _op_reconcile() {
             continue
         fi
 
-        # Get expected layers from manifest
+        # A corruption halt is durable until the user completes an explicit
+        # verified repair. Do not repeatedly rewrite the marker, notify again,
+        # and then claim reconcile_ok on later ticks.
+        if _halt_exists "$entity" "corrupt_layers"; then
+            lifecycle_log "warn" "supervisor" "reconcile_halt_persisted" \
+                "{\"entity\":\"$entity\",\"reason\":\"corrupt_layers\"}" 2>/dev/null || true
+            continue
+        fi
+
+        # Get expected layers and their hashes from the same manifest snapshot.
         local expected_files=()
+        local expected_sha256s=()
         if command -v php >/dev/null 2>&1; then
-            local plugin_dir="/usr/local/emhttp/plugins/unraid-aicliagents"
-            while IFS= read -r line; do
-                [ -n "$line" ] && expected_files+=("$line")
-            done < <(php -d display_errors=0 -r "
-                \$m = json_decode(@file_get_contents('$mpath'), true);
-                \$layers = \$m['entities']['$entity']['expected_layers'] ?? [];
-                foreach (\$layers as \$l) echo (\$l['filename'] ?? '') . PHP_EOL;
-            " 2>/dev/null || true)
+            local layer_filename layer_sha256
+            while IFS=$'\t' read -r layer_filename layer_sha256; do
+                [ -n "$layer_filename" ] || continue
+                expected_files+=("$layer_filename")
+                expected_sha256s+=("$layer_sha256")
+            done < <(_manifest_entity_layer_records "$entity" "$manifest_snapshot")
         fi
 
         # Get actual files on disk
@@ -886,34 +986,49 @@ _op_reconcile() {
             fi
         done
 
-        # Sha256 verification for expected layers (budget-aware: only if time permits)
+        # Sha256 verification for expected layers (budget-aware: only if time
+        # permits). A corruption verdict requires two identical mismatches while
+        # the file identity stays fixed. Changed identity or contradictory reads
+        # are deferred to the next tick and are never reported as healthy.
+        local integrity_verdict=0
         now=$(date +%s)
         if [ $(( now - reconcile_start )) -lt $(( max_budget - 5 )) ]; then
-            for exp_file in "${expected_files[@]:-}"; do
+            local layer_index
+            for layer_index in "${!expected_files[@]}"; do
+                exp_file="${expected_files[$layer_index]}"
                 [ -n "$exp_file" ] || continue
                 local full_path="${persist_path}/${exp_file}"
                 [ -f "$full_path" ] || continue
 
-                local expected_sha256
-                expected_sha256=$(_manifest_sha256 "$exp_file")
+                local expected_sha256="${expected_sha256s[$layer_index]:-}"
                 # Skip verification if sha256 in manifest is placeholder/smoke
                 [ -n "$expected_sha256" ] || continue
                 [ "$expected_sha256" = "smoke" ] && continue
                 [ "${#expected_sha256}" -lt 32 ] && continue
 
-                local actual_sha256
-                actual_sha256=$(sha256sum "$full_path" 2>/dev/null | awk '{print $1}' || echo "")
-                if [ -n "$actual_sha256" ] && [ "$actual_sha256" != "$expected_sha256" ]; then
-                    log_error "Reconcile: sha256 mismatch for $exp_file (expected $expected_sha256, got $actual_sha256)"
-                    _write_halt "$entity" "corrupt_layers" "sha256 mismatch for $exp_file"
+                _verify_layer_sha256 "$full_path" "$expected_sha256"
+                local verify_rc=$?
+                if [ "$verify_rc" -eq 1 ]; then
+                    integrity_verdict=1
+                    log_error "Reconcile: confirmed sha256 mismatch for $exp_file (expected $expected_sha256, got $_LAYER_VERIFY_ACTUAL, identity $_LAYER_VERIFY_IDENTITY)"
+                    _write_halt "$entity" "corrupt_layers" "confirmed sha256 mismatch for $exp_file"
                     _supervisor_notify "critical" "AICliAgents: Layer corruption detected" \
-                        "Entity $entity: layer $exp_file has sha256 mismatch. Storage halted." \
+                        "Entity $entity: layer $exp_file has a confirmed sha256 mismatch. Storage halted." \
                         "sha256_mismatch_${entity}_${exp_file}" 3600
                     lifecycle_log "critical" "supervisor" "reconcile_halted_entity" \
-                        "{\"entity\":\"$entity\",\"reason\":\"sha256_mismatch\",\"filename\":\"$exp_file\"}" 2>/dev/null || true
+                        "{\"entity\":\"$entity\",\"reason\":\"sha256_mismatch\",\"filename\":\"$exp_file\",\"expected_sha256\":\"$expected_sha256\",\"actual_sha256\":\"$_LAYER_VERIFY_ACTUAL\",\"identity\":\"$_LAYER_VERIFY_IDENTITY\"}" 2>/dev/null || true
+                    break
+                elif [ "$verify_rc" -eq 2 ]; then
+                    integrity_verdict=2
+                    log_warn "Reconcile: inconclusive sha256 verification for $exp_file; stable confirmation not obtained — retrying next tick"
+                    lifecycle_log "warn" "supervisor" "reconcile_verify_inconclusive" \
+                        "{\"entity\":\"$entity\",\"filename\":\"$exp_file\",\"expected_sha256\":\"$expected_sha256\",\"observed_sha256\":\"$_LAYER_VERIFY_ACTUAL\",\"identity\":\"$_LAYER_VERIFY_IDENTITY\"}" 2>/dev/null || true
+                    break
                 fi
             done
         fi
+
+        [ "$integrity_verdict" -eq 0 ] || continue
 
         lifecycle_log "info" "supervisor" "reconcile_ok" \
             "{\"entity\":\"$entity\",\"active_count\":${#actual_files[@]}}" 2>/dev/null || true
@@ -1117,6 +1232,15 @@ _op_bake() {
 }
 
 # ---------------------------------------------------------------------------
+# Only an explicit workflow may close sessions to consolidate. Policy maintenance
+# must wait for natural idle; its storagectl call also has a mount-busy guard.
+_consolidate_reason_closes_home() {
+    case "${1:-}" in
+        user_consolidate|pre_migrate|post_migrate) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Op handler: consolidate
 # Spawns a child process running consolidate_layers.sh.
 # ---------------------------------------------------------------------------
@@ -1150,10 +1274,9 @@ _op_consolidate() {
     lifecycle_log "info" "supervisor" "consolidate_start" \
         "{\"entity\":\"$entity\",\"reason\":\"$reason\"}" 2>/dev/null || true
 
-    # R2.2 (M1 fix): pre-bake close phase — close the user's sessions + ttyds before
-    # EVERY bake attempt (not once per job — close is idempotent: no sessions → cheap
-    # no-op; re-pinned mount → re-freed). Phase guard (once-flag) REMOVED.
-    if [ "$type" = "home" ]; then
+    # User-requested consolidation and migration are explicit close/resume workflows.
+    # Automatic policy work is maintenance and must never terminate live sessions.
+    if [ "$type" = "home" ] && _consolidate_reason_closes_home "$reason"; then
         log_info "Consolidate close phase: closing sessions for home/$id"
         _close_home_for_consolidate "$id"
     fi
@@ -1312,6 +1435,19 @@ _op_mount() {
     _OP_EXIT=""
     _OP_DEFER_REASON=""
 
+    # A recovered workspace may supersede an old forced-upgrade closed set
+    # while its durable mount retry is still queued. Never activate that stale
+    # job after the manifest has been retired: doing so can disturb the healthy
+    # replacement sessions that made the old job obsolete.
+    if [ "$type" = "agent" ] && [ "$reason" = "upgrade_relaunch" ] \
+        && ! _has_pending_agent_upgrade "$id"; then
+        log_info "Skipping obsolete upgrade activation: $entity (manifest retired)"
+        lifecycle_log "info" "supervisor" "upgrade_activation_superseded" \
+            "{\"entity\":\"$entity\"}" 2>/dev/null || true
+        _OP_EXIT=0
+        return 0
+    fi
+
     # Entity-lock probe: bake/consolidate in flight for this entity → defer.
     local _lock_id="${id//[^a-zA-Z0-9_-]/_}"
     local bake_lock="/var/run/aicli-bake-${type}-${_lock_id}.lock"
@@ -1373,6 +1509,15 @@ _op_mount() {
         safe_id="${id//[^a-zA-Z0-9_-]/_}"
         marker="/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${safe_id}"
         [ -f "$marker" ] && _OP_DEFER_REASON="$(head -1 "$marker" 2>/dev/null | tr -d '\n')"
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
+        if [ "$type" = "agent" ] && [ "$reason" = "upgrade_relaunch" ]; then
+            if ! _relaunch_pending_agent_upgrade "$id"; then
+                exit_code=1
+                _OP_EXIT=1
+            fi
+        fi
     fi
 
     if [ "$exit_code" -eq 0 ]; then
@@ -1655,6 +1800,24 @@ _job_finalize() {
                     "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"op\":\"$op\",\"attempt\":$attempt,\"retry_in_s\":$uc_delay,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
                 log_info "User $op job $job_id deferred ($defer) — retry #$attempt in ${uc_delay}s (until overlay frees or ${uc_cap}s cap)"
             fi
+        elif [ "$op" = "mount" ] && [ "$reason" = "upgrade_relaunch" ]; then
+            # #72: a retained upgrade closed-set is a durable barrier, not a
+            # five-minute storage wait. Retry for as long as some process holds
+            # the old agent overlay; browser starts remain blocked by the
+            # manifest, so no retry can re-pin the stale binary.
+            local ur_delay ur_retry_at
+            ur_delay="$(_mount_retry_delay "$attempt")"
+            ur_retry_at=$(( now + ur_delay ))
+            mkdir -p "$JOB_RETRY_DIR" 2>/dev/null || true
+            local ur_trace_kv=""
+            [ -n "$trace" ] && ur_trace_kv=",\"trace\":\"$trace\""
+            _atomic_json_write "$JOB_RETRY_DIR/${job_id}.retry" \
+                "$(printf '{"job_id":"%s","type":"%s","id":"%s","op":"%s","reason":"%s","priority":%d,"retry_at":%d%s}' \
+                    "$job_id" "$type" "$id" "$op" "$reason" "$priority" "$ur_retry_at" "$ur_trace_kv")" || true
+            attempt=$(( attempt + 1 ))
+            lifecycle_log "info" "supervisor" "upgrade_activation_requeued" \
+                "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"attempt\":$attempt,\"retry_in_s\":$ur_delay,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
+            log_info "Upgrade activation for $entity deferred ($defer) — retry #$attempt in ${ur_delay}s"
         elif [ "$op" = "mount" ] && { [ "$defer" = "target_not_mounted" ] || [ "$defer" = "bake_lock_held" ]; }; then
             local elapsed=$(( now - queued_at ))
             local wait_cap="$STORAGE_TARGET_WAIT_S"
@@ -1719,7 +1882,8 @@ _check_job_retries() {
     done
 }
 
-# OP#1381: self-contained overlay busy-arbiter for the supervisor scope.
+# OP#1381 / Bug #1384: self-contained overlay busy-arbiter for every supervisor
+# policy and resume path.
 #
 # The supervisor does NOT source common.sh (see the _intent_delete_segment note),
 # so home_mount_in_use is not reliably in scope here — calling it bare would error
@@ -1731,7 +1895,7 @@ _check_job_retries() {
 #
 # Returns 0 (busy) / 1 (idle). Best-effort; a probe error is treated as BUSY
 # (fail-safe: never resume on an indeterminate result).
-_overlay_busy_for_resume() {
+_supervisor_overlay_busy() {
     local mnt="$1"
     [ -n "$mnt" ] || return 0   # no mount -> can't prove idle -> treat as busy
     if declare -f home_mount_in_use >/dev/null 2>&1; then
@@ -1749,6 +1913,9 @@ _overlay_busy_for_resume() {
     done
     return 1
 }
+
+# Compatibility name retained for focused unit tests and older sourced callers.
+_overlay_busy_for_resume() { _supervisor_overlay_busy "$@"; }
 
 # OP#1381: overlay-free early-resume for parked user consolidate/bake retries.
 #
@@ -1796,7 +1963,7 @@ _check_deferred_consolidate_resume() {
         elif declare -f agent_mount >/dev/null 2>&1; then
             mnt="$(agent_mount "$r_id" 2>/dev/null)"
         fi
-        _overlay_busy_for_resume "$mnt" && continue
+        _supervisor_overlay_busy "$mnt" && continue
 
         # Overlay is idle — pull the retry forward so the next _check_job_retries
         # (this same tick) matures it. Rewrite the .retry with retry_at=now,
@@ -2072,6 +2239,12 @@ _check_wants_bake_flags() {
 # enqueue when a consolidate for this entity is already pending — otherwise a home
 # parked at the threshold would pile up one .req per tick until the op drains.
 # ---------------------------------------------------------------------------
+_policy_consolidate_home_is_idle() {
+    local id="${1:-}" mnt
+    mnt="$(home_mount "$id" 2>/dev/null || true)"
+    ! _supervisor_overlay_busy "$mnt"
+}
+
 _check_consolidate_policy() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
@@ -2102,6 +2275,13 @@ _check_consolidate_policy() {
             *) continue ;;
         esac
 
+        # Policy maintenance waits for natural idle. Explicit user consolidation
+        # has its own confirmed close/resume path and does not come through here.
+        if ! _policy_consolidate_home_is_idle "$id"; then
+            log_info "Consolidate policy: waiting for home/$id to become idle"
+            continue
+        fi
+
         # Skip if a consolidate is already queued for this entity (no per-tick pile-up).
         safe_id="$(printf '%s' "$id" | tr '/ ' '__')"
         existing="$(ls "${QUEUE_DIR}"/*_home_"${safe_id}"_consolidate.req 2>/dev/null | head -1)"
@@ -2118,25 +2298,18 @@ _check_consolidate_policy() {
 }
 
 # ---------------------------------------------------------------------------
-# WP #1262 (#6): force-reclaim escalation.
+# WP #1262 / issue #44: reclaim-wait notification.
 #
 # The reclaim/consolidate-at-idle path only runs when a home is idle (the
 # post-bake reclaim and _check_consolidate_policy both defer on a live session).
 # A permanently-connected session would therefore defer reclaim FOREVER, letting
 # the ZRAM upper grow unbounded and the delta stack march to the hard ceiling.
-# This is the bounded escape valve: when a home is BUSY (live session) AND
-# storagectl recommends consolidation (layers >= ceiling-2, or space pressure),
-# arm a user-warned countdown; at the deadline gracefully force-close the home's
-# sessions (resume-id preserved — TerminalHandler::gracefulClose) so the home
-# reaches idle and the already-deferred consolidate runs. Below threshold OR
-# idle, do nothing and let natural idle drive reclaim. NEVER fires for a routine
-# bake — only when consolidation is actually recommended.
+# When a home is BUSY (live session) AND storagectl recommends consolidation,
+# notify the user and wait. Automatic maintenance never closes sessions; the home
+# reaches idle only through a user close or an explicit confirmed workflow.
+# Below threshold or while idle, no warning is needed. This path is only active
+# when consolidation is actually recommended, never for a routine bake.
 # ---------------------------------------------------------------------------
-
-# Countdown duration (seconds). Precedence: env (tests/tuning) > cfg > 300 (5min).
-_force_reclaim_countdown_sec() {
-    echo "${AICLI_FORCE_RECLAIM_COUNTDOWN_SEC:-${force_reclaim_countdown_sec:-300}}"
-}
 
 # Injectable clock so the state machine is unit-testable without faking date(1).
 _now_epoch() { date +%s; }
@@ -2174,10 +2347,8 @@ _home_reclaim_recommended() {
     return 0
 }
 
-# _force_close_home_sessions <user> — close every live session on this home,
-# preserving resume ids. Reuses the proven PHP gracefulClose path (flush +
-# resume-id scrape + ttyd/tmux teardown) headlessly via a CLI bridge, so it works
-# whether or not a browser is connected. Best-effort; never aborts the tick.
+# Compatibility close bridge retained for explicit callers and its injection
+# contract. Automatic maintenance never invokes it (issue #44).
 _force_close_home_sessions() {
     local user="$1"
     [ -n "$user" ] || return 0
@@ -2288,13 +2459,11 @@ _relaunch_home_sessions() {
     ' ) 2>/dev/null || true
 }
 
-# The state machine. See block comment above. Stub-overridable boundary helpers:
+# The wait-state machine. See block comment above. Stub-overridable helpers:
 # _now_epoch, _manifest_home_ids, home_persist_path, home_mount,
-# _home_reclaim_recommended, home_mount_in_use, _force_close_home_sessions.
+# _home_reclaim_recommended and _supervisor_overlay_busy.
 _check_force_reclaim_escalation() {
     local esc_dir="${SUPERVISOR_DIR}/escalation"
-    local countdown
-    countdown="$(_force_reclaim_countdown_sec)"
 
     local ids
     ids="$(_manifest_home_ids)"
@@ -2314,46 +2483,35 @@ _check_force_reclaim_escalation() {
 
         local recommended=0 busy=0
         if [ -n "$persist" ] && _home_reclaim_recommended "$id" "$persist"; then recommended=1; fi
-        if [ -n "$mnt" ] && home_mount_in_use "$mnt"; then busy=1; fi
+        if [ -n "$mnt" ] && _supervisor_overlay_busy "$mnt"; then busy=1; fi
 
         if [ "$recommended" -eq 1 ] && [ "$busy" -eq 1 ]; then
             if [ ! -f "$state_file" ]; then
-                # Arm: write countdown state + notify the user once.
+                # Record the wait + notify the user once.
                 mkdir -p "$esc_dir" 2>/dev/null || true
-                local deadline=$(( now + countdown ))
                 _atomic_json_write "$state_file" \
-                    "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"deadline_epoch":%d,"state":"countdown"}' \
-                        "$id" "$_RECLAIM_REASON" "$now" "$deadline")" || true
-                local mins=$(( countdown / 60 ))
-                _supervisor_notify "warning" "AICliAgents: storage reclaim scheduled" \
-                    "Home '$id' needs storage reclamation but has a live session. Sessions will close in ${mins} min to free memory; you can resume exactly where you left off." \
+                    "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting"}' \
+                        "$id" "$_RECLAIM_REASON" "$now")" || true
+                _supervisor_notify "warning" "AICliAgents: storage maintenance waiting" \
+                    "Home '$id' needs storage maintenance but has live sessions. Maintenance will wait; close those sessions when convenient." \
                     "force_reclaim_${id}" 3600
-                lifecycle_log "warn" "supervisor" "force_reclaim_armed" \
-                    "{\"entity\":\"home/$id\",\"reason\":\"$_RECLAIM_REASON\",\"deadline_epoch\":$deadline}" 2>/dev/null || true
-                log_info "Force-reclaim armed for home/$id (reason=$_RECLAIM_REASON, deadline in ${countdown}s)"
+                lifecycle_log "warn" "supervisor" "reclaim_waiting_for_idle" \
+                    "{\"entity\":\"home/$id\",\"reason\":\"$_RECLAIM_REASON\"}" 2>/dev/null || true
+                log_info "Storage maintenance waiting for home/$id to become idle (reason=$_RECLAIM_REASON)"
             else
-                # Countdown in flight — fire at/after the deadline. Read the
-                # deadline with sed (POSIX, no PCRE) so the state machine is
-                # unit-testable on any grep build, not just .4's UTF-8 locale.
-                local deadline
-                deadline="$(sed -n 's/.*"deadline_epoch":\([0-9]*\).*/\1/p' "$state_file" 2>/dev/null | head -1)"
-                [ -n "$deadline" ] || deadline=0
-                if [ "$now" -ge "$deadline" ]; then
-                    log_warn "Force-reclaim deadline reached for home/$id — closing sessions"
-                    lifecycle_log "warn" "supervisor" "force_reclaim_firing" \
-                        "{\"entity\":\"home/$id\"}" 2>/dev/null || true
-                    # Flip to "closing" BEFORE the close so the UI renders the
-                    # terminal state even if the close takes a moment.
+                # Normalize an old countdown/closing state left in /tmp by a
+                # previous plugin version. It must not retain auto-close semantics.
+                local prior_state
+                prior_state="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$state_file" 2>/dev/null | head -1)"
+                if [ "$prior_state" != "waiting" ]; then
                     _atomic_json_write "$state_file" \
-                        "$(printf '{"entity":"home/%s","reason":"%s","state":"closing","fired_at":%d}' \
+                        "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting"}' \
                             "$id" "$_RECLAIM_REASON" "$now")" || true
-                    _force_close_home_sessions "$id"
                 fi
             fi
         else
             # Condition no longer holds (home went idle, or pressure relieved):
-            # stand down — drop any countdown so we never force-close a user who
-            # already closed naturally.
+            # Stand down once the home is idle or pressure has cleared.
             if [ -f "$state_file" ]; then
                 rm -f "$state_file" 2>/dev/null || true
                 lifecycle_log "info" "supervisor" "force_reclaim_cleared" \
@@ -2361,6 +2519,87 @@ _check_force_reclaim_escalation() {
                 log_info "Force-reclaim stood down for home/$id (recommended=$recommended busy=$busy)"
             fi
         fi
+    done <<< "$ids"
+}
+
+# #72 — complete a deferred agent upgrade only after storagectl has activated
+# the newly baked layer. The relaunch service consumes the exact closed set and
+# removes its manifest; setInstallStatus(100) is deliberately last so browsers
+# cannot reopen a retired ttyd during the activation gap.
+_has_pending_agent_upgrade() {
+    local agent_id="$1"
+    case "$agent_id" in ''|*[!a-z0-9-]*) return 1 ;; esac
+    [ "$(command -v php)" ] || return 1
+    AICLI_RELAUNCH_AGENT="$agent_id" php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        exit(\AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade(
+            (string)getenv("AICLI_RELAUNCH_AGENT")
+        ) ? 0 : 1);
+    ' >/dev/null 2>&1
+}
+
+_relaunch_pending_agent_upgrade() {
+    local agent_id="$1"
+    case "$agent_id" in ''|*[!a-z0-9-]*) return 1 ;; esac
+    [ "$(command -v php)" ] || return 1
+
+    ( [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+      AICLI_RELAUNCH_AGENT="$agent_id" php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        $agent = (string)getenv("AICLI_RELAUNCH_AGENT");
+        if (!\AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade($agent)) exit(0);
+        $result = \AICliAgents\Services\UpgradeRelaunchService::relaunchClosedSet($agent);
+        setInstallStatus("Installation complete", 100, $agent);
+        \AICliAgents\Services\LifecycleLogService::log(
+            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+            "installer", "deferred_upgrade_relaunch_complete",
+            ["agent"=>$agent, "relaunched"=>$result["relaunched"], "skipped"=>$result["skipped"]]
+        );
+    ' ) 2>/dev/null
+}
+
+# #71: start safely queued upgrades only after all sessions have closed on
+# their own. Run in a subshell and close the supervisor lifetime lock there so
+# a spawned install job can never inherit and pin the singleton lock.
+_check_queued_agent_upgrades() {
+    [ "$(command -v php)" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 15 php -d display_errors=0 -r '
+            $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+            require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+            \AICliAgents\Services\PendingAgentUpgradeService::processAllReady();
+        ' >/dev/null 2>&1
+    ) || true
+}
+
+# Self-heal the crash window between install-bg retaining a manifest and
+# enqueuing its activation job. A stable job id plus queue/retry checks makes
+# this idempotent; mount_busy retries live in the supervisor retry pen.
+_check_pending_agent_upgrades() {
+    [ "$(command -v php)" ] || return 0
+    local ids
+    ids="$(php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        foreach (\AICliAgents\Services\UpgradeRelaunchService::pendingAgentIds() as $id) echo $id, PHP_EOL;
+    ' 2>/dev/null)"
+    [ -n "$ids" ] || return 0
+
+    local id safe job_id
+    while IFS= read -r id; do
+        case "$id" in ''|*[!a-z0-9-]*) continue ;; esac
+        safe="${id//[^A-Za-z0-9._-]/_}"
+        job_id="upgrade-agent-$safe"
+        [ -f "$JOB_RETRY_DIR/${job_id}.retry" ] && continue
+        if ls "$QUEUE_DIR"/*_agent_${safe}_mount.req >/dev/null 2>&1; then
+            continue
+        fi
+        queue_enqueue 1 agent "$id" mount upgrade_relaunch "" "$job_id" >/dev/null 2>&1 || true
     done <<< "$ids"
 }
 
@@ -2386,6 +2625,14 @@ _work_tick() {
 
     # Step 1: Reconcile manifest with filesystem (unconditional, every tick)
     _op_reconcile
+
+    # Step 1a (#71): admit non-destructive queued upgrades at a session-free
+    # boundary. This raises the install barrier before its second empty check.
+    _check_queued_agent_upgrades
+
+    # Step 1b (#72): ensure every retained agent-upgrade closed set has one
+    # backoff-managed activation job, even if install-bg crashed after writing it.
+    _check_pending_agent_upgrades
 
     # Step 2: Check dirty-pressure thresholds (may enqueue bakes)
     _check_dirty_pressure
@@ -2545,6 +2792,11 @@ _work_tick() {
 # start — acquire lock, run heartbeat + work loop
 # ---------------------------------------------------------------------------
 _do_start() {
+    if _supervisor_start_suppressed; then
+        log_info "Supervisor start suppressed by fresh health-smoke marker"
+        return 0
+    fi
+
     mkdir -p "$STATUS_DIR" 2>/dev/null || true
     mkdir -p "$SUPERVISOR_DIR" 2>/dev/null || true
     mkdir -p "$HALTS_DIR" 2>/dev/null || true

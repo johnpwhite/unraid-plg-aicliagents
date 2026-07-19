@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-07-17 — An agent upgrade is not complete until the new layer is active
+
+**Context:** A forced Claude Code upgrade downloaded and baked the new version, but a surviving process still held the old overlay mount. The backend logged `agent_refresh_still_deferred` and retained the exact-session relaunch manifest, while the progress API nevertheless reported completion. The browser reopened the retired session id, showed “Terminal session not found”, and the retry launched against the stale binary, pinning that layer again.
+
+**Root cause:** “installer process exited successfully” and “upgraded binary is live” were represented as the same terminal state. The 1–99 install marker was the only start barrier, so publishing 100 removed protection even though activation and relaunch were incomplete. The retained manifest documented unfinished work but nothing treated it as authoritative or guaranteed the supervisor would retry it.
+
+**Rule:** Completion belongs to the entire state transition: download → bake → activate new layer → relaunch exact closed set. A durable manifest for an unfinished transition must remain a start barrier, drive an idempotent supervisor job with retry/backoff, and be consumed before 100% is published. The browser must hide retired terminal endpoints while that barrier exists.
+
+**Related boundary:** Force-upgrading an active session deliberately terminates its descendant process tree. Conversation resume does not preserve subagents, monitors, or shell jobs, so the UI must state that consequence explicitly; a queued/non-destructive upgrade should be the normal future path.
+
+---
+
+## 2026-07-16 — `TMUX_TMPDIR` does not isolate a test that inherits `TMUX`
+
+**Context:** A two-session regression test set a private `TMUX_TMPDIR`, created test sessions, and called `tmux kill-server` during cleanup. It was launched from inside a live Codex tmux pane and terminated every live plugin agent session.
+
+**Root cause:** The inherited `TMUX=<socket>,<server-pid>,<pane>` variable takes precedence over socket discovery through `TMUX_TMPDIR`. Every test command remained attached to the production shared server; the apparent private directory provided no isolation.
+
+**Rule:** Any test that starts or stops a real tmux server must use an explicit private socket (`tmux -S <random-private-socket>`) and remove `TMUX`/`TMUX_PANE` from the command environment. Cleanup must name that same explicit socket. A repository-wide shell regression now rejects `tmux kill-server` in tests unless the command includes `-S` or `-L`.
+
+**Related design lesson:** Plugin workspaces share one tmux server, so persisted workspace options must use `set-option -t <session>` and targeted `source-file`; `-g` makes the most recently attached workspace overwrite every other workspace's settings.
+
+---
+
 ## 2026-06-09 — Manual storage surgery on .4: the supervisor respawns from the UI poll; read the live persist location, not the stale cfg key
 
 **Context:** Migrating the plugin's per-user home on .4 from `aicliagent` back to `root` (a manual

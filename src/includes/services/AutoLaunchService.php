@@ -104,6 +104,15 @@ class AutoLaunchService
                     continue;
                 }
 
+                // Issue #56: an array-start/page-load race can run this sweep
+                // while /mnt/user is still an unmounted rootfs directory. Skip
+                // cleanly; a later array-start or access sweep will retry.
+                if (!StorageMountService::isPathAvailable($path)) {
+                    $skipped++;
+                    self::log("Auto-launch deferred for $sid ($agentId): workspace storage unavailable (trigger=$reason)", AICLI_LOG_WARN);
+                    continue;
+                }
+
                 $resumeId = ConfigService::getResumeId($path, $agentId);
                 if ($resumeId === null && !$config['freshIfNoResume']) {
                     $skipped++;

@@ -85,20 +85,26 @@ class NpmSource implements AgentSource {
     }
 
     public function checkUpdates(string $agentId, array $agent, string $channel): ?array {
+        if (AgentRegistry::normalizeChannel($channel) === 'pinned') return null;
         $cache = VersionCheckService::checkAllAgents(true);
         $agentCache = $cache[$agentId] ?? null;
         if (!$agentCache || empty($agentCache['dist_tags'])) return null;
 
         $installed = AgentRegistry::getInstalledVersion($agentId);
-        $channelVersion = $agentCache['dist_tags'][$channel] ?? null;
-        // Graceful fall-through: if 'beta' is unpublished, npm often uses 'next'.
-        if ($channelVersion === null && $channel === 'beta') {
-            $channelVersion = $agentCache['dist_tags']['next'] ?? null;
-            if ($channelVersion !== null) {
-                LogService::log("NpmSource: $agentId has no 'beta' dist-tag; using 'next'.", LogService::LOG_WARN, "NpmSource");
-            }
+        $resolution = VersionCheckService::resolveChannelTarget(
+            $channel,
+            AgentRegistry::getPinned($agentId),
+            (array)$agentCache['dist_tags']
+        );
+        $channelVersion = $resolution['target'];
+        if ($channelVersion === null || $resolution['error'] !== null) return null;
+        if ($resolution['fallback']) {
+            LogService::log(
+                "NpmSource: $agentId channel {$resolution['channel']} has no primary dist-tag; using {$resolution['resolved_tag']}.",
+                LogService::LOG_WARN,
+                "NpmSource"
+            );
         }
-        if ($channelVersion === null) return null;
 
         $cmp = version_compare($channelVersion, $installed);
         return [

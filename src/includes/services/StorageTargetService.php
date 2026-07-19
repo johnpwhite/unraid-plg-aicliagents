@@ -83,10 +83,14 @@ class StorageTargetService {
             if (!self::mounted($d)) continue;
             $cands[] = self::candidate($d, 'Array disk: ' . basename($d), 'array_disk', $kind, $config, $current, true);
         }
-        // 6. Network remotes — listed but flagged per the S-02 kind policy.
-        foreach (self::subdirs("$mnt/remotes") as $d) {
-            if (!self::mounted($d)) continue;
-            $cands[] = self::candidate($d, 'Network share: ' . basename($d), 'remote', $kind, $config, $current);
+        // 6. Network remotes — discover from /proc mount metadata and NEVER
+        // touch the mounted filesystem here. A dead hard NFS/CIFS mount can put
+        // glob/stat/findmnt --target/statfs in uninterruptible sleep, taking the
+        // entire plugin page's debug request down with it (issue #39).
+        $remoteMounts = self::remoteMountpoints("$mnt/remotes");
+        foreach ($remoteMounts as $d) {
+            $cands[] = self::remoteCandidate($d, 'Network share: ' . basename($d),
+                $kind, $config, $current);
         }
         // 7. Flash — always present, always offered last among usable targets.
         $flashPath = (strpos($current, '/boot') === 0) ? $current : self::DEFAULT_FLASH_PATH;
@@ -99,7 +103,10 @@ class StorageTargetService {
         // Current path not among the candidates (custom location) → surface it.
         $havePaths = array_column($cands, 'path');
         if (!in_array($current, $havePaths, true)) {
-            $cands[] = self::candidate($current, 'Current location', 'current', $kind, $config, $current);
+            $remoteRoot = self::containingMountpoint($current, $remoteMounts);
+            $cands[] = $remoteRoot !== null
+                ? self::remoteCandidate($current, 'Current location', $kind, $config, $current, 'current')
+                : self::candidate($current, 'Current location', 'current', $kind, $config, $current);
         }
 
         // Dedupe by path (first wins — list is built best-source-first), merging
@@ -196,6 +203,12 @@ class StorageTargetService {
      */
     public static function validateTarget(string $kind, string $path, array $config): array {
         $kind = ($kind === 'agent') ? 'agent' : 'home';
+        // Issue #56: /mnt/user may exist as an ordinary rootfs stub before
+        // shfs is mounted. Never probe or approve a future mkdir beneath it.
+        if (!StorageMountService::isBackingMountAvailable($path)) {
+            return ['ok' => false, 'warnings' => ['storage_unmounted'], 'resolved_path' => null,
+                'message' => "Persistence path '$path' is unavailable because its backing storage is not mounted."];
+        }
         // Probe the deepest existing ancestor — a not-yet-created subdirectory
         // of a valid mount is a valid target (execute_migrate mkdir -p's it).
         [$probePath, $suffix] = self::existingAncestor($path);
@@ -295,6 +308,44 @@ class StorageTargetService {
             $entry['picked_via']    = $original;
         }
         $entry['recommendation_rank'] = self::rank($source, $probe, $refuse, $entry['mount_class']);
+        return $entry;
+    }
+
+    /**
+     * Build a network candidate using mount-table facts only. This is not a
+     * reduced timeout probe: hard network mounts can remain in D-state after a
+     * timeout and leak an unkillable helper. Mandatory page-load code therefore
+     * performs zero filesystem operations below a remote mountpoint.
+     */
+    private static function remoteCandidate(string $path, string $label, string $kind,
+                                            array $config, string $current,
+                                            string $source = 'remote'): array {
+        $warnings = ['network_target', 'remote_probe_skipped'];
+        $refuse = true;
+        if ($kind === 'home') {
+            $warnings[] = 'rejected_for_home';
+        } else {
+            $warnings[] = 'remote_agent_warn';
+            $refuse = (string)($config['storage_allow_remote_agent'] ?? '0') !== '1';
+        }
+        $entry = [
+            'path' => $path,
+            'label' => $label,
+            'source' => $source,
+            'mount_class' => 'remote',
+            'engine' => 'layering',
+            'upper_mode' => 'zram',
+            'durability' => 'network',
+            'rotational' => false,
+            'free_bytes' => 0,
+            'warnings' => $warnings,
+            'refuse' => $refuse,
+            'current' => ($path === $current),
+            'recommended' => false,
+            'advanced' => false,
+            'probe_status' => 'metadata_only',
+        ];
+        $entry['recommendation_rank'] = self::rank($source, [], $refuse, 'remote');
         return $entry;
     }
 
@@ -415,6 +466,54 @@ class StorageTargetService {
         if (!is_array($out)) return [];
         sort($out);
         return $out;
+    }
+
+    /**
+     * Mounted paths directly beneath the remote root, without dereferencing
+     * that root. Tests reuse AICLI_ITEST_MOUNTED_PATHS; production reads the
+     * kernel's mountinfo pseudo-file (override: AICLI_MOUNTINFO).
+     *
+     * @return array<int,string>
+     */
+    public static function remoteMountpoints(string $remoteRoot): array {
+        $root = rtrim($remoteRoot, '/');
+        $hook = getenv('AICLI_ITEST_MOUNTED_PATHS');
+        if ($hook !== false) {
+            $paths = array_filter(explode(':', $hook), static fn($p) => self::isBelow($p, $root));
+        } else {
+            $mountinfo = getenv('AICLI_MOUNTINFO') ?: '/proc/self/mountinfo';
+            $paths = [];
+            foreach ((array)@file($mountinfo, FILE_IGNORE_NEW_LINES) as $line) {
+                $fields = explode(' ', $line);
+                if (count($fields) < 5) continue;
+                $path = self::decodeMountinfoPath($fields[4]);
+                if (self::isBelow($path, $root)) $paths[] = $path;
+            }
+        }
+        $paths = array_values(array_unique($paths));
+        sort($paths);
+        return $paths;
+    }
+
+    private static function containingMountpoint(string $path, array $mounts): ?string {
+        $best = null;
+        foreach ($mounts as $mount) {
+            if ($path === $mount || strpos($path, rtrim($mount, '/') . '/') === 0) {
+                if ($best === null || strlen($mount) > strlen($best)) $best = $mount;
+            }
+        }
+        return $best;
+    }
+
+    private static function isBelow(string $path, string $root): bool {
+        return strpos($path, $root . '/') === 0;
+    }
+
+    /** Decode the octal escapes used for spaces, tabs, newlines and backslashes. */
+    private static function decodeMountinfoPath(string $path): string {
+        return preg_replace_callback('/\\\\([0-7]{3})/', static function ($m) {
+            return chr(octdec($m[1]));
+        }, $path) ?? $path;
     }
 
     /**

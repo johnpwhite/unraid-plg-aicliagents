@@ -150,7 +150,7 @@ fi
 # TMUX_TMPDIR` targets the old default socket location. The sentinel is written
 # unconditionally so this never runs again.
 TMUX_MIGRATED="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/.tmux-socket-migrated"
-if [ ! -f "$TMUX_MIGRATED" ] && command -v tmux >/dev/null 2>&1; then
+if [ "$MIGRATION_NEEDED" = "1" ] && [ ! -f "$TMUX_MIGRATED" ] && command -v tmux >/dev/null 2>&1; then
     _OLD_SESS=$(env -u TMUX_TMPDIR tmux ls -F '#S' 2>/dev/null | grep '^aicli-agent-' || true)
     if [ -n "$_OLD_SESS" ]; then
         log_status "    > Bug #1043 one-off: gracefully closing pre-upgrade terminal session(s) from the old tmux socket..."
@@ -307,4 +307,3 @@ if [ -d "$EMHTTP_DEST/agents/.runtime" ]; then
 fi
 
 log_ok "Pre-upgrade cleanup complete."
-

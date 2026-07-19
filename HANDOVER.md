@@ -1,40 +1,83 @@
-I'm resuming work on **unraid-plg-aicliagents** (the AI CLI Agents Unraid plugin). Context from previous session (2026-07-12):
+I am resuming work on `unraid-plg-aicliagents`. Context from the previous session on 2026-07-19 follows.
 
-**Where this runs:** Claude Code runs directly ON the Unraid test server `.4` (192.168.1.4, hostname `Unraid`) — `/usr/local/emhttp/plugins/…` and `/mnt/user/…` are LOCAL. `.4` is SHARED with other live Claude sessions (e.g. saas-businessOS on runner volume `runner_bos`). Recall memories [[storefront-from-dot4]] and [[session-safe-ui-deploy]] before deploying.
+## Repository state
 
-**Repo state:**
 - Branch: `master`
-- HEAD: `dd58ca58` Feat: … (v2026.07.12.01) — the session-safe Factory publish of the f54f792b feature set. Clean, pushed, level with origin.
-- Prior: `f54f792b` the feature work (44 files); `959c1d90` this HANDOVER.md.
-- Root workspace repo (`unraid-extensions`): my CI tooling is committed+pushed (`6857272` attestation + GitLab→Forgejo scrub, `f936bb2` visual-review exclusion); a concurrent session's file-editor commits sit on top — leave it alone.
+- Last product commit before this handover: `5a80edeb release: publish 2026.07.19 stable channel fix`
+- All product commits were pushed to `origin/master`.
+- The release is `2026.07.19.01`.
 
-**Running state:**
-- Factory (Forgejo) version = **`2026.07.12.01`** — session-safe Factory-published this session (bump + tarball via `publish-factory --no-git`, local git push, then `.4` deploy by direct file overlay + flash/manifest promote — NO `plugin install`, sessions preserved). Forgejo raw `.plg`+`src.tar.gz` serve it, so a `.4` REBOOT now fetches the current features (no longer overlay-only). `.4` flash + `/var/log/plugins` `.plg` = 2026.07.12.01; live plugin code synced to the release (bundle md5 matches `src/assets/ui/index.js`).
-- Public Storefront (GitHub `johnpwhite/unraid-plg-aicliagents` main) = `2026.07.11.01` — NOT yet promoted to `2026.07.12.01`. Promote via `jpw-unraid-storefront` when John's ready (net-off the changelog first).
+## Running state on Unraid `.4`
 
-**In flight (Forgejo):**
-- #43 Workspace asset tree — IMPLEMENTED + session-safe-deployed (commit f54f792b), NOT released. See its latest comment for the full shipped list. Umbrella issue for the asset-tree + in-page editor + "＋ Add" create flow.
-- Un-ticketed features shipped in the same commit (back-fill issues if you want tracking): the workspace-row context menu + inline rename; the managed file-path-convention instruction block (docs/specs/AGENT_FILE_PATH_CONVENTION.md); the vendored CodeMirror editor.
+- The live plugin generation is `2026.07.19.01-ed2b48393473839f`.
+- `src.tar.gz` SHA-256 is `ed2b48393473839fb369839ef51d670373897a2c7cde8888170d180ec8a9c2e3`.
+- The repository, `/boot/config/plugins/unraid-aicliagents.plg`, and `/var/log/plugins/unraid-aicliagents.plg` all have SHA-256 `2c80cc706c11bd3575297f811bc32553647410016de7b04c83617c6a32b8da5f`.
+- The official same-layout plugin installer installed the release, so it is persistent across reboot.
+- Exact before/after snapshots of 14 Claude, Codex, ttyd, and tmux process records were identical. The user agents were not restarted by this deployment. Only the plugin supervisor was deliberately replaced.
+- Claude's persisted update policy now says `stable`. The installed Claude binary remains version `2.1.212`; deployment did not force an agent upgrade.
 
-**Recently shipped this session:**
-- (commit f54f792b) the whole asset-tree/editor/menu/file-path-block/clickable-root feature set — 44 files.
-- Earlier: released 2026.07.11.01 to Factory (Forgejo) + Storefront (GitHub) — #40 clickable terminal paths, #41 direct image paste, #42 pinnable drawer. Plus new CI tooling: session-safe `factory-tested.json` attestation + `ci/attest` + `ci/storefront --force` (root repo).
+## Critical host incident
 
-**Next logical step:**
-Pick one (confirm with John): (a) build the per-agent **"Config surface" panel on the Manager page** (reuses `get_agent_config_surface` with no `path` → global scope only — agreed follow-on to #43); (b) **lazy-load the CodeMirror editor bundle** (grew ~330KB→~950KB — dynamic-import `FileEditorModal` so those deps only download on first file open); or (c) **promote 2026.07.12.01 to the public Storefront** (GitHub) once tested — `jpw-unraid-storefront`, net-off the changelog. (Factory publish already done this session.)
+- Do **not** run the full `ci/run release-gate` on live Unraid `.4`.
+- The host rebooted at boot time `2026-07-19 20:27:41` while that gate was exercising storage-functional tests, roughly five minutes after the safe in-place plugin install had completed.
+- Tower's remote syslog, `/mnt/cache/appdata/syslog-ng/logs/remote/Unraid/Unraid-20260719.log` on `192.168.1.202`, ends abruptly after rapid loop-device mount/unmount activity, repeated `drop_caches: 3`, and OverlayFS warnings that an upper/work directory was already in use and behaviour was undefined. There is no clean shutdown, kernel panic, OOM, UPS, or thermal-trip record.
+- The storage gate is the strongest immediate correlation with this reboot, although the log does not prove the final low-level reset mechanism.
+- Plugin Forgejo issue #83 tracks isolating these destructive storage checks from production and is urgent/in progress.
 
-**Active constraints / gotchas:**
-- **Session-safe deploy only** — overlay files into the live plugin dir; NEVER `ci/run deploy` / `plugin install` (kills agent sessions). Overlay BOTH `index.js` AND `index.css` (css-only changes are invisible if you forget the css — that bit me: the editor rendered unstyled/behind).
-- **Never run two `ci/run` for aicliagents concurrently** — corrupts `runner_aicliagents/ui-build/node_modules` (tinypool error, looks like a vitest failure but isn't). Use `run_in_background: true`, never trailing `&`. Fix = `rm -rf /mnt/appdata/runner_aicliagents/ui-build/node_modules` then one clean run.
-- **C4 docs are STALE** — big `src/**` + `ui-build/**` changes landed; run `python3 C4-Documentation/tools/c4-drift.py check`, refresh, `… sync`.
-- The `2026.07.11.01` attestation/release-gate artifacts don't cover the WIP; a versioned publish re-gates. Live-GUI L4 still auth-blocked (needs the .4 GUI password in `ci/ci.secrets.conf`) — see [[aicliagents-l4-auth-blocker]].
-- Pre-deploy green check (container-only, session-safe): `cd .. && ci/run lint unit build --plugin=aicliagents`. Last run GREEN: phpunit 1118, vitest (assetTree 42 / fileEditorApi 11 / fileEditorRouting 6 / menuNav 14), build.
+## Storage and thermal evidence
 
-**Skills to load first (only if doing that work):**
-- `jpw-unraid-factory` / `jpw-unraid-storefront` — only if cutting a release.
-- `jpw-forgejo-backlog` — if back-filling issues.
+- The post-reboot automatic Btrfs scrub of `/mnt/cache` corrected 117 checksum errors and reported zero uncorrectable errors.
+- Btrfs device statistics show corruption counters on both mirrored NVMe devices: 48 on `nvme0` and 72 on `nvme2`; there are no Btrfs read/write/flush/generation errors.
+- Both WDC NVMe drives were 47–50 C when checked, with zero critical warnings and zero SMART media/data-integrity errors. They record 9/18 minutes above warning temperature, one drive records 2 minutes above critical temperature, and each records about 278 unsafe shutdowns.
+- HDDs `/dev/sdb` and `/dev/sde` were 59–60 C. SATA SSDs `/dev/sdc` and `/dev/sdd` were 56–59 C and SMART attribute 190 was `FAILING_NOW` against a 45 C threshold. `/dev/sdf` was 51 C and records a past threshold failure.
+- CPU package temperature was 71 C. A motherboard sensor reported 83 C.
+- Heat is a credible contributor to throttling, resets, and storage instability and must be corrected. It does not by itself prove the immediate reboot cause. Corruption on both sides of the Btrfs mirror also makes RAM, CPU, board, or power instability plausible.
+- Recommended sequence: stop production storage stress; clean and improve airflow and verify fan curves; return CPU/RAM/XMP/overclock settings to BIOS defaults; run a multi-pass offline memory test; then run a second Btrfs scrub and compare error counters.
+- Homelab Forgejo issue #29 tracks the unclean reboot investigation. Homelab issue #30 tracks the urgent thermal remediation.
 
-**Files to read before editing:**
-- `docs/specs/WORKSPACE_ASSET_TREE.md` + `docs/specs/AGENT_FILE_PATH_CONVENTION.md` (the two feature specs).
-- Backend: `src/includes/services/AssetSurfaceService.php` (descriptors + tree + creatable), `src/includes/handlers/AssetsHandler.php` (get_agent_config_surface, read_file), `src/includes/services/ValidationService.php` (validateIntendedPath), `src/includes/services/hub/FilePathConventionProjector.php` + `HubProjector.php` (policy fence).
-- Frontend: `ui-build/src/components/AssetTreePanel.tsx`, `ui-build/src/lib/assetTree.ts`, `ui-build/src/components/fileEditor/` (vendored editor), `ui-build/src/components/AICliAgentsTerminal.tsx` (openFileEditor + openTerminalPath wiring), `ui-build/src/components/DrawerPanel.tsx` + `WorkspaceRowMenu.tsx` (context menu).
+## Recently shipped
+
+- `b8a13bfb fix: make stable agent channel authoritative`
+  - Stable is now saved as `stable`, legacy `latest` is normalized to stable, stable resolves only stable-tagged versions unless the registry has no stable tag, beta resolves beta/next, and exact pins remain exact.
+  - Installer, emergency installer, source selection, and UI all use the same saved policy.
+  - `tests/php/StableChannelResolutionTest.php` provides the regression coverage.
+- `8f41a4bc docs: sync stable channel architecture provenance`
+- `0c1ec9df fix: satisfy folder error static analysis`
+- `99e07e48 test: use stable parallel Vitest worker threads`
+  - The process pool reproducibly failed with `ERR_IPC_CHANNEL_CLOSED`; the thread pool completes all 313 tests in parallel.
+- `5a80edeb release: publish 2026.07.19 stable channel fix`
+  - Published release assets, scoped a Semgrep false-positive suppression, and moved the supervisor readiness probe into `src/scripts/installer/supervisor-ready.php`.
+
+## Verification completed
+
+- PHP: 1,184 tests, 4,876 assertions, 3 skipped — passed before release packaging.
+- JavaScript: 313 tests — passed with the thread pool.
+- PHPStan, lint, build, Semgrep, XML/JSON validation, and factory publisher validation passed.
+- Focused post-change PHP regression run: 10 tests, 24 assertions — passed.
+- Do not repeat the complete host-level release gate until issue #83 is fixed; its storage checks are unsafe on this production host.
+
+## Open work
+
+- Plugin #83: isolate/disable destructive release-gate storage tests on a live Unraid host.
+- Plugin #79: ensure every RAM-only CI/deployment path either persists the plugin to flash or explicitly forbids pretending it is a durable install.
+- Plugin #78: continue the Claude `2.1.212` segmentation-fault investigation; prior evidence included an attempted 107 TiB allocation before SIGSEGV.
+- Homelab #29: determine the low-level cause of the unclean `.4` reboots.
+- Homelab #30: remediate excessive disk and system temperatures.
+- Fixed and closed this session: plugin #80, #81, #82, #84, and #85.
+
+## Next logical step
+
+Do not stress the live host further. Fix cooling and isolate the release-gate storage tests first, then perform offline memory diagnostics and a comparison Btrfs scrub. Resume the remaining Claude crash investigation only on a thermally and electrically stable host so hardware instability does not contaminate the evidence.
+
+## Important gotchas
+
+- Work through `/mnt/cache/DevelopmentProjects/unraid-extensions/unraid-plg-aicliagents`, not `/mnt/user`, to bypass shfs for this cache-only checkout.
+- Live working trees and agent sessions are shared mutable state. Check the branch immediately before committing and never use a deployment path that replaces tmux/ttyd/agent processes.
+- The official plugin same-layout installer has now been demonstrated to preserve running agents; retain exact PID/start-time snapshot checks around future live deployments.
+- Release artifacts archived outside the repository are under `/mnt/cache/DevelopmentProjects/.agent-archives/unraid-plg-aicliagents-20260719-stable-fix/`.
+- Broad C4 drift may remain outside the documents specifically refreshed for this fix; check the drift manifest before unrelated architecture edits.
+
+## Skills and files to load first
+
+- Skills: `jpw-forgejo-backlog`, then `jpw-handover` at the end of the next substantial session.
+- Read `./HANDOVER.md`, `src/AgentRegistry.php`, `src/VersionCheckService.php`, `src/InstallerService.php`, `src/NpmSource.php`, `ManagerStoreTab.php`, `ManagerStoreScripts.php`, `tests/php/StableChannelResolutionTest.php`, `tests/php/RegressionGuardsTest.php`, `ci/run`, and the storage functional tests before editing related behaviour.

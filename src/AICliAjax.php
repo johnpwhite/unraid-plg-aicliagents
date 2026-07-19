@@ -164,6 +164,8 @@ if (isset($_GET['action'])) {
                 // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
                 echo json_encode($result);
             } else {
+                $safeAction = preg_replace('/[^a-zA-Z0-9_.-]/', '', substr((string)$action, 0, 64));
+                aicli_log("Unknown AJAX action: $safeAction", AICLI_LOG_WARN, 'AICliAjax');
                 // Same: JSON response, not HTML. $action has already reached
                 // the dispatcher's switch without matching a handler.
                 // nosemgrep: php.lang.security.injection.echoed-request.echoed-request

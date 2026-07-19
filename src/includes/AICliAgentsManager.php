@@ -36,10 +36,13 @@ require_once __DIR__ . '/services/StorageTargetService.php';   // S-11 #1355 —
 require_once __DIR__ . '/services/TaskService.php';
 require_once __DIR__ . '/services/InstallerService.php';
 require_once __DIR__ . '/services/TerminalService.php';
+require_once __DIR__ . '/services/TerminalGenerationService.php';
 require_once __DIR__ . '/services/AutoLaunchService.php';
 require_once __DIR__ . '/services/UpgradeRelaunchService.php';
 require_once __DIR__ . '/services/ConsolidateState.php';   // HOME_CONSOLIDATE_INPROGRESS_GUARD — per-user consolidate marker
 require_once __DIR__ . '/services/UtilityService.php';
+require_once __DIR__ . '/services/PendingAgentUpgradeService.php';   // #71 — non-destructive pre-install queue
+require_once __DIR__ . '/services/AgentUpgradeAdmissionService.php'; // #71 — closes terminal-start/install race
 require_once __DIR__ . '/services/NchanService.php';
 require_once __DIR__ . '/services/ActivityService.php';
 require_once __DIR__ . '/services/VersionClassifier.php';
@@ -441,23 +444,11 @@ function aicli_get_workspaces() {
 
 /**
  * Wrapper for saving workspace state.
- * Writes workspaces.json to the overlay (fast) and attempts a non-blocking persist.
- * If a bake is already in progress, the data is safe in ZRAM and will be captured next cycle.
+ * Writes workspaces.json to the overlay. Durability is coalesced by the supervisor's
+ * scheduled/pressure/shutdown persistence instead of creating a layer for each UI save.
  */
 function aicli_save_workspaces($data) {
-    $res = \AICliAgents\Services\ConfigService::saveWorkspaces($data);
-
-    $config = getAICliConfig();
-    $user = $config['user'] ?? 'root';
-    if (empty($user)) $user = 'root';
-
-    // Non-blocking persist: try to bake, but don't wait if another bake is running.
-    // The file is already written to the ZRAM overlay — it's safe. The bake is just
-    // an optimization to flush to Flash sooner. The supervisor's next idle-tick
-    // will catch it if we skip here.
-    aicli_persist_home_nonblocking($user);
-
-    return $res;
+    return \AICliAgents\Services\ConfigService::saveWorkspaces($data);
 }
 
 /**

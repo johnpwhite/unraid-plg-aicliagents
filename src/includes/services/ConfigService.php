@@ -347,6 +347,10 @@ class ConfigService {
     public static function saveWorkspaces($data) {
         $count = count($data['sessions'] ?? []);
         $file = self::getUserStatePath() . "/workspaces.json";
+        if (self::workspaceDataMatchesFile($file, $data)) {
+            LogService::log("saveWorkspaces unchanged: count=$count path=$file", LogService::LOG_DEBUG, "ConfigService");
+            return true;
+        }
         // Diagnostic INFO (not DEBUG) so the boundary is visible in default-level
         // logs. A reported workspace-loss had no audit trail because the prior
         // log was DEBUG.
@@ -357,6 +361,19 @@ class ConfigService {
         }
         LogService::log("saveWorkspaces ok: count=$count path=$file", LogService::LOG_INFO, "ConfigService");
         return true;
+    }
+
+    /**
+     * Return true only when an existing, valid workspace file already contains
+     * exactly the requested state. Kept public so the no-write decision can be
+     * tested against an isolated fixture without touching a live home overlay.
+     */
+    public static function workspaceDataMatchesFile(string $file, array $data): bool {
+        if (!is_file($file)) return false;
+        $raw = @file_get_contents($file);
+        if ($raw === false || $raw === '') return false;
+        $existing = json_decode($raw, true);
+        return is_array($existing) && json_last_error() === JSON_ERROR_NONE && $existing === $data;
     }
 
     /**

@@ -53,20 +53,51 @@ class StorageMountService {
         ];
     }
 
-    /** Runtime check: is this path usable right now? */
+    /**
+     * Is the filesystem that owns $path mounted and safe to write to?
+     *
+     * /mnt/user and /mnt/user0 are ordinary directories on rootfs until shfs
+     * mounts them. Treating those stubs as usable can make a boot-time
+     * auto-launch create files beneath them, which then prevents Unraid from
+     * mounting the user-share filesystem at all. Match mount-table targets
+     * exactly: the former substring check let a /mnt/user0 entry incorrectly
+     * satisfy a /mnt/user check.
+     *
+     * $mounts is an explicit test seam; production callers read /proc/mounts.
+     */
+    public static function isBackingMountAvailable(string $path, ?string $mounts = null): bool {
+        if ($path === '') return false;
+
+        $target = null;
+        if (preg_match('#^/mnt/(user0?)(/|$)#', $path, $m)) {
+            $target = '/mnt/' . $m[1];
+        } elseif (preg_match('#^/mnt/(disk\d+)(/|$)#', $path, $m)) {
+            $target = '/mnt/' . $m[1];
+        }
+
+        if ($target === null) return true;
+        $mounts = $mounts ?? (@file_get_contents('/proc/mounts') ?: '');
+        return self::mountTableHasTarget($mounts, $target);
+    }
+
+    /** Pure parser for /proc/mounts-style rows. */
+    public static function mountTableHasTarget(string $mounts, string $target): bool {
+        foreach (preg_split('/\r?\n/', $mounts) ?: [] as $line) {
+            $fields = preg_split('/\s+/', trim($line));
+            if (!isset($fields[1])) continue;
+            $mountedAt = str_replace(
+                ['\\040', '\\011', '\\012', '\\134'],
+                [' ', "\t", "\n", '\\'],
+                $fields[1]
+            );
+            if ($mountedAt === $target) return true;
+        }
+        return false;
+    }
+
+    /** Runtime check: does this path exist and is its backing storage usable? */
     public static function isPathAvailable(string $path): bool {
-        if (empty($path)) return false;
-        // For /mnt/user/ paths, the directory can exist on tmpfs even when the array is stopped.
-        // mkdir/writes succeed but data goes to RAM and is lost. Check if shfs is actually mounted.
-        if (preg_match('#^/mnt/user0?(/|$)#', $path)) {
-            $mounts = @file_get_contents('/proc/mounts') ?: '';
-            if (strpos($mounts, 'shfs /mnt/user') === false) return false;
-        }
-        // For /mnt/disk* paths (individual array disks), check if the specific disk is mounted
-        if (preg_match('#^/mnt/(disk\d+)(/|$)#', $path, $m)) {
-            $mounts = $mounts ?? (@file_get_contents('/proc/mounts') ?: '');
-            if (strpos($mounts, " /mnt/{$m[1]} ") === false) return false;
-        }
+        if (!self::isBackingMountAvailable($path)) return false;
         return is_dir($path) && is_readable($path);
     }
 
@@ -521,13 +552,16 @@ class StorageMountService {
      * Pure decision (no I/O) so the #1304 data-safety contract is unit-testable:
      *   consolidated            -> 0  (success)
      *   not deferred (real fail)-> 1  (fatal)
-     *   deferred + bake ok      -> 2  (non-fatal; data reached Flash)
+     *   deferred + bake 0 or 2  -> 2  (non-fatal; data reached Flash)
      *   deferred + bake failed  -> 1  (fatal; data NOT on Flash)
      */
     public static function mapAgentCommitResult(bool $consolidated, bool $deferred, int $bakeRc): int {
         if ($consolidated) return 0;
         if (!$deferred)     return 1;          // genuine consolidation failure
-        return $bakeRc === 0 ? 2 : 1;          // deferred: 2 only if the fallback bake saved it
+        // storagectl bake exit 2 means the delta reached durable storage but the
+        // busy live mount could not be refreshed/reclaimed yet. Both 0 and 2 are
+        // therefore safe, non-fatal install outcomes.
+        return ($bakeRc === 0 || $bakeRc === 2) ? 2 : 1;
     }
 
     // L5 (WP#1333): commitChanges() was DELETED — its persist consumer-policy (the

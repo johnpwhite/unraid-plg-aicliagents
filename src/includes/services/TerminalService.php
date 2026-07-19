@@ -29,6 +29,20 @@ class TerminalService {
             return;
         }
 
+        // Issue #56: every caller converges here, including boot auto-launch,
+        // activity retry and post-install relaunch. The browser handler already
+        // checked the workspace, but those headless paths bypassed it and could
+        // reach tmux while /mnt/user was only a rootfs stub. Fail before writing
+        // session metadata, mounting HOME or invoking aicli-shell.sh.
+        if (!empty($path) && !StorageMountService::isPathAvailable((string)$path)) {
+            LogService::log(
+                "Session $id deferred: workspace path is unavailable: $path",
+                LogService::LOG_WARN,
+                "TerminalService"
+            );
+            return;
+        }
+
         // 2. Setup environment
         $config = ConfigService::getConfig();
         $registry = AgentRegistry::getRegistry();
@@ -61,7 +75,15 @@ class TerminalService {
             return;
         }
 
-        $shell = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/aicli-shell.sh";
+        // Running-agent-safe updates: resolve the active `src` pointer once at
+        // launch. ttyd and the detached tmux bootstrap then keep an immutable
+        // generation path in argv, so a later atomic activation cannot replace
+        // the wrapper underneath a running workspace.
+        $activeSrc = realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src');
+        if ($activeSrc === false) {
+            $activeSrc = '/usr/local/emhttp/plugins/unraid-aicliagents/src';
+        }
+        $shell = $activeSrc . "/scripts/aicli-shell.sh";
         $sock = "/var/run/aicliterm-$id.sock";
         $pidFile = "/var/run/unraid-aicliagents-$id.pid";
         $logFile = "/tmp/ttyd-$id.log";

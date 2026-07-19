@@ -149,6 +149,10 @@ class StorageMigrationService {
      */
     public static function migratePersistence($newPath) {
         if (empty($newPath)) return false;
+        if (!StorageMountService::isBackingMountAvailable((string)$newPath)) {
+            LogService::log("Refusing home migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
+            return false;
+        }
         $config = ConfigService::getConfig();
         $oldPath = $config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence';
         if ($newPath === $oldPath) return true;
@@ -164,6 +168,10 @@ class StorageMigrationService {
      */
     public static function migrateAgentStorage($newPath) {
         if (empty($newPath)) return false;
+        if (!StorageMountService::isBackingMountAvailable((string)$newPath)) {
+            LogService::log("Refusing agent migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
+            return false;
+        }
         $config = ConfigService::getConfig();
         $oldPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
         if ($newPath === $oldPath) return true;

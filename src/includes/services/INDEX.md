@@ -10,6 +10,7 @@ This directory contains the core business logic of the AICliAgents plugin, decom
 | `TraceContext.php` | Per-request trace-correlation id (R-06 #1370): AJAX → PHP → shell → queue join key. | < 60 lines. Dependency-free, static only. |
 | `ConfigService.php` | Persists plugin settings to Flash. | < 150 lines. Handles Nginx proxy generation. |
 | `ProcessManager.php` | Manages tmux sessions and agent PIDs. | < 150 lines. Handles clean termination. |
+| `TerminalGenerationService.php` | Identifies the current per-session ttyd generation for browser reconnect recovery. | Read-only; PID plus `/proc` start time prevents PID-reuse collisions. |
 | `InitService.php` | Scaffolds directories and plugin state. | < 100 lines. Runs on every boot/install. |
 | `PermissionService.php` | Enforces UID/GID and chmod safety. | < 100 lines. Focuses on RAM/Flash security. |
 | `AgentRegistry.php` | Manages the dynamic agent manifest. | < 150 lines. Handles versioning & discovery. |

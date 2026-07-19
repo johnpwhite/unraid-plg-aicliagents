@@ -260,10 +260,11 @@ log_step "Agent proxy wrappers..."
 create_proxy() {
     local cmd=$1 pkg_path=$2
     local wrapper="$BIN_DEST/$cmd"
+    local wrapper_tmp="$wrapper.tmp.$$"
     local target="$EMHTTP_DEST/agents/$pkg_path"
     local bin_dest="$BIN_DEST"
 
-    cat <<'PROXYEOF' | sed -e "s|__BIN_DEST__|${bin_dest}|g" -e "s|__TARGET__|${target}|g" -e "s|__CMD__|${cmd}|g" -e "s|__PKG_PATH__|${pkg_path}|g" > "$wrapper"
+    cat <<'PROXYEOF' | sed -e "s|__BIN_DEST__|${bin_dest}|g" -e "s|__TARGET__|${target}|g" -e "s|__CMD__|${cmd}|g" -e "s|__PKG_PATH__|${pkg_path}|g" > "$wrapper_tmp"
 #!/bin/bash
 # AICliAgents Proxy Wrapper for __CMD__
 # The entry point is baked at plugin-install time, but npm packages occasionally
@@ -303,7 +304,8 @@ else
     exit 127
 fi
 PROXYEOF
-    chmod +x "$wrapper"
+    chmod +x "$wrapper_tmp"
+    mv -f "$wrapper_tmp" "$wrapper"
     ln -sf "$wrapper" "/usr/local/bin/$cmd"
 }
 
@@ -334,9 +336,10 @@ log_step "Docker tool wrappers..."
 create_docker_proxy() {
     local cmd=$1 image=$2 docker_cmd=$3 description=$4
     local wrapper="$BIN_DEST/$cmd"
+    local wrapper_tmp="$wrapper.tmp.$$"
     local log_file="/tmp/unraid-aicliagents/debug.log"
 
-    cat > "$wrapper" <<'DOCKEREOF'
+    cat > "$wrapper_tmp" <<'DOCKEREOF'
 #!/bin/bash
 # AICliAgents Docker Proxy: __CMD__
 CMD="__CMD__"
@@ -370,12 +373,13 @@ exec docker run --rm -v "$(pwd)":/src -w /src "$IMAGE" $DOCKER_CMD "$@"
 DOCKEREOF
 
     # Replace placeholders with actual values
-    sed -i "s|__CMD__|${cmd}|g" "$wrapper"
-    sed -i "s|__IMAGE__|${image}|g" "$wrapper"
-    sed -i "s|__DOCKER_CMD__|${docker_cmd}|g" "$wrapper"
-    sed -i "s|__DESCRIPTION__|${description}|g" "$wrapper"
+    sed -i "s|__CMD__|${cmd}|g" "$wrapper_tmp"
+    sed -i "s|__IMAGE__|${image}|g" "$wrapper_tmp"
+    sed -i "s|__DOCKER_CMD__|${docker_cmd}|g" "$wrapper_tmp"
+    sed -i "s|__DESCRIPTION__|${description}|g" "$wrapper_tmp"
 
-    chmod +x "$wrapper"
+    chmod +x "$wrapper_tmp"
+    mv -f "$wrapper_tmp" "$wrapper"
     ln -sf "$wrapper" "/usr/local/bin/$cmd"
 }
 

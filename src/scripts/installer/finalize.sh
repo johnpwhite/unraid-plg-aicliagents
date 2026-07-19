@@ -80,6 +80,15 @@ aicli_cleanup_legacy();
 aicli_boot_resurrection();
 saveAICliConfig(['version' => '$VERSION']);
 " > /dev/null 2>&1
+
+# #74: cleanup intentionally stops the old supervisor before replacing source.
+# Do not report install success until the new daemon owns its pidfile and has a
+# fresh heartbeat. A later WebUI request remains a self-heal backstop, not the
+# primary restart mechanism for headless installs.
+if ! php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/supervisor-ready.php > /dev/null 2>&1; then
+    log_error "Storage supervisor did not become ready after installation."
+    exit 1
+fi
 log_ok "Services initialized. Plugin updated to v$VERSION."
 
 # --- Agent Version Check Cron ---
@@ -131,4 +140,3 @@ for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php ArrayStopWarning
 done
 [ "$MISSING_ENTRY" -gt 0 ] && log_status "  > Restored $MISSING_ENTRY missing UI entry point(s)."
 cd - > /dev/null
-

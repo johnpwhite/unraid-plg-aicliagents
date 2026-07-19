@@ -101,7 +101,9 @@ if ($backupDest !== '') {
 
 // 4. Run the install
 try {
+    putenv('AICLI_DEFER_INSTALL_COMPLETION=1');
     $result = \AICliAgents\Services\InstallerService::installAgent($agentId, $targetVersion);
+    putenv('AICLI_DEFER_INSTALL_COMPLETION');
     if (isset($result['status']) && $result['status'] === 'error') {
         aicli_log("Background Install Job FAILED for $agentId: " . ($result['message'] ?? $result['error'] ?? 'Unknown Error'), AICLI_LOG_ERROR);
         \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_ERROR, 'installer', 'agent_install_failed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest', 'error' => $result['message'] ?? $result['error'] ?? 'Unknown Error']);
@@ -158,6 +160,7 @@ try {
                 // keep the original autoLaunch sweep so configured workspaces start.
                 \AICliAgents\Services\AutoLaunchService::launchAllPending($agentId, 'agent_install');
             }
+            setInstallStatus("Installation complete", 100, $agentId);
         } else {
             // Layer not live after forced refresh — do NOT relaunch (would pin the
             // stale binary). Manifest intentionally left in place for a later retry.
@@ -165,6 +168,12 @@ try {
             \AICliAgents\Services\LifecycleLogService::log(
                 \AICliAgents\Services\LifecycleLogService::LEVEL_WARN, 'installer',
                 'relaunch_skipped_layer_stale', ['agent' => $agentId]);
+            setInstallStatus(
+                "Upgrade installed — waiting for running processes before activation...",
+                99,
+                $agentId
+            );
+            \AICliAgents\Services\UpgradeRelaunchService::schedulePendingActivation($agentId);
         }
     }
 } catch (\Throwable $e) {

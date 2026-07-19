@@ -3,7 +3,7 @@
  * apply-tmux-json.php — emit `tmux set-option` commands for an allow-listed
  * JSON settings file. Invoked by aicli-shell.sh's apply_tmux_json helper:
  *
- *   php apply-tmux-json.php <settings.json> | bash
+ *   php apply-tmux-json.php <settings.json> <target-session> | bash
  *
  * T-03: the allowed/append key lists are single-sourced from
  * TmuxService::ALLOWED_KEYS / ::APPEND_KEYS — any future extension of the PHP
@@ -11,17 +11,20 @@
  * (not `php -r`) per the publish anti-pattern rule: backslash namespaces
  * inside a double-quoted `php -r` body are eaten by bash.
  *
- * APPEND_KEYS (terminal-features / terminal-overrides) emit `-ga` so fragments
- * accumulate; everything else emits `-g`.
+ * Every option is targeted at one session. APPEND_KEYS emit `-a -t`; all other
+ * keys emit `-t`. The tmux server is shared by every workspace, so `-g` would
+ * allow the last attached workspace to overwrite all others (#67).
  */
 
 declare(strict_types=1);
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/TmuxService.php';
+$srcRoot = dirname(__DIR__, 2);
+require_once $srcRoot . '/includes/AICliAgentsManager.php';
+require_once $srcRoot . '/includes/services/TmuxService.php';
 
 $jsonfile = $argv[1] ?? '';
-if ($jsonfile === '' || !is_file($jsonfile)) {
+$target = $argv[2] ?? '';
+if ($jsonfile === '' || !is_file($jsonfile) || !preg_match('/^[A-Za-z0-9_-]{1,160}$/', $target)) {
     exit(0); // nothing to apply — mirrors the shell helper's [ -f ] guard
 }
 
@@ -38,6 +41,7 @@ foreach ($s as $k => $v) {
     if ($v === '' || $v === null) continue;
     $isAppend = in_array($k, $append, true);
     if (!in_array($k, $allowed, true) && !$isAppend) continue;
-    $flag = $isAppend ? '-ga' : '-g';
-    echo 'tmux set-option ' . $flag . ' ' . escapeshellarg($k) . ' ' . escapeshellarg((string)$v) . "\n";
+    $appendFlag = $isAppend ? '-a ' : '';
+    echo 'tmux set-option ' . $appendFlag . '-t ' . escapeshellarg($target) . ' '
+        . escapeshellarg($k) . ' ' . escapeshellarg((string)$v) . "\n";
 }

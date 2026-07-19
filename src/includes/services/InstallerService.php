@@ -50,6 +50,34 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Agent not found in registry'];
         }
 
+        // An omitted version means "use my selected release channel", not
+        // npm's moving `latest` tag. Resolve it once, before any binary fetch or
+        // replacement, so immediate, queued, forced, repair and reinstall paths
+        // all obey the same Stable/Beta/Pinned contract.
+        $resolution = VersionCheckService::resolveInstallTarget($agentId, $targetVersion);
+        if ($resolution['target'] === null || $resolution['error'] !== null) {
+            $reason = $resolution['error'] ?? 'unresolved_channel_target';
+            LogService::log("Install target resolution failed for $agentId: $reason", LogService::LOG_ERROR, "InstallerService");
+            setInstallStatus("Release channel error", 0, $agentId, $reason);
+            return ['status' => 'error', 'message' => $reason];
+        }
+        $targetVersion = $resolution['target'];
+        LogService::log(
+            "Resolved install target for $agentId: channel={$resolution['channel']} tag="
+            . ($resolution['resolved_tag'] ?? 'explicit') . " version=$targetVersion fallback="
+            . ($resolution['fallback'] ? 'yes' : 'no'),
+            $resolution['fallback'] ? LogService::LOG_WARN : LogService::LOG_INFO,
+            "InstallerService"
+        );
+        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_install_target_resolved', [
+            'agent' => $agentId,
+            'channel' => $resolution['channel'],
+            'resolved_tag' => $resolution['resolved_tag'],
+            'version' => $targetVersion,
+            'fallback' => $resolution['fallback'],
+            'explicit' => $resolution['explicit'],
+        ]);
+
         // Do NOT pre-remove the saved version. Keeping the old version while
         // the install is in-flight prevents the "v?" badge UX glitch when the
         // Store page renders during an upgrade (e.g. a parallel agent's
@@ -73,7 +101,7 @@ class InstallerService {
         }
 
         $desc = SourceResolver::descriptor($agent);
-        LogService::log("Using source type '" . ($desc['type'] ?? '?') . "' for $agentId (target=" . ($targetVersion ?? 'latest') . ")", LogService::LOG_INFO, "InstallerService");
+        LogService::log("Using source type '" . ($desc['type'] ?? '?') . "' for $agentId (target=$targetVersion)", LogService::LOG_INFO, "InstallerService");
         setInstallStatus("Starting install...", 20, $agentId);
 
         $ok = $source->fetch($agentId, $agent, $targetVersion, function(string $msg, int $pct) use ($agentId) {
@@ -123,7 +151,15 @@ class InstallerService {
             LogService::log("Installer: Layer compaction busy for $agentId — install proceeded with delta bake fallback.", LogService::LOG_WARN, "InstallerService");
         }
 
-        setInstallStatus("Installation complete", 100, $agentId);
+        // install-bg owns agent-layer activation + closed-session relaunch. Do
+        // not publish 100% before that state machine finishes: the terminal UI
+        // treats completion as permission to reopen the retired ttyd id.
+        $deferCompletion = getenv('AICLI_DEFER_INSTALL_COMPLETION') === '1';
+        if ($deferCompletion) {
+            setInstallStatus("Activating upgraded version...", 95, $agentId);
+        } else {
+            setInstallStatus("Installation complete", 100, $agentId);
+        }
 
         // Post-install: invalidate version cache and clear update notifications
         VersionCheckService::invalidateAgent($agentId);
@@ -199,8 +235,24 @@ class InstallerService {
 
         setInstallStatus("Installing $package to RAM...", 20, $agentId);
 
+        $resolution = VersionCheckService::resolveInstallTarget($agentId, null);
+        if ($resolution['target'] === null || $resolution['error'] !== null) {
+            $reason = $resolution['error'] ?? 'unresolved_channel_target';
+            LogService::log("Emergency install target resolution failed for $agentId: $reason", LogService::LOG_ERROR, "InstallerService");
+            setInstallStatus("Release channel error", 0, $agentId, $reason);
+            return ['status' => 'error', 'message' => $reason];
+        }
+        $targetVersion = $resolution['target'];
+        LogService::log(
+            "EMERGENCY INSTALL target: channel={$resolution['channel']} tag="
+            . ($resolution['resolved_tag'] ?? 'explicit') . " version=$targetVersion fallback="
+            . ($resolution['fallback'] ? 'yes' : 'no'),
+            $resolution['fallback'] ? LogService::LOG_WARN : LogService::LOG_INFO,
+            "InstallerService"
+        );
+
         // Direct npm install — no SquashFS, no ZRAM overlay
-        $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir) . " && npm install " . escapeshellarg($package . "@latest") . " --no-audit --no-fund --loglevel info 2>&1";
+        $cmd = "export PATH=$pluginDir/bin:\$PATH; cd " . escapeshellarg($agentDir) . " && npm install " . escapeshellarg($package . "@$targetVersion") . " --no-audit --no-fund --loglevel info 2>&1";
 
         $currentProgress = 20;
         $res = UtilityService::execStreaming($cmd, function($line, $isError) use ($agentId, &$currentProgress) {

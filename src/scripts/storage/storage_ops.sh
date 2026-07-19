@@ -297,6 +297,12 @@ fi
 LAYER_COUNT=$(echo "$LOWERS" | tr ':' '\n' | wc -l)
 if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir="$WORK_DIR" "$MNT_POINT"; then
     log "Stack mounted at $MNT_POINT (Layers: $LAYER_COUNT)"
+    # Any prior busy snapshot is now part of this freshly assembled lower stack
+    # and must never be considered replaceable by a later live-session bake.
+    if [ "$TYPE" = "home" ]; then
+        _MOUNT_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
+        rm -f "/tmp/unraid-aicliagents/.bake_busy_snapshot_${TYPE}_${_MOUNT_LOCK_ID}" 2>/dev/null || true
+    fi
     lifecycle_log "info" "mount_stack" "mount_stack_assembled" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"layer_count\":$LAYER_COUNT,\"mount_point\":\"$MNT_POINT\"}" 2>/dev/null || true
 else
     error "Failed to mount OverlayFS stack at $MNT_POINT"
@@ -351,6 +357,8 @@ _entity_paths "$TYPE" "$ID" "$PERSIST_PATH"   # sets UPPER_DIR/WORK_DIR/MNT_POIN
 # Sanitise $ID to keep the lock filename shell-safe (alphanumeric + hyphen).
 _LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
 _BAKE_LOCK="/var/run/aicli-bake-${TYPE}-${_LOCK_ID}.lock"
+_BUSY_SNAPSHOT_MARKER="/tmp/unraid-aicliagents/.bake_busy_snapshot_${TYPE}_${_LOCK_ID}"
+_HOME_BUSY_AT_BAKE_START=0
 exec 9>"$_BAKE_LOCK"
 if ! flock -n 9; then
     # Another bake for this entity is already running.  The in-progress bake
@@ -401,6 +409,10 @@ lifecycle_log "info" "commit_stack" "bash_bake_start" "{\"type\":\"$TYPE\",\"id\
 # between. Idle bakes are NEVER gated -- they reclaim and trim, clearing the
 # marker. Override via AICLI_BUSY_BAKE_COOLDOWN_SEC (tests / tuning).
 if [ "$TYPE" = "home" ] && home_mount_in_use "$MNT_POINT"; then
+    _HOME_BUSY_AT_BAKE_START=1
+    if ! _prepare_busy_snapshot_roll "$TYPE" "$ID" "$_BUSY_SNAPSHOT_MARKER"; then
+        log "Could not prepare rolling busy snapshot marker; this bake will retain every layer for safety"
+    fi
     _BUSY_COOLDOWN_SEC="${AICLI_BUSY_BAKE_COOLDOWN_SEC:-1800}"
     _COOLDOWN_MARKER="/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}"
     _last_busy_bake=0
@@ -586,7 +598,9 @@ log "Bake complete: $NEW_BASENAME"
 # commitChanges belt-and-braces path was removed in this epic — so the lifecycle event
 # is gated on the writer's SUCCESS (it no longer fires when the write failed) and the
 # supervisor reconcile is the only remaining backstop.
+_MANIFEST_RECORDED=0
 if manifest_record_layer "$TYPE" "$ID" "$PERSIST_PATH" "$NEW_BASENAME"; then
+    _MANIFEST_RECORDED=1
     lifecycle_log "info" "commit_stack" "manifest_recorded_under_lock" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\"}" 2>/dev/null || true
 else
     lifecycle_log "warn" "commit_stack" "manifest_record_failed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\"}" 2>/dev/null || true
@@ -636,6 +650,32 @@ if home_mount_in_use "$MNT_POINT"; then
     log "Mount is BUSY (open fd or live HOME=$MNT_POINT session). Deferring refresh + ZRAM cleanup."
     log "Data persisted to Flash. ZRAM dirty stats remain until sessions close."
     rm -f "$MARKER"
+    # While the same live mount remains busy, UPPER is never trimmed. Therefore
+    # this layer contains everything in the previous busy snapshot plus newer
+    # writes. Keep one rolling crash-recovery snapshot instead of consuming a
+    # layer slot on every scheduled bake. op_mount clears the marker before a
+    # snapshot can become part of a lower stack.
+    if [ "$TYPE" = "home" ] && [ "$_HOME_BUSY_AT_BAKE_START" -eq 1 ] \
+       && [ "$_MANIFEST_RECORDED" -eq 1 ]; then
+        _REPLACED_BUSY_SNAPSHOT=""
+        if _replace_busy_snapshot "$TYPE" "$ID" "$PERSIST_PATH" \
+                "$_BUSY_SNAPSHOT_MARKER" "$NEW_BASENAME"; then
+            if [ -n "$_REPLACED_BUSY_SNAPSHOT" ]; then
+                log "Replaced superseded busy snapshot $_REPLACED_BUSY_SNAPSHOT with $NEW_BASENAME"
+                lifecycle_log "info" "commit_stack" "busy_snapshot_replaced" \
+                    "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"previous\":\"$_REPLACED_BUSY_SNAPSHOT\",\"current\":\"$NEW_BASENAME\"}" 2>/dev/null || true
+            else
+                log "Recorded first rolling busy snapshot $NEW_BASENAME"
+            fi
+        else
+            _busy_roll_rc=$?
+            if [ "$_busy_roll_rc" -eq 2 ]; then
+                log "Mount stack changed during bake; keeping the new snapshot as a normal layer for safety"
+            else
+                log "Could not roll the busy snapshot; keeping every layer for safety"
+            fi
+        fi
+    fi
     # Stamp the busy-bake cooldown: while a session keeps the home busy, the
     # upper is never trimmed (reclaim deferred), so without this every bake
     # trigger would re-bake the whole untrimmed upper. The pre-bake gate near

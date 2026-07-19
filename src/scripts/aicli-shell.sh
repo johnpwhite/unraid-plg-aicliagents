@@ -46,9 +46,14 @@ USER_NAME=$(whoami)
 USER_WORK_DIR="$TMP_DIR/work/$USER_NAME"
 DEBUG_LOG="/tmp/unraid-aicliagents/debug.log"
 EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+# Capture the immutable generation containing this launcher. TerminalService
+# resolves the active src symlink before starting ttyd, so this path remains
+# valid across later plugin activations.
+PLUGIN_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
+[ -n "$PLUGIN_SRC" ] || PLUGIN_SRC="$EMHTTP_DEST/src"
 
 # Unified terminal output logging via safe PHP bridge (no string interpolation)
-BRIDGE_SCRIPT="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/log-bridge.php"
+BRIDGE_SCRIPT="$PLUGIN_SRC/scripts/log-bridge.php"
 log_aicli() {
     local level_name="$1"
     local level_val="$2"
@@ -71,6 +76,21 @@ HOME_DIR="${AICLI_HOME:-$USER_WORK_DIR/home}"
 TARGET_USER="${AICLI_USER:-$USER_NAME}"
 ROOT_DIR="${AICLI_ROOT:-/mnt}"
 HISTORY_LIMIT="${AICLI_HISTORY:-4096}"
+
+# Issue #56: fail closed if this wrapper is invoked directly or by an older
+# PHP caller while an Unraid user-share path is only a rootfs stub. Nothing
+# below this point may read workspace state, cd there, or pass it to tmux -c
+# until the exact backing mount exists. Exit 75 means temporary failure; the
+# normal auto-launch/retry reconciliation can try again after array start.
+case "$ROOT_DIR" in
+    /mnt/user|/mnt/user/*)   _AICLI_REQUIRED_MOUNT="/mnt/user" ;;
+    /mnt/user0|/mnt/user0/*) _AICLI_REQUIRED_MOUNT="/mnt/user0" ;;
+    *)                       _AICLI_REQUIRED_MOUNT="" ;;
+esac
+if [ -n "$_AICLI_REQUIRED_MOUNT" ] && ! mountpoint -q "$_AICLI_REQUIRED_MOUNT" 2>/dev/null; then
+    log_aicli "WARN" 1 "Workspace deferred: $_AICLI_REQUIRED_MOUNT is not mounted ($ROOT_DIR)."
+    exit 75
+fi
 
 # Node.js V8 bytecode cache (Node 22+). All nine agents are Node-based, so enabling
 # this shaves roughly 20% off startup by skipping require()-time re-parsing.
@@ -166,7 +186,7 @@ export LC_ALL=en_US.UTF-8
 # dir and expose it via TERMINFO_DIRS (trailing ':' keeps the system db, where
 # xterm-256color lives). Guarded: only if tic exists and it isn't already built.
 _AICLI_TI_DIR="/tmp/unraid-aicliagents/terminfo"
-_AICLI_TI_SRC="/usr/local/emhttp/plugins/unraid-aicliagents/src/terminfo/tmux.terminfo"
+_AICLI_TI_SRC="$PLUGIN_SRC/terminfo/tmux.terminfo"
 if [ ! -e "$_AICLI_TI_DIR/t/tmux-256color" ] && command -v tic >/dev/null 2>&1 && [ -f "$_AICLI_TI_SRC" ]; then
     mkdir -p "$_AICLI_TI_DIR" 2>/dev/null
     if tic -x -o "$_AICLI_TI_DIR" "$_AICLI_TI_SRC" >/dev/null 2>&1; then
@@ -246,6 +266,7 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
 
     # 1. Minimal Header (Safe injections only)
     echo "#!/bin/bash" > "$RUN_SCRIPT"
+    printf 'export PLUGIN_SRC=%q\n' "$PLUGIN_SRC" >> "$RUN_SCRIPT"
     
     # Inject logging function into the child script for tmux diagnostics
     cat << 'FUNCOEF' >> "$RUN_SCRIPT"
@@ -253,7 +274,7 @@ log_aicli() {
     local level_name="$1"
     local level_val="$2"
     local msg="$3"
-    local bridge="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/log-bridge.php"
+    local bridge="$PLUGIN_SRC/scripts/log-bridge.php"
     local debug_log="/tmp/unraid-aicliagents/debug.log"
 
     if [ ! -f "$bridge" ]; then
@@ -263,7 +284,10 @@ log_aicli() {
     php "$bridge" log "$msg" "$level_val" "SHELL-CHILD" 2>/dev/null
 }
 perf_log() {
-    printf '%s %s %s %s\n' "$(date +%s%N | cut -c1-13)" "$1" "$AGENT_ID" "$AICLI_SESSION_ID" >> /tmp/unraid-aicliagents/perf.log 2>/dev/null
+    # Optional $2 is appended as a free-form extra field (issue #71 uses it for
+    # `run.exit ... rc=<code>`). AICLI_PERF_LOG override exists for unit tests
+    # only — production always writes the shared perf.log.
+    printf '%s %s %s %s%s\n' "$(date +%s%N | cut -c1-13)" "$1" "$AGENT_ID" "$AICLI_SESSION_ID" "${2:+ $2}" >> "${AICLI_PERF_LOG:-/tmp/unraid-aicliagents/perf.log}" 2>/dev/null
 }
 FUNCOEF
 
@@ -276,7 +300,7 @@ FUNCOEF
     # token instead of re-prompting every session. Idempotent and reused per
     # user; best-effort — on failure the agent just falls back to interactive
     # auth. See docs/specs/SECRET_SERVICE.md.
-    _SS_ADDR=$(bash "$EMHTTP_DEST/src/secret-service/secret-service-up.sh" "$USER_NAME" "$HOME_DIR" 2>>"$DEBUG_LOG")
+    _SS_ADDR=$(bash "$PLUGIN_SRC/secret-service/secret-service-up.sh" "$USER_NAME" "$HOME_DIR" 2>>"$DEBUG_LOG")
     if [ -n "$_SS_ADDR" ]; then
         printf 'export DBUS_SESSION_BUS_ADDRESS=%q\n' "$_SS_ADDR" >> "$RUN_SCRIPT"
         log_aicli "DEBUG" 3 "Secret Service ready for $USER_NAME: $_SS_ADDR"
@@ -322,8 +346,18 @@ FUNCOEF
     printf 'export AICLI_ARGS_AGENT_FILE=%q\n' "$_ARGS_AGENT_FILE" >> "$RUN_SCRIPT"
     printf 'export DEBUG_LOG=%q\n' "$DEBUG_LOG" >> "$RUN_SCRIPT"
     
-    # D-204: Pass Node Memory limits to the child script
-    MEM_LIMIT="${AICLI_NODE_MEMORY:-4096}"
+    # D-204: Pass Node Memory limits to the child script.
+    # Issue #71: claude-code gets an 8 GB old-space default — multi-subagent
+    # sessions inside one claude process are the suspected JS-heap OOM behind
+    # the 2026-07-16/17 unexplained process deaths, and the host has 62 GB.
+    # Other agents keep the 4 GB default. AICLI_NODE_MEMORY still overrides
+    # either default when a caller sets it; NODE_OPTIONS itself is a RESERVED
+    # key in EnvService, so the 5-tier user env merge can never clobber this.
+    if [ "$AGENT_ID" = "claude-code" ]; then
+        MEM_LIMIT="${AICLI_NODE_MEMORY:-8192}"
+    else
+        MEM_LIMIT="${AICLI_NODE_MEMORY:-4096}"
+    fi
     printf 'export NODE_OPTIONS=%q\n' "--max-old-space-size=$MEM_LIMIT" >> "$RUN_SCRIPT"
 
     # D-59: Prevent Auto-Updates on Launch (agent-specific)
@@ -345,6 +379,8 @@ FUNCOEF
 
     # WP #736: Inject the full 5-tier effective env from EnvService — single
     # source of truth (TerminalService merges the same map for its $envStr).
+    # effective-env-export.php invokes EnvService::buildEffectiveEnv for both
+    # this initial export and the hot-reload function embedded below.
     # Tier order, later wins per key:
     #   source.env < secrets.cfg < workspace secrets < agent envs < workspace envs
     # Reserved names (PATH, HOME, AICLI_*, frozen_*, …) are filtered out so a
@@ -352,23 +388,9 @@ FUNCOEF
     # dead-write gap where secrets.cfg was never sourced at launch.
     EXPORTED_KEYS_FILE="$HOME_DIR/.aicli/.exported_keys_${ENV_HASH}"
     mkdir -p "$(dirname "$EXPORTED_KEYS_FILE")" 2>/dev/null
-    php -r '
-        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
-        $rootDir = $argv[1] ?? "";
-        $agentId = $argv[2] ?? "";
-        $tracker = $argv[3] ?? "";
-        $env = \AICliAgents\Services\EnvService::buildEffectiveEnv($rootDir !== "" ? $rootDir : null, $agentId);
-        $names = [];
-        foreach ($env as $k => $v) {
-            if (\AICliAgents\Services\EnvService::isReservedKey($k)) continue;
-            if (!preg_match("/^[A-Za-z_][A-Za-z0-9_]*$/", $k)) continue;
-            echo "export " . $k . "=" . escapeshellarg($v) . PHP_EOL;
-            $names[] = $k;
-        }
-        if ($tracker !== "") {
-            @file_put_contents($tracker, implode(PHP_EOL, $names) . PHP_EOL);
-        }
-    ' -- "$ROOT_DIR" "$AGENT_ID" "$EXPORTED_KEYS_FILE" >> "$RUN_SCRIPT" 2>/dev/null
+    php "$PLUGIN_SRC/scripts/user/effective-env-export.php" \
+        "$PLUGIN_SRC/includes/AICliAgentsManager.php" startup \
+        "$ROOT_DIR" "$AGENT_ID" "$EXPORTED_KEYS_FILE" >> "$RUN_SCRIPT" 2>/dev/null
     log_aicli "INFO" 2 "Injected effective env (5-tier merge via EnvService)"
 
     # Export the tracker path + workspace path so the run-loop's
@@ -477,6 +499,108 @@ _build_fresh_cmd() {
     printf '%s' "$_cmd"
 }
 
+# Return the newest Claude conversation id for THIS workspace only. Claude's
+# modern session store is partitioned by its dasherised cwd under
+# ~/.claude/projects; scanning all projects can select another workspace's chat
+# and turn the subsequent failed resume into a blank conversation.
+_aicli_discover_claude_chat() {
+    [ "$AGENT_ID" = "claude-code" ] || return 0
+    [ -n "$AICLI_WORKSPACE_PATH" ] || return 0
+
+    local _project_key _project_dir _newest_jsonl
+    _project_key="-$(printf '%s' "${AICLI_WORKSPACE_PATH#/}" | tr '/' '-')"
+    _project_dir="$HOME_DIR/.claude/projects/$_project_key"
+    [ -d "$_project_dir" ] || return 0
+
+    # Issue #71: exclude subagent transcripts (`agent-<id>.jsonl`). They are
+    # not resumable conversations — resuming from one opens the wrong
+    # transcript. Only main-session GUIDs may be discovered.
+    _newest_jsonl=$(find "$_project_dir" -maxdepth 1 -name '*.jsonl' ! -name 'agent-*' -type f \
+        -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    [ -n "$_newest_jsonl" ] && basename "$_newest_jsonl" .jsonl
+}
+
+# Refresh the in-memory and durable resume ids after Claude has had a chance to
+# write its active conversation. This must run before an automatic relaunch so
+# /resume switches and a newly-created fresh chat both resume the correct
+# workspace conversation.
+_aicli_sync_claude_chat() {
+    [ "$AGENT_ID" = "claude-code" ] || return 0
+    [ -n "$AICLI_ENV_HASH" ] || return 0
+
+    local _discovered_chat _resume_dir _resume_file
+    _discovered_chat=$(_aicli_discover_claude_chat)
+    if [ -n "$_discovered_chat" ] && [ "$_discovered_chat" != "$frozen_chat_id" ]; then
+        log_aicli "INFO" 2 "Workspace-scoped Claude GUID sync: $frozen_chat_id -> $_discovered_chat"
+        frozen_chat_id="$_discovered_chat"
+        _resume_dir="$HOME_DIR/.aicli/resumes"
+        _resume_file="${_resume_dir}/resume_${AICLI_ENV_HASH}.json"
+        mkdir -p "$_resume_dir" 2>/dev/null
+        printf '{"chat_id":"%s","saved_at":%d}\n' "$_discovered_chat" "$(date +%s)" > "${_resume_file}.tmp" \
+            && mv "${_resume_file}.tmp" "$_resume_file" 2>/dev/null
+    fi
+}
+
+# Preserve the actual process result before deciding whether anything should be
+# relaunched. Bash encodes signal termination as 128+signal; retain both forms
+# and the runtime so diagnostics can distinguish startup rejection from a crash
+# or kill after a healthy, long-running session.
+_aicli_record_agent_exit() {
+    local _attempt="$1" _rc="$2" _started="$3"
+    local _ended _termination="exit"
+    _ended=$(date +%s)
+    last_launch_duration=$((_ended - _started))
+    last_launch_rc="$_rc"
+
+    if [ "$_rc" -ge 129 ] && [ "$_rc" -le 192 ]; then
+        local _signal=$((_rc - 128)) _signal_name
+        _signal_name=$(kill -l "$_signal" 2>/dev/null || printf 'UNKNOWN')
+        _termination="signal ${_signal} (${_signal_name})"
+    fi
+    log_aicli "INFO" 2 "Agent process ended: attempt=$_attempt rc=$_rc termination=$_termination duration=${last_launch_duration}s"
+    # Issue #71: every child exit also emits a machine-readable perf event
+    # (`<epoch_ms> run.exit <agent> <session> rc=<code>`) so unexplained agent
+    # deaths (2026-07-17: two organic claude-code exits under heavy subagent
+    # load) can be correlated without parsing debug.log prose. A non-zero exit
+    # additionally snapshots crash forensics BEFORE the relaunch loop clears
+    # the pane.
+    perf_log run.exit "rc=$_rc"
+    if [ "$_rc" -ne 0 ]; then
+        _aicli_capture_crash "$_attempt" "$_rc"
+    fi
+}
+
+# Issue #71: crash forensics. The agent's stderr deliberately flows to the pane
+# TTY (see safe_exec / D-400 — redirecting stderr to a file breaks TUI isatty
+# probes and is NOT an option), so on an unexplained exit the pane scrollback
+# IS the stderr record. Snapshot the last ~80 pane lines plus launch context
+# into /tmp/unraid-aicliagents/crash-<agent>-<session>-<timestamp>.log before
+# the relaunch loop repaints the screen. Bounded: only the 10 newest crash
+# files per agent are kept. AICLI_CRASH_DIR override exists for unit tests.
+_aicli_capture_crash() {
+    local _attempt="$1" _rc="$2"
+    local _dir="${AICLI_CRASH_DIR:-/tmp/unraid-aicliagents}"
+    local _crash_file="$_dir/crash-${AGENT_ID}-${AICLI_SESSION_ID}-$(date +%Y%m%d-%H%M%S).log"
+    {
+        printf 'agent=%s session=%s attempt=%s rc=%s captured_at=%s\n' \
+            "$AGENT_ID" "$AICLI_SESSION_ID" "$_attempt" "$_rc" "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'node_options=%s\n' "${NODE_OPTIONS:-<unset>}"
+        printf -- '---- pane tail (last 80 lines) ----\n'
+        tmux capture-pane -p -S -80 2>/dev/null || printf '(tmux pane capture unavailable)\n'
+    } > "$_crash_file" 2>/dev/null
+    log_aicli "WARN" 1 "Crash forensics captured: $_crash_file (attempt=$_attempt rc=$_rc)"
+    # Prune: keep only the 10 newest crash files for this agent.
+    ls -1t "$_dir"/crash-"${AGENT_ID}"-*.log 2>/dev/null | tail -n +11 | while IFS= read -r _old; do
+        rm -f "$_old" 2>/dev/null
+    done
+}
+
+# A resume process that survives the existing fast-exit window reached its TUI
+# lifecycle; a later non-zero exit must not be reclassified as startup failure.
+_aicli_resume_was_established() {
+    [ "$1" -ge 3 ]
+}
+
 # WP #736 hot-apply: re-read the 5-tier effective env via EnvService on every
 # loop iteration. Diffs against $AICLI_EXPORTED_KEYS_FILE: unsets any key we
 # previously exported but is no longer present; re-exports the current set.
@@ -485,20 +609,9 @@ _build_fresh_cmd() {
 # startup cost).
 _aicli_load_envs() {
     local script="/tmp/aicli-envreload-$$-$RANDOM.sh"
-    php -r '
-        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
-        $rootDir = $argv[1] ?? "";
-        $agentId = $argv[2] ?? "";
-        $env = \AICliAgents\Services\EnvService::buildEffectiveEnv($rootDir !== "" ? $rootDir : null, $agentId);
-        $names = [];
-        foreach ($env as $k => $v) {
-            if (\AICliAgents\Services\EnvService::isReservedKey($k)) continue;
-            if (!preg_match("/^[A-Za-z_][A-Za-z0-9_]*$/", $k)) continue;
-            echo "export " . $k . "=" . escapeshellarg($v) . PHP_EOL;
-            $names[] = $k;
-        }
-        echo "_AICLI_NEW_KEYS=" . escapeshellarg(implode(" ", $names)) . PHP_EOL;
-    ' -- "$AICLI_WORKSPACE_PATH" "$AGENT_ID" > "$script" 2>/dev/null
+    php "$PLUGIN_SRC/scripts/user/effective-env-export.php" \
+        "$PLUGIN_SRC/includes/AICliAgentsManager.php" reload \
+        "$AICLI_WORKSPACE_PATH" "$AGENT_ID" > "$script" 2>/dev/null
 
     # Source it: exports the new env AND sets _AICLI_NEW_KEYS in our scope.
     # shellcheck disable=SC1090
@@ -668,9 +781,9 @@ while true; do
     # 1. '_fresh_' sentinel = user clicked "Start New Session" — skip all fallbacks.
     # 2. If the UI handed us an explicit chat id (from graceful-close capture),
     #    that is ALWAYS the strongest signal — trust it regardless of agent.
-    # 3. Otherwise, fall back to the legacy per-agent history-dir scan so the
-    #    "resume-latest" path still works for agents we've had wired up for
-    #    a while (gemini-cli, claude-code, pi-coder).
+    # 3. Otherwise, use agent-specific history discovery. Claude is special:
+    #    resolve its modern ~/.claude/projects/<workspace> store to an explicit
+    #    id rather than using a global-newest or obsolete ~/.claude/sessions scan.
     can_resume=0
     if [ "$frozen_chat_id" = "_fresh_" ]; then
         can_resume=0
@@ -678,12 +791,15 @@ while true; do
     elif [ -n "$frozen_chat_id" ] && [ "$frozen_chat_id" != "none" ]; then
         can_resume=1
         log_aicli "INFO" 2 "Resume requested with explicit chat id: $frozen_chat_id"
+    elif [ "$AGENT_ID" == "claude-code" ]; then
+        _workspace_claude_chat=$(_aicli_discover_claude_chat)
+        if [ -n "$_workspace_claude_chat" ]; then
+            frozen_chat_id="$_workspace_claude_chat"
+            can_resume=1
+            log_aicli "INFO" 2 "Workspace-scoped Claude resume discovered: $frozen_chat_id"
+        fi
     elif [ "$AGENT_ID" == "gemini-cli" ]; then
         if [ -d "$HOME_DIR/.gemini/history" ] && [ -n "$(find "$HOME_DIR/.gemini/history" -type f 2>/dev/null)" ]; then
-            can_resume=1
-        fi
-    elif [ "$AGENT_ID" == "claude-code" ]; then
-        if [ -d "$HOME_DIR/.claude/sessions" ] && [ -n "$(find "$HOME_DIR/.claude/sessions" -type f 2>/dev/null)" ]; then
             can_resume=1
         fi
     elif [ "$AGENT_ID" == "pi-coder" ]; then
@@ -711,7 +827,9 @@ while true; do
     # alive and also makes genuine errors visible directly to the user.
     safe_exec() {
         local cmd="$1"
-        log_aicli "INFO" 2 "Executing: $cmd"
+        # Issue #71: log the effective NODE_OPTIONS alongside every launch so
+        # heap-limit forensics never depend on reconstructing the environment.
+        log_aicli "INFO" 2 "Executing: $cmd (NODE_OPTIONS=${NODE_OPTIONS:-<unset>})"
         bash -c "$cmd"
     }
 
@@ -729,7 +847,8 @@ while true; do
     }
 
     status="fail"
-    launch_start_ts=$(date +%s)
+    last_launch_duration=0
+    last_launch_rc=1
     if [ "$AGENT_ID" == "terminal" ]; then
         /bin/bash
         status="ok"
@@ -753,28 +872,47 @@ while true; do
         log_aicli "INFO" 2 "Attempting Resume: $FINAL_CMD"
 
         # 1. Command-based Execution (Uses PATH or absolute path)
-        if safe_exec "$FINAL_CMD"; then
+        _attempt_started=$(date +%s)
+        safe_exec "$FINAL_CMD"
+        _attempt_rc=$?
+        _aicli_record_agent_exit "explicit-resume" "$_attempt_rc" "$_attempt_started"
+        if [ "$_attempt_rc" -eq 0 ]; then
             status="ok"
+        elif _aicli_resume_was_established "$last_launch_duration"; then
+            # The resume DID start and owned the terminal for a meaningful
+            # period. Its later non-zero exit is a process failure/termination,
+            # not evidence that the resume command was invalid. Never replace
+            # that conversation with a silent fresh launch.
+            status="ok"
+            log_aicli "WARN" 1 "Resumed agent exited non-zero after ${last_launch_duration}s (rc=$_attempt_rc); preserving conversation for resume-first relaunch"
         else
-            # 2. Deep Fallback: Explicit node invocation — only for JS targets.
-            if [[ "$frozen_binary" == *"/"* ]] && ! is_elf_binary "$frozen_binary"; then
-                log_aicli "INFO" 2 "Native launch failed. Trying explicit node launch on $frozen_binary..."
-                if node "$frozen_binary"; then
-                    status="ok"
-                fi
-            fi
+            log_aicli "WARN" 1 "Resume command failed during startup after ${last_launch_duration}s (rc=$_attempt_rc); preserving continuity and refusing fresh fallback"
+            status="resume_failed"
         fi
     elif [ "$can_resume" == "1" ]; then
         LATEST_CMD="${frozen_resume_latest//\{binary\}/$frozen_binary}"
         LATEST_CMD="${LATEST_CMD//\{args\}/$frozen_effective_args}"
         LATEST_CMD="${LATEST_CMD//  / }"
         log_aicli "INFO" 2 "Attempting Latest Resume: $LATEST_CMD"
-        if safe_exec "$LATEST_CMD"; then
+        _attempt_started=$(date +%s)
+        safe_exec "$LATEST_CMD"
+        _attempt_rc=$?
+        _aicli_record_agent_exit "latest-resume" "$_attempt_rc" "$_attempt_started"
+        if [ "$_attempt_rc" -eq 0 ]; then
             status="ok"
+        elif _aicli_resume_was_established "$last_launch_duration"; then
+            status="ok"
+            log_aicli "WARN" 1 "Resumed agent exited non-zero after ${last_launch_duration}s (rc=$_attempt_rc); preserving conversation for resume-first relaunch"
+        else
+            log_aicli "WARN" 1 "Resume command failed during startup after ${last_launch_duration}s (rc=$_attempt_rc); preserving continuity and refusing fresh fallback"
+            status="resume_failed"
         fi
     fi
 
-    # Fallback to Fresh Launch if resume failed or wasn't applicable
+    # Fresh launch is allowed only when no resumable conversation was selected.
+    # A failed explicit/latest resume must park visibly and retry resume after
+    # confirmation; silently replacing it with a blank conversation loses the
+    # very context this wrapper exists to preserve.
     if [ "$status" == "fail" ]; then
         # Append plugin_args (e.g. codex sandbox overrides) AFTER user workspace
         # args so codex's last-`-c`-wins makes the plugin value override any
@@ -783,20 +921,37 @@ while true; do
         log_aicli "INFO" 2 "Attempting Fresh Launch: $FRESH_CMD"
 
         # 1. Command-based Execution
-        if safe_exec "$FRESH_CMD"; then
+        _attempt_started=$(date +%s)
+        safe_exec "$FRESH_CMD"
+        _attempt_rc=$?
+        _aicli_record_agent_exit "fresh" "$_attempt_rc" "$_attempt_started"
+        if [ "$_attempt_rc" -eq 0 ]; then
             status="ok"
+        elif _aicli_resume_was_established "$last_launch_duration"; then
+            # The fresh command also genuinely started. A later Ctrl-C/signal
+            # must return to the sentinel/session-sync logic, not invoke the JS
+            # binary again as a second blank process.
+            status="ok"
+            log_aicli "WARN" 1 "Fresh agent exited non-zero after ${last_launch_duration}s (rc=$_attempt_rc); treating it as an established process exit"
         else
-            # 2. Deep Fallback — only meaningful when the binary is actually a JS file.
+            # 2. Deep Fallback — only meaningful for a JS file that failed
+            # during startup, before it established an interactive lifecycle.
             if [[ "$frozen_binary" == *"/"* ]] && ! is_elf_binary "$frozen_binary"; then
                 log_aicli "INFO" 2 "Native launch failed. Trying explicit node launch on $frozen_binary..."
-                if node "$frozen_binary"; then
+                _attempt_started=$(date +%s)
+                node "$frozen_binary"
+                _attempt_rc=$?
+                _aicli_record_agent_exit "fresh-node-fallback" "$_attempt_rc" "$_attempt_started"
+                if [ "$_attempt_rc" -eq 0 ]; then
                     status="ok"
                 fi
             fi
         fi
     fi
     
-    if [ "$status" != "ok" ]; then
+    if [ "$status" = "resume_failed" ]; then
+        log_aicli "ERROR" 1 "Resume failed for $AGENT_ID (rc=$last_launch_rc); refusing silent fresh fallback"
+    elif [ "$status" != "ok" ]; then
         log_aicli "ERROR" 1 "All launch attempts failed for $AGENT_ID. Binary corrupted or Node error. Check $DEBUG_LOG"
     fi
 
@@ -820,6 +975,11 @@ while true; do
         break
     fi
 
+    # Refresh Claude's active workspace conversation BEFORE any automatic
+    # relaunch path. In particular, Apply-now's auto-reload used to skip the
+    # post-exit GUID sync and could relaunch a stale or blank conversation.
+    _aicli_sync_claude_chat
+
     # WP #275: Auto-reload sentinel. When the UI's "Apply now" button (workspace
     # args modal) sends Ctrl-C to apply args changes, it also touches this flag
     # BEFORE the Ctrl-C. The user shouldn't see a "Press ENTER to reload" prompt
@@ -841,17 +1001,7 @@ while true; do
     # not need a GUID update.
     if [ -n "$AICLI_ENV_HASH" ]; then
         _discovered_chat=""
-        if [ "$AGENT_ID" == "claude-code" ]; then
-            for _cc_sessions_dir in "$HOME_DIR/.claude/projects" "$HOME_DIR/.claude/sessions"; do
-                if [ -d "$_cc_sessions_dir" ]; then
-                    _newest_jsonl=$(find "$_cc_sessions_dir" -name "*.jsonl" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
-                    if [ -n "$_newest_jsonl" ]; then
-                        _discovered_chat=$(basename "$_newest_jsonl" .jsonl)
-                        break
-                    fi
-                fi
-            done
-        elif [ "$AGENT_ID" == "antigravity-cli" ]; then
+        if [ "$AGENT_ID" == "antigravity-cli" ]; then
             # After an in-TUI conversation switch, agy writes the active chat's
             # <uuid>.pb. Newest .pb by mtime = the just-active conversation; sync it
             # so the next Ctrl-C relaunch resumes THAT chat, not the baked-in one.
@@ -880,7 +1030,7 @@ while true; do
     # that state produces an infinite loop of the same first-run prompt. When a
     # fast exit is detected, require an explicit ENTER instead of timing out after
     # 10s so the user has a chance to read the message and close the workspace.
-    launch_duration=$(( $(date +%s) - launch_start_ts ))
+    launch_duration="$last_launch_duration"
     if [ "$launch_duration" -lt 3 ]; then
         echo -e "\n\033[1;31m[Agent Exited Immediately]\033[0m The agent exited after ${launch_duration}s — likely missing configuration."
         echo -e "Press ENTER to retry, or close this workspace from the UI."
@@ -922,21 +1072,21 @@ perf_log tmux.options.begin
 # Tier 1 — Built-in defaults (safety net; also mirrored in TmuxService::BUILTIN).
 # T-01: every key in TmuxService::BUILTIN must have a matching line here — the
 #        parity is enforced by TmuxBaselineParityTest.php in CI.
-tmux set-option -g history-limit "$HISTORY_LIMIT" 2>/dev/null
-tmux set-option -g status off 2>/dev/null
-tmux set-option -g mouse off 2>/dev/null
-tmux set-option -g prefix C-b 2>/dev/null
-tmux set-option -g base-index 0 2>/dev/null
-tmux set-option -g bell-action any 2>/dev/null
-tmux set-option -g allow-passthrough on 2>/dev/null
-tmux set-option -g focus-events on 2>/dev/null
+tmux set-option -t "$SESSION" history-limit "$HISTORY_LIMIT" 2>/dev/null
+tmux set-option -t "$SESSION" status off 2>/dev/null
+tmux set-option -t "$SESSION" mouse off 2>/dev/null
+tmux set-option -t "$SESSION" prefix C-b 2>/dev/null
+tmux set-option -t "$SESSION" base-index 0 2>/dev/null
+tmux set-option -t "$SESSION" bell-action any 2>/dev/null
+tmux set-option -t "$SESSION" allow-passthrough on 2>/dev/null
+tmux set-option -t "$SESSION" focus-events on 2>/dev/null
 # WP #1253: escape-time 0 — tmux's 500ms default makes a lone ESC ambiguous (key
 # vs. start-of-sequence). When a fast TUI streamer (e.g. antigravity) emits an
 # escape sequence whose bytes arrive SPLIT across reads over the ttyd/websocket
 # pipe, tmux waits then mis-parses the ESC, emitting literal bytes / dropping the
 # sequence -> intermittent blank/garble of streamed output. 0 is the canonical
 # TUI-app setting and is harmless on a fast local-socket terminal.
-tmux set-option -g escape-time 0 2>/dev/null
+tmux set-option -t "$SESSION" escape-time 0 2>/dev/null
 # xterm-256color: tells apps inside tmux the correct terminal type (not screen),
 # avoiding line-translation issues when TUI agents (agy, gemini-cli) set raw PTY mode.
 # The terminal-overrides appends enable 24-bit colour pass-through from ttyd/the browser.
@@ -944,15 +1094,15 @@ tmux set-option -g escape-time 0 2>/dev/null
 # T-02: extended-keys off globally; per-agent quirk profiles (T-07) enable it for Claude Code.
 # T-02: RGB is the modern synonym for Tc; xterm.js 5.x recognises both. Both can coexist
 #        as accumulated -ga entries; the existing Tc entry stays for older clients.
-tmux set-option -g  default-terminal "$_AICLI_DEFTERM" 2>/dev/null
-tmux set-option -g  set-clipboard on 2>/dev/null
-tmux set-option -g  extended-keys off 2>/dev/null
-tmux set-option -ga terminal-overrides ",xterm-256color:Tc" 2>/dev/null
-tmux set-option -ga terminal-overrides ",xterm-256color:RGB" 2>/dev/null
+tmux set-option -t "$SESSION" default-terminal "$_AICLI_DEFTERM" 2>/dev/null
+tmux set-option -t "$SESSION" set-clipboard on 2>/dev/null
+tmux set-option -t "$SESSION" extended-keys off 2>/dev/null
+tmux set-option -a -t "$SESSION" terminal-overrides ",xterm-256color:Tc" 2>/dev/null
+tmux set-option -a -t "$SESSION" terminal-overrides ",xterm-256color:RGB" 2>/dev/null
 # tmux-256color (bundled terminfo, opt-in via default-terminal): same truecolor
 # pass-through, and propagate TERMINFO_DIRS into the server env so panes find it.
-tmux set-option -ga terminal-overrides ",tmux-256color:Tc" 2>/dev/null
-tmux set-option -ga terminal-overrides ",tmux-256color:RGB" 2>/dev/null
+tmux set-option -a -t "$SESSION" terminal-overrides ",tmux-256color:Tc" 2>/dev/null
+tmux set-option -a -t "$SESSION" terminal-overrides ",tmux-256color:RGB" 2>/dev/null
 [ -n "${TERMINFO_DIRS:-}" ] && tmux set-environment -g TERMINFO_DIRS "$TERMINFO_DIRS" 2>/dev/null
 
 # Helper: apply a JSON file of allow-listed tmux options via a single PHP pass.
@@ -967,8 +1117,8 @@ apply_tmux_json() {
     local jsonfile="$1"
     [ -f "$jsonfile" ] || return 0
     log_aicli "DEBUG" 3 "Applying tmux settings from $jsonfile"
-    php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/user/apply-tmux-json.php \
-        "$jsonfile" 2>>"$DEBUG_LOG" | bash 2>>"$DEBUG_LOG"
+    php "$PLUGIN_SRC/scripts/user/apply-tmux-json.php" \
+        "$jsonfile" "$SESSION" 2>>"$DEBUG_LOG" | bash 2>>"$DEBUG_LOG"
 }
 
 # Legacy migration: rename pre-4-tier per-(ws,agent) hash files to .legacy so the old
@@ -1009,7 +1159,7 @@ fi
 WS_TMUX_CONF="$ROOT_DIR/.aicli/tmux/${AGENT_ID}.conf"
 if [ -n "$ROOT_DIR" ] && [ -f "$WS_TMUX_CONF" ] && [ -r "$WS_TMUX_CONF" ]; then
     log_aicli "DEBUG" 3 "Sourcing workspace tmux conf: $WS_TMUX_CONF"
-    if ! tmux source-file "$WS_TMUX_CONF" 2>>"$DEBUG_LOG"; then
+    if ! tmux source-file -t "$SESSION" "$WS_TMUX_CONF" 2>>"$DEBUG_LOG"; then
         log_aicli "WARN" 2 "Workspace tmux conf had errors (see $DEBUG_LOG) - prior tiers remain active"
     fi
 fi

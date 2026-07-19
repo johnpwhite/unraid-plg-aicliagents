@@ -23,6 +23,11 @@ class SupervisorService {
     public const WORKFILE   = '/var/run/aicli-supervisor.work.json';
     public const STATUSFILE = '/tmp/unraid-aicliagents/supervisor.status.json';
 
+    /** Fresh exact marker temporarily suppresses auto-start in health smoke A181. */
+    public const SUPPRESS_START_FILE = '/tmp/unraid-aicliagents/supervisor/.health-test-suppress-start';
+    private const SUPPRESS_START_MAGIC = 'aicli-health-smoke-v1';
+    private const SUPPRESS_START_MAX_AGE = 120;
+
     /** Supervisor runtime directories. */
     public const SUPERVISOR_DIR      = '/tmp/unraid-aicliagents/supervisor';
     public const HALTS_DIR           = '/tmp/unraid-aicliagents/supervisor/halts';
@@ -65,6 +70,10 @@ class SupervisorService {
      */
     public static function start(): bool {
         if (!file_exists(self::SCRIPT_PATH)) {
+            return false;
+        }
+
+        if (self::startSuppressed()) {
             return false;
         }
 
@@ -175,11 +184,19 @@ class SupervisorService {
      *
      * @return string one of: 'ok' (nothing to do), 'started' (was down, started
      *                one), 'healed' (was wedged, killed strays + restarted),
+     *                'suppressed' (fresh health-smoke gate),
      *                'noop' (script missing / could not act).
      */
     public static function ensureHealthy(?int $tickBudgetSec = null): string {
         if (!file_exists(self::SCRIPT_PATH)) {
             return 'noop';
+        }
+
+        // Deterministic smoke isolation: do not race A181's deliberate dead
+        // observation. The exact marker is short-lived; stale/invalid markers
+        // are deleted by startSuppressed() and production healing proceeds.
+        if (self::startSuppressed()) {
+            return 'suppressed';
         }
 
         $pids    = self::livePids();              // every live supervisor proc (path-anchored)
@@ -229,6 +246,41 @@ class SupervisorService {
         self::reapAllSupervisors($pids);
         @unlink(self::PIDFILE);
         return self::start() ? 'healed' : 'noop';
+    }
+
+    /**
+     * Establish a live supervisor and wait for its heartbeat within a bounded
+     * readiness window. Installer finalization uses this instead of relying on
+     * a later WebUI request to call ensureHealthy(). Callables are test seams.
+     *
+     * @param callable|null $ensure  fn(): mixed
+     * @param callable|null $healthy fn(): bool
+     * @param callable|null $pause   fn(int $microseconds): void
+     */
+    public static function ensureReady(
+        int $timeoutMs = 10000,
+        ?callable $ensure = null,
+        ?callable $healthy = null,
+        ?callable $pause = null
+    ): bool {
+        $timeoutMs = max(0, $timeoutMs);
+        $ensure = $ensure ?? static fn() => self::ensureHealthy();
+        $healthy = $healthy ?? static function (): bool {
+            if (!self::isRunning()) return false;
+            return self::singleInstanceHealth()['healthy'];
+        };
+        $pause = $pause ?? static function (int $microseconds): void {
+            usleep($microseconds);
+        };
+
+        $ensure();
+        $deadline = microtime(true) + ($timeoutMs / 1000);
+        do {
+            if ($healthy()) return true;
+            if (microtime(true) >= $deadline) break;
+            $pause(200000);
+        } while (true);
+        return false;
     }
 
     /**
@@ -852,6 +904,34 @@ class SupervisorService {
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * True only for the fresh, exact A181 smoke marker. The optional environment
+     * path keeps unit coverage isolated from a live host. Invalid, future-dated,
+     * or stale markers are removed so a failed smoke can suppress production
+     * healing for at most two minutes.
+     */
+    private static function startSuppressed(): bool {
+        $override = getenv('AICLI_SUPERVISOR_START_SUPPRESS_FILE');
+        $path = ($override !== false && $override !== '')
+            ? $override
+            : self::SUPPRESS_START_FILE;
+        if (!is_file($path)) {
+            return false;
+        }
+
+        $raw = @file_get_contents($path);
+        $mtime = @filemtime($path);
+        $age = ($mtime === false) ? PHP_INT_MAX : time() - $mtime;
+        if (trim((string)$raw) === self::SUPPRESS_START_MAGIC
+            && $age >= 0
+            && $age <= self::SUPPRESS_START_MAX_AGE) {
+            return true;
+        }
+
+        @unlink($path);
+        return false;
+    }
 
     /**
      * Builds the halt file path for an entity (and optional kind).

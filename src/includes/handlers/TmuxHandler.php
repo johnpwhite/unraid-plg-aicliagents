@@ -21,8 +21,8 @@ class TmuxHandler {
         switch ($action) {
             case 'tmux_get_settings':           return self::getSettings();
             case 'tmux_save_settings':          return self::saveSettings();
-            case 'tmux_apply_settings':         return self::applySettings();
-            case 'tmux_reload_conf':            return self::reloadConf();
+            case 'tmux_apply_settings':         return self::applySettings($id);
+            case 'tmux_reload_conf':            return self::reloadConf($id);
             case 'tmux_restart_session':        return self::restartSession($id);
             // Four-tier (agent defaults vs workspace overrides) endpoints.
             case 'tmux_get_agent_defaults':     return self::getAgentDefaults();
@@ -83,21 +83,23 @@ class TmuxHandler {
             : ['status' => 'error', 'message' => 'Failed to persist settings'];
     }
 
-    private static function applySettings() {
+    private static function applySettings($id) {
         $a = self::args();
         if (empty($a['path']) || empty($a['agentId'])) {
             return ['status' => 'error', 'message' => 'path and agentId required'];
         }
-        $r = TmuxService::applySettings($a['path'], $a['agentId']);
+        if ($id === 'default') return ['status' => 'error', 'message' => 'session id required'];
+        $r = TmuxService::applySettings($a['path'], $a['agentId'], $id);
         return ['status' => 'ok'] + $r;
     }
 
-    private static function reloadConf() {
+    private static function reloadConf($id) {
         $a = self::args();
         if (empty($a['path']) || empty($a['agentId'])) {
             return ['status' => 'error', 'message' => 'path and agentId required'];
         }
-        return TmuxService::reloadConf($a['path'], $a['agentId']);
+        if ($id === 'default') return ['status' => 'error', 'message' => 'session id required'];
+        return TmuxService::reloadConf($a['path'], $a['agentId'], $id);
     }
 
     private static function restartSession($id) {

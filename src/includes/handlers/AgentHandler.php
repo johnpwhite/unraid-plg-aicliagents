@@ -86,11 +86,15 @@ class AgentHandler {
     private static function listActiveInstalls() {
         $dir = '/tmp/unraid-aicliagents';
         $active = [];
+        $seen = [];
         foreach (glob("$dir/install-status-*") ?: [] as $f) {
             $base = basename($f);
             if (!preg_match('/^install-status-([a-z0-9][a-z0-9-]{0,63})$/', $base, $m)) continue;
             $status = @json_decode((string)@file_get_contents($f), true);
             if (!is_array($status)) continue;
+            // A safely queued upgrade is deliberately not active: terminals
+            // remain usable until every session closes naturally.
+            if (($status['phase'] ?? '') === 'queued') continue;
             $progress = (int)($status['progress'] ?? 0);
             if ($progress > 0 && $progress < 100) {
                 // Honour the same staleness guard as isInstallInProgress: if the
@@ -100,6 +104,15 @@ class AgentHandler {
                 $age = time() - (int)@filemtime($f);
                 if ($age > self::INSTALL_STALE_THRESHOLD_SECS) {
                     $agentId = $m[1];
+                    if (\AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade($agentId)) {
+                        $active[] = [
+                            'agentId' => $agentId,
+                            'progress' => 99,
+                            'status' => 'Waiting for running processes before activating the upgraded version',
+                        ];
+                        $seen[$agentId] = true;
+                        continue;
+                    }
                     $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
                     exec($cmd, $ignored, $rc);
                     if ($rc !== 0) {
@@ -112,7 +125,16 @@ class AgentHandler {
                     'progress' => $progress,
                     'status'   => (string)($status['status_text'] ?? $status['status'] ?? ''),
                 ];
+                $seen[$m[1]] = true;
             }
+        }
+        foreach (\AICliAgents\Services\UpgradeRelaunchService::pendingAgentIds() as $agentId) {
+            if (isset($seen[$agentId])) continue;
+            $active[] = [
+                'agentId' => $agentId,
+                'progress' => 99,
+                'status' => 'Waiting for running processes before activating the upgraded version',
+            ];
         }
         return ['status' => 'ok', 'active' => $active];
     }
@@ -134,13 +156,20 @@ class AgentHandler {
     public static function isInstallInProgress(string $agentId): bool {
         if ($agentId === '') return false;
 
+        // #72: install-bg can finish while activation is deferred by an open
+        // agent mount. Reopening a retired workspace while its closed-set
+        // manifest remains would pin the stale binary indefinitely.
+        if (\AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade($agentId)) {
+            return true;
+        }
+
         $statusFile = "/tmp/unraid-aicliagents/install-status-$agentId";
         $markerInProgress = false;
         if (is_file($statusFile)) {
             $status = @json_decode((string)@file_get_contents($statusFile), true);
             if (is_array($status)) {
                 $progress = (int)($status['progress'] ?? 0);
-                if ($progress > 0 && $progress < 100) {
+                if (($status['phase'] ?? '') !== 'queued' && $progress > 0 && $progress < 100) {
                     $markerInProgress = true;
                 }
             }
@@ -189,6 +218,43 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'An installation is already in progress for this agent.'];
         }
 
+        $version = (string)($_GET['version'] ?? '');
+        $backupDest = (($_GET['backup'] ?? '') === '1') ? trim((string)($_GET['backup_dest'] ?? '')) : '';
+        $force = (($_GET['force'] ?? '') === '1');
+        $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
+
+        // #71: waiting is the default and is entirely non-destructive. This
+        // backend check is authoritative even if a stale UI calls the endpoint.
+        if (!$force && $sessions !== []) {
+            return \AICliAgents\Services\PendingAgentUpgradeService::queue(
+                $agentId, $version, $backupDest, count($sessions)
+            );
+        }
+
+        $admission = null;
+        if (!$force) {
+            $admission = \AICliAgents\Services\AgentUpgradeAdmissionService::acquire($agentId);
+            if ($admission === null) {
+                return \AICliAgents\Services\PendingAgentUpgradeService::queue(
+                    $agentId, $version, $backupDest, count($sessions)
+                );
+            }
+            // A terminal may have reached final registration after the first
+            // list but before this lock. Recheck while admission is exclusive.
+            $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
+            if ($sessions !== []) {
+                \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
+                return \AICliAgents\Services\PendingAgentUpgradeService::queue(
+                    $agentId, $version, $backupDest, count($sessions)
+                );
+            }
+        }
+
+        // An immediate or explicitly forced install supersedes an older queue.
+        \AICliAgents\Services\PendingAgentUpgradeService::cancel($agentId);
+
+        try {
+
         // R2 (UPGRADE_RELAUNCH_ZOMBIE_SKIP): write the in-progress marker as the
         // FIRST mutating action — BEFORE _closeSessionsForUpgrade — so a racing
         // `start` reliably observes the upgrade and refuses to spawn a zombie
@@ -200,7 +266,7 @@ class AgentHandler {
         // Phase 1: graceful-close any active workspace sessions using this
         // agent BEFORE the binary is replaced. Preserves each session's
         // resume id and list them for the UI.
-        $preClosed = self::_closeSessionsForUpgrade($agentId);
+        $preClosed = $force ? self::_closeSessionsForUpgrade($agentId) : [];
 
         // Enqueue a home bake before the install so any dirty ZRAM is durable
         // before the binary replacement and potential remount. The supervisor
@@ -209,8 +275,6 @@ class AgentHandler {
         $user = $config['user'] ?? 'root';
         if (empty($user)) $user = 'root';
         \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_agent_install', 5, null, true);
-
-        $version = $_GET['version'] ?? '';
 
         // Advance the marker now that sessions are closed and the job is about to
         // launch (the early "Upgrade starting…" marker set above remains in place
@@ -229,11 +293,13 @@ class AgentHandler {
         // WP #964 (slice): optional pre-upgrade backup. The version + backup-dest
         // slots are passed positionally and ALWAYS present (empty string when
         // unused) so install-bg.php can read argv[2]/argv[3] unambiguously.
-        $backupDest = (($_GET['backup'] ?? '') === '1') ? trim((string)($_GET['backup_dest'] ?? '')) : '';
         $versionArg = " " . escapeshellarg($version);
         $backupArg  = " " . escapeshellarg($backupDest);
         aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg);
-        return ['status' => 'ok', 'message' => 'Installation started', 'pre_closed_sessions' => $preClosed];
+            return ['status' => 'ok', 'message' => 'Installation started', 'pre_closed_sessions' => $preClosed];
+        } finally {
+            \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
+        }
     }
 
     /**
@@ -522,11 +588,22 @@ class AgentHandler {
      */
     private static function setAgentChannel() {
         $agentId = $_GET['agentId'] ?? '';
-        $channel = $_GET['channel'] ?? 'latest';
+        $channel = strtolower(trim((string)($_GET['channel'] ?? 'stable')));
         $pinned = $_GET['pinned'] ?? null;
         if ($pinned === '') $pinned = null;
 
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
+        if (!in_array($channel, ['stable', 'latest', 'beta', 'pinned'], true)) {
+            return ['status' => 'error', 'message' => 'Unsupported release channel'];
+        }
+        $channel = \AICliAgents\Services\AgentRegistry::normalizeChannel($channel);
+        if ($channel === 'pinned' && $pinned === null) {
+            $installed = \AICliAgents\Services\AgentRegistry::getInstalledVersion($agentId);
+            if (in_array($installed, ['', '0.0.0', 'unknown', 'installed'], true)) {
+                return ['status' => 'error', 'message' => 'Choose an installed version before pinning'];
+            }
+            $pinned = $installed;
+        }
 
         \AICliAgents\Services\AgentRegistry::setChannel($agentId, $channel, $pinned);
         // Clear old notification for this agent since channel changed

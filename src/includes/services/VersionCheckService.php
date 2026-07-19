@@ -178,7 +178,7 @@ class VersionCheckService {
     /**
      * Get filtered version list for dropdown display.
      * @param string      $agentId
-     * @param string|null $channel  'latest' (default — stable) or 'beta'. Other values map to 'latest'.
+     * @param string|null $channel  'stable' (default) or 'beta'. Legacy 'latest' maps to stable.
      * @param int         $monthsBack  How far back to include untagged stable releases.
      * @return array Sorted versions for the dropdown (max MAX_DROPDOWN_ENTRIES)
      */
@@ -187,7 +187,8 @@ class VersionCheckService {
         $agentCache = $cache[$agentId] ?? null;
         if (!$agentCache || empty($agentCache['versions'])) return [];
 
-        $channel = ($channel === 'beta') ? 'beta' : 'latest';
+        $channel = AgentRegistry::normalizeChannel((string)($channel ?? 'stable'));
+        $channel = ($channel === 'beta') ? 'beta' : 'stable';
         $cutoff   = strtotime("-{$monthsBack} months");
         $distTags = $agentCache['dist_tags'] ?? [];
         $versions = $agentCache['versions'];
@@ -225,6 +226,84 @@ class VersionCheckService {
     }
 
     /**
+     * Pure release-channel resolver used by every install entry point.
+     * It returns an exact cached version when possible, preventing npm's
+     * moving `latest` tag from bypassing the user's Stable selection.
+     *
+     * @param array<string,string> $distTags
+     * @return array{channel:string,target:?string,resolved_tag:?string,fallback:bool,error:?string}
+     */
+    public static function resolveChannelTarget(string $channel, ?string $pinned, array $distTags): array
+    {
+        $channel = AgentRegistry::normalizeChannel($channel);
+        if ($channel === 'pinned') {
+            $target = ($pinned !== null && trim($pinned) !== '') ? trim($pinned) : null;
+            return [
+                'channel' => 'pinned',
+                'target' => $target,
+                'resolved_tag' => $target !== null ? 'pinned' : null,
+                'fallback' => false,
+                'error' => $target === null ? 'missing_pinned_version' : null,
+            ];
+        }
+
+        $candidates = $channel === 'beta' ? ['beta', 'next'] : ['stable', 'latest'];
+        foreach ($candidates as $index => $tag) {
+            $version = isset($distTags[$tag]) ? trim((string)$distTags[$tag]) : '';
+            if ($version === '') continue;
+            return [
+                'channel' => $channel,
+                'target' => $version,
+                'resolved_tag' => $tag,
+                'fallback' => $index > 0,
+                'error' => null,
+            ];
+        }
+
+        // With an empty/stale cache, preserve source-native tag semantics.
+        // Stable sources conventionally call this `latest`; beta sources call
+        // it `beta`. A later fetch failure stays visible instead of silently
+        // crossing from beta to stable.
+        $tag = $channel === 'beta' ? 'beta' : 'latest';
+        return [
+            'channel' => $channel,
+            'target' => $tag,
+            'resolved_tag' => $tag,
+            'fallback' => $channel === 'stable',
+            'error' => null,
+        ];
+    }
+
+    /**
+     * Resolve an optional install target against the agent's persisted channel.
+     * Explicit version selections always win; omitted targets use Stable/Beta/
+     * Pinned semantics from the current version cache.
+     *
+     * @return array{channel:string,target:?string,resolved_tag:?string,fallback:bool,error:?string,explicit:bool}
+     */
+    public static function resolveInstallTarget(string $agentId, ?string $explicitTarget): array
+    {
+        if ($explicitTarget !== null && trim($explicitTarget) !== '') {
+            return [
+                'channel' => 'explicit',
+                'target' => trim($explicitTarget),
+                'resolved_tag' => null,
+                'fallback' => false,
+                'error' => null,
+                'explicit' => true,
+            ];
+        }
+
+        $channel = AgentRegistry::getChannel($agentId);
+        $pinned = AgentRegistry::getPinned($agentId);
+        $cache = self::getCachedResults();
+        $tags = (array)($cache[$agentId]['dist_tags'] ?? []);
+        $resolved = self::resolveChannelTarget($channel, $pinned, $tags);
+        $resolved['explicit'] = false;
+        return $resolved;
+    }
+
+    /**
      * Check if an agent has an update available relative to its selected channel.
      */
     public static function hasUpdate(string $agentId): ?array {
@@ -235,11 +314,11 @@ class VersionCheckService {
         // Support both old format (string) and new format (object)
         if (is_string($agentVer)) {
             $installed = $agentVer;
-            $channel = 'latest';
+            $channel = 'stable';
             $pinned = null;
         } else {
             $installed = $agentVer['installed'] ?? '0.0.0';
-            $channel = $agentVer['channel'] ?? 'latest';
+            $channel = AgentRegistry::normalizeChannel((string)($agentVer['channel'] ?? 'stable'));
             $pinned = $agentVer['pinned'] ?? null;
         }
 
@@ -253,8 +332,9 @@ class VersionCheckService {
         $agentCache = $cache[$agentId] ?? null;
         if (!$agentCache || empty($agentCache['dist_tags'])) return null;
 
-        $channelVersion = $agentCache['dist_tags'][$channel] ?? null;
-        if (!$channelVersion) return null;
+        $resolution = self::resolveChannelTarget($channel, $pinned, (array)$agentCache['dist_tags']);
+        $channelVersion = $resolution['target'];
+        if (!$channelVersion || $resolution['error'] !== null) return null;
 
         $cmp = version_compare($channelVersion, $installed);
         if ($cmp <= 0) return null;

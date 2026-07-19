@@ -23,6 +23,7 @@ class TerminalHandler {
             case 'restart':          return self::restart($id);
             case 'agent_signal_reload': return self::agentSignalReload($id);
             case 'get_chat_session': return self::getChatSession();
+            case 'get_session_status': return self::getSessionStatus($id);
             case 'get_resume_id':    return self::getResumeId();
             case 'log':              return self::log();
             case 'get_log':          return self::getLog();
@@ -35,7 +36,7 @@ class TerminalHandler {
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'agent_signal_reload', 'get_chat_session', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent'];
+        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent'];
     }
 
     /**
@@ -190,8 +191,29 @@ class TerminalHandler {
         if (empty($chatId) && !empty($_GET['resume'])) {
             $chatId = 'auto';
         }
-        startAICliTerminal($id, $workspacePath, $chatId, $agentId);
-        return ['status' => 'ok', 'sock' => "/webterminal/aicliterm-$id/"];
+        // #71: serialize the final status check + session registration with
+        // queued-upgrade admission. The earlier check gives fast feedback;
+        // this one closes the in-flight request race.
+        $admission = \AICliAgents\Services\AgentUpgradeAdmissionService::acquire($agentId);
+        if ($admission === null) {
+            return [
+                'status' => 'upgrade_in_progress',
+                'message' => 'Upgrade transition in progress — retrying is safe.',
+            ];
+        }
+        try {
+            // @phpstan-ignore-next-line The supervisor can raise this external status barrier after the earlier check.
+            if (\AICliAgents\Handlers\AgentHandler::isInstallInProgress($agentId)) {
+                return [
+                    'status' => 'upgrade_in_progress',
+                    'message' => 'Upgrade in progress — this session will resume automatically when the upgrade finishes.',
+                ];
+            }
+            startAICliTerminal($id, $workspacePath, $chatId, $agentId);
+            return ['status' => 'ok', 'sock' => "/webterminal/aicliterm-$id/"];
+        } finally {
+            \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
+        }
     }
 
     /**
@@ -737,6 +759,16 @@ class TerminalHandler {
                 );
                 foreach ($it as $file) {
                     if ($file->getExtension() !== 'jsonl') continue;
+                    // #71: subagent transcripts are NOT resumable conversations.
+                    // Claude stores them in the same project tree as the main
+                    // session files (basename `agent-<id>.jsonl`, typically under
+                    // a subagents/ dir). The recursive scan here once promoted
+                    // `agent-a1cac446c74dc0fc2` to resume_id — resuming from it
+                    // opens the wrong transcript. Filter to main-conversation
+                    // ids only.
+                    $base = $file->getBasename('.jsonl');
+                    if (strpos($base, 'agent-') === 0) continue;
+                    if (strpos(str_replace('\\', '/', $file->getPathname()), '/subagents/') !== false) continue;
                     $mtime = $file->getMTime();
                     if ($mtime > $newestMtime) {
                         $newestMtime = $mtime;
@@ -744,7 +776,9 @@ class TerminalHandler {
                     }
                 }
             }
-            if ($newestId !== null && preg_match('/^[A-Za-z0-9_-]{20,}$/', $newestId)) return $newestId;
+            // #71: main-conversation ids are GUIDs (8-4-4-4-12 hex). Anything
+            // else found on disk is agent metadata, not a resumable session.
+            if ($newestId !== null && preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $newestId)) return $newestId;
             return null;
         }
 
@@ -752,9 +786,23 @@ class TerminalHandler {
     }
 
     private static function restart($id) {
-        stopAICliTerminal($id, true);
-        startAICliTerminal($id, $_GET['path'] ?? null, $_GET['chatId'] ?? null, $_GET['agentId'] ?? 'gemini-cli');
+        // Restart is a continue-current-conversation action. Reuse the same
+        // quiesce + pane/disk capture pipeline as Close before replacing the
+        // terminal, so agents whose id is not present in browser state still
+        // resume precisely. `_fresh_` belongs exclusively to Start New Session
+        // and is deliberately converted to auto-resume here.
+        self::gracefulClose($id);
+        // gracefulClose persisted the authoritative pane/disk capture for this
+        // workspace. Resolve it through ConfigService at launch rather than
+        // trusting a browser-held id that may predate an in-TUI /resume switch.
+        $chatId = self::restartChatId($_GET['chatId'] ?? null);
+        startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $_GET['agentId'] ?? 'gemini-cli');
         return ['status' => 'ok'];
+    }
+
+    /** Resolve the resume selector for an explicit Restart request. */
+    public static function restartChatId(?string $requested): string {
+        return 'auto';
     }
 
     private static function getChatSession() {
@@ -762,6 +810,19 @@ class TerminalHandler {
         $agentId = $_GET['agentId'] ?? 'gemini-cli';
         $chatId = \AICliAgents\Services\TerminalService::findSession($path, $agentId);
         return ['status' => 'ok', 'chatId' => $chatId];
+    }
+
+    /** Cheap active-session probe used to replace stale ttyd iframes. */
+    private static function getSessionStatus($id) {
+        $path = (string)($_GET['path'] ?? '');
+        $agentId = (string)($_GET['agentId'] ?? 'gemini-cli');
+        return [
+            'status' => 'ok',
+            // Preserve the status endpoint's original conversation-sync
+            // contract while adding the ttyd identity used for reconnects.
+            'chatId' => \AICliAgents\Services\TerminalService::findSession($path, $agentId),
+            'terminalGeneration' => \AICliAgents\Services\TerminalGenerationService::current((string)$id),
+        ];
     }
 
     private static function log() {

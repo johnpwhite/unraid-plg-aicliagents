@@ -280,6 +280,119 @@ _layer_next_seq() {
     printf '%d' "$((max + 1))"
 }
 
+# _prepare_busy_snapshot_roll <type> <id> <marker>
+#
+# Mark the start of a busy bake while holding the same short mount-operation
+# lock used by op_mount.  The sentinel distinguishes "this is the first busy
+# snapshot" from "op_mount cleared the marker while the bake was running".
+_prepare_busy_snapshot_roll() {
+    local type="${1:-}" id="${2:-}" marker="${3:-}" lock_fd
+    [ "$type" = "home" ] && [ -n "$id" ] && [ -n "$marker" ] || return 1
+    [ "$(basename -- "$marker")" = ".bake_busy_snapshot_${type}_${id//[^a-zA-Z0-9_-]/_}" ] || return 1
+
+    exec {lock_fd}>"$(mount_op_lock_path "$type" "$id")" 2>/dev/null || return 1
+    if ! flock -w 30 "$lock_fd"; then
+        exec {lock_fd}>&-
+        return 1
+    fi
+    if [ ! -e "$marker" ]; then
+        printf '%s' '__none__' > "$marker" || {
+            flock -u "$lock_fd"
+            exec {lock_fd}>&-
+            return 1
+        }
+    fi
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+}
+
+# _replace_busy_snapshot <type> <id> <persist> <marker> <current>
+#
+# A busy home cannot reclaim its upper directory, so each bake is a complete
+# snapshot of the same upper plus newer writes. The previous busy snapshot was
+# deliberately never mounted as a lower and is therefore fully superseded by
+# the current one. Replace its manifest reference first, then remove the file.
+# A crash between those operations leaves harmless untracked debris that the
+# reconciler can recover; it never leaves a manifest reference to a missing file.
+# Reading/updating the marker and removing the superseded snapshot all happen
+# under the mount-operation lock. If op_mount cleared the marker first, return 2
+# and retain both snapshots: the prior layer may now be mounted and immutable.
+_replace_busy_snapshot() {
+    local type="${1:-}" id="${2:-}" persist="${3:-}" marker="${4:-}" current="${5:-}"
+    local previous lock_fd
+    [ "$type" = "home" ] || return 1
+    [ -n "$id" ] && [ -n "$persist" ] && [ -n "$marker" ] || return 1
+    [ "$(basename -- "$marker")" = ".bake_busy_snapshot_${type}_${id//[^a-zA-Z0-9_-]/_}" ] || return 1
+    [ "$(basename -- "$current")" = "$current" ] || return 1
+    case "$current" in  "home_${id}_delta_"*.sqsh) : ;; *) return 1 ;; esac
+    [ -f "$persist/$current" ] || return 1
+
+    exec {lock_fd}>"$(mount_op_lock_path "$type" "$id")" 2>/dev/null || return 1
+    if ! flock -w 30 "$lock_fd"; then
+        exec {lock_fd}>&-
+        return 1
+    fi
+    if [ ! -f "$marker" ]; then
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 2
+    fi
+    previous="$(cat "$marker" 2>/dev/null || true)"
+    if [ "$previous" = '__none__' ]; then
+        printf '%s' "$current" > "$marker" || {
+            flock -u "$lock_fd"
+            exec {lock_fd}>&-
+            return 1
+        }
+        _REPLACED_BUSY_SNAPSHOT=""
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 0
+    fi
+    [ "$previous" != "$current" ] || {
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 1
+    }
+    [ "$(basename -- "$previous")" = "$previous" ] || {
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 1
+    }
+    case "$previous" in
+        "home_${id}_delta_"*.sqsh) : ;;
+        *)
+            flock -u "$lock_fd"
+            exec {lock_fd}>&-
+            return 1
+            ;;
+    esac
+    [ -f "$persist/$previous" ] || {
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 1
+    }
+    manifest_remove_layer "$type" "$id" "$previous" || {
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 1
+    }
+    rm -f -- "$persist/$previous" || {
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 1
+    }
+    printf '%s' "$current" > "$marker" || {
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        return 1
+    }
+    _REPLACED_BUSY_SNAPSHOT="$previous"
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    return 0
+}
+
 # _layer_discover_sorted <persist> <type> <id> -> newest-first FULL PATHS, one/line.
 # Single source of discovery ordering (seq desc, then dt desc). A tab separates the
 # sort key from the path so `cut -f2-` recovers the path verbatim (paths have no tabs).

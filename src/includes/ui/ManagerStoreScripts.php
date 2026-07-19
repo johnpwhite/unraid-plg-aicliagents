@@ -59,10 +59,8 @@ function installVersionAgent(id, btn, explicitVersion) {
 }
 
 // Single consolidated confirm modal. Shows the appropriate title + body for
-// install / upgrade / downgrade / reinstall, and lists any active sessions
-// that will be gracefully closed. One modal, one user decision, one async
-// hop to the install endpoint. Keeps the close-sessions list visible so the
-// user always knows what's about to happen.
+// install / upgrade / downgrade / reinstall. With active sessions the safe
+// default queues the change; destructive force-close is an explicit opt-in.
 function _showInstallConfirm(id, version, btn, label, sessions) {
     // WP #964 (slice): an upgrade gets the richer keep-a-copy overlay — it
     // offers a rollback backup of the current version before replacing it.
@@ -88,12 +86,17 @@ function _showInstallConfirm(id, version, btn, label, sessions) {
     if (sessions.length > 0) {
         var lines = sessions.map(function(s) {
             var p = s.path || '<no workspace>';
-            return '• ' + p + '  (' + (s.id || '').slice(0, 8) + ')';
-        }).join('\n');
-        body += sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
-              + ' will be gracefully closed:\n\n' + lines
-              + "\n\nEach session's resume id is preserved so you can pick up where you left off.";
-        confirmText = 'Close & ' + (isInstall ? 'install' : label.toLowerCase());
+            return '• ' + _escAttr(p) + '  (' + _escAttr((s.id || '').slice(0, 8)) + ')';
+        }).join('<br>');
+        body = '<div style="text-align:left;line-height:1.5">'
+             + sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
+             + ' will remain running:<br>' + lines
+             + '<br><br><b>The change will queue safely and start after all sessions close naturally.</b>'
+             + '<label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">'
+             + '<input type="checkbox" id="aicli-force-upgrade" style="margin-top:2px">'
+             + '<span>Force now: terminate these sessions; background subagents, monitors, and shell tasks will stop.</span>'
+             + '</label></div>';
+        confirmText = 'Queue change safely';
     } else if (isInstall) {
         body = 'Proceed with installation.';
     }
@@ -108,13 +111,16 @@ function _showInstallConfirm(id, version, btn, label, sessions) {
     swal({
         title: title,
         text: body,
+        html: sessions.length > 0,
         type: sessions.length > 0 ? 'warning' : (label === 'Downgrade' ? 'warning' : 'info'),
         showCancelButton: true,
         confirmButtonText: confirmText,
         cancelButtonText: 'Cancel',
         closeOnConfirm: true,
     }, function(confirmed) {
-        if (confirmed) doInstall(id, version, btn, sessions.length);
+        if (!confirmed) return;
+        var force = document.getElementById('aicli-force-upgrade');
+        doInstall(id, version, btn, sessions.length, null, !!(force && force.checked));
     });
 }
 
@@ -232,7 +238,13 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
             sessionHtml =
                 '<div style="margin-bottom:10px;">'
               + sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
-              + ' will be gracefully closed:<br>' + lines + '</div>';
+              + ' will remain running:<br>' + lines
+              + '<br><b>The upgrade will queue safely and start after all sessions close naturally.</b>'
+              + '<label style="display:flex; gap:8px; align-items:flex-start; margin-top:10px; cursor:pointer;">'
+              + '<input type="checkbox" id="aicli-force-upgrade" style="margin-top:2px;">'
+              + '<span>Force now: terminate these sessions; background subagents, monitors, and shell tasks will stop.</span>'
+              + '</label>'
+              + '</div>';
         }
 
         var html =
@@ -262,13 +274,14 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
             text: html,
             html: true,
             showCancelButton: true,
-            confirmButtonText: sessions.length > 0 ? 'Close & upgrade' : 'Upgrade',
+            confirmButtonText: sessions.length > 0 ? 'Queue upgrade safely' : 'Upgrade',
             cancelButtonText: 'Cancel',
             closeOnConfirm: false,
         }, function(confirmed) {
             if (!confirmed) return;
             var toggle = document.getElementById('aicli-bk-toggle');
             var destEl = document.getElementById('aicli-bk-dest');
+            var forceEl = document.getElementById('aicli-force-upgrade');
             // Backup only when the toggle is both checked AND enabled — a
             // disabled toggle means insufficient space / bad path, so the
             // confirm means "upgrade without a backup".
@@ -276,7 +289,7 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
                 ? { backup: true, dest: (destEl ? destEl.value.trim() : '') }
                 : null;
             swal.close();
-            doInstall(id, version, btn, sessions.length, opts);
+            doInstall(id, version, btn, sessions.length, opts, !!(forceEl && forceEl.checked));
         });
 
         // swal renders synchronously — the overlay DOM exists now, so paint
@@ -285,7 +298,7 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
     });
 }
 
-function doInstall(id, version, btn, sessionsToClose, backupOpts) {
+function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow) {
     // The click source can be a <button> OR a <select> (version picker). For
     // a select, mutating innerHTML would nuke the options, so we only swap
     // the waiting-state content on real buttons and just disable the select.
@@ -299,21 +312,17 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts) {
     $(btn).prop('disabled', true);
     if (!isSelect) $(btn).html('<i class="fa fa-spinner fa-spin"></i> WAIT...');
 
-    // Render the progress panel IMMEDIATELY on click + broadcast install-
-    // start so every other tab (Terminal) transitions to the holding
-    // overlay BEFORE the ~1.8 s server round-trip where _closeSessionsForUpgrade
-    // does Ctrl-C + sleeps. Previously the broadcast fired inside
-    // startInstallPolling which only runs AFTER install_agent returns —
-    // leaving a noticeable dead window where the progress bar showed
-    // "Starting installation…" and the terminal tab hadn't yet reacted.
+    var safeQueue = !!(sessionsToClose && sessionsToClose > 0 && !forceNow);
     _hideButtons(buttons);
-    bar.css('width', '5%');
+    bar.css('width', safeQueue ? '1%' : '5%');
     // Status text reflects what the server is actually doing in the first
     // ~1.8 s window: if sessions were listed in the confirm modal, the
     // backend is running _closeSessionsForUpgrade (Ctrl-C + sleep + sentinel);
     // otherwise it's starting install-bg directly. The real install-status
     // JSON takes over once polling kicks in.
-    if (sessionsToClose && sessionsToClose > 0) {
+    if (safeQueue) {
+        status.text('Queueing safely — active sessions will keep running…');
+    } else if (sessionsToClose && sessionsToClose > 0) {
         status.text('Closing ' + sessionsToClose + ' active session' + (sessionsToClose === 1 ? '' : 's') + '…');
     } else if (backupOpts && backupOpts.backup) {
         status.text('Backing up current version…');
@@ -321,10 +330,15 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts) {
         status.text('Preparing installation…');
     }
     progress.removeAttr('style').addClass('active');
-    _broadcastInstall('install-start', id, { at: 'doInstall-enter' });
+    // Only an explicitly forced install enters terminal holding before AJAX,
+    // because that backend path may begin closure inside the request. Ordinary
+    // installs wait for the authoritative response: it may safely queue after
+    // detecting a terminal-start race.
+    if (forceNow) _broadcastInstall('install-start', id, { at: 'doInstall-force' });
 
     var url = '/plugins/unraid-aicliagents/AICliAjax.php?action=install_agent&agentId=' + id + '&csrf_token=' + csrf;
     if (version) url += '&version=' + encodeURIComponent(version);
+    if (forceNow) url += '&force=1';
     // WP #964 (slice): request a pre-upgrade backup of the current version.
     if (backupOpts && backupOpts.backup && backupOpts.dest) {
         url += '&backup=1&backup_dest=' + encodeURIComponent(backupOpts.dest);
@@ -341,6 +355,13 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts) {
             if (!isSelect) $(btn).html(originalContent);
             _broadcastInstall('install-complete', id, { success: false, message: r.message || 'install refused' });
             return;
+        }
+        if (r.status === 'queued') {
+            bar.css('width', '1%');
+            status.text(r.message || 'Upgrade queued safely — waiting for active sessions to close');
+        } else if (!forceNow) {
+            // The backend acquired admission, raised its barrier, and started.
+            _broadcastInstall('install-start', id, { at: 'install-admitted' });
         }
         startInstallPolling(id, progress, bar, status, buttons, btn, originalContent);
     }).fail(function(xhr) {
@@ -467,7 +488,7 @@ function populateVersionPicker(id, data) {
     if (!select) return;
 
     var installed = data.installed || '0.0.0';
-    var channel = data.channel || 'latest';
+    var channel = data.channel || 'stable';
     select.setAttribute('data-installed', installed);
     // Safe clear — avoids innerHTML which the security hook will block.
     while (select.firstChild) select.removeChild(select.firstChild);
@@ -505,13 +526,13 @@ function populateVersionPicker(id, data) {
         });
     });
 
-    // Pre-release filter: on the 'latest' channel hide versions whose dist-tags
+    // Pre-release filter: on the Stable channel hide versions whose dist-tags
     // are exclusively pre-release markers. Codex-CLI exposes alpha-linux-x64,
     // alpha, etc. in its npm dist-tags — they should not appear in a stable picker.
     // A version with no tags (untagged) or with at least one non-pre-release tag
     // (e.g. 'latest') is always kept.
     var preReleaseRe = /alpha|beta|canary|nightly|snapshot|next(?:-\d|$)|rc(?:\d|$)|dev[-_]build|pre[-_]?release/i;
-    if (channel === 'latest' || channel === 'stable') {
+    if (channel === 'stable' || channel === 'latest') {
         compatibleVersions = compatibleVersions.filter(function(v) {
             var tags = v.tags || [];
             if (tags.length === 0) return true;
@@ -675,7 +696,10 @@ function onVersionSelect(select) {
     var selectedOpt = select.options[select.selectedIndex];
     var text = selectedOpt ? selectedOpt.textContent : '';
     var tagMatch = text.match(/\[(\w+)\]/);
-    var channel = tagMatch ? tagMatch[1] : 'latest';
+    var channel = tagMatch ? tagMatch[1] : 'stable';
+    // `latest` is a release tag, not the user-facing Stable channel. Older
+    // builds conflated the two and could install a newer, less-tested release.
+    if (channel === 'latest') channel = 'stable';
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=set_agent_channel&agentId='
               + encodeURIComponent(id) + '&channel=' + encodeURIComponent(channel)
               + '&csrf_token=' + csrf);

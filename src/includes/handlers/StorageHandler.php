@@ -156,21 +156,18 @@ class StorageHandler {
     }
 
     /**
-     * WP #1262: Return the current force-reclaim countdown state for the React UI.
+     * Return the current storage-maintenance wait state for the React UI.
      *
      * Reads /tmp/unraid-aicliagents/supervisor/escalation/home_<safeId>.json
      * written by the bash supervisor when a home overlay is busy AND storage
      * reclaim is needed. The React banner polls this every 5 s and displays a
-     * live countdown + "Close now" shortcut.
+     * waiting notice + "Close now" shortcut.
      *
      * Response shapes:
      *   no file / parse error:  { "status":"ok", "state":"none", "now":<epoch> }
-     *   countdown:              { "status":"ok", "now":<epoch>, "state":"countdown",
+     *   waiting:                { "status":"ok", "now":<epoch>, "state":"waiting",
      *                             "entity":"home/root", "reason":"layers_near_max",
-     *                             "started_at":<epoch>, "deadline_epoch":<epoch> }
-     *   closing:                { "status":"ok", "now":<epoch>, "state":"closing",
-     *                             "entity":"home/root", "reason":"layers_near_max",
-     *                             "fired_at":<epoch> }
+     *                             "started_at":<epoch> }
      */
     private static function getForceReclaimState(): array {
         $config = getAICliConfig();
@@ -799,7 +796,8 @@ class StorageHandler {
             return ['status' => 'error', 'message' => "Deleting '$id' requires explicit root_confirmed confirmation — use the UI dialog."];
         }
 
-        aicli_log("AJAX Request: Delete home storage for home/$id", AICLI_LOG_WARN);
+        // This is a plain-text log call, not a SQL sink, and $id passed the strict allowlist above.
+        aicli_log("AJAX Request: Delete home storage for home/$id", AICLI_LOG_WARN); // nosemgrep: php.lang.security.injection.tainted-sql-string.tainted-sql-string
 
         require_once __DIR__ . '/../services/FileStorage.php';
         $result = \AICliAgents\Services\FileStorage::deleteHomeEntity($id);
@@ -965,6 +963,17 @@ class StorageHandler {
         require_once __DIR__ . '/../services/FileStorage.php';
         $__migResult = null;
         $__migWork = function () use (&$__migResult, $config, $oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath) {
+        // Issue #56: validation and execution are separated by UI/request time.
+        // Recheck the backing mounts immediately before evicting sessions or
+        // creating destination directories so an array-stop race fails closed.
+        foreach ([['agent', $newAgentPath, $oldAgentPath], ['home', $newHomePath, $oldHomePath]] as [$kind, $newPath, $oldPath]) {
+            if ($newPath && $newPath !== $oldPath
+                && !\AICliAgents\Services\StorageMountService::isBackingMountAvailable((string)$newPath)) {
+                $__migResult = ['status' => 'error', 'message' => ucfirst($kind) . " target storage is not mounted: $newPath"];
+                aicli_log("Storage Migration: refusing unavailable $kind target $newPath", AICLI_LOG_ERROR);
+                return false;
+            }
+        }
         // 1. Evict all sessions
         self::migrateProgress('Stopping active sessions...', 5);
         // R3 (CAPTURE_RESUME_ALL_CLOSE_PATHS): a storage-path migration is an

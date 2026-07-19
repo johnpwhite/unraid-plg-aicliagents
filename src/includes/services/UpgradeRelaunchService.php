@@ -50,6 +50,140 @@ class UpgradeRelaunchService
         return is_array($data) ? $data : [];
     }
 
+    /** A closed set remains an active upgrade barrier until it is relaunched. */
+    public static function hasPendingAgentUpgrade(string $agentId): bool
+    {
+        $manifest = self::readManifest($agentId);
+        return !empty($manifest['closed']) && is_array($manifest['closed']);
+    }
+
+    /**
+     * Agent ids with a durable closed set waiting for layer activation.
+     * Invalid/malformed manifests are ignored; callers must never infer an id
+     * from a filename alone.
+     *
+     * @return array<int,string>
+     */
+    public static function pendingAgentIds(): array
+    {
+        $ids = [];
+        foreach (glob(self::baseDir() . '/upgrade-relaunch-*.json') ?: [] as $file) {
+            $data = json_decode((string)@file_get_contents($file), true);
+            if (!is_array($data) || empty($data['closed']) || !is_array($data['closed'])) continue;
+            $agentId = (string)($data['agentId'] ?? '');
+            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) continue;
+            // A browser/user may have recovered every closed workspace under
+            // fresh session ids before a deferred layer activation succeeds.
+            // Such a manifest can never make progress while those healthy
+            // replacements hold the overlay, and it incorrectly marks every
+            // session for the agent as "upgrading" after supervisor restart.
+            if (self::retireSupersededManifest($agentId)) continue;
+            $ids[$agentId] = true;
+        }
+        return array_keys($ids);
+    }
+
+    /**
+     * Archive an obsolete closed-set manifest when every retired session has a
+     * healthy replacement for the same workspace under a different session id.
+     * Matching is one-to-one: one replacement cannot satisfy two closed entries.
+     * Partial recovery deliberately leaves the whole manifest intact.
+     *
+     * @param array<int,array<string,mixed>>|null $activeSessions
+     * @param callable|null $isHealthy fn(string $sessionId): bool
+     */
+    public static function retireSupersededManifest(
+        string $agentId,
+        ?array $activeSessions = null,
+        ?callable $isHealthy = null
+    ): bool {
+        $manifest = self::readManifest($agentId);
+        $closed = $manifest['closed'] ?? [];
+        if (!is_array($closed) || $closed === []) return false;
+
+        if ($activeSessions === null) {
+            require_once __DIR__ . '/TerminalService.php';
+            require_once __DIR__ . '/ProcessManager.php';
+            $activeSessions = TerminalService::listActiveSessionsForAgent($agentId);
+        }
+        if ($isHealthy === null) {
+            $isHealthy = static fn(string $sid): bool => ProcessManager::tmuxSessionHasLiveAgent($sid);
+        }
+
+        $available = [];
+        foreach ($activeSessions as $session) {
+            if (!is_array($session)) continue;
+            $sid = trim((string)($session['id'] ?? ''));
+            $path = self::normaliseWorkspacePath((string)($session['path'] ?? ''));
+            if ($sid === '' || $path === '' || !$isHealthy($sid)) continue;
+            $available[] = ['id' => $sid, 'path' => $path];
+        }
+
+        foreach ($closed as $entry) {
+            if (!is_array($entry)) return false;
+            $retiredId = trim((string)($entry['sessionId'] ?? ''));
+            $path = self::normaliseWorkspacePath((string)($entry['workspacePath'] ?? ''));
+            if ($retiredId === '' || $path === '') return false;
+
+            $match = null;
+            foreach ($available as $index => $candidate) {
+                if ($candidate['path'] === $path && $candidate['id'] !== $retiredId) {
+                    $match = $index;
+                    break;
+                }
+            }
+            if ($match === null) return false;
+            unset($available[$match]);
+        }
+
+        $source = self::manifestPath($agentId);
+        $archiveDir = self::baseDir() . '/archive/superseded-upgrades';
+        if (!@mkdir($archiveDir, 0755, true) && !is_dir($archiveDir)) return false;
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        $archive = sprintf(
+            '%s/%s-%d-%s.json',
+            $archiveDir,
+            gmdate('Ymd\\THis\\Z'),
+            getmypid(),
+            $safe
+        );
+        return @rename($source, $archive);
+    }
+
+    private static function normaliseWorkspacePath(string $path): string
+    {
+        $path = trim($path);
+        if ($path === '') return '';
+        $path = (string)preg_replace('#/+#', '/', $path);
+        return $path === '/' ? '/' : rtrim($path, '/');
+    }
+
+    /**
+     * Enqueue the supervisor-owned layer activation using a stable job id.
+     * The optional callables are deterministic test seams.
+     */
+    public static function schedulePendingActivation(
+        string $agentId,
+        ?callable $enqueue = null,
+        ?callable $wake = null
+    ): bool {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if ($enqueue === null) {
+            $enqueue = static function (string $id, string $jobId): bool {
+                return SupervisorService::enqueue(
+                    'agent', $id, 'mount', 'upgrade_relaunch', 1, $jobId
+                );
+            };
+        }
+        if ($wake === null) {
+            $wake = static fn(): bool => SupervisorService::wake();
+        }
+        $jobId = 'upgrade-agent-' . preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        $queued = (bool)$enqueue($agentId, $jobId);
+        if ($queued) $wake();
+        return $queued;
+    }
+
     public static function deleteManifest(string $agentId): void
     {
         @unlink(self::manifestPath($agentId));

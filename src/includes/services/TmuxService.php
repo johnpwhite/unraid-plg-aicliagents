@@ -20,8 +20,8 @@ class TmuxService {
 
     /**
      * Keys that use -ga (append) semantics in tmux. applySettings() and the
-     * shell apply_tmux_json helper branch on this const to emit
-     * `set-option -ga` instead of `set-option -g` for these keys so that
+     * shell apply_tmux_json helper branch on this const to emit session-targeted
+     * append semantics (`set-option -a -t`) so that
      * multiple terminal-feature/override fragments accumulate rather than
      * clobber each other.
      *
@@ -256,7 +256,9 @@ class TmuxService {
 
     // ---------- Live operations (unchanged semantics) ----------
 
-    public static function applySettings(string $path, string $agentId): array {
+    public static function applySettings(string $path, string $agentId, string $sessionId): array {
+        [$session, $sock] = self::resolveSession($agentId, $sessionId);
+        if ($session === '') return ['applied' => [], 'errors' => ['session' => 'Session not found']];
         // Apply the merged agent+workspace tier — what the user currently sees in the UI.
         $merged = array_merge(self::getAgentDefaults($agentId), self::getWorkspaceOverrides($path, $agentId));
         $applied = [];
@@ -264,23 +266,24 @@ class TmuxService {
         foreach ($merged as $k => $v) {
             if (!in_array($k, self::ALLOWED_KEYS, true)) continue;
             if ($v === '' || $v === null) continue;
-            // T-02 note: APPEND_KEYS (`-ga` semantics) are intentionally NOT
-            // user-settable — the ALLOWED_KEYS guard above filters them (the
-            // sets are disjoint by design; see the consts' docblocks). Append
-            // semantics are applied only in the shell Tier-1 block and the
-            // future agent quirk tier, so plain `-g` is correct here.
-            $r = self::runTmux(['set-option', '-g', $k, (string)$v]);
+            // T-02 note: APPEND_KEYS (append semantics) are intentionally NOT
+            // user-settable — the ALLOWED_KEYS guard above filters them.
+            // The tmux server is shared. Apply to this workspace only; `-g`
+            // would let one workspace overwrite every other workspace (#67).
+            $r = self::runTmuxAt($sock, ['set-option', '-t', $session, $k, (string)$v]);
             if ($r['rc'] === 0) $applied[] = $k; else $errors[$k] = $r['err'] ?: $r['out'];
         }
         return ['applied' => $applied, 'errors' => $errors];
     }
 
-    public static function reloadConf(string $path, string $agentId): array {
+    public static function reloadConf(string $path, string $agentId, string $sessionId): array {
         $conf = self::getConfPath($path, $agentId);
         if (!file_exists($conf) || !is_readable($conf)) {
             return ['status' => 'error', 'message' => "No conf file at $conf"];
         }
-        $r = self::runTmux(['source-file', $conf]);
+        [$session, $sock] = self::resolveSession($agentId, $sessionId);
+        if ($session === '') return ['status' => 'error', 'message' => 'Session not found'];
+        $r = self::runTmuxAt($sock, ['source-file', '-t', $session, $conf]);
         return $r['rc'] === 0
             ? ['status' => 'ok', 'conf' => $conf]
             : ['status' => 'error', 'message' => $r['err'] ?: $r['out'], 'conf' => $conf];

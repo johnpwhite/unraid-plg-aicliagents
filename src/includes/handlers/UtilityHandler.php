@@ -25,6 +25,10 @@ class UtilityHandler {
             case 'save_env':         return self::saveEnv();
             case 'filetree':         return null; // Handled via rawFiletree()
             case 'list_dir':         return self::listDir();
+            case 'create_dir':       return self::createDirectory(
+                $_POST['parent'] ?? $_GET['parent'] ?? '',
+                $_POST['name'] ?? $_GET['name'] ?? ''
+            );
             case 'check_path':       return self::checkPath();
             case 'upload_chunk':     return self::uploadChunk();
             case 'save_file':        return self::saveFile();
@@ -38,7 +42,7 @@ class UtilityHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'get_env', 'save_env',
-                'filetree', 'list_dir', 'check_path', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log', 'log_client_error'];
+                'filetree', 'list_dir', 'create_dir', 'check_path', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log', 'log_client_error'];
     }
 
     /**
@@ -87,11 +91,30 @@ class UtilityHandler {
     }
 
     private static function debug() {
+        return self::debugPayload();
+    }
+
+    /**
+     * Compose the boot payload while treating storage diagnostics as optional.
+     * Config and the registry must remain available even if a storage status
+     * provider throws, otherwise the React application cannot render recovery.
+     * The injectable provider is the regression-test seam for issue #39.
+     */
+    public static function debugPayload(?callable $storageProvider = null): array {
+        $storageProvider = $storageProvider ?? static fn() => aicli_get_storage_status();
+        $storageStatus = null;
+        $storageError = null;
+        try {
+            $storageStatus = $storageProvider();
+        } catch (\Throwable $e) {
+            $storageError = 'Storage diagnostics are temporarily unavailable.';
+        }
         return [
             'status' => 'ok',
             'config' => getAICliConfig(),
             'registry' => getAICliAgentsRegistry(),
-            'storage_status' => aicli_get_storage_status()
+            'storage_status' => $storageStatus,
+            'storage_status_error' => $storageError,
         ];
     }
 
@@ -256,6 +279,55 @@ class UtilityHandler {
         return ['status' => 'ok', 'path' => $path, 'items' => $items];
     }
 
+    /**
+     * Create one child directory for the workspace browser.
+     *
+     * The optional base list is a test seam; production callers use
+     * ValidationService's standard filesystem allowlist.
+     */
+    public static function createDirectory($rawParent, $rawName, ?array $allowedBases = null): array {
+        if (!is_string($rawParent) || !is_string($rawName)) {
+            return ['status' => 'error', 'message' => 'Folder parent and name must be text.'];
+        }
+
+        $parent = ValidationService::validatePath($rawParent, $allowedBases);
+        if ($parent === false || !is_dir($parent)) {
+            return ['status' => 'error', 'message' => 'Parent folder was not found or is not allowed.'];
+        }
+
+        $name = trim($rawName);
+        if ($name === '' || $name === '.' || $name === '..' || strlen($name) > 255
+            || preg_match('/[\x00-\x1F\x7F\\/\\\\]/', $name)) {
+            return ['status' => 'error', 'message' => 'Enter a valid single folder name (maximum 255 bytes).'];
+        }
+
+        if (!is_writable($parent)) {
+            return ['status' => 'error', 'message' => 'The selected parent folder is not writable.'];
+        }
+
+        $destination = rtrim($parent, '/') . '/' . $name;
+        if (file_exists($destination) || is_link($destination)) {
+            return ['status' => 'error', 'message' => 'A file or folder with that name already exists.'];
+        }
+
+        error_clear_last();
+        if (!@mkdir($destination, 0777, false)) {
+            $phpError = error_get_last();
+            $detail = $phpError !== null ? ': ' . $phpError['message'] : '';
+            aicli_log("Folder creation failed under $parent$detail", AICLI_LOG_ERROR, 'UtilityHandler');
+            return ['status' => 'error', 'message' => 'The folder could not be created. Check the parent folder permissions.'];
+        }
+
+        $created = realpath($destination);
+        if ($created === false || dirname($created) !== $parent) {
+            aicli_log("Folder was created but canonical verification failed under $parent", AICLI_LOG_ERROR, 'UtilityHandler');
+            return ['status' => 'error', 'message' => 'The folder was created but could not be verified safely.'];
+        }
+
+        aicli_log("Workspace folder created: $created", AICLI_LOG_INFO, 'UtilityHandler');
+        return ['status' => 'ok', 'path' => $created];
+    }
+
     private static function uploadChunk() {
         $rawPath = $_POST['path'] ?? '';
         $rawFilename = $_POST['filename'] ?? '';
@@ -287,6 +359,10 @@ class UtilityHandler {
         if (empty($filename)) {
             aicli_log("[Upload] REJECTED: Filename empty after sanitization (raw: '$rawFilename')", AICLI_LOG_ERROR, "UtilityHandler");
             return ['status' => 'error', 'message' => 'Invalid filename'];
+        }
+
+        if (!\AICliAgents\Services\StorageMountService::isBackingMountAvailable($targetPath)) {
+            return ['status' => 'error', 'message' => 'Target storage is not mounted'];
         }
 
         if (!is_dir($targetPath)) @mkdir($targetPath, 0755, true);
@@ -358,6 +434,10 @@ class UtilityHandler {
             return ['status' => 'error', 'message' => 'No file data received'];
         }
 
+        if (!\AICliAgents\Services\StorageMountService::isBackingMountAvailable($targetPath)) {
+            return ['status' => 'error', 'message' => 'Target storage is not mounted'];
+        }
+
         $data = base64_decode($b64data, true);
         if ($data === false) {
             aicli_log("[Upload/SaveFile] REJECTED: base64_decode failed", AICLI_LOG_ERROR, "UtilityHandler");
@@ -397,6 +477,9 @@ class UtilityHandler {
         $filename = ValidationService::sanitizeFilename($rawFilename);
         if (empty($data) || $targetPath === false || empty($filename)) {
             return ['status' => 'error', 'message' => 'Missing image data or invalid path'];
+        }
+        if (!\AICliAgents\Services\StorageMountService::isBackingMountAvailable($targetPath)) {
+            return ['status' => 'error', 'message' => 'Target storage is not mounted'];
         }
         if (!preg_match('/^data:image\/(\w+);base64,/', $data, $type)) {
             return ['status' => 'error', 'message' => 'Invalid image format'];

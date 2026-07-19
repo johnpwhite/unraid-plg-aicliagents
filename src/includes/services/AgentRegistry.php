@@ -105,7 +105,7 @@ class AgentRegistry {
                         $existing['installed'] = $v;
                         $versions[$id] = $existing;
                     } else {
-                        $versions[$id] = ['installed' => $v, 'channel' => 'latest', 'pinned' => null];
+                        $versions[$id] = ['installed' => $v, 'channel' => 'stable', 'pinned' => null];
                     }
                     $agent['version'] = $v;
                     $versionsChanged = true;
@@ -296,8 +296,11 @@ class AgentRegistry {
                 // makes the plugin sandbox_mode override any user workspace arg.
                 // See docs/specs/CODEX_SANDBOX_MODE_UNRAID.md
                 'plugin_args' => '-c sandbox_mode=danger-full-access -c approval_policy=on-request',
-                'resume_cmd' => "{binary} {args} {plugin_args}",
-                'resume_latest' => "{binary} {args} {plugin_args}",
+                // Codex 0.144.1 grammar is `codex [OPTIONS] resume [SESSION_ID]`.
+                // Keep user and plugin global options before the subcommand;
+                // a plain Codex invocation starts a new conversation.
+                'resume_cmd' => "{binary} {args} {plugin_args} resume {chatId}",
+                'resume_latest' => "{binary} {args} {plugin_args} resume --last",
                 'env_prefix' => 'CODEX',
                 'changelog_url' => 'https://github.com/openai/codex/releases',
                 // T-12: codex-cli supports two auth paths: interactive login via
@@ -459,13 +462,24 @@ class AgentRegistry {
     }
 
     /**
-     * Get the selected channel for an agent (default: "latest").
+     * Get the selected user-facing channel (default: "stable").
+     *
+     * Older plugin builds stored "latest" for the control labelled Stable.
+     * Treat that legacy value as stable so an existing selection cannot keep
+     * following a newer npm dist-tag after this defect is fixed.
      */
     public static function getChannel(string $agentId): string {
         $versions = self::getVersions();
         $entry = $versions[$agentId] ?? null;
-        if (!is_array($entry)) return 'latest';
-        return $entry['channel'] ?? 'latest';
+        if (!is_array($entry)) return 'stable';
+        return self::normalizeChannel((string)($entry['channel'] ?? 'stable'));
+    }
+
+    /** Normalize persisted/UI channel values to the supported semantic set. */
+    public static function normalizeChannel(string $channel): string {
+        $channel = strtolower(trim($channel));
+        if ($channel === 'latest' || $channel === '') return 'stable';
+        return in_array($channel, ['stable', 'beta', 'pinned'], true) ? $channel : 'stable';
     }
 
     /**
@@ -503,7 +517,7 @@ class AgentRegistry {
             // Migrate from old string format to new object format
             $entry = [
                 'installed' => $version,
-                'channel' => 'latest',
+                'channel' => 'stable',
                 'pinned' => null,
             ];
             if ($probedMtime !== null) {
@@ -570,7 +584,7 @@ class AgentRegistry {
                 $versions[$agentId] = $existing;
             } else {
                 $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
-                $versions[$agentId] = ['installed' => $installed, 'channel' => 'latest', 'pinned' => null, 'probed_mtime' => $mtime];
+                $versions[$agentId] = ['installed' => $installed, 'channel' => 'stable', 'pinned' => null, 'probed_mtime' => $mtime];
             }
             self::saveVersions($versions);
             LogService::log("maybeRefreshVersion: $agentId discovery yielded '$v' (mtime recorded=$mtime)", LogService::LOG_WARN, "AgentRegistry");
@@ -581,6 +595,7 @@ class AgentRegistry {
      * Set the channel (and optionally pinned version) for an agent.
      */
     public static function setChannel(string $agentId, string $channel, ?string $pinned = null): void {
+        $channel = self::normalizeChannel($channel);
         $versions = self::getVersions();
         $existing = $versions[$agentId] ?? null;
         $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');

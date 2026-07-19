@@ -17,8 +17,8 @@
 # as an argv so AICLI_PLUGIN_ROOT can redirect it in tests. Returns 0 only when the
 # PHP mutation ran successfully.
 #
-# Usage: source this file, then call manifest_record_layer / manifest_replace_layers /
-#        manifest_remove_entity. Idempotent where the underlying owner method is
+# Usage: source this file, then call manifest_record_layer / manifest_remove_layer /
+#        manifest_replace_layers / manifest_remove_entity. Idempotent where the owner is
 #        (addLayer upserts by filename).
 
 _MW_BOOTSTRAP="${AICLI_PLUGIN_ROOT:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/includes/AICliAgentsManager.php"
@@ -72,6 +72,23 @@ manifest_record_layer() {
         ]);
         exit($ok ? 0 : 1);
     ' "$1" "$2" "$3" "$4" "${5:-}" "$_MW_BOOTSTRAP" 2>>"$_MW_STDERR"
+}
+
+# manifest_remove_layer <type> <id> <basename>
+#   Remove one superseded layer from the entity manifest. The caller must update
+#   the manifest before deleting the file so a crash can leave only recoverable,
+#   untracked debris — never a manifest reference to a missing layer.
+manifest_remove_layer() {
+    command -v php >/dev/null 2>&1 || return 1
+    php -d display_errors=0 -r '
+        $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
+        require_once $argv[4];
+        $ok = \AICliAgents\Services\LayerManifestService::removeLayer(
+            $argv[1] . "/" . $argv[2],
+            $argv[3]
+        );
+        exit($ok ? 0 : 1);
+    ' "$1" "$2" "$3" "$_MW_BOOTSTRAP" 2>>"$_MW_STDERR"
 }
 
 # manifest_replace_layers <type> <id> <persist> <consolidated_basename>
