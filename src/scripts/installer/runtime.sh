@@ -313,26 +313,33 @@ PROXYEOF
     ln -sf "$wrapper" "/usr/local/bin/$cmd"
 }
 
-# Proxy mapping: cmd -> relative path from /agents/ to entry
+# Proxy mapping: cmd -> relative path from /agents/ to entry.
+# MUST stay aligned with AgentRegistry::getShellProxyMap() / each agent's
+# `binary` + `shell_cmds` fields. Aliases in shell-integration.sh call these
+# wrappers (never raw package paths).
 create_proxy "gemini" "gemini-cli/node_modules/@google/gemini-cli/bundle/gemini.js"
-create_proxy "copilot" "gh-copilot/node_modules/@github/copilot/index.js"
+create_proxy "copilot" "gh-copilot/node_modules/@github/copilot/npm-loader.js"
 # claude-code 2.1.x ships the CLI as a native ELF at bin/claude.exe (older 2.0.x had
 # cli.js at the package root — the wrapper's self-heal block falls back to whatever
 # package.json "bin" points at if this path is ever absent). Bug #761.
 create_proxy "claude" "claude-code/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
-create_proxy "opencode" "opencode/node_modules/opencode-ai/bin/opencode"
+create_proxy "opencode" "opencode/node_modules/opencode-ai/bin/opencode.exe"
 create_proxy "kilo" "kilocode/node_modules/@kilocode/cli/bin/kilo"
 create_proxy "pi" "pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
-create_proxy "codex" "codex-cli/node_modules/.bin/codex"
-create_proxy "droid" "factory-cli/node_modules/.bin/droid"
+create_proxy "codex" "codex-cli/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+create_proxy "droid" "factory-cli/node_modules/@factory/cli/bin/droid"
 create_proxy "nanocoder" "nanocoder/node_modules/.bin/nanocoder"
 create_proxy "goose" "goose/bin/goose"
-create_proxy "qwen" "qwen-code/node_modules/@qwen-code/qwen-code/cli.js"
+create_proxy "qwen" "qwen-code/node_modules/.bin/qwen"
 create_proxy "agy"  "antigravity-cli/home/.local/bin/agy"
 create_proxy "grok" "grok-build/home/.grok/bin/grok"
 create_proxy "kimi" "kimi-code/home/.kimi-code/bin/kimi"
+# Cursor CLI: official installer creates both `agent` and `cursor-agent` symlinks;
+# both host commands proxy the same captive binary (registry shell_cmds).
+create_proxy "agent" "cursor-cli/home/.local/bin/agent"
+create_proxy "cursor-agent" "cursor-cli/home/.local/bin/agent"
 
-log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen, agy, grok, kimi)."
+log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen, agy, grok, kimi, agent, cursor-agent)."
 
 # --- 6. Docker Tool Wrappers ---
 # Tools that require Docker containers. The wrapper either proxies to the container

@@ -56,7 +56,7 @@ class HubProjector {
                       new OpencodeProjector(), new KilocodeProjector(), new AntigravityProjector(),
                       new FactoryProjector(), new NanocoderProjector(),
                       new CopilotProjector(), new CodexProjector(), new GooseProjector(),
-                      new GrokProjector(), new KimiCodeProjector()] as $p) {
+                      new GrokProjector(), new KimiCodeProjector(), new CursorProjector()] as $p) {
                 self::$vendors[$p->agentId()] = $p;
             }
         }
@@ -107,6 +107,9 @@ class HubProjector {
                 new InstructionProjector('kimi-code', '.kimi-code/AGENTS.md', 'Kimi Code', ['kimi-code'], false),
                 // Kilo: dedicated auto-discovered rules file (~/.kilo/rules/*.md), no fence.
                 new KiloInstructionProjector('kilocode', '.kilo/rules/aicli-hub-global.md', 'Kilo Code', ['kilocode'], false),
+                // Cursor Agent CLI — project-level AGENTS.md is common; global home
+                // instructions are not a stable Cursor CLI surface. Skip dedicated
+                // instruction projector until Cursor documents a global file path.
             ] as $p) {
                 self::$instructionVendors[$p->agentId()] = $p;
             }

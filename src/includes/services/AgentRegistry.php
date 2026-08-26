@@ -145,6 +145,7 @@ class AgentRegistry {
                 // is needed — it'll be seeded additively (never overwrites a user
                 // value, never auto-removed later, user deletions honoured via the
                 // seeded sidecar). Per WP #736 ENV_AND_SECRETS_TIERS.
+                'shell_cmds' => ['gemini'],
             ],
             'claude-code' => [
                 'id' => 'claude-code',
@@ -185,6 +186,7 @@ class AgentRegistry {
                     'terminal-features' => 'xterm*:extkeys',
                     'escape-time'       => '10',
                 ],
+                'shell_cmds' => ['claude'],
             ],
             'opencode' => [
                 'id' => 'opencode',
@@ -207,6 +209,7 @@ class AgentRegistry {
                 // npm package carries no repository metadata — npm versions page
                 // is the verified fallback (no GitHub releases to point at).
                 'changelog_url' => 'https://www.npmjs.com/package/opencode-ai?activeTab=versions',
+                'shell_cmds' => ['opencode'],
             ],
             'kilocode' => [
                 'id' => 'kilocode',
@@ -225,6 +228,7 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'KILOCODE',
                 'changelog_url' => 'https://github.com/Kilo-Org/kilocode/releases',
+                'shell_cmds' => ['kilo'],
             ],
             'pi-coder' => [
                 'id' => 'pi-coder',
@@ -241,6 +245,7 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'PI_CODER',
                 'changelog_url' => 'https://github.com/badlogic/pi-mono/releases',
+                'shell_cmds' => ['pi'],
             ],
             'gh-copilot' => [
                 'id' => 'gh-copilot',
@@ -263,6 +268,7 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'GH_COPILOT',
                 'changelog_url' => 'https://github.com/github/copilot-cli/releases',
+                'shell_cmds' => ['copilot'],
             ],
             'codex-cli' => [
                 'id' => 'codex-cli',
@@ -309,6 +315,7 @@ class AgentRegistry {
                 // On Unraid, codex runs without an OS sandbox (kernel ramfs root blocks
                 // bwrap); shell commands are gated by HITL approval (on-request).
                 'auth_hint' => 'Either run `codex login` on first launch (browser OAuth), or add your OPENAI_API_KEY in the Secrets panel — the env-var path requires no interactive authentication. Note: on Unraid, codex runs without an OS sandbox (kernel ramfs root blocks bwrap); commands are gated by approval.',
+                'shell_cmds' => ['codex'],
             ],
             'factory-cli' => [
                 'id' => 'factory-cli',
@@ -322,6 +329,7 @@ class AgentRegistry {
                 'env_prefix' => 'FACTORY',
                 // @factory/cli has no public release history — npm versions page.
                 'changelog_url' => 'https://www.npmjs.com/package/@factory/cli?activeTab=versions',
+                'shell_cmds' => ['droid'],
             ],
             'nanocoder' => [
                 'id' => 'nanocoder',
@@ -334,6 +342,7 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'NANOCODER',
                 'changelog_url' => 'https://github.com/Nano-Collective/nanocoder/releases',
+                'shell_cmds' => ['nanocoder'],
             ],
             'goose' => [
                 'id' => 'goose',
@@ -375,6 +384,7 @@ class AgentRegistry {
                     ['env' => '{GOOSE_PROVIDER}_API_KEY', 'label' => 'API Key', 'type' => 'password',
                      'help' => 'Stored as ANTHROPIC_API_KEY / OPENAI_API_KEY / etc. — resolved from the Provider selection above.'],
                 ],
+                'shell_cmds' => ['goose'],
             ],
             'qwen-code' => [
                 'id' => 'qwen-code',
@@ -398,6 +408,7 @@ class AgentRegistry {
                     ['env' => 'DASHSCOPE_API_KEY', 'label' => 'DashScope API Key', 'type' => 'password',
                      'help' => 'Required for Alibaba\'s official Qwen API. Alternative providers (Ollama, vLLM) can be configured via the general env panel.'],
                 ],
+                'shell_cmds' => ['qwen'],
             ],
             'antigravity-cli' => [
                 'id' => 'antigravity-cli',
@@ -436,6 +447,7 @@ class AgentRegistry {
                 // API-key env var.
                 // T-12: first-run wizard auth hint — shown in step 3 checklist.
                 'auth_hint' => 'On first launch, `agy` prints a Google authorization URL — open it in a browser, approve access, and paste the code back into the terminal. Credentials persist in your managed home directory.',
+                'shell_cmds' => ['agy'],
             ],
             'grok-build' => [
                 'id' => 'grok-build',
@@ -464,6 +476,7 @@ class AgentRegistry {
                     ['env' => 'XAI_API_KEY', 'label' => 'xAI API Key', 'type' => 'password',
                      'help' => 'Optional alternative to Grok device authentication.'],
                 ],
+                'shell_cmds' => ['grok'],
             ],
             'kimi-code' => [
                 'id' => 'kimi-code',
@@ -485,9 +498,75 @@ class AgentRegistry {
                 'changelog_url' => 'https://github.com/MoonshotAI/kimi-code/releases',
                 'auth_hint' => 'Kimi Code may already recognise your account. If it asks for authentication, use the login option inside the running agent workspace.',
                 'default_envs' => ['KIMI_DISABLE_TELEMETRY' => '1'],
+                'shell_cmds' => ['kimi'],
+            ],
+            'cursor-cli' => [
+                'id' => 'cursor-cli',
+                'name' => 'Cursor CLI',
+                'description' => 'Cursor Agent CLI — run the Cursor agent from a terminal (same agent as the editor, without Tab/diff UI).',
+                'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/cursor.svg',
+                // Official installer: curl https://cursor.com/install | bash.
+                // With CurlInstallSource's captive HOME=<agentDir>/home the
+                // binary lands at <agentDir>/home/.local/bin/agent (plus a
+                // cursor-agent symlink). Versioned bundles live under
+                // ~/.local/share/cursor-agent/versions/ inside that captive home.
+                'source' => [
+                    'type' => 'curl_install',
+                    'script_url' => 'https://cursor.com/install',
+                    'version_probe' => '{binary} --version',
+                ],
+                'binary' => "$agentBase/cursor-cli/home/.local/bin/agent",
+                'binary_fallback' => "$agentBase/cursor-cli/home/.local/bin/cursor-agent",
+                // Resume flags are not yet stabilised across Cursor CLI builds —
+                // relaunch fresh (same pattern as nanocoder/factory until verified).
+                'resume_cmd' => '{binary} {args}',
+                'resume_latest' => '{binary} {args}',
+                'env_prefix' => 'CURSOR',
+                'changelog_url' => 'https://cursor.com/changelog',
+                'auth_hint' => 'Run `agent login` (or `cursor-agent login`) on first launch, or set CURSOR_API_KEY in Secrets. Credentials persist in the managed home across reboots. Prefer the Agent Store for upgrades — the plugin reinstalls the captive binary (Cursor may also self-update under the captive home).',
+                'default_secrets' => [
+                    ['env' => 'CURSOR_API_KEY', 'label' => 'Cursor API Key', 'type' => 'password',
+                     'help' => 'Optional alternative to interactive `agent login` (useful for headless/SSH).'],
+                ],
+                // Primary host command is `agent`; also expose the legacy symlink name.
+                'shell_cmds' => ['agent', 'cursor-agent'],
             ],
 
         ];
+    }
+
+    /**
+     * Host-CLI proxy map: shell command name => path relative to AGENT_BASE.
+     * Single source of truth for runtime.sh create_proxy and shell-integration
+     * aliases (aliases invoke plugin bin wrappers, never raw package paths).
+     *
+     * @return array<string,string>
+     */
+    public static function getShellProxyMap(): array {
+        $map = [];
+        $baseLen = strlen(rtrim(self::AGENT_BASE, '/') . '/');
+        foreach (self::getDefaultAgents() as $id => $agent) {
+            $bin = (string)($agent['binary'] ?? '');
+            if ($bin === '' || strpos($bin, self::AGENT_BASE) !== 0) {
+                continue;
+            }
+            $rel = substr($bin, $baseLen);
+            $cmds = $agent['shell_cmds'] ?? null;
+            if (!is_array($cmds) || $cmds === []) {
+                // Legacy fallback: last path segment without extension quirks.
+                $cmds = [basename($rel, '.exe')];
+                if ($cmds[0] === 'cli.js' || $cmds[0] === 'gemini.js') {
+                    $cmds = [$id];
+                }
+            }
+            foreach ($cmds as $cmd) {
+                if (!is_string($cmd) || $cmd === '' || !preg_match('/^[a-z][a-z0-9_-]*$/', $cmd)) {
+                    continue;
+                }
+                $map[$cmd] = $rel;
+            }
+        }
+        return $map;
     }
 
     public static function getVersions() {

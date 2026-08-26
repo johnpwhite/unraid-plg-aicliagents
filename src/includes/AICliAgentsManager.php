@@ -82,6 +82,7 @@ require_once __DIR__ . '/services/hub/CodexProjector.php';
 require_once __DIR__ . '/services/hub/GrokProjector.php'; // same fenced mcp_servers TOML grammar
 require_once __DIR__ . '/services/hub/KimiCodeProjector.php';
 require_once __DIR__ . '/services/hub/GooseProjector.php';
+require_once __DIR__ . '/services/hub/CursorProjector.php';
 // Config Hub phase 2 (OP #1363 / H-02 — instruction-file projection)
 require_once __DIR__ . '/services/hub/InstructionProjector.php';
 require_once __DIR__ . '/services/hub/KiloInstructionProjector.php'; // extends InstructionProjector

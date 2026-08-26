@@ -1,10 +1,10 @@
 # Unraid AI CLI Agents
 
-Run modern AI coding agents — Claude Code, Gemini CLI, GitHub Copilot, OpenCode, Goose, and more — directly inside the Unraid WebUI, with persistent workspaces and tmux session reattach.
+Run modern AI coding agents — Claude Code, Gemini CLI, GitHub Copilot, OpenCode, Goose, Cursor CLI, and more — directly inside the Unraid WebUI, with persistent workspaces and tmux session reattach.
 
 ## Features
 
-- **11 agents out of the box** — Claude Code, Gemini CLI, GitHub Copilot, OpenCode, Kilo Code, Codex CLI, Goose, Qwen Code, Pi Coder, Factory (Droid) CLI, NanoCoder. Install, upgrade, and switch versions from a single AI Agent Marketplace page.
+- **15 agents out of the box** — Claude Code, Gemini CLI, GitHub Copilot, OpenCode, Kilo Code, Codex CLI, Goose, Qwen Code, Pi Coder, Factory (Droid) CLI, NanoCoder, Antigravity CLI, Grok Build, Kimi Code, Cursor CLI. Install, upgrade, and switch versions from a single AI Agent Marketplace page.
 - **Web terminal in the Unraid GUI** — every workspace opens an embedded xterm session backed by tmux on the server. Close the browser tab, come back tomorrow, your agent's still running.
 - **Reattach from your local terminal** — register an SSH public key in Settings, click the key icon on a workspace, paste the copied command into Windows Terminal / iTerm / your shell. No new client, no extra ports, no protocol handlers.
 - **Per-workspace environment & secrets** — API keys, env vars, and CLI args can be set per-agent and overridden per-workspace, with hot-apply so changes take effect on the next session without rebuild.
@@ -25,3 +25,7 @@ Available via Community Applications. Search for "AI CLI Agents".
 ## Support
 
 [Forum thread](https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/)
+
+## Fork notes
+
+See [docs/FORK.md](docs/FORK.md) for SeraphimSerapis fork / johnpwhite upstream pluginURL policy.
