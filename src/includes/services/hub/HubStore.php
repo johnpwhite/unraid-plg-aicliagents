@@ -134,6 +134,19 @@ class HubStore {
         $out['enabledFor'] = array_values(array_unique($ids));
         sort($out['enabledFor']);
 
+        // Optional per-server tool-approval default. Canonical field; maps to Codex's
+        // `default_tools_approval_mode` (verified against the official Codex MCP config
+        // reference). Other vendors' transpilers ignore it. Only the Codex-valid values
+        // are accepted; absent = leave the vendor's own default untouched.
+        $ta = trim((string)($def['toolsApprovalMode'] ?? ''));
+        if ($ta !== '') {
+            if (!in_array($ta, ['auto', 'prompt', 'writes', 'approve'], true)) {
+                $errors[] = "invalid toolsApprovalMode '$ta' (allowed: auto, prompt, writes, approve)";
+            } else {
+                $out['toolsApprovalMode'] = $ta;
+            }
+        }
+
         return empty($errors) ? $out : null;
     }
 

@@ -84,7 +84,7 @@ _sc_err() { printf '[storagectl] %s\n' "$*" >&2; }
 
 # ---- argument parsing -------------------------------------------------------
 VERB="${1:-}"; shift || true
-TYPE=""; ID=""; PERSIST=""; OWNER=""; LAZY=0; WANT_UPPER=0; WANT_LAYERS=0; WANT_MANIFEST=0
+TYPE=""; ID=""; PERSIST=""; OWNER=""; LAZY=0; WANT_UPPER=0; WANT_LAYERS=0; WANT_MANIFEST=0; KEEP_UPPER=0; STAGED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --type)     TYPE="${2:-}"; shift 2 ;;
@@ -92,6 +92,12 @@ while [ $# -gt 0 ]; do
         --persist)  PERSIST="${2:-}"; shift 2 ;;
         --owner)    OWNER="${2:-}"; shift 2 ;;   # Bug #1054: chown home overlay to this user (mount only)
         --lazy)     LAZY=1; shift ;;
+        # Phase 3: `unstage --keep-upper` leaves the staging writable layer on disk
+        # for the caller to bake; without it the layer goes with the mount.
+        --keep-upper) KEEP_UPPER=1; shift ;;
+        # Phase 3: `bake --staged` captures the install-only staging layer
+        # (op_stage) instead of the layer the agent is currently serving from.
+        --staged)   STAGED=1; shift ;;
         --upper)    WANT_UPPER=1; shift ;;
         --layers)   WANT_LAYERS=1; shift ;;
         --manifest) WANT_MANIFEST=1; shift ;;
@@ -117,9 +123,16 @@ _json_str() {
 # These thin accessors delegate to the shared helper (which sets UPPER_DIR / WORK_DIR
 # / MNT_POINT / ENTITY_UPPER_MODE) so the dispatcher and the ops can never diverge.
 # Existing call sites (emit_json, do_wipe, …) are unchanged.
-_upper_mode() { _entity_paths "$TYPE" "$ID" "$PERSIST"; printf '%s' "$ENTITY_UPPER_MODE"; }
-_mnt_point()  { _entity_paths "$TYPE" "$ID" "$PERSIST"; printf '%s' "$MNT_POINT"; }
-_upper_dir()  { _entity_paths "$TYPE" "$ID" "$PERSIST"; printf '%s' "$UPPER_DIR"; }
+#
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): _entity_paths_live, not
+# _entity_paths. storagectl reports on and operates upon the version that is IN
+# SERVICE, and once an agent is on the versioned layout its writable layer is no
+# longer at the id-keyed path — a `wipe` or a size report against the id-keyed
+# path would silently address an empty directory. Identical for home mounts and
+# pre-Phase-3 agents.
+_upper_mode() { _entity_paths_live "$TYPE" "$ID" "$PERSIST"; printf '%s' "$ENTITY_UPPER_MODE"; }
+_mnt_point()  { _entity_paths_live "$TYPE" "$ID" "$PERSIST"; printf '%s' "$MNT_POINT"; }
+_upper_dir()  { _entity_paths_live "$TYPE" "$ID" "$PERSIST"; printf '%s' "$UPPER_DIR"; }
 
 # ---- itest guard ------------------------------------------------------------
 _itest_guard() {
@@ -263,7 +276,7 @@ _lifecycle_events_json() {
 # ---- result emitter ---------------------------------------------------------
 # emit_json <exit> <outcome> <defer_reason> <events_json>
 emit_json() {
-    local ex="$1" outcome="$2" reason="$3" events="${4:-[]}"
+    local ex="$1" outcome="$2" reason="$3" events="${4:-[]}" extra="${5:-}"
     local mnt; mnt="$(_mnt_point)"
     local mounted=false
     mountpoint -q "$mnt" 2>/dev/null && mounted=true
@@ -314,6 +327,11 @@ emit_json() {
         [ "$_bk" = "flash" ] || { _sb="false"; _sc="false"; }
         printf '"backend":"%s","supportsBake":%s,"supportsConsolidate":%s,' "$(_json_str "$_bk")" "$_sb" "$_sc"
     fi
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3: an optional verb-specific object
+    # (today: `stage`, carrying the staging mount path the installer writes to).
+    # Emitted as a named field rather than spliced into the top level so a verb
+    # can never shadow a contract key that PHP already reads.
+    [ -n "$extra" ] && printf '"payload":%s,' "$extra"
     printf '"raw_exit":%s' "$ex"
     printf '}\n'
 }
@@ -386,12 +404,68 @@ do_unmount() {
     exit "$ex"
 }
 
+# ---- stage / unstage (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, 2026-09-15) ----
+# The install-only overlay an agent upgrade writes into, so the version in
+# service keeps its own layer untouched and no session has to close. Agents
+# only — a home has no second version to install beside the first.
+do_stage() {
+    require_entity_args
+    _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
+    if [ "$TYPE" != "agent" ]; then
+        emit_json 3 "failed" "stage_is_agent_only"
+        exit 3
+    fi
+    local start; start="$(_lifecycle_count)"
+    local mnt; mnt="$(op_stage "$ID" "$PERSIST")"
+    local ex=$?
+    local events; events="$(_lifecycle_events_json "$start")"
+    if [ "$ex" -ne 0 ]; then
+        emit_json "$ex" "$(_outcome_for "$ex")" "stage_failed" "$events"
+        exit "$ex"
+    fi
+    # The staging mount path is what the installer needs; emit_json's payload is
+    # the contract PHP reads, so it travels there rather than on stdout (which
+    # also carries the op's own logging).
+    emit_json 0 "ok" "" "$events" "$(printf '{"mount":"%s"}' "$mnt")"
+    exit 0
+}
+
+do_unstage() {
+    require_entity_args
+    _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
+    if [ "$TYPE" != "agent" ]; then
+        emit_json 3 "failed" "unstage_is_agent_only"
+        exit 3
+    fi
+    op_unstage "$ID" "$PERSIST" "${KEEP_UPPER:-0}" >&2
+    local ex=$?
+    emit_json "$ex" "$(_outcome_for "$ex")" ""
+    exit "$ex"
+}
+
 do_bake() {
     require_entity_args
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
     _passthrough_guard bake   # Step 6: no-op (data is already durable) if passthrough
     local start; start="$(_lifecycle_count)"
-    op_bake "$TYPE" "$ID" "$PERSIST" >&2
+    # Phase 3: --staged redirects the bake at the install-only staging layer.
+    # Refused for a home (there is no second version of a home to stage) and
+    # refused when nothing is staged, rather than silently baking the live layer
+    # and reporting success — an empty or wrong bake that exits 0 is the failure
+    # shape this codebase has paid for most often.
+    local _staged_upper=""
+    if [ "$STAGED" -eq 1 ]; then
+        if [ "$TYPE" != "agent" ]; then
+            emit_json 3 "failed" "staged_bake_is_agent_only"
+            exit 3
+        fi
+        _staged_upper="$(agent_staging_upper "$ID" "$PERSIST")"
+        if [ -z "$_staged_upper" ] || [ ! -d "$_staged_upper" ]; then
+            emit_json 3 "failed" "nothing_staged"
+            exit 3
+        fi
+    fi
+    op_bake "$TYPE" "$ID" "$PERSIST" "$_staged_upper" >&2
     local ex=$?
     # S-09 (#1352): exit 4 (precondition failed, e.g. fat32_size_cap) also writes a
     # reason marker — surface it in the JSON exactly like a defer's.
@@ -429,6 +503,18 @@ do_wipe() {
     # wipe is destructive — guard hard even outside itest mode against the real
     # persist default, but the harness path is the only sanctioned caller today.
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
+    # #99: serialize deletion with reconcile/bake/consolidate using the same
+    # per-entity authority lock. Without this, reconcile can validate a layer
+    # from its snapshot while wipe removes that layer and manifest entry,
+    # producing a false durable corrupt_layers halt after a valid deletion.
+    local _wipe_lock_wait="${AICLI_WIPE_LOCK_WAIT:-30}"
+    case "$_wipe_lock_wait" in ''|*[!0-9]*) _wipe_lock_wait=30 ;; esac
+    [ "$_wipe_lock_wait" -le 30 ] || _wipe_lock_wait=30
+    exec 9>"/var/run/aicli-bake-${TYPE}-${_LOCK_ID}.lock"
+    if ! flock -w "$_wipe_lock_wait" 9; then
+        emit_json 2 "deferred" "storage_lock_busy"
+        exit 2
+    fi
     _passthrough_guard wipe   # Step 6: rm the plain dir if passthrough
     # Default: wipe everything if no specific flag given.
     if [ "$WANT_UPPER" -eq 0 ] && [ "$WANT_LAYERS" -eq 0 ] && [ "$WANT_MANIFEST" -eq 0 ]; then
@@ -618,8 +704,10 @@ case "$VERB" in
     status)      do_status ;;
     probe)       do_probe ;;
     graduate)    do_graduate ;;
+    stage)       do_stage ;;
+    unstage)     do_unstage ;;
     ""|-h|--help|help)
-        _sc_err "usage: storagectl.sh <mount|unmount|bake|consolidate|wipe|status|graduate> --type <home|agent> --id <ID> --persist <PATH> [flags]"
+        _sc_err "usage: storagectl.sh <mount|unmount|bake|consolidate|wipe|status|graduate|stage|unstage> --type <home|agent> --id <ID> --persist <PATH> [flags]"
         _sc_err "       storagectl.sh probe --persist <PATH>   (read-only capability probe, JSON)"
         exit 64 ;;
     *)

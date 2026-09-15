@@ -258,7 +258,10 @@ graceful_kill "ttyd.*aicliterm-"
 if command -v tmux > /dev/null 2>&1; then
     # Non-root audit: iterate every per-uid tmux socket so non-root sessions
     # get killed too.
-    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+    # Bug #141: sessions now each own a private server under s-<sid>/tmux-<uid>;
+    # pre-#141 sessions may still be live on the legacy shared socket. Cover both.
+    for _sock in /tmp/unraid-aicliagents/tmux/s-*/tmux-*/default \
+                 /tmp/unraid-aicliagents/tmux/tmux-*/default; do
         [ -S "$_sock" ] || continue
         tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
     done

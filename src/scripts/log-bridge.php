@@ -12,6 +12,9 @@
  *   log <message> <level> [context]   - Log a message via aicli_log
  *   init <username> [force]           - Initialize working directory
  *   stop <session_id> [sync]          - Stop a terminal session
+ *   workspace_exited <session_id> <exit_code> - Publish the WORKSPACE_LIFECYCLE_EVENTS.md
+ *                                        `exited` event (agent process exit inside a
+ *                                        live session; see agent-exit-recorder.sh)
  */
 
 $MANAGER = '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
@@ -58,6 +61,23 @@ switch ($action) {
         $sync = ($argv[3] ?? '') === 'true';
         if (!empty($sessionId)) {
             stopAICliTerminal($sessionId, $sync);
+        }
+        break;
+
+    // WORKSPACE_LIFECYCLE_EVENTS.md: the agent process inside a live session
+    // just ended (a crash, a normal exit, or a relaunch inside the same
+    // workspace). Published from agent-exit-recorder.sh, which runs in the
+    // same shell as every other session event and has no other cheap way to
+    // reach Nchan. Best-effort — a malformed id is simply ignored.
+    case 'workspace_exited':
+        $sessionId = $argv[2] ?? '';
+        $exitCode = (int)($argv[3] ?? 0);
+        if ($sessionId !== '' && class_exists('\\AICliAgents\\Services\\NchanService')) {
+            \AICliAgents\Services\NchanService::publish('workspaces', [
+                'event' => 'exited',
+                'id'    => $sessionId,
+                'code'  => $exitCode,
+            ]);
         }
         break;
 

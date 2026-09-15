@@ -2,13 +2,17 @@
 /**
  * <module_context>
  *     <name>HealthService</name>
- *     <description>Proactive health surface (R-09/R-14, Feature #1372). Runs nine CHEAP checks
+ *     <description>Proactive health surface (R-09/R-14, Feature #1372). Runs ten CHEAP checks
  *     (supervisor heartbeat, manifest sanity, mount/manifest drift, defer-marker age, /boot + /tmp
  *     space, boot-integrity cached sweep, debug.log rotation bound, client-error budget, storage
- *     job ledger), each returning ok|warn|fail + message. Overall = worst-of. Result cached at
+ *     job ledger, Nchan push failures — R3 of EVENT_PUBLISH_OBSERVABILITY.md), each returning
+ *     ok|warn|fail + message, PLUS CONDITIONAL checks present only while their
+ *     feature is configured: `voice` (AGENT_VOICE.md R11, a text-to-speech engine
+ *     URL) and `voice_input` (VOICE_INPUT.md R7, a transcription engine URL).
+ *     Overall = worst-of. Result cached at
  *     /tmp/unraid-aicliagents/health.json (TTL 60s — recompute only when stale). Degradation
  *     notify is deduped via a fingerprint file, cleared on recovery (healthcheck.php cron).</description>
- *     <dependencies>ConfigService, SupervisorService, BootIntegrityService, LayerManifestService, StoragePathResolver, StorageMountService, AtomicWriteService</dependencies>
+ *     <dependencies>ConfigService, SupervisorService, BootIntegrityService, LayerManifestService, StoragePathResolver, StorageMountService, AtomicWriteService, VoiceService</dependencies>
  *     <constraints>Checks reuse cached sweeps/ledgers/tick files — no heavy scans (the 60s cache is
  *     the budget guard). compute() never throws (per-check fault isolation -> warn). Pure eval*
  *     methods carry the decision logic so PHPUnit needs no real daemon/mounts. Test hooks:
@@ -19,6 +23,8 @@
  */
 
 namespace AICliAgents\Services;
+
+require_once __DIR__ . '/FavouritesService.php';
 
 class HealthService {
 
@@ -34,6 +40,8 @@ class HealthService {
     private const DEFER_WARN_AGE_S = 21600;
     /** Client-error budget (R-14): warn above this many entries in the last hour. */
     private const CLIENT_ERROR_BUDGET_PER_H = 10;
+    /** Push (Nchan) failure budget (EVENT_PUBLISH_OBSERVABILITY.md R3): warn above this many in the last hour. */
+    private const PUSH_FAILURE_BUDGET_PER_H = 5;
     /** debug.log tail window scanned for client errors (bytes — bounded read). */
     private const CLIENT_ERROR_TAIL_BYTES = 262144;
     private const NOTIFY_SCRIPT = '/usr/local/emhttp/plugins/dynamix/scripts/notify';
@@ -79,6 +87,7 @@ class HealthService {
             'debug_log'      => function () { return self::collectDebugLog(); },
             'client_errors'  => function () { return self::collectClientErrors(); },
             'storage_jobs'   => function () { return self::collectStorageJobs(); },
+            'push'           => function () { return self::collectPush(); },
         ];
         $checks = [];
         foreach ($collectors as $name => $fn) {
@@ -87,6 +96,50 @@ class HealthService {
             } catch (\Throwable $e) {
                 $checks[$name] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
             }
+        }
+        // AGENT_VOICE.md R11: `voice` is CONDITIONAL, not one of the fixed
+        // collectors above — it must be ABSENT (not merely 'ok') while
+        // tts_url is empty (browser mode), so it is added only when
+        // collectVoice() decides the engine is actually in play.
+        try {
+            $voiceCheck = self::collectVoice();
+            if ($voiceCheck !== null) {
+                $checks['voice'] = $voiceCheck;
+            }
+        } catch (\Throwable $e) {
+            $checks['voice'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
+        }
+        // VOICE_INPUT.md R7: `voice_input` is CONDITIONAL, like `voice` above —
+        // absent (not merely 'ok') while stt_url is empty (browser recognition
+        // has no engine to be unhealthy).
+        try {
+            $voiceInputCheck = self::collectVoiceInput();
+            if ($voiceInputCheck !== null) {
+                $checks['voice_input'] = $voiceInputCheck;
+            }
+        } catch (\Throwable $e) {
+            $checks['voice_input'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
+        }
+        // HOME_BACKUP.md R10: `backup` is CONDITIONAL, like `voice` — absent
+        // (not merely 'ok') while backup_target is empty (the feature is off).
+        try {
+            $backupCheck = self::collectBackup();
+            if ($backupCheck !== null) {
+                $checks['backup'] = $backupCheck;
+            }
+        } catch (\Throwable $e) {
+            $checks['backup'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
+        }
+        // WORKSPACE_FAVOURITES.md R1: `favourites` is CONDITIONAL, like `voice`
+        // and `backup` — absent while favourites.json has never been set aside
+        // as corrupt (the common case).
+        try {
+            $favouritesCheck = self::collectFavourites();
+            if ($favouritesCheck !== null) {
+                $checks['favourites'] = $favouritesCheck;
+            }
+        } catch (\Throwable $e) {
+            $checks['favourites'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
         }
         return [
             'schema'             => self::SCHEMA_VERSION,
@@ -117,6 +170,7 @@ class HealthService {
     public static function checkAndNotify(): array {
         $result = self::get(true);
         self::maybeNotify($result);
+        try { AgentRelayService::publishHostHealth($result); } catch (\Throwable $e) { /* Relay must never affect health checks. */ }
         return $result;
     }
 
@@ -315,6 +369,98 @@ class HealthService {
         return self::result(self::STATUS_OK, "$countLastHour client error(s) in the last hour");
     }
 
+    /**
+     * Push (Nchan) failures (EVENT_PUBLISH_OBSERVABILITY.md R3): the socket
+     * missing is worse than any failure count, so it fails first. No status
+     * file yet means no publisher has ever failed — ok. More than 5 failures
+     * in the last hour is a warn, with the last recorded error attached.
+     */
+    public static function evalPush(?array $status, bool $socketPresent): array {
+        if (!$socketPresent) {
+            return self::result(self::STATUS_FAIL, 'nchan unix socket is absent — every publish is failing');
+        }
+        if ($status === null) {
+            return self::result(self::STATUS_OK, 'no push failures recorded');
+        }
+        $failures = (int) ($status['failures_1h'] ?? 0);
+        if ($failures > self::PUSH_FAILURE_BUDGET_PER_H) {
+            $lastError = (string) ($status['last_error'] ?? 'unknown');
+            return self::result(self::STATUS_WARN, "$failures push failures in the last hour (last: $lastError)");
+        }
+        return self::result(self::STATUS_OK, "$failures push failure(s) in the last hour");
+    }
+
+    /**
+     * AGENT_VOICE.md R11: only ever called while tts_url is set (collectVoice()
+     * is the gate — see its own doc comment for why the check is ABSENT
+     * entirely in browser mode, not merely 'ok'). $status is VoiceService's
+     * last-synthesis record (null = engine mode just turned on, nothing
+     * attempted yet).
+     */
+    public static function evalVoice(?array $status): array {
+        if ($status === null) {
+            return self::result(self::STATUS_OK, 'no synthesis attempted yet');
+        }
+        if (($status['ok'] ?? false) === true) {
+            return self::result(self::STATUS_OK, 'last synthesis succeeded');
+        }
+        return self::result(self::STATUS_WARN, (string)($status['message'] ?? 'last synthesis failed'));
+    }
+
+    /**
+     * VOICE_INPUT.md R7: only ever called while stt_url is set (collectVoiceInput()
+     * is the gate — the input-side mirror of evalVoice() above). $status is
+     * VoiceService's last-transcription record (null = engine mode just turned
+     * on, nothing attempted yet).
+     */
+    public static function evalVoiceInput(?array $status): array {
+        if ($status === null) {
+            return self::result(self::STATUS_OK, 'no transcription attempted yet');
+        }
+        if (($status['ok'] ?? false) === true) {
+            return self::result(self::STATUS_OK, 'last transcription succeeded');
+        }
+        return self::result(self::STATUS_WARN, (string)($status['message'] ?? 'last transcription failed'));
+    }
+
+    /**
+     * HOME_BACKUP.md R10: never FAIL — a stale or missing backup is a warning
+     * to act on, not a plugin malfunction. $worstAgeS is the age (seconds) of
+     * the OLDEST "last successful snapshot" across every user with one; -1
+     * when no user has a last_backup yet (target configured, nothing ran).
+     * Threshold: 2x the schedule interval, or 7 days when the schedule is 'off'.
+     */
+    public static function evalBackup(bool $anyBackup, int $worstAgeS, int $intervalS, string $worstUser): array {
+        if (!$anyBackup) {
+            return self::result(self::STATUS_OK, 'a backup target is set but no backup has run yet');
+        }
+        $thresholdS = $intervalS > 0 ? ($intervalS * 2) : (7 * 86400);
+        if ($worstAgeS > $thresholdS) {
+            $days = round($worstAgeS / 86400, 1);
+            $who  = $worstUser !== '' ? "$worstUser's" : 'the';
+            return self::result(self::STATUS_WARN, "$who last home backup was $days day(s) ago");
+        }
+        return self::result(self::STATUS_OK, 'the newest home backup is within the expected window');
+    }
+
+    /**
+     * HOME_RESTORE.md R7: pure, unit-testable — given each user's
+     * `last_restore` object (or null, as StorageHandler::restoreStatusFor()
+     * returns it), the first user whose restore record says `ok:false`, or
+     * '' when none failed. A missing/never-run record (null) is never a
+     * failure.
+     *
+     * @param array<string,array|null> $lastRestoreByUser
+     */
+    public static function firstFailedRestoreUser(array $lastRestoreByUser): string {
+        foreach ($lastRestoreByUser as $user => $lastRestore) {
+            if (is_array($lastRestore) && ($lastRestore['ok'] ?? true) === false) {
+                return (string)$user;
+            }
+        }
+        return '';
+    }
+
     /** Storage job ledger: any failed job -> warn. @param string[] $states ledger job states */
     public static function evalStorageJobs(array $states): array {
         $failed = count(array_keys($states, 'failed', true));
@@ -394,9 +540,25 @@ class HealthService {
                 $mounted["home/$user"] = self::hasLayers('home', $user, StoragePathResolver::homePersistPath(''));
             }
         }
-        $agentBase = preg_quote(StorageMountService::AGENT_MNT_BASE, '#');
-        if (preg_match_all('#^\S+\s+' . $agentBase . '/([^/\s]+)\s+overlay\b#m', $mounts, $m)) {
-            foreach ($m[1] as $id) {
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
+        // AgentRegistry::agentBase() instead of the removed
+        // StorageMountService::AGENT_MNT_BASE duplicate constant.
+        //
+        // Phase 2 (2026-09-09): a migrated agent's overlay mounts at
+        // agents/.versions/<id>/<generation>, not agents/<id> — match both shapes
+        // (the versioned alternative first, so it never falls through and gets
+        // misread as a legacy id) or this audit reports a correctly-mounted,
+        // migrated agent as unmounted. Group 1 = versioned id, group 2 = legacy id.
+        $agentBase = preg_quote(AgentRegistry::agentBase(), '#');
+        if (preg_match_all(
+            '#^\S+\s+' . $agentBase . '/(?:\.versions/([^/\s]+)/[^/\s]+|([^/\s]+))\s+overlay\b#m',
+            $mounts,
+            $m,
+            PREG_SET_ORDER
+        )) {
+            foreach ($m as $row) {
+                $id = ($row[1] ?? '') !== '' ? $row[1] : ($row[2] ?? '');
+                if ($id === '') continue;
                 $mounted["agent/$id"] = self::hasLayers('agent', $id, StoragePathResolver::agentPersistPath());
             }
         }
@@ -478,6 +640,131 @@ class HealthService {
             $states[] = (string)($job['state'] ?? '');
         }
         return self::evalStorageJobs($states);
+    }
+
+    /** Reads NchanService's shared push.status.json (its own path/socket test hooks apply here too). */
+    private static function collectPush(): array {
+        $path = NchanService::statusPath();
+        $status = null;
+        if (is_file($path)) {
+            $decoded = json_decode((string) @file_get_contents($path), true);
+            $status = is_array($decoded) ? $decoded : null;
+        }
+        return self::evalPush($status, file_exists(NchanService::socketPath()));
+    }
+
+    /**
+     * AGENT_VOICE.md R11: null (never a check entry, not even 'ok') while
+     * tts_url is empty — browser-speech mode has no engine to be unhealthy.
+     * Reads VoiceService's own status.json, the same tmpfs status file
+     * VoiceService::speak() writes after every engine attempt.
+     */
+    private static function collectVoice(): ?array {
+        $config = ConfigService::getConfig();
+        $ttsUrl = trim((string)($config['tts_url'] ?? ''));
+        if ($ttsUrl === '') {
+            return null;
+        }
+        $path = VoiceService::statusPath();
+        $status = null;
+        if (is_file($path)) {
+            $decoded = json_decode((string) @file_get_contents($path), true);
+            $status = is_array($decoded) ? $decoded : null;
+        }
+        return self::evalVoice($status);
+    }
+
+    /**
+     * VOICE_INPUT.md R7: null (never a check entry, not even 'ok') while
+     * stt_url is empty — browser-recognition mode has no engine to be
+     * unhealthy. Reads VoiceService's own sttStatusPath(), the tmpfs status
+     * file VoiceService::transcribe() writes after every engine attempt.
+     */
+    private static function collectVoiceInput(): ?array {
+        $config = ConfigService::getConfig();
+        $sttUrl = trim((string)($config['stt_url'] ?? ''));
+        if ($sttUrl === '') {
+            return null;
+        }
+        $path = VoiceService::sttStatusPath();
+        $status = null;
+        if (is_file($path)) {
+            $decoded = json_decode((string) @file_get_contents($path), true);
+            $status = is_array($decoded) ? $decoded : null;
+        }
+        return self::evalVoiceInput($status);
+    }
+
+    /**
+     * HOME_BACKUP.md R10: null (never a check entry) while backup_target is
+     * empty. Otherwise the WORST (oldest) last_backup age across every user
+     * with a home, so one neglected user's stale backup is never hidden by
+     * a healthy one. Reads StorageHandler::backupStatusFor() — the SAME
+     * per-user object `get_storage_status`'s `last_backup` field carries.
+     */
+    private static function collectBackup(): ?array {
+        $config = ConfigService::getConfig();
+        $target = trim((string)($config['backup_target'] ?? ''));
+        if ($target === '') {
+            return null;
+        }
+        $intervalS = self::backupScheduleIntervalSeconds((string)($config['backup_schedule'] ?? 'off'));
+
+        require_once __DIR__ . '/../handlers/StorageHandler.php';
+        require_once __DIR__ . '/UtilityService.php';
+        $users = UtilityService::getUnraidUsers();
+        if (empty($users)) {
+            $users = [(string)($config['user'] ?? 'root')];
+        }
+
+        $anyBackup = false;
+        $worstAgeS = -1;
+        $worstUser = '';
+        $lastRestoreByUser = [];
+        foreach ($users as $u) {
+            $status = \AICliAgents\Handlers\StorageHandler::backupStatusFor((string)$u);
+            $last = $status['last_backup'] ?? null;
+            if (is_array($last)) {
+                $at = strtotime((string)($last['at'] ?? ''));
+                if ($at !== false) {
+                    $anyBackup = true;
+                    $age = time() - $at;
+                    if ($age > $worstAgeS) {
+                        $worstAgeS = $age;
+                        $worstUser = (string)$u;
+                    }
+                }
+            }
+            $restoreStatus = \AICliAgents\Handlers\StorageHandler::restoreStatusFor((string)$u);
+            $lastRestoreByUser[(string)$u] = $restoreStatus['last_restore'] ?? null;
+        }
+
+        // HOME_RESTORE.md R7: a failed restore is a warn cause of its own,
+        // independent of the backup-age check above.
+        $restoreFailedUser = self::firstFailedRestoreUser($lastRestoreByUser);
+        if ($restoreFailedUser !== '') {
+            return self::result(self::STATUS_WARN, "$restoreFailedUser's last restore failed");
+        }
+        return self::evalBackup($anyBackup, $worstAgeS, $intervalS, $worstUser);
+    }
+
+    /**
+     * WORKSPACE_FAVOURITES.md R1: null (never a check entry) while
+     * favourites.json has never been renamed aside as corrupt. A cheap glob
+     * (FavouritesService::corruptFileExists()) — no read of the file itself.
+     */
+    private static function collectFavourites(): ?array {
+        if (!FavouritesService::corruptFileExists()) {
+            return null;
+        }
+        return self::result(self::STATUS_WARN, 'favourites file was corrupt and set aside');
+    }
+
+    /** 'daily:HH:MM' -> a day; 'weekly:D:HH:MM' -> a week; 'off'/anything else -> 0 (no schedule). */
+    private static function backupScheduleIntervalSeconds(string $schedule): int {
+        if (strncmp($schedule, 'daily:', 6) === 0) return 86400;
+        if (strncmp($schedule, 'weekly:', 7) === 0) return 7 * 86400;
+        return 0;
     }
 
     // ==================================================================

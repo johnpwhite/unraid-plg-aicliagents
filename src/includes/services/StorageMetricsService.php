@@ -14,6 +14,75 @@ class StorageMetricsService {
     /**
      * Retrieves unified storage metrics for agents, homes, and rootfs.
      */
+    /**
+     * How many versions of one agent are mounted right now, and what the ones
+     * that are no longer current are costing.
+     *
+     * docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, R6. Returns keys that
+     * are always present, so the UI never has to distinguish "no overlap" from
+     * "this plugin version does not report it":
+     *
+     *   generations         how many versions of this agent are mounted
+     *   generations_max     the ceiling past which an upgrade waits instead
+     *   superseded_mb       the writable layers held by versions no longer current
+     *   at_generation_limit true when the next upgrade of this agent will wait
+     *
+     * @return array<string,mixed>
+     */
+    public static function agentGenerationPressure(string $agentId, string $persistPath): array {
+        $mounted = AgentRegistry::mountedGenerations($agentId);
+        $live = self::liveGenerationId($agentId);
+        $supersededMb = 0;
+        foreach ($mounted as $gen) {
+            if ($gen === $live) continue;
+            // The layer a generation actually owns is recorded when it is bound;
+            // never re-derived here, because a generation that adopted the
+            // pre-Phase-3 shared layer records a different path and a guess
+            // would report the wrong number (or zero).
+            $upper = self::generationUpperPath($agentId, $gen);
+            if ($upper !== null && is_dir($upper)) {
+                $supersededMb += self::getDirSize($upper);
+            }
+        }
+        $count = count($mounted);
+        return [
+            'generations'         => $count,
+            'generations_max'     => AgentRegistry::MAX_CONCURRENT_GENERATIONS,
+            'superseded_mb'       => $supersededMb,
+            'at_generation_limit' => !AgentRegistry::canAddGeneration($count),
+        ];
+    }
+
+    /** The generation id the agent's stable name currently points at, or null. */
+    private static function liveGenerationId(string $agentId): ?string {
+        $stable = AgentRegistry::agentPath($agentId);
+        if (!is_link($stable)) return null;
+        $target = @readlink($stable);
+        if (!is_string($target)) return null;
+        $prefix = ".versions/$agentId/";
+        return strncmp($target, $prefix, strlen($prefix)) === 0
+            ? substr($target, strlen($prefix))
+            : null;
+    }
+
+    /**
+     * The writable layer one generation owns, read from the record the mount
+     * pipeline writes beside the generation directories (resolve_paths.sh
+     * agent_generation_state_set). Null when there is no record.
+     */
+    private static function generationUpperPath(string $agentId, string $generationId): ?string {
+        $file = AgentRegistry::agentBase() . "/.versions/$agentId/.state/"
+              . preg_replace('/[^A-Za-z0-9._-]/', '', $generationId) . '.env';
+        if (!is_file($file)) return null;
+        foreach (explode("\n", (string)@file_get_contents($file)) as $line) {
+            if (strncmp($line, 'upper=', 6) === 0) {
+                $val = trim(substr($line, 6));
+                return $val !== '' ? $val : null;
+            }
+        }
+        return null;
+    }
+
     public static function getStatus() {
         $config = ConfigService::getConfig();
         // F8 (WP#1332): resolve the persist paths through StoragePathResolver — the
@@ -40,8 +109,21 @@ class StorageMetricsService {
             if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/", basename($file), $m)) {
                 $id = $m[1];
                 if (isset($agents[$id])) continue;
-                $mnt = StorageMountService::AGENT_MNT_BASE . "/$id";
+                // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): the old
+                // StorageMountService::AGENT_MNT_BASE was a second constant
+                // duplicating AgentRegistry::AGENT_BASE's literal — removed,
+                // route through the resolver instead.
+                $mnt = AgentRegistry::agentPath($id);
                 $agents[$id] = self::getEntityStats('agent', $id, $agentPath, $mnt);
+                // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, R6 (2026-09-15): an
+                // agent can now have a superseded version still mounted for a
+                // session that has not been reloaded, and each one costs a
+                // writable layer measured at 255-450 MB on this hardware. R6 is
+                // explicit that this must be VISIBLE while it is happening —
+                // an operator watching flash headroom during a slow-draining
+                // overlap should see it here, not discover it as an
+                // out-of-space install failure later.
+                $agents[$id] += self::agentGenerationPressure($id, $agentPath);
             }
         }
 
@@ -142,10 +224,15 @@ class StorageMetricsService {
             && count(StorageTargetService::qualifyingGraduateTargets('home', $config)) > 0;
         $agentHasTarget = $agentFlashStick
             && count(StorageTargetService::qualifyingGraduateTargets('agent', $config)) > 0;
+        // HOME_BACKUP.md R10: `last_backup` per user — the same object
+        // StorageHandler::backupStatusFor() returns, so the Storage tab and
+        // the backup_status AJAX action can never disagree.
+        require_once __DIR__ . '/../handlers/StorageHandler.php';
         foreach ($homes as $_u => $_st)  {
             $_hasLayers = (($_st['layers'] ?? 0) > 0);
             $homes[$_u] = array_merge($_st, FileStorage::effectiveBackendCaps($homeDev, $_hasLayers),
-                ['can_graduate' => FileStorage::canGraduate($homeDev, $homeWear, $_hasLayers, $homeHasTarget)]);
+                ['can_graduate' => FileStorage::canGraduate($homeDev, $homeWear, $_hasLayers, $homeHasTarget)],
+                ['last_backup' => \AICliAgents\Handlers\StorageHandler::backupStatusFor((string)$_u)['last_backup'] ?? null]);
         }
         foreach ($agents as $_a => $_st) {
             $_hasLayers = (($_st['layers'] ?? 0) > 0);

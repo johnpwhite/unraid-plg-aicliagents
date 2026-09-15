@@ -121,8 +121,34 @@ To ensure your agents (like OpenCode and Claude Code) always start reliably, the
 - **Data Protection**: Corrupt databases are automatically quarantined (renamed to `.corrupt.<timestamp>`) and the agent is allowed to start with a fresh, healthy database. 
 - **WAL Checkpointing**: During system shutdowns and plugin updates, the plugin performs a clean "Checkpoint" to merge temporary write logs into the main database file, ensuring maximum portability and reliability.
 
+## 7. Agent Relay
+
+The **Agent Relay** tab provides durable coordination between saved workspaces on
+the same Unraid host. It uses atomic JSON files managed by the plugin, so no
+database is required and a browser does not need to stay open.
+
+- **Topics are FYI:** subscribe a workspace only to the service topics it cares
+  about. Receiving an event never makes that workspace responsible for acting
+  on it.
+- **Actors are accountable:** an administrator can assign one saved workspace
+  as the actor for a concrete topic. Only that actor can handle direct requests
+  for the topic. If it misses the chosen acknowledgement or resolution deadline,
+  the sender sees that escalation is needed.
+- **Headless recovery:** an assigned actor can start after boot or array start
+  without a browser. Explicitly closing one pauses that behaviour; use **Launch
+  actor** in Relay Settings, or manually reopen the workspace, to resume it.
+- **Private messages:** known saved workspaces can communicate in a durable
+  private thread without adding noise to a topic. The optional per-workspace
+  terminal notification only pastes a marked message; it never presses Enter.
+- **Native tools:** enable Relay MCP in Settings to project tools into supported
+  agent configurations. Already-running agents need one restart to load an MCP
+  change. The common `$AICLI_RELAY_COMMAND` is available to every launched
+  workspace.
+
+For the full trust model and transport limits, see
+[`docs/specs/AGENT_RELAY_POC.md`](specs/AGENT_RELAY_POC.md).
+
 ---
 *Version: 2026.04.01.08*
 *Architecture: Btrfs Loopback + Delta Sync + Zero-Archive Deployment*
-
 

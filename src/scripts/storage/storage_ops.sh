@@ -26,6 +26,28 @@
 _SO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 [ -d "$_SO_DIR" ] || _SO_DIR="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage"
 
+# _sweep_agent_generations <agent_id> <persist_path>
+#
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15). Release superseded
+# generations of one agent, and ALWAYS return success.
+#
+# The "always" is load-bearing. op_mount runs under `set -euo pipefail`, and the
+# sweep is house-keeping: whether a superseded layer could be released this time
+# says nothing about whether the mount this call was asked for is good. An
+# earlier form ended in `[ -n "$line" ] && log "$line"`, whose status becomes the
+# loop's status and therefore op_mount's — so a sweep with nothing to say made a
+# perfectly good mount report failure. Every caller of op_mount reads that exit
+# code as "is this agent usable".
+_sweep_agent_generations() {
+    local id="$1" persist="$2" out=""
+    declare -f aicli_gc_agent_generations >/dev/null 2>&1 || return 0
+    out="$(aicli_gc_agent_generations "$id" "$persist" 0 2>&1 || true)"
+    if [ -n "$out" ]; then
+        log "$out"
+    fi
+    return 0
+}
+
 # ---- op_mount  (from mount_stack.sh) ----------------------------
 op_mount() (
 set -euo pipefail
@@ -62,6 +84,13 @@ source "$_SO_DIR/resolve_paths.sh" 2>/dev/null || true
 
 # Source Phase 4a boot integrity classifier (warn mode -- observation only, no halt)
 source "$_SO_DIR/boot_integrity.sh" 2>/dev/null || true
+
+# Source generation-id helpers (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2, 2026-09-09) —
+# aicli_agent_generation_id, reused from the plugin's own generation activation.
+# Optional dependency, same shape as the sources above: op_mount degrades to
+# Phase-1 behaviour (always the stable, unversioned mount point) if this ever
+# fails to source, rather than half-apply the versioned layout.
+source "$_SO_DIR/../installer/generation.sh" 2>/dev/null || true
 
 log() {
     local msg="[$(get_ts)] [INFO] [MOUNT] $(_trace_tag)$1"
@@ -111,11 +140,33 @@ if [ "$ENTITY_UPPER_MODE" = "zram" ]; then
 fi
 
 # 2. Define mount point
-MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
+if declare -f agent_mount >/dev/null 2>&1; then
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
+    # resolve_paths.sh's agent_mount() (sourced above), falling back to the
+    # literal only if sourcing ever failed.
+    MNT_POINT="$(agent_mount "$ID")"
+else
+    MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
+fi
 [ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
 
-# Remove stale emergency symlink if present (emergency mode leaves a symlink at the mount point)
-[ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
+# Remove a stray/emergency symlink at the mount point (emergency mode can leave
+# one there). SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): a symlink
+# into THIS agent's OWN agent_versions_dir is a LEGITIMATE, already-activated
+# generation, not a stale emergency leftover — stripping it here, before the
+# busy-arbiter further below gets a chance to resolve it via agent_mount_real,
+# would destroy the only record of what is currently live and mounted, making
+# every teardown/reap decision downstream blind (it would see "never mounted"
+# and skip tearing the real thing down, risking a second live overlay). Keep
+# that one shape; still strip anything else, exactly as before Phase 2.
+if [ "$TYPE" = "agent" ] && [ -L "$MNT_POINT" ] && declare -f agent_versions_dir >/dev/null 2>&1; then
+    case "$(readlink "$MNT_POINT" 2>/dev/null)" in
+        .versions/"$ID"/*) : ;;   # Phase 2 generation symlink -- keep
+        *) rm -f "$MNT_POINT" ;;
+    esac
+elif [ -L "$MNT_POINT" ]; then
+    rm -f "$MNT_POINT"
+fi
 mkdir -p "$UPPER_DIR" "$WORK_DIR" "$MNT_POINT"
 
 # Bug #1054: for non-root home overlays, chown the upperdir + workdir + mount
@@ -266,6 +317,114 @@ if [ -n "${_MOUNT_OP_LOCK_FD:-}" ]; then
     flock -w 30 "$_MOUNT_OP_LOCK_FD" || log "mount-op lock wait timed out after 30s — proceeding (possible wedged holder)"
 fi
 
+# ============================================================================
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): decide WHICH generation
+# this call is binding, and where its writable layer lives, BEFORE anything is
+# torn down.
+#
+# Phase 2 computed the generation AFTER the teardown arbiter had already emptied
+# the one place an agent could be mounted, because there was only ever one. The
+# whole point of Phase 3 is that there can now be two, so the order inverts: work
+# out the target first, then tear down only what is genuinely in the way. A
+# generation a live process is still running from is never in the way — it is a
+# different directory, and leaving it mounted is the feature.
+# ============================================================================
+_AGENT_VERSIONED=0
+_AGENT_GEN_ID=""
+_AGENT_STABLE_LINK="$MNT_POINT"
+_TEARDOWN_TARGET="$MNT_POINT"
+
+if [ "$TYPE" = "agent" ] && [ -n "${FILES[0]:-}" ] \
+   && declare -f agent_versioned_mount >/dev/null 2>&1 \
+   && declare -f aicli_agent_generation_id >/dev/null 2>&1; then
+    _AGENT_GEN_ID="$(aicli_agent_generation_id "${FILES[0]}" 2>/dev/null || true)"
+fi
+
+if [ -n "$_AGENT_GEN_ID" ]; then
+    _AGENT_VERSIONED=1
+    _AGENT_TARGET_MOUNT="$(agent_versioned_mount "$ID" "$_AGENT_GEN_ID")"
+    _AGENT_LIVE_REAL="$(agent_mount_real "$ID" 2>/dev/null || echo "$MNT_POINT")"
+
+    # --- Idempotent no-op -----------------------------------------------------
+    # The newest layer set already has its generation bound AND activated. This
+    # is the common case on every workspace launch, and Phase 2 reached it via
+    # the arbiter's "busy -> defer" path, which reported a deferral for a mount
+    # that was in fact perfectly correct. Say so plainly and succeed instead.
+    if mountpoint -q "$_AGENT_TARGET_MOUNT" 2>/dev/null \
+       && [ "$(agent_live_generation "$ID" 2>/dev/null || true)" = "$_AGENT_GEN_ID" ]; then
+        log "Agent $ID is already on generation $_AGENT_GEN_ID (newest layer) — nothing to do."
+        # Back-fill the state record for a generation the Phase 2 code bound.
+        # Those generations predate the record and use the id-keyed writable
+        # layer, so without this the reaper cannot tell which layer belongs to
+        # them and has to leave it on flash for good — about 1 GB across this
+        # box's agents after their first upgrade each. The layer is read out of
+        # /proc/mounts, not derived: for these generations a derived answer would
+        # name the versioned path they do not use. It also makes
+        # agent_generation_upper_is_shared true while this generation is mounted,
+        # which is what stops the reaper ever removing a layer still in service.
+        if ! agent_generation_state_get "$ID" "$_AGENT_GEN_ID" upper >/dev/null 2>&1; then
+            _BOUND_UPPER="$(agent_generation_bound_upper "$ID" "$_AGENT_GEN_ID" 2>/dev/null || true)"
+            if [ -n "$_BOUND_UPPER" ]; then
+                agent_generation_state_set "$ID" "$_AGENT_GEN_ID" upper "$_BOUND_UPPER" 2>/dev/null || true
+                _BOUND_WORK="$(agent_generation_bound_upper "$ID" "$_AGENT_GEN_ID" workdir 2>/dev/null || true)"
+                [ -n "$_BOUND_WORK" ] && agent_generation_state_set "$ID" "$_AGENT_GEN_ID" work "$_BOUND_WORK" 2>/dev/null || true
+                agent_generation_state_set "$ID" "$_AGENT_GEN_ID" adopted_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" 2>/dev/null || true
+                log "Agent $ID: recorded generation $_AGENT_GEN_ID's existing writable layer ($_BOUND_UPPER) so it can be reclaimed when superseded."
+            fi
+        fi
+        # Sweep anyway. This is the path EVERY workspace launch takes once the
+        # newest version is active, and it is the only moment the plugin reliably
+        # revisits an agent after an upgrade. Without it a superseded generation —
+        # a live overlay plus a few hundred megabytes of writable layer — would
+        # survive until the NEXT upgrade of that agent, however long that is,
+        # even though the session holding it ended minutes after the switch.
+        _sweep_agent_generations "$ID" "$PERSIST_PATH"
+        exit 0
+    fi
+
+    # --- What, if anything, has to come down ---------------------------------
+    # Only the location currently behind the stable name, and only when it is
+    # NOT the target. A referenced generation stays exactly where it is; that is
+    # the entire feature. An UNreferenced one is torn down so superseded
+    # generations do not accumulate on a write-endurance-limited stick.
+    _AGENT_OLD_GEN="$(agent_live_generation "$ID" 2>/dev/null || true)"
+    if [ "$_AGENT_LIVE_REAL" = "$_AGENT_TARGET_MOUNT" ]; then
+        # Same generation, not yet mounted (or a half-failed earlier activation):
+        # arbitrate the target itself, exactly as Phase 2 did.
+        _TEARDOWN_TARGET="$_AGENT_TARGET_MOUNT"
+    elif [ -n "$_AGENT_OLD_GEN" ] \
+         && aicli_agent_generation_is_referenced "$ID" "$_AGENT_OLD_GEN" 2>/dev/null; then
+        # SIDE BY SIDE. A live process is running from the old generation, so it
+        # keeps its mount, its lower stack and its own upper, untouched, for as
+        # long as it lives. We bind the new generation next to it and move the
+        # stable name; every NEW session resolves the new one.
+        log "Agent $ID: generation $_AGENT_OLD_GEN is still in use — installing $_AGENT_GEN_ID alongside it (no session closed)."
+        lifecycle_log "info" "mount_stack" "agent_generation_side_by_side" \
+            "{\"id\":\"$ID\",\"previous\":\"$_AGENT_OLD_GEN\",\"target\":\"$_AGENT_GEN_ID\"}" 2>/dev/null || true
+        _TEARDOWN_TARGET="$_AGENT_TARGET_MOUNT"
+    elif [ -L "$_AGENT_STABLE_LINK" ] || [ ! -e "$_AGENT_STABLE_LINK" ]; then
+        # Already on the versioned layout (or nothing there yet) and the old
+        # generation is unreferenced — tear it down now rather than leave it to
+        # the GC sweep, so the overlap window is as short as the facts allow.
+        if [ -n "$_AGENT_OLD_GEN" ] && [ "$_AGENT_OLD_GEN" != "$_AGENT_GEN_ID" ]; then
+            log "Agent $ID: generation $_AGENT_OLD_GEN is unreferenced — releasing it before binding $_AGENT_GEN_ID."
+            if ! _mount_teardown_arbiter "$_AGENT_LIVE_REAL"; then
+                log "Agent $ID: could not release $_AGENT_OLD_GEN cleanly; it stays mounted and the GC sweep will retry."
+            fi
+        fi
+        _TEARDOWN_TARGET="$_AGENT_TARGET_MOUNT"
+    else
+        # A genuinely pre-Phase-2 install: the stable name is still a REAL
+        # mounted directory, so it cannot become a symlink while anything holds
+        # it. Arbitrate it as Phase 1/2 did — busy defers, idle converts.
+        _TEARDOWN_TARGET="$_AGENT_LIVE_REAL"
+    fi
+elif [ "$TYPE" = "agent" ] && declare -f agent_mount_real >/dev/null 2>&1; then
+    # No baked layer yet (fresh install, empty lower stack) — Phase 1/2 shape,
+    # byte-identical: arbitrate whatever the stable name resolves to.
+    _TEARDOWN_TARGET="$(agent_mount_real "$ID")"
+fi
+
 # WP #1309: teardown-before-remount via the busy-arbiter (common.sh), SAFE BY
 # CONSTRUCTION. The old code did `umount … || umount -l … || true` then re-bound
 # the SAME upperdir/workdir — a lazy umount only detaches from the namespace and
@@ -278,24 +437,78 @@ fi
 # `if …; then` so op_mount's `set -e` does NOT fire on the arbiter's non-zero
 # (defer/error) return before we capture it — a bare call would exit the subshell
 # with the arbiter's code and SKIP the defer-reason marker + lifecycle event below.
-if _mount_teardown_arbiter "$MNT_POINT"; then
+if _mount_teardown_arbiter "$_TEARDOWN_TARGET"; then
     _TEARDOWN_RC=0
 else
     _TEARDOWN_RC=$?
 fi
 if [ "$_TEARDOWN_RC" -eq 2 ]; then
-    log "Mount $MNT_POINT is BUSY (live overlay). Deferring lower refresh — upper holds all data; the new lower is picked up on the next idle refresh."
+    log "Mount $_TEARDOWN_TARGET is BUSY (live overlay). Deferring lower refresh — upper holds all data; the new lower is picked up on the next idle refresh."
     _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_refresh_deferred_busy" "mount_busy" \
-        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$MNT_POINT\"}"
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$_TEARDOWN_TARGET\"}"
 elif [ "$_TEARDOWN_RC" -eq 1 ]; then
-    error "Mount $MNT_POINT is busy and NOT a healthy overlay — refusing unsafe remount (would poison copy-up)."
-    lifecycle_log "error" "mount_stack" "mount_stack_busy_phantom" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$MNT_POINT\"}" 2>/dev/null || true
+    error "Mount $_TEARDOWN_TARGET is busy and NOT a healthy overlay — refusing unsafe remount (would poison copy-up)."
+    lifecycle_log "error" "mount_stack" "mount_stack_busy_phantom" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$_TEARDOWN_TARGET\"}" 2>/dev/null || true
     exit 1
 fi
 # _TEARDOWN_RC == 0: released, or was never mounted — safe to bind a fresh overlay.
 
+# --- Bind target + this generation's own writable layer ----------------------
+# Phase 3: each generation gets its OWN upper/work, so two live versions never
+# share a writable layer. The one exception is the one-time migration off the
+# single-version world: when NOTHING of this agent is mounted, the pre-Phase-3
+# shared upper is renamed into this generation's versioned name. A rename is
+# instantaneous and same-filesystem, so the 255-450 MB of un-baked install output
+# measured in these uppers is carried over rather than copied or discarded — and
+# it is only ever attempted when no mount can possibly be holding it.
+if [ "$_AGENT_VERSIONED" = "1" ]; then
+    _GEN_UPPER="$(agent_generation_state_get "$ID" "$_AGENT_GEN_ID" upper 2>/dev/null || true)"
+    _GEN_WORK="$(agent_generation_state_get "$ID" "$_AGENT_GEN_ID" work 2>/dev/null || true)"
+    if [ -n "$_GEN_UPPER" ] && [ -n "$_GEN_WORK" ]; then
+        # This generation has been bound before — reuse the layer it already
+        # owns. Never re-derived: a generation that adopted the legacy path must
+        # keep it, and guessing would either lose its content or point two
+        # generations at one tree.
+        UPPER_DIR="$_GEN_UPPER"
+        WORK_DIR="$_GEN_WORK"
+    else
+        _LEGACY_UPPER="$UPPER_DIR"
+        _LEGACY_WORK="$WORK_DIR"
+        _entity_paths "$TYPE" "$ID" "$PERSIST_PATH" "$_AGENT_GEN_ID"
+        if [ "$(agent_generation_count "$ID")" -eq 0 ] \
+           && ! mountpoint -q "$_AGENT_STABLE_LINK" 2>/dev/null \
+           && [ -d "$_LEGACY_UPPER" ] && [ ! -e "$UPPER_DIR" ]; then
+            if mv -T "$_LEGACY_UPPER" "$UPPER_DIR" 2>/dev/null; then
+                [ -d "$_LEGACY_WORK" ] && { rm -rf "${UPPER_DIR%/*}/.workmigrate.$$" 2>/dev/null; mv -T "$_LEGACY_WORK" "$WORK_DIR" 2>/dev/null || true; }
+                log "Agent $ID: adopted the pre-Phase-3 shared writable layer into generation $_AGENT_GEN_ID."
+                lifecycle_log "info" "mount_stack" "agent_upper_migrated_to_generation" \
+                    "{\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\",\"from\":\"$_LEGACY_UPPER\"}" 2>/dev/null || true
+            else
+                log "Agent $ID: could not adopt the shared writable layer — generation $_AGENT_GEN_ID starts with a fresh one."
+            fi
+        fi
+    fi
+    mkdir -p "$UPPER_DIR" "$WORK_DIR" || { error "Failed to create writable layer for $ID generation $_AGENT_GEN_ID"; exit 1; }
+
+    # MNT_POINT is assigned LAST, and deliberately so: _entity_paths above sets
+    # MNT_POINT as well as the writable layer, so assigning the versioned target
+    # any earlier has it silently reset to the stable path — the overlay then
+    # binds over the stable name, the activation cannot replace a mounted
+    # directory with a symlink, and the agent never reaches the versioned
+    # layout at all. Caught end-to-end on 2026-09-15 rather than by reading.
+    MNT_POINT="$_AGENT_TARGET_MOUNT"
+    mkdir -p "$MNT_POINT" || { error "Failed to create versioned mount dir $MNT_POINT"; exit 1; }
+
+    agent_generation_state_set "$ID" "$_AGENT_GEN_ID" upper "$UPPER_DIR" 2>/dev/null || true
+    agent_generation_state_set "$ID" "$_AGENT_GEN_ID" work  "$WORK_DIR" 2>/dev/null || true
+    agent_generation_state_set "$ID" "$_AGENT_GEN_ID" layer "$(basename -- "${FILES[0]}")" 2>/dev/null || true
+    agent_generation_state_set "$ID" "$_AGENT_GEN_ID" bound_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" 2>/dev/null || true
+fi
 LAYER_COUNT=$(echo "$LOWERS" | tr ':' '\n' | wc -l)
-if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir="$WORK_DIR" "$MNT_POINT"; then
+# Claude Code and other package managers finalize directory caches with rename(2).
+# A directory originating in a SquashFS lower otherwise returns EXDEV; redirect_dir
+# copies up its metadata and preserves the atomic rename contract.
+if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir="$WORK_DIR",redirect_dir=on "$MNT_POINT"; then
     log "Stack mounted at $MNT_POINT (Layers: $LAYER_COUNT)"
     # Any prior busy snapshot is now part of this freshly assembled lower stack
     # and must never be considered replaceable by a later live-session bake.
@@ -304,6 +517,30 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
         rm -f "/tmp/unraid-aicliagents/.bake_busy_snapshot_${TYPE}_${_MOUNT_LOCK_ID}" 2>/dev/null || true
     fi
     lifecycle_log "info" "mount_stack" "mount_stack_assembled" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"layer_count\":$LAYER_COUNT,\"mount_point\":\"$MNT_POINT\"}" 2>/dev/null || true
+    if [ "$_AGENT_VERSIONED" = "1" ]; then
+        # Flip the stable symlink onto the generation we just mounted. Only now
+        # — after `mount` above has already succeeded — so a new session can
+        # never resolve agent_mount to a generation whose overlay isn't live
+        # yet (mirrors aicli_activate_generation never flipping `src` until its
+        # own payload is staged). A failure here is logged, not fatal: the
+        # overlay is correctly mounted either way, just not yet reachable via
+        # the stable name — the next op_mount (idempotent: same content hashes
+        # to the same generation id) retries the flip.
+        if agent_activate_stable_symlink "$ID" "$_AGENT_GEN_ID" "$MNT_POINT"; then
+            lifecycle_log "info" "mount_stack" "agent_generation_activated" \
+                "{\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\"}" 2>/dev/null || true
+            # Phase 3: sweep superseded generations now that the stable name has
+            # moved. Reaps only what NO live process names, so the generation an
+            # older session is still running from survives this call by design
+            # and is collected by a later sweep once that session ends. Runs on
+            # every activation (not only at install time) because a session can
+            # end at any moment and an agent generation costs 100-450 MB of the
+            # writable layer, an order of magnitude more than the plugin's own.
+            _sweep_agent_generations "$ID" "$PERSIST_PATH"
+        else
+            error "Mounted generation $_AGENT_GEN_ID for agent $ID but failed to activate the stable symlink at $_AGENT_STABLE_LINK — will retry on the next mount cycle."
+        fi
+    fi
 else
     error "Failed to mount OverlayFS stack at $MNT_POINT"
     # WP #1084: overlay mount failed — clean up the loop mounts we just made
@@ -317,15 +554,172 @@ else
 fi
 )
 
+# ---- op_stage / op_unstage  (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3) --------
+#
+# op_stage <agent_id> <persist_path>
+#
+# Bind an install-only overlay for ONE agent: the same read-only lower stack the
+# live version is serving from, plus a writable layer of its own, mounted at
+# agent_staging_mount. The installer writes the new version in there and nothing
+# that is running can see it.
+#
+# This is the piece that makes an upgrade stop needing a closed session set. It
+# is deliberately NOT a generation: it has no entry under agent_versions_dir, the
+# stable symlink never points at it, and no session can ever resolve to it. It
+# exists only between "start installing" and "bake what was installed", and
+# op_unstage removes it either way.
+#
+# Prints the staging mount path on stdout (the ONLY thing on stdout) so the
+# caller can hand it to the installer. Exit 0 mounted, 1 could not.
+op_stage() (
+set -euo pipefail
+ID="${1:-}"
+PERSIST_PATH="${2:-}"
+[ -n "$ID" ] && [ -n "$PERSIST_PATH" ] || { echo "Usage: op_stage <agent_id> <persist_path>" >&2; exit 1; }
+
+PLUGIN_ROOT="/usr/local/emhttp/plugins/unraid-aicliagents"
+
+# Source shared storage functions (guard_path, check_disk_space, _entity_paths,
+# _layer_discover_sorted) and the canonical path resolver. Same optional-source
+# shape as op_mount's: resolve_paths.sh carries agent_staging_mount, without
+# which staging cannot be located at all — so that one is required, not optional.
+source "$_SO_DIR/common.sh"
+source "$_SO_DIR/resolve_paths.sh" || { echo "resolve_paths.sh missing — cannot stage" >&2; exit 1; }
+
+
+log()   { local m="[$(get_ts)] [INFO] [STAGE] $(_trace_tag)$1"; echo "$m" >&2; echo "$m" >> "$DEBUG_LOG"; }
+error() { local m="[$(get_ts)] [ERR!] [STAGE] $(_trace_tag)$1"; echo "$m" >&2; echo "$m" >> "$DEBUG_LOG"; }
+
+_assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non-durable filesystem — staging refused"; exit 1; }
+
+STAGE_MNT="$(agent_staging_mount "$ID")"
+STAGE_KEY="$(agent_staging_entity_key "$ID")"
+_entity_paths agent "$STAGE_KEY" "$PERSIST_PATH"
+STAGE_UPPER="$UPPER_DIR"
+STAGE_WORK="$WORK_DIR"
+[ "$ENTITY_UPPER_MODE" = "zram" ] && { bash "$PLUGIN_ROOT/src/scripts/storage/initialize_zram.sh" || { error "ZRAM initialization failed"; exit 1; }; }
+
+# Never inherit a previous, abandoned staging attempt: a half-finished install
+# left in the layer would be baked into the new version as if it belonged there.
+if mountpoint -q "$STAGE_MNT" 2>/dev/null; then
+    umount "$STAGE_MNT" 2>/dev/null || { error "A previous staging mount at $STAGE_MNT is still busy — refusing to stage over it"; exit 1; }
+fi
+guard_path "$STAGE_UPPER" "staging upper" || { error "Refusing to clear an unsafe staging upper path"; exit 1; }
+guard_path "$STAGE_WORK" "staging work" || { error "Refusing to clear an unsafe staging work path"; exit 1; }
+rm -rf "${STAGE_UPPER:?}" "${STAGE_WORK:?}" 2>/dev/null || true
+mkdir -p "$STAGE_UPPER" "$STAGE_WORK" "$STAGE_MNT" || { error "Could not create the staging layer for $ID"; exit 1; }
+
+# The SAME lower stack the live version is serving. A new version installed over
+# the current one is what every previous upgrade produced too — the difference is
+# only that the result now lands in a layer nothing is reading.
+FILES=()
+mapfile -t FILES < <(_layer_discover_sorted "$PERSIST_PATH" "agent" "$ID")
+LOWERS=""
+for sqsh in "${FILES[@]}"; do
+    SQSH_NAME="$(basename "$sqsh" .sqsh)"
+    SQSH_MNT="/tmp/unraid-aicliagents/mnt/$SQSH_NAME"
+    mkdir -p "$SQSH_MNT"
+    if ! mountpoint -q "$SQSH_MNT"; then
+        mount -o loop,ro "$sqsh" "$SQSH_MNT" || { error "Failed to mount lower layer $sqsh"; exit 1; }
+    fi
+    [ -n "$LOWERS" ] && LOWERS="$LOWERS:"
+    LOWERS="$LOWERS$SQSH_MNT"
+done
+if [ -z "$LOWERS" ]; then
+    # A first-ever install has nothing to stack on. An empty lower is correct
+    # here and needs none of op_mount's boot-integrity classification: this
+    # overlay is not, and never becomes, the agent's data.
+    LOWERS="/tmp/unraid-aicliagents/mnt/empty"
+    mkdir -p "$LOWERS"
+fi
+
+if ! mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$STAGE_UPPER",workdir="$STAGE_WORK",redirect_dir=on "$STAGE_MNT"; then
+    error "Failed to mount the staging overlay at $STAGE_MNT"
+    exit 1
+fi
+log "Staged $ID for install at $STAGE_MNT (writable layer: $STAGE_UPPER)"
+lifecycle_log "info" "stage" "agent_install_staged" \
+    "{\"id\":\"$ID\",\"mount\":\"$STAGE_MNT\",\"upper\":\"$STAGE_UPPER\",\"layers\":${#FILES[@]}}" 2>/dev/null || true
+printf '%s\n' "$STAGE_MNT"
+)
+
+# op_unstage <agent_id> <persist_path> [keep_upper]
+#
+# Tear the staging overlay down. With keep_upper=1 the writable layer is left on
+# disk for the caller to bake; otherwise it is removed too. Safe to call when
+# nothing is staged — that is a clean no-op, because the install failure path
+# calls it unconditionally.
+op_unstage() (
+set -euo pipefail
+ID="${1:-}"
+PERSIST_PATH="${2:-}"
+KEEP_UPPER="${3:-0}"
+[ -n "$ID" ] && [ -n "$PERSIST_PATH" ] || { echo "Usage: op_unstage <agent_id> <persist_path> [keep_upper]" >&2; exit 1; }
+
+PLUGIN_ROOT="/usr/local/emhttp/plugins/unraid-aicliagents"
+
+# Source shared storage functions (guard_path, check_disk_space, _entity_paths,
+# _layer_discover_sorted) and the canonical path resolver. Same optional-source
+# shape as op_mount's: resolve_paths.sh carries agent_staging_mount, without
+# which staging cannot be located at all — so that one is required, not optional.
+source "$_SO_DIR/common.sh"
+source "$_SO_DIR/resolve_paths.sh" || { echo "resolve_paths.sh missing — cannot stage" >&2; exit 1; }
+
+
+log() { local m="[$(get_ts)] [INFO] [STAGE] $(_trace_tag)$1"; echo "$m" >&2; echo "$m" >> "$DEBUG_LOG"; }
+
+STAGE_MNT="$(agent_staging_mount "$ID")"
+STAGE_KEY="$(agent_staging_entity_key "$ID")"
+_entity_paths agent "$STAGE_KEY" "$PERSIST_PATH"
+
+if mountpoint -q "$STAGE_MNT" 2>/dev/null; then
+    # REAL umount only. A lazy detach would return success while the kernel still
+    # held the layer, and the rm below would then race it — the copy-up poison
+    # WP #1309 already paid for once.
+    if ! umount "$STAGE_MNT" 2>/dev/null; then
+        log "Staging mount $STAGE_MNT is still busy — leaving it for the next sweep."
+        exit 2
+    fi
+fi
+rmdir "$STAGE_MNT" 2>/dev/null || true
+
+if [ "$KEEP_UPPER" != "1" ]; then
+    if guard_path "$UPPER_DIR" "staging upper" && guard_path "$WORK_DIR" "staging work"; then
+        rm -rf "${UPPER_DIR:?}" "${WORK_DIR:?}" 2>/dev/null || true
+    fi
+    lifecycle_log "info" "stage" "agent_install_unstaged" "{\"id\":\"$ID\"}" 2>/dev/null || true
+fi
+exit 0
+)
+
+# agent_staging_upper <agent_id> <persist_path>
+# Echo the staging writable layer's path — the thing op_bake is asked to bake
+# once an install into the staging mount has succeeded.
+agent_staging_upper() {
+    local id="${1:-}" persist="${2:-}"
+    declare -f _entity_paths >/dev/null 2>&1 || source "$_SO_DIR/common.sh"
+    declare -f agent_staging_entity_key >/dev/null 2>&1 || source "$_SO_DIR/resolve_paths.sh"
+    _entity_paths agent "$(agent_staging_entity_key "$id")" "$persist"
+    printf '%s\n' "$UPPER_DIR"
+}
+
 # ---- op_bake  (from commit_stack.sh) ----------------------------
 op_bake() (
 set -euo pipefail
 # AICliAgents: Persistence Bake (ZRAM -> SquashFS)
-# Usage: commit_stack.sh <type: agent|home> <id> <persistence_path>
+# Usage: op_bake <type: agent|home> <id> <persistence_path> [upper_override]
+#
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): the optional 4th argument
+# names the writable layer to bake, instead of the one the entity is currently
+# serving from. It exists for exactly one caller — capturing what an install
+# wrote into its own staging layer (op_stage) — and it changes two things: the
+# layer that gets baked, and the fact that the post-bake trim is skipped, because
+# the caller, not this function, owns that layer's lifetime.
 
 TYPE="${1:-}"
 ID="${2:-}"
 PERSIST_PATH="${3:-}"
+_UPPER_OVERRIDE="${4:-}"
 
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$_SO_DIR/common.sh"
@@ -348,7 +742,13 @@ source "$_SO_DIR/atomic_write_layer.sh" 2>/dev/null || {
 
 # #342: derive UPPER_DIR from persistence fstype (vfat→ZRAM, else→disk direct).
 # Must match the logic in mount_stack.sh so we bake from the correct upper layer.
-_entity_paths "$TYPE" "$ID" "$PERSIST_PATH"   # sets UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE
+_entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"   # sets UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE  # Phase 3: the LIVE generation's layer, not the id-keyed one
+if [ -n "$_UPPER_OVERRIDE" ]; then
+    UPPER_DIR="$_UPPER_OVERRIDE"
+    # An overridden layer belongs to no generation, so the post-bake trim must
+    # never run against it: ENTITY_GENERATION is what that decision reads.
+    ENTITY_GENERATION=""
+fi
 
 # Bug #716: per-entity bake flock — serialise concurrent bakes of the same entity.
 # All bake paths (InstallerService::commitChanges, supervisor _op_bake,
@@ -607,7 +1007,14 @@ else
 fi
 
 # 3. Check if ZRAM can be safely flushed
-MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
+if declare -f agent_mount >/dev/null 2>&1; then
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
+    # resolve_paths.sh's agent_mount() (sourced above), falling back to the
+    # literal only if sourcing ever failed.
+    MNT_POINT="$(agent_mount "$ID")"
+else
+    MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
+fi
 [ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
 
 log "Checking for active sessions on $MNT_POINT..."
@@ -716,26 +1123,66 @@ if [ "$_REFRESH_RC" -ne 0 ]; then
     exit "$_REFRESH_RC"
 fi
 
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15) — THE ONE RULE THAT MUST
+# NOT BE GOT WRONG.
+#
+# Everything below reclaims bytes from UPPER_DIR on the strength of one
+# invariant: the mount that reads this upper has just been refreshed, so every
+# file removed here falls through to the new lower and the merged view does not
+# change. Side by side breaks that invariant for exactly one case. When the
+# refresh above bound a NEW generation, it did not touch the generation this
+# bake read its upper from — that generation is still mounted, still serving a
+# live session, and its own lower stack does NOT contain the layer just baked.
+# Trimming its upper would delete files out from under a running agent with
+# nothing underneath to fall through to.
+#
+# So: trim only when the generation that owns this upper is still the live one.
+# Otherwise leave it entirely alone — the whole upper is reclaimed in one go
+# when that generation is reaped, which cannot happen until nothing references
+# it any more.
+_SKIP_UPPER_TRIM=0
+if [ -n "$_UPPER_OVERRIDE" ]; then
+    # A staging layer: its whole point is to be captured once and then removed
+    # by the caller. Trimming it here would be work done twice, against a layer
+    # this function does not own.
+    _SKIP_UPPER_TRIM=1
+    rm -f "$MARKER" "$_BAKE_MANIFEST" 2>/dev/null || true
+elif [ "$TYPE" = "agent" ] && [ -n "${ENTITY_GENERATION:-}" ] \
+   && declare -f agent_live_generation >/dev/null 2>&1; then
+    _LIVE_GEN_NOW="$(agent_live_generation "$ID" 2>/dev/null || true)"
+    if [ "$_LIVE_GEN_NOW" != "$ENTITY_GENERATION" ]; then
+        _SKIP_UPPER_TRIM=1
+        log "Generation $ENTITY_GENERATION was superseded by ${_LIVE_GEN_NOW:-none} during this bake — leaving its writable layer intact (a session is still running from it)."
+        lifecycle_log "info" "commit_stack" "upper_trim_skipped_superseded_generation" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"baked_generation\":\"$ENTITY_GENERATION\",\"live_generation\":\"${_LIVE_GEN_NOW:-}\"}" 2>/dev/null || true
+        rm -f "$MARKER" "$_BAKE_MANIFEST" 2>/dev/null || true
+    fi
+fi
+
 # WP #935: Selective UPPER cleanup — now safe to run because the refresh above
 # exposed the new lower. Per-file: a file is wiped only if (a) its mtime is not
 # newer than the marker AND (b) no process holds an open write fd to it. Bytes
 # that satisfy the invariant are reclaimed; the rest stay in ZRAM safely.
-log "Performing selective ZRAM cleanup (per-file mtime + open-fd + bake-confirmed invariant)..."
-# WP #1277: build the confirmed-baked manifest of ABSOLUTE upper paths from the
-# writer's relative file list, then pass it as the third arg so the reclaim only
-# wipes files PROVEN in this layer. The manifest is passed UNCONDITIONALLY (even
-# if empty) — never fall back to the legacy candidates−excludes wipe, which is
-# the aggressive behaviour that risked loss. An empty manifest => wipe nothing
-# (the upper is simply not trimmed this cycle; a later bake reclaims it).
-CONFIRMED_MANIFEST="${_BAKE_MANIFEST}.abs"
-: > "$CONFIRMED_MANIFEST"
-if [ -s "$_BAKE_MANIFEST" ]; then
-    while IFS= read -r _rel; do
-        [ -n "$_rel" ] && printf '%s\n' "$UPPER_DIR/$_rel"
-    done < "$_BAKE_MANIFEST" >> "$CONFIRMED_MANIFEST"
+if [ "$_SKIP_UPPER_TRIM" = "0" ]; then
+    log "Performing selective ZRAM cleanup (per-file mtime + open-fd + bake-confirmed invariant)..."
+    # WP #1277: build the confirmed-baked manifest of ABSOLUTE upper paths from the
+    # writer's relative file list, then pass it as the third arg so the reclaim only
+    # wipes files PROVEN in this layer. The manifest is passed UNCONDITIONALLY (even
+    # if empty) — never fall back to the legacy candidates−excludes wipe, which is
+    # the aggressive behaviour that risked loss. An empty manifest => wipe nothing
+    # (the upper is simply not trimmed this cycle; a later bake reclaims it).
+    CONFIRMED_MANIFEST="${_BAKE_MANIFEST}.abs"
+    : > "$CONFIRMED_MANIFEST"
+    if [ -s "$_BAKE_MANIFEST" ]; then
+        while IFS= read -r _rel; do
+            [ -n "$_rel" ] && printf '%s\n' "$UPPER_DIR/$_rel"
+        done < "$_BAKE_MANIFEST" >> "$CONFIRMED_MANIFEST"
+    fi
+    CLEANUP_JSON=$(selective_upper_cleanup "$UPPER_DIR" "$MARKER" "$CONFIRMED_MANIFEST")
+    rm -f "$MARKER" "$_BAKE_MANIFEST" "$CONFIRMED_MANIFEST" 2>/dev/null || true
+else
+    CLEANUP_JSON='{"skipped":"superseded_generation"}'
 fi
-CLEANUP_JSON=$(selective_upper_cleanup "$UPPER_DIR" "$MARKER" "$CONFIRMED_MANIFEST")
-rm -f "$MARKER" "$_BAKE_MANIFEST" "$CONFIRMED_MANIFEST" 2>/dev/null || true
 # Idle reclaim succeeded — the upper is trimmed, so clear any busy-bake cooldown
 # left over from a prior in-session bake. The next session starts fresh.
 [ "$TYPE" = "home" ] && rm -f "/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
@@ -764,7 +1211,20 @@ set -euo pipefail
 TYPE="${1:-}"
 ID="${2:-}"
 PERSIST_PATH="${3:-}"
-MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
+
+# Source canonical path resolver (Phase 1 — Storage Durability Supervisor).
+# Moved ahead of the MNT_POINT derivation below (SIDE_BY_SIDE_AGENT_INSTALLS.md
+# Phase 1, 2026-09-09) so agent_mount() is actually available by the time it's
+# needed here; this is a subshell function (note the outer `(` `)`), so a
+# source further down in the SAME function still would not leak in from any
+# earlier op_* call — each op_* function must source it for itself.
+source "$_SO_DIR/resolve_paths.sh" 2>/dev/null || true
+
+if declare -f agent_mount >/dev/null 2>&1; then
+    MNT_POINT="$(agent_mount "$ID")"
+else
+    MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
+fi
 
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$_SO_DIR/common.sh"
@@ -772,9 +1232,6 @@ source "$_SO_DIR/common.sh"
 # WP #922: snapshot debug.log to Flash on non-zero exit. Survives /tmp rotation
 # so the next investigator has actual evidence. Skips on exit 2 (deferred).
 install_failure_trap "$TYPE" "$ID" "consolidate_layers"
-
-# Source canonical path resolver and lifecycle log writer (Phase 1)
-source "$_SO_DIR/resolve_paths.sh" 2>/dev/null || true
 
 # F6 (WP#1331): the SINGLE manifest writer (replaces the inline php -r replaceLayers).
 source "$_SO_DIR/manifest_write.sh" 2>/dev/null || true
@@ -789,7 +1246,7 @@ source "$_SO_DIR/atomic_write_layer.sh" 2>/dev/null || {
 TASK_STATUS_FILE="/tmp/unraid-aicliagents/task-status-$ID"
 
 # #342: derive UPPER_DIR from persistence fstype — must match mount_stack.sh.
-_entity_paths "$TYPE" "$ID" "$PERSIST_PATH"   # sets UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE
+_entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"   # sets UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE  # Phase 3: the LIVE generation's layer, not the id-keyed one
 
 log() {
     local msg="[$(get_ts)] [INFO] [CONSOLIDATE] $(_trace_tag)$1"
@@ -914,7 +1371,18 @@ fi
 # check trips it too — a benign deferral (retry picks up the new layer), never a
 # loss, mirroring the bake-landed-during-consolidate guard further down.
 _DISCOVERED_COUNT=$(_layer_discover_sorted "$PERSIST_PATH" "$TYPE" "$ID" | awk 'NF{c++}END{print c+0}')
-_MOUNTED_COUNT=$(_mounted_lower_count "$MNT_POINT")
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): _mounted_lower_count reads
+# /proc/mounts, which records the kernel's REAL mount target -- never the stable
+# agent_mount symlink once an agent is migrated. Resolve through agent_mount_real
+# first so this WP #1278 completeness check keeps seeing the true lowerdir count
+# instead of reading 0 and deferring every consolidate forever (fail-safe, but
+# not correct -- a genuinely stale/short mount would look identical, and the two
+# must stay distinguishable). No-op for home and for a not-yet-migrated agent.
+_MOUNT_POINT_REAL="$MNT_POINT"
+if [ "$TYPE" = "agent" ] && declare -f agent_mount_real >/dev/null 2>&1; then
+    _MOUNT_POINT_REAL="$(agent_mount_real "$ID")"
+fi
+_MOUNTED_COUNT=$(_mounted_lower_count "$_MOUNT_POINT_REAL")
 case "$_MOUNTED_COUNT" in ''|*[!0-9]*) _MOUNTED_COUNT=0 ;; esac
 if [ "$_DISCOVERED_COUNT" -ge 1 ] && [ "$_MOUNTED_COUNT" -ne "$_DISCOVERED_COUNT" ]; then
     error "WP #1278: mounted lowerdir count ($_MOUNTED_COUNT) != on-disk layer count ($_DISCOVERED_COUNT) after refresh — refusing to consolidate from an incomplete view (would risk deleting un-captured deltas). Deferring."
@@ -1251,7 +1719,18 @@ for old_layer in "${OLD_LAYERS[@]}"; do
     [ -f "$old_layer" ] || continue
     # Belt-and-braces: never delete the new consolidated file
     [ "$(basename "$old_layer")" = "$FINAL_NAME" ] && continue
+    # GitHub #13: unmount this layer's loop mount BEFORE removing its backing
+    # file. The manifest already points only at $FINAL_NAME, and this consolidate
+    # rebuilds the overlay from a different lower set, so nothing will ever
+    # remount this squashfs again. Left mounted, its deleted-backing-file loop
+    # looks like the benign "deleted-but-open" case the supervisor's reaper
+    # skips for a bake (Feature #1382) — but here it is a permanent orphan.
+    _old_layer_mnt="/tmp/unraid-aicliagents/mnt/$(basename "$old_layer" .sqsh)"
+    if mountpoint -q "$_old_layer_mnt" 2>/dev/null; then
+        umount "$_old_layer_mnt" 2>/dev/null || umount -l "$_old_layer_mnt" 2>/dev/null || true
+    fi
     rm -f "$old_layer"
+    rmdir "$_old_layer_mnt" 2>/dev/null || true
     lifecycle_log "info" "consolidate_layers" "old_layer_removed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"file\":\"$(basename "$old_layer")\"}" 2>/dev/null || true
     log "Removed old layer: $(basename "$old_layer")"
     # L3.5 (Follow-on 4): mid-delete — at least one old layer pruned, intent present,
@@ -1403,7 +1882,7 @@ _GR_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
 # Clear any stale defer-reason marker so the reason PHP reads is THIS run's truth.
 rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
 
-_entity_paths "$TYPE" "$ID" "$PERSIST_PATH"   # UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE
+_entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"   # UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE  # Phase 3: the LIVE generation's layer, not the id-keyed one
 
 # _gr_precondition_refuse <reason> — marker + lifecycle + exit 4 (precondition).
 _gr_precondition_refuse() {
@@ -1621,7 +2100,16 @@ log "Graduation complete: $TYPE/$ID is now passthrough at $_GR_PT_DIR ($_GR_SRC_
 # mounts) and bind the plain dir at the entity's normal mount point — the same
 # bind _pt_mount performs. A busy/phantom mount is left alone: the graduation
 # is durable, and the next normal mount routes through the passthrough guard.
-if _mount_teardown_arbiter "$MNT_POINT"; then _GR_TD=0; else _GR_TD=$?; fi
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): tear down whatever the
+# stable name REALLY resolves to (agent_mount_real) -- $MNT_POINT may still be
+# the stable symlink here, and /proc/mounts (which the arbiter's busy re-check
+# reads) never shows that name once an agent is migrated. No-op for home / a
+# not-yet-migrated agent, same as every other arbiter call site touched here.
+_GR_TEARDOWN_TARGET="$MNT_POINT"
+if [ "$TYPE" = "agent" ] && declare -f agent_mount_real >/dev/null 2>&1; then
+    _GR_TEARDOWN_TARGET="$(agent_mount_real "$ID")"
+fi
+if _mount_teardown_arbiter "$_GR_TEARDOWN_TARGET"; then _GR_TD=0; else _GR_TD=$?; fi
 if [ "$_GR_TD" -eq 0 ]; then
     # Lift this entity's now-orphaned layer loop mounts.
     for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do

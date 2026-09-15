@@ -30,11 +30,26 @@ class UtilityHandler {
                 $_POST['name'] ?? $_GET['name'] ?? ''
             );
             case 'check_path':       return self::checkPath();
-            case 'upload_chunk':     return self::uploadChunk();
-            case 'save_file':        return self::saveFile();
+            case 'save_file':        return self::saveFile(
+                $_POST['path'] ?? '',
+                $_POST['filename'] ?? '',
+                $_POST['filedata'] ?? '',
+                filter_var($_POST['secret'] ?? false, FILTER_VALIDATE_BOOLEAN)
+            );
+            case 'save_file_chunk':  return self::saveFileChunk(
+                $_POST['path'] ?? '',
+                $_POST['filename'] ?? '',
+                $_POST['filedata'] ?? '',
+                (string)($_POST['uploadId'] ?? ''),
+                (int)($_POST['chunkIndex'] ?? -1),
+                (int)($_POST['totalChunks'] ?? 0),
+                filter_var($_POST['secret'] ?? false, FILTER_VALIDATE_BOOLEAN)
+            );
+            case 'get_upload_limits': return self::getUploadLimits();
             case 'save_pasted_image': return self::savePastedImage();
             case 'perf_log':          return self::perfLog();
             case 'log_client_error':  return self::clientError();
+            case 'get_secrets_dir':   return self::getSecretsDir();
             default:                  return null;
         }
     }
@@ -42,7 +57,33 @@ class UtilityHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'get_env', 'save_env',
-                'filetree', 'list_dir', 'create_dir', 'check_path', 'upload_chunk', 'save_file', 'save_pasted_image', 'perf_log', 'log_client_error'];
+                'filetree', 'list_dir', 'create_dir', 'check_path', 'save_file', 'save_file_chunk',
+                'get_upload_limits', 'save_pasted_image', 'perf_log', 'log_client_error', 'get_secrets_dir'];
+    }
+
+    /**
+     * docs/specs/FILE_VIEWER_SECRET_DROP.md R1/R5 — resolve (and, on first
+     * use, create) the current workspace user's `.claude/secrets/` directory.
+     * The user is the plugin's configured session user (the same one
+     * ConfigService::getUserStatePath() and the launch path use), never a
+     * value from the request. A missing home mount (array stopped / an
+     * emergency session) is reported as `exists:false` — no directory is
+     * fabricated under a phantom mount, and the client tells the operator
+     * and does nothing further.
+     */
+    private static function getSecretsDir() {
+        $config = \AICliAgents\Services\ConfigService::getConfig();
+        $user = (string)($config['user'] ?? 'root');
+        if ($user === '') $user = 'root';
+        $dir = \AICliAgents\Services\SecretPaths::ensureSecretsDir($user);
+        $exists = $dir !== '' && is_dir($dir);
+        $normalised = $exists ? \AICliAgents\Services\SecretPaths::normaliseModes($dir) : 0;
+        return [
+            'status'     => 'ok',
+            'path'       => $exists ? $dir : \AICliAgents\Services\SecretPaths::secretsDirForUser($user),
+            'exists'     => $exists,
+            'normalised' => $normalised,
+        ];
     }
 
     /**
@@ -120,6 +161,15 @@ class UtilityHandler {
 
     private static function save() {
         saveAICliConfig($_POST);
+        // HOME_BACKUP.md R1: the Storage tab's Home backup card posts its six
+        // backup_* fields through this same generic settings-save action (the
+        // form the whole Manager page shares, ManagerLayout.php). Only resync
+        // the cron when a backup field was actually submitted, so an ordinary
+        // save (e.g. a theme change) never rewrites a root-owned cron file for
+        // no reason.
+        if (array_key_exists('backup_schedule', $_POST)) {
+            \AICliAgents\Services\BackupCronService::sync(getAICliConfig());
+        }
         return ['status' => 'ok'];
     }
 
@@ -199,26 +249,62 @@ class UtilityHandler {
 
     private static function saveWorkspaces() {
         $data = json_decode($_POST['workspaces'] ?? '[]', true);
+        $removedIds = json_decode($_POST['removed_ids'] ?? '[]', true);
         if (is_array($data)) {
-            aicli_save_workspaces($data);
-            return ['status' => 'ok'];
+            if (!aicli_save_workspaces($data, is_array($removedIds) ? $removedIds : [])) {
+                return ['status' => 'error', 'message' => \AICliAgents\Services\ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save workspace state'];
+            }
+            // #137: a closed (removed) workspace must not linger as a ghost Relay
+            // contact — sweep its non-owner relay traces on close.
+            if (is_array($removedIds)) {
+                foreach ($removedIds as $rid) {
+                    if (is_string($rid) && $rid !== '') \AICliAgents\Services\AgentRelayService::forgetSessionRelayTraces($rid);
+                }
+            }
+            // PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md: subscriptions and cursors
+            // die with the workspace, the same rule #137 already applies to Relay
+            // traces above. Pass every still-live workspace id (not just the ones
+            // just removed) so a subscription orphaned by any other path — a crash,
+            // a Tier 3 delete — is swept here too the next time anyone saves.
+            if (class_exists('\\AICliAgents\\Services\\EventSubscriptionStore')) {
+                try {
+                    $liveIds = array_column(aicli_get_workspaces()['sessions'] ?? [], 'id');
+                    \AICliAgents\Services\EventSubscriptionStore::reapStale($liveIds);
+                } catch (\Throwable $e) {
+                    // Best-effort — a sweep failure must not affect the save that already succeeded.
+                }
+            }
+            // #128: a recreated workspace gets a new id; re-adopt topic ownership by
+            // identity so the owner regains its topic the moment the drawer is saved.
+            \AICliAgents\Services\AgentRelayService::reAdoptOwnersByIdentity();
+            // Return the authoritative registry. In particular this restores a
+            // Relay-managed actor immediately if an old drawer tried to close it.
+            return ['status' => 'ok', 'workspaces' => aicli_get_workspaces()];
         }
         return ['status' => 'error', 'message' => 'Invalid Workspace data'];
     }
 
     private static function getEnv() {
         $path = $_GET['path'] ?? '';
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
         if (empty($path)) {
             return ['status' => 'error', 'message' => 'Workspace path is required'];
         }
+        // This one REFUSES rather than degrades: an empty env map would read as
+        // "nothing is set", and the editor could then save that emptiness over the
+        // user's real values. The env editor always knows its agent, so an
+        // unresolved agent here is a caller fault worth surfacing.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)($_GET['id'] ?? ''), (string)($_GET['path'] ?? ''));
+        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('get_env', (string)($_GET['id'] ?? ''), (string)($_GET['path'] ?? ''));
         $envs = \AICliAgents\Services\ConfigService::getWorkspaceEnvs($path, $agentId);
         return ['status' => 'ok', 'envs' => $envs];
     }
 
     private static function saveEnv() {
         $path = $_POST['path'] ?? $_GET['path'] ?? '';
-        $agentId = $_POST['agentId'] ?? $_GET['agentId'] ?? 'gemini-cli';
+        // Never default the agent: this WRITES env vars, and defaulting saved
+        // them into a different agent's file where they silently never applied.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_POST['agentId'] ?? $_GET['agentId'] ?? null, (string)($_POST['id'] ?? $_GET['id'] ?? ''), (string)($_POST['path'] ?? $_GET['path'] ?? ''));
+        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('save_env', (string)($_POST['id'] ?? $_GET['id'] ?? ''), (string)($_POST['path'] ?? $_GET['path'] ?? ''));
         $envs = json_decode($_POST['envs'] ?? $_GET['envs'] ?? '{}', true);
         if (empty($path)) {
             return ['status' => 'error', 'message' => 'Workspace path is required'];
@@ -276,7 +362,15 @@ class UtilityHandler {
                 }
             }
         }
-        return ['status' => 'ok', 'path' => $path, 'items' => $items];
+        $response = ['status' => 'ok', 'path' => $path, 'items' => $items];
+        // FILE_VIEWER_SECRET_DROP.md R3: a listing of the secrets directory
+        // fixes any loose (e.g. 0775) modes it finds on existing files and
+        // reports how many — the files themselves never appear in $items
+        // (they are not directories), only the count is surfaced.
+        if (\AICliAgents\Services\SecretPaths::isSecretDir($path)) {
+            $response['normalised'] = \AICliAgents\Services\SecretPaths::normaliseModes($path);
+        }
+        return $response;
     }
 
     /**
@@ -328,61 +422,6 @@ class UtilityHandler {
         return ['status' => 'ok', 'path' => $created];
     }
 
-    private static function uploadChunk() {
-        $rawPath = $_POST['path'] ?? '';
-        $rawFilename = $_POST['filename'] ?? '';
-        $chunkIndex = (int)($_POST['chunkIndex'] ?? 0);
-        $totalChunks = (int)($_POST['totalChunks'] ?? 1);
-        $chunk = $_FILES['chunk'] ?? null;
-
-        aicli_log("[Upload] Chunk $chunkIndex/$totalChunks for '$rawFilename' to '$rawPath'" .
-                  ($chunk ? " (size: " . ($chunk['size'] ?? '?') . ", error: " . ($chunk['error'] ?? '?') . ")" : " (NO FILE DATA)"),
-                  AICLI_LOG_DEBUG, "UtilityHandler");
-
-        $targetPath = ValidationService::validatePath($rawPath);
-        $filename = ValidationService::sanitizeFilename($rawFilename);
-
-        if (!$chunk) {
-            aicli_log("[Upload] REJECTED: No chunk file in \$_FILES. Keys: " . implode(',', array_keys($_FILES)), AICLI_LOG_ERROR, "UtilityHandler");
-            return ['status' => 'error', 'message' => 'No file data received. Check upload_max_filesize in PHP.'];
-        }
-        if ($chunk['error'] !== UPLOAD_ERR_OK) {
-            $errors = [1=>'upload_max_filesize exceeded', 2=>'MAX_FILE_SIZE exceeded', 3=>'Partial upload', 4=>'No file uploaded', 6=>'Missing temp dir', 7=>'Disk write failed'];
-            $errMsg = $errors[$chunk['error']] ?? "Unknown error code {$chunk['error']}";
-            aicli_log("[Upload] REJECTED: PHP upload error: $errMsg", AICLI_LOG_ERROR, "UtilityHandler");
-            return ['status' => 'error', 'message' => "PHP upload error: $errMsg"];
-        }
-        if ($targetPath === false) {
-            aicli_log("[Upload] REJECTED: Path validation failed for '$rawPath'", AICLI_LOG_ERROR, "UtilityHandler");
-            return ['status' => 'error', 'message' => 'Path validation failed: ' . $rawPath];
-        }
-        if (empty($filename)) {
-            aicli_log("[Upload] REJECTED: Filename empty after sanitization (raw: '$rawFilename')", AICLI_LOG_ERROR, "UtilityHandler");
-            return ['status' => 'error', 'message' => 'Invalid filename'];
-        }
-
-        if (!\AICliAgents\Services\StorageMountService::isBackingMountAvailable($targetPath)) {
-            return ['status' => 'error', 'message' => 'Target storage is not mounted'];
-        }
-
-        if (!is_dir($targetPath)) @mkdir($targetPath, 0755, true);
-        $dest = rtrim($targetPath, '/') . '/' . $filename;
-        $mode = ($chunkIndex == 0) ? 'wb' : 'ab';
-        $fp = fopen($dest, $mode);
-        if ($fp) {
-            $bytes = fwrite($fp, file_get_contents($chunk['tmp_name']));
-            fclose($fp);
-            aicli_log("[Upload] Chunk $chunkIndex written: $bytes bytes to $dest (mode: $mode)", AICLI_LOG_DEBUG, "UtilityHandler");
-            if ($chunkIndex + 1 >= $totalChunks) {
-                $finalSize = filesize($dest);
-                aicli_log("[Upload] Complete: $filename ($finalSize bytes) saved to $targetPath", AICLI_LOG_INFO, "UtilityHandler");
-            }
-            return ['status' => 'ok'];
-        }
-        aicli_log("[Upload] FAILED: Could not open $dest for writing", AICLI_LOG_ERROR, "UtilityHandler");
-        return ['status' => 'error', 'message' => 'Failed to write to ' . $dest];
-    }
-
     /**
      * #40 (docs/specs/TMUX_PATH_LINKS.md): read-only existence check for a
      * terminal path-link candidate. The path rides in the POST body (never the
@@ -395,9 +434,22 @@ class UtilityHandler {
         if (!is_string($rawPath) || $rawPath === '' || strlen($rawPath) > 4096) {
             return ['status' => 'error', 'message' => 'Missing or invalid path'];
         }
+        $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
         $resolved = ValidationService::validatePath($rawPath);
         if ($resolved === false) {
-            return ['status' => 'ok', 'exists' => false, 'isFile' => false, 'path' => ''];
+            // A REFUSED location is not a missing file, and the caller must be able to
+            // say so. Both used to answer exists:false, so the UI reported "File not
+            // found: /tmp/x.md" about a file plainly sitting there — sending the
+            // operator to hunt for a typo instead of telling them the location is
+            // outside the allowlist. The allowlist itself does not move; only the
+            // wording does. Spec: docs/specs/TERMINAL_URL_LINKS.md
+            return [
+                'status' => 'ok',
+                'exists' => false,
+                'isFile' => false,
+                'path'   => '',
+                'reason' => 'outside_allowed_bases',
+            ];
         }
         $exists = file_exists($resolved);
         return [
@@ -405,19 +457,31 @@ class UtilityHandler {
             'exists' => $exists,
             'isFile' => $exists && is_file($resolved),
             'path'   => $exists ? $resolved : '',
+            'reason' => $exists ? '' : 'not_found',
         ];
     }
 
     /**
      * D-405: Save a file from base64-encoded POST data (avoids multipart which hangs on Unraid nginx).
+     *
+     * docs/specs/FILE_VIEWER_SECRET_DROP.md R3: a save is treated as a SECRET
+     * write when the caller sets $secretFlag (the "New secret file" client
+     * flow) OR the resolved target directory is itself a secrets path
+     * (SecretPaths::isSecretDir) — the second check is defense in depth, so
+     * overwriting an existing secret file through the normal editor Save
+     * button is covered even without the flag. For a secret write: the
+     * directory is created 0700 (never 0777), the "make writable" fallback
+     * never loosens it to 0777, and the file is chmod'd 0600 immediately
+     * after the atomic write lands.
+     *
+     * Public + explicit-args so it has the same test seam as
+     * createDirectory() above; production callers still just pass the
+     * $_POST values (see the `save_file` case in handle()).
      */
-    private static function saveFile() {
-        $rawPath = $_POST['path'] ?? '';
-        $rawFilename = $_POST['filename'] ?? '';
-        $b64data = $_POST['filedata'] ?? '';
+    public static function saveFile($rawPath, $rawFilename, $b64data, bool $secretFlag = false) {
+        aicli_log("[Upload/SaveFile] Received: '$rawFilename' to '$rawPath' (" . strlen((string)$b64data) . " b64 chars)", AICLI_LOG_DEBUG, "UtilityHandler");
 
-        aicli_log("[Upload/SaveFile] Received: '$rawFilename' to '$rawPath' (" . strlen($b64data) . " b64 chars)", AICLI_LOG_DEBUG, "UtilityHandler");
-
+        $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
         $targetPath = ValidationService::validatePath($rawPath);
         $filename = ValidationService::sanitizeFilename($rawFilename);
 
@@ -444,12 +508,16 @@ class UtilityHandler {
             return ['status' => 'error', 'message' => 'Invalid base64 data'];
         }
 
-        if (!is_dir($targetPath)) @mkdir($targetPath, 0777, true);
+        $isSecret = $secretFlag || \AICliAgents\Services\SecretPaths::isSecretDir($targetPath);
+
+        if (!is_dir($targetPath)) @mkdir($targetPath, $isSecret ? 0700 : 0777, true);
         // Ensure writable — user share dirs created by root (mode 755) may be
         // unwritable for the nobody:users PHP process. chmod is a best-effort
         // attempt; if the caller is nobody and doesn't own the dir it silently
-        // no-ops, but for world-writable shares it works.
-        if (!is_writable($targetPath)) @chmod($targetPath, 0777);
+        // no-ops, but for world-writable shares it works. NEVER for a secrets
+        // directory: R3 forbids loosening it to 0777 even when it's not
+        // writable by this process — the save simply fails instead.
+        if (!$isSecret && !is_writable($targetPath)) @chmod($targetPath, 0777);
 
         // $targetPath is validated by ValidationService::validatePath (whitelisted
         // bases, rejects ../ and prefix-impersonation). $filename is sanitised by
@@ -460,6 +528,7 @@ class UtilityHandler {
         // nosemgrep: php.lang.security.tainted-url-to-connection.tainted-url-to-connection
         $bytes = @file_put_contents($dest, $data);
         if ($bytes !== false) {
+            if ($isSecret) @chmod($dest, 0600);
             aicli_log("[Upload/SaveFile] Complete: $filename ($bytes bytes) saved to $targetPath", AICLI_LOG_INFO, "UtilityHandler");
             return ['status' => 'ok', 'filename' => $filename, 'bytes' => $bytes];
         }
@@ -467,6 +536,293 @@ class UtilityHandler {
         $errDetail = $phpErr ? $phpErr['message'] : 'unknown error';
         aicli_log("[Upload/SaveFile] FAILED: Could not write to $dest — $errDetail", AICLI_LOG_ERROR, "UtilityHandler");
         return ['status' => 'error', 'message' => 'Failed to write file to ' . $dest . ' (' . $errDetail . ')'];
+    }
+
+    /**
+     * docs/specs/WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3 — the client asks this
+     * once per overlay open to size its chunks. `chunk_bytes` is the biggest
+     * RAW (pre-base64) chunk that still fits the server's `post_max_size`
+     * after base64 inflation (base64 grows data by 4/3) and a 256 KiB margin
+     * for the other POST fields, rounded down to a 64 KiB multiple so chunk
+     * boundaries stay tidy. `max_file_bytes` is the `upload_max_bytes`
+     * plugin setting (0 = no cap).
+     *
+     * $postMaxSizeIni is a test seam (an ini_get('post_max_size')-shaped
+     * string, e.g. '8M') — production callers omit it and the real php.ini
+     * value is read. $maxFileBytesOverride is the same kind of seam for the
+     * `upload_max_bytes` setting.
+     */
+    public static function getUploadLimits(?string $postMaxSizeIni = null, ?int $maxFileBytesOverride = null): array {
+        $ini = $postMaxSizeIni ?? (string) ini_get('post_max_size');
+        $postMaxBytes = self::parseIniBytes($ini);
+        if ($postMaxBytes <= 0) {
+            // '0' (or unparseable) means PHP places no limit — fall back to a
+            // sane chunk size instead of advertising an unbounded/zero chunk.
+            $postMaxBytes = 8 * 1024 * 1024;
+        }
+
+        $overheadBytes = 262144; // 256 KiB for the other POST fields + multipart-ish overhead
+        $rawAvailable = $postMaxBytes - $overheadBytes;
+        $chunkBytes = $rawAvailable > 0 ? (int) floor($rawAvailable * 3 / 4) : 65536;
+        $chunkBytes = intdiv($chunkBytes, 65536) * 65536;
+        if ($chunkBytes < 65536) $chunkBytes = 65536; // never advertise a useless chunk size
+
+        if ($maxFileBytesOverride !== null) {
+            $maxFileBytes = max(0, $maxFileBytesOverride);
+        } else {
+            $config = \AICliAgents\Services\ConfigService::getConfig();
+            $raw = $config['upload_max_bytes'] ?? 536870912;
+            $maxFileBytes = (is_numeric($raw) && (int)$raw >= 0) ? (int)$raw : 536870912;
+        }
+
+        return [
+            'status'         => 'ok',
+            'post_max_bytes' => $postMaxBytes,
+            'chunk_bytes'    => $chunkBytes,
+            'max_file_bytes' => $maxFileBytes,
+        ];
+    }
+
+    /** Parses a php.ini size string ('8M', '512K', '1G', or a plain number) into bytes. */
+    private static function parseIniBytes(string $val): int {
+        $val = trim($val);
+        if ($val === '') return 0;
+        $suffix = strtolower(substr($val, -1));
+        $num = (float) $val;
+        switch ($suffix) {
+            case 'g': return (int) ($num * 1024 * 1024 * 1024);
+            case 'm': return (int) ($num * 1024 * 1024);
+            case 'k': return (int) ($num * 1024);
+            default:  return (int) $num;
+        }
+    }
+
+    /**
+     * docs/specs/WORKSPACE_UPLOAD_MULTI_CHUNKED.md R4 — appends one base64
+     * chunk to `<dest>.part-<uploadId>`, verifying `chunkIndex` is the next
+     * one expected (an `.idx` sidecar holds the last chunk index actually
+     * written — never trust the client's own count). Index 0 always resets:
+     * it truncates any previous part for this uploadId and sweeps parts
+     * older than 1 hour out of the target directory (a client that never
+     * came back after chunk 0 must not leak a part file forever) — this
+     * script-level sweep is now backed by a supervisor-tick one across every
+     * workspace path (activity-sweep.php, REVIEW_2026-09-13_EVENTS_AND_SECURITY.md
+     * S6), for a folder that never receives another upload at all. Under a
+     * secrets directory the growing part is `chmod 0600` on every chunk, not
+     * only at finalize (S9). Each chunk is also refused, and the part
+     * removed, once it would grow past the configured `upload_max_bytes`
+     * (S6). On the last chunk the part is renamed onto `<dest>` — the same
+     * secrets 0600 rule as saveFile() applies. Any failure (bad uploadId
+     * shape, chunk out of order, base64 that won't decode, a write that
+     * fails, the size cap) removes the in-progress part so a retry starts
+     * clean.
+     *
+     * Public + explicit-args for the same test seam as saveFile() above.
+     */
+    public static function saveFileChunk($rawPath, $rawFilename, $b64chunk, string $uploadId, int $chunkIndex, int $totalChunks, bool $secretFlag = false): array {
+        $logCtx = "UtilityHandler";
+
+        if (!preg_match('/^[0-9a-f]{16}$/i', $uploadId)) {
+            aicli_log("[Upload/Chunk] REJECTED: malformed uploadId", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Invalid upload id'];
+        }
+        if ($totalChunks < 1 || $chunkIndex < 0 || $chunkIndex >= $totalChunks) {
+            aicli_log("[Upload/Chunk] REJECTED: chunkIndex $chunkIndex out of range for totalChunks $totalChunks (uploadId $uploadId)", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Invalid chunk index'];
+        }
+
+        $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
+        $targetPath = ValidationService::validatePath($rawPath);
+        $filename = ValidationService::sanitizeFilename($rawFilename);
+
+        if ($targetPath === false) {
+            aicli_log("[Upload/Chunk] REJECTED: Path validation failed for '$rawPath'", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Path validation failed: ' . $rawPath];
+        }
+        if (empty($filename)) {
+            aicli_log("[Upload/Chunk] REJECTED: Empty filename after sanitization", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Invalid filename'];
+        }
+        if (empty($b64chunk)) {
+            aicli_log("[Upload/Chunk] REJECTED: No chunk data received", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'No chunk data received'];
+        }
+        if (!\AICliAgents\Services\StorageMountService::isBackingMountAvailable($targetPath)) {
+            return ['status' => 'error', 'message' => 'Target storage is not mounted'];
+        }
+
+        $isSecret = $secretFlag || \AICliAgents\Services\SecretPaths::isSecretDir($targetPath);
+        if (!is_dir($targetPath)) @mkdir($targetPath, $isSecret ? 0700 : 0777, true);
+        if (!$isSecret && !is_writable($targetPath)) @chmod($targetPath, 0777);
+
+        $dest = rtrim($targetPath, '/') . '/' . $filename;
+        $part = $dest . '.part-' . $uploadId;
+        $idxFile = $part . '.idx';
+
+        if ($chunkIndex === 0) {
+            self::sweepStaleUploadParts($targetPath);
+            @unlink($part);
+            @unlink($idxFile);
+            aicli_log("[Upload/Chunk] Start: uploadId=$uploadId '$filename' totalChunks=$totalChunks target='$targetPath'", AICLI_LOG_INFO, $logCtx);
+        } else {
+            $lastWritten = self::readPartIndex($idxFile);
+            if ($lastWritten === null || $chunkIndex !== $lastWritten + 1) {
+                @unlink($part);
+                @unlink($idxFile);
+                self::forgetUploadPart($uploadId);
+                aicli_log("[Upload/Chunk] REJECTED: chunk $chunkIndex out of order for uploadId $uploadId (expected " . ($lastWritten === null ? 'chunk 0 first' : $lastWritten + 1) . ")", AICLI_LOG_ERROR, $logCtx);
+                return ['status' => 'error', 'message' => 'Chunk received out of order. Restart the upload.'];
+            }
+        }
+
+        $data = base64_decode($b64chunk, true);
+        if ($data === false) {
+            @unlink($part);
+            @unlink($idxFile);
+            self::forgetUploadPart($uploadId);
+            aicli_log("[Upload/Chunk] REJECTED: base64_decode failed for chunk $chunkIndex (uploadId $uploadId)", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Invalid base64 data in chunk'];
+        }
+
+        $mode = ($chunkIndex === 0) ? 'wb' : 'ab';
+        error_clear_last();
+        $fp = @fopen($part, $mode);
+        if ($fp === false) {
+            $phpErr = error_get_last();
+            aicli_log("[Upload/Chunk] FAILED: could not open part file $part (" . ($phpErr['message'] ?? 'unknown') . ")", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Failed to open the upload for writing'];
+        }
+        $written = fwrite($fp, $data);
+        fclose($fp);
+        if ($chunkIndex === 0) self::registerUploadPart($uploadId, $part);
+        if ($written === false) {
+            @unlink($part);
+            @unlink($idxFile);
+            self::forgetUploadPart($uploadId);
+            aicli_log("[Upload/Chunk] FAILED: write failed for chunk $chunkIndex to $part", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Failed to write chunk to disk'];
+        }
+        // S9 (REVIEW_2026-09-13_EVENTS_AND_SECURITY.md#S9): a part file under a
+        // secrets dir stays owner-only while it grows, not just once finalized —
+        // the same $isSecret detection saveFile() and the finalize step below use.
+        if ($isSecret) @chmod($part, 0600);
+
+        // S6: refuse this chunk once the growing part would exceed the
+        // configured upload_max_bytes cap (0 = no cap), and remove the part so
+        // a retry starts clean instead of resuming an already-oversized file.
+        $maxFileBytes = self::getUploadLimits()['max_file_bytes'];
+        if ($maxFileBytes > 0) {
+            $partSize = @filesize($part);
+            if ($partSize !== false && $partSize > $maxFileBytes) {
+                @unlink($part);
+                @unlink($idxFile);
+                self::forgetUploadPart($uploadId);
+                aicli_log("[Upload/Chunk] REJECTED: part exceeded the upload_max_bytes limit ($maxFileBytes bytes) for uploadId $uploadId", AICLI_LOG_ERROR, $logCtx);
+                return ['status' => 'error', 'message' => 'This upload is larger than the configured limit.'];
+            }
+        }
+
+        @file_put_contents($idxFile, (string) $chunkIndex);
+        aicli_log("[Upload/Chunk] Chunk $chunkIndex/$totalChunks written: $written bytes to $part", AICLI_LOG_DEBUG, $logCtx);
+
+        if ($chunkIndex + 1 < $totalChunks) {
+            return ['status' => 'ok', 'filename' => $filename, 'complete' => false];
+        }
+
+        // Last chunk: finalize by renaming the part onto the real destination.
+        if (!@rename($part, $dest)) {
+            aicli_log("[Upload/Chunk] FAILED: could not rename $part to $dest", AICLI_LOG_ERROR, $logCtx);
+            return ['status' => 'error', 'message' => 'Failed to finalize the upload'];
+        }
+        @unlink($idxFile);
+        self::forgetUploadPart($uploadId);
+        if ($isSecret) @chmod($dest, 0600);
+        $finalSize = filesize($dest);
+        aicli_log("[Upload/Chunk] Complete: $filename ($finalSize bytes, $totalChunks chunks) saved to $targetPath", AICLI_LOG_INFO, $logCtx);
+        return ['status' => 'ok', 'filename' => $filename, 'bytes' => $finalSize, 'complete' => true];
+    }
+
+    /**
+     * Part-file index (REVIEW_2026-09-13 S6, as built after the gate found the
+     * first version walking every workspace tree on the supervisor tick — a
+     * FUSE hazard on /mnt/user and a stall of the supervisor queue). A chunked
+     * upload registers its part file here (tmpfs, one small file per
+     * uploadId) and forgets it when the part is finalized or removed. The
+     * supervisor sweep reads ONLY this index; it never walks a directory.
+     * Test seam: $uploadPartsIndexDir.
+     */
+    public static ?string $uploadPartsIndexDir = null;
+
+    private static function uploadPartsIndexDir(): string {
+        return self::$uploadPartsIndexDir ?? '/tmp/unraid-aicliagents/upload-parts';
+    }
+
+    private static function registerUploadPart(string $uploadId, string $part): void {
+        if (!preg_match('/^[0-9a-f]{16}$/', $uploadId)) return;
+        $dir = self::uploadPartsIndexDir();
+        if (!is_dir($dir)) @mkdir($dir, 0700, true);
+        @file_put_contents("$dir/$uploadId", $part);
+    }
+
+    private static function forgetUploadPart(string $uploadId): void {
+        if (!preg_match('/^[0-9a-f]{16}$/', $uploadId)) return;
+        @unlink(self::uploadPartsIndexDir() . "/$uploadId");
+    }
+
+    /**
+     * Removes every registered part file (and its .idx sidecar) whose index
+     * entry is older than $ttlSeconds, plus the entry itself. Returns the
+     * number of part files removed. Reads only the index directory.
+     */
+    public static function sweepStaleUploadPartsFromIndex(int $ttlSeconds = 3600, ?int $now = null): int {
+        $dir = self::uploadPartsIndexDir();
+        if (!is_dir($dir)) return 0;
+        $now = $now ?? time();
+        $removed = 0;
+        foreach ((scandir($dir) ?: []) as $entry) {
+            if (!preg_match('/^[0-9a-f]{16}$/', $entry)) continue;
+            $marker = "$dir/$entry";
+            $mtime = @filemtime($marker);
+            if ($mtime === false || ($now - $mtime) < $ttlSeconds) continue;
+            $part = trim((string)@file_get_contents($marker));
+            // The recorded path must be this upload's own part file, never anything else.
+            if ($part !== '' && substr($part, -22) === '.part-' . $entry && is_file($part)) {
+                if (@unlink($part)) $removed++;
+                @unlink($part . '.idx');
+            }
+            @unlink($marker);
+        }
+        return $removed;
+    }
+
+    /** Reads the last-written chunk index from an `.idx` sidecar, or null if absent/unreadable. */
+    private static function readPartIndex(string $idxFile): ?int {
+        if (!is_file($idxFile)) return null;
+        $raw = @file_get_contents($idxFile);
+        if ($raw === false || $raw === '' || !ctype_digit(trim($raw))) return null;
+        return (int) trim($raw);
+    }
+
+    /**
+     * Removes `.part-*` files (and their `.idx` sidecars) older than 1 hour
+     * from $dir. Runs on every chunk-0 request so an upload nobody ever
+     * finished (browser closed, network dropped before the last chunk)
+     * cannot accumulate forever. Errors are best-effort — a sweep that can't
+     * read the directory must never block the chunk it was called for.
+     */
+    private static function sweepStaleUploadParts(string $dir): void {
+        $entries = @scandir($dir);
+        if ($entries === false) return;
+        $cutoff = time() - 3600;
+        foreach ($entries as $entry) {
+            if (strpos($entry, '.part-') === false) continue;
+            $path = rtrim($dir, '/') . '/' . $entry;
+            $mtime = @filemtime($path);
+            if ($mtime !== false && $mtime < $cutoff) {
+                @unlink($path);
+                aicli_log("[Upload/Chunk] Swept stale part: $path", AICLI_LOG_DEBUG, "UtilityHandler");
+            }
+        }
     }
 
     private static function savePastedImage() {

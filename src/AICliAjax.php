@@ -45,33 +45,75 @@ require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/WorkspaceBundleService.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/BundleHandler.php';
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AssetsHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AgentRelayHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/VoiceHandler.php';
+require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/FavouritesHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
+    // External Relay MCP is bearer-authenticated JSON-RPC, not browser AJAX.
+    // It must bypass CSRF only for this one dedicated endpoint.
+    if ($action === 'relay_http_mcp') {
+        ob_end_clean();
+        require '/usr/local/emhttp/plugins/unraid-aicliagents/src/AICliRelayMcp.page';
+        exit;
+    }
     if ($action !== 'filetree') {
         header('Content-Type: application/json');
+    }
+
+    // WORKSPACE_UPLOAD_MULTI_CHUNKED.md R5: PHP silently drops a POST body
+    // bigger than post_max_size and empties $_POST — that would otherwise
+    // fail the CSRF check below and hide the real cause behind "Invalid CSRF
+    // Token". Catch it here, before CSRF, for the two upload actions only.
+    if (($action === 'save_file' || $action === 'save_file_chunk')
+        && !empty($_SERVER['CONTENT_LENGTH']) && empty($_POST)) {
+        $postMaxBytes = \AICliAgents\Handlers\UtilityHandler::getUploadLimits()['post_max_bytes'];
+        $contentLength = (int) $_SERVER['CONTENT_LENGTH'];
+        if ($postMaxBytes > 0 && $contentLength > $postMaxBytes) {
+            $limitMb = round($postMaxBytes / 1048576, 1);
+            aicli_log("Upload overflow: Content-Length $contentLength exceeds post_max_size $postMaxBytes bytes (action=$action)", AICLI_LOG_ERROR, "AICliAjax");
+            ob_end_clean();
+            echo json_encode(['status' => 'error', 'message' => "This upload is too large for one request. The server accepts up to {$limitMb} MB per request (post_max_size). Retry — the overlay should split large files into smaller chunks."]);
+            exit;
+        }
     }
 
     // Validate session ID
     $rawId = $_GET['id'] ?? 'default';
     $id = ValidationService::validateId($rawId) ?: 'default';
 
+    // S4 (REVIEW_2026-09-13_EVENTS_AND_SECURITY.md#S4): a short, explicit list of
+    // read-only actions that a browser fetches as a raw byte stream, not JSON —
+    // for example an <audio src> for a voice clip. Such a request cannot carry a
+    // CSRF token (the tag has no way to add a header or a form field), and it is
+    // safe to exempt: the resource id is unguessable and expiring, and the
+    // session cookie still applies. A write action must NEVER appear here.
+    // A `const` cannot be declared inside an `if` block in PHP, so this uses
+    // `define()` instead — functionally the same fixed, explicit list.
+    define('CSRF_EXEMPT_READS', ['voice_clip']);
+
     // CSRF Validation — see PLUGIN_STANDARDS.md Lesson 3.
     // local_prepend.php (auto_prepend_file) validates CSRF from $_POST or X-CSRF-TOKEN
     // header for POST requests, then unsets them. We re-check here from $_REQUEST
     // (which retains the GET copy) so GET-based callers also pass.
-    $var = @parse_ini_file("/var/local/emhttp/var.ini");
-    $expected = trim((string)($var['csrf_token'] ?? ''));
-    $received = $_REQUEST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
-    if (is_array($received)) $received = end($received);
-    $received = trim((string)$received);
+    if (!in_array($action, CSRF_EXEMPT_READS, true)) {
+        $var = @parse_ini_file("/var/local/emhttp/var.ini");
+        $expected = trim((string)($var['csrf_token'] ?? ''));
+        $received = $_REQUEST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (is_array($received)) $received = end($received);
+        $received = trim((string)$received);
 
-    if (empty($expected) || $received !== $expected) {
-        aicli_log("CSRF FAILED! Action: $action (Received: $received, Expected: $expected)", AICLI_LOG_ERROR, "AICliAjax");
-        ob_end_clean();
-        echo json_encode(['status' => 'error', 'message' => 'Invalid CSRF Token']);
-        exit;
+        if (empty($expected) || $received !== $expected) {
+            // S10: log only the action and whether a token arrived. Printing the
+            // expected or received token would put a live secret in the log.
+            $gotToken = ($received !== '') ? 'yes' : 'no';
+            aicli_log("CSRF check failed for action: $action (token received: $gotToken)", AICLI_LOG_ERROR, "AICliAjax");
+            ob_end_clean();
+            echo json_encode(['status' => 'error', 'message' => 'Invalid CSRF Token']);
+            exit;
+        }
     }
 
     // R-06 trace correlation: adopt the client's X-Aicli-Trace header (or the
@@ -85,13 +127,22 @@ if (isset($_GET['action'])) {
     }
 
     try {
-        // Log milestone actions at INFO, everything else at DEBUG
-        $milestones = ['start', 'stop', 'restart', 'install_agent', 'uninstall_agent', 'consolidate_storage', 'persist_home', 'repair_agent_storage', 'repair_home_storage', 'save', 'wipe_storage'];
+        // Log milestone actions at INFO, everything else at DEBUG.
+        // The workspace-menu actions are milestones too: they are things a PERSON
+        // did, and at DEBUG they were invisible — on 2026-09-11 a continue arrived
+        // that the operator did not expect, and the request that sent it left no
+        // line at all at the default log level. continue_session additionally
+        // records who asked (TerminalHandler::recordContinue).
+        $milestones = ['start', 'stop', 'restart', 'install_agent', 'uninstall_agent', 'consolidate_storage', 'persist_home', 'repair_agent_storage', 'repair_home_storage', 'save', 'wipe_storage',
+            'continue_session', 'graceful_close', 'restart_fresh', 'reload_onto_current', 'refresh_bridge', 'workspace_export'];
         $logLvl = in_array($action, $milestones) ? AICLI_LOG_INFO : AICLI_LOG_DEBUG;
         aicli_log("Handling AJAX Request: $action ($id)", $logLvl, "AICliAjax");
 
-        // D-405: Increase limits for file upload actions (base64 POST data can be large)
-        if (in_array($action, ['save_file', 'upload_chunk', 'save_pasted_image'])) {
+        // D-405: Increase limits for file upload actions (base64 POST data can be large).
+        // VOICE_INPUT.md R2: voice_transcribe posts a base64 clip up to 4 MiB
+        // decoded (~5.4 MB base64) and its own engine call can take up to 30s,
+        // so it shares this same allowance.
+        if (in_array($action, ['save_file', 'save_file_chunk', 'save_pasted_image', 'voice_transcribe'])) {
             @ini_set('post_max_size', '64M');
             @ini_set('upload_max_filesize', '64M');
             set_time_limit(120);
@@ -118,6 +169,11 @@ if (isset($_GET['action'])) {
             // the bundles dir — see BundleHandler::safeBundleName).
             ob_end_clean();
             \AICliAgents\Handlers\BundleHandler::rawBundleDownload();
+        } elseif ($action === 'voice_clip') {
+            // AGENT_VOICE.md: raw mp3 stream (id shape-validated in the handler
+            // against /^v_[0-9a-f]{16}$/ before it ever reaches a path).
+            ob_end_clean();
+            \AICliAgents\Handlers\VoiceHandler::rawVoiceClip();
         } elseif ($action === 'get_task_status') {
             // Task status file is already JSON - read and output directly.
             // SECURITY: $user gets interpolated into a filesystem path so
@@ -155,10 +211,22 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\DiagnosticsHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\BundleHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\AssetsHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\AgentRelayHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\VoiceHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\FavouritesHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
             ob_end_clean();
             if ($result !== null) {
+                // EVENT_FIRST_RECONCILIATION.md R4/R5: every reconcile read needs
+                // a server-clock `ts` so a subscriber can drop a push message
+                // older than the last snapshot it applied. This is the one place
+                // every standard handler's JSON answer passes through, so stamp
+                // it here instead of in each handler. A handler that already set
+                // its own `ts` keeps it.
+                if (is_array($result) && !array_key_exists('ts', $result)) {
+                    $result['ts'] = \AICliAgents\Services\NchanService::nowMs();
+                }
                 // json_encode output served as application/json — no browser
                 // HTML parser involved. Not a user-controlled HTML sink.
                 // nosemgrep: php.lang.security.injection.echoed-request.echoed-request

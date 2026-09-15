@@ -63,6 +63,34 @@ class StoragePathResolver {
     }
 
     /**
+     * HOME_BACKUP.md: is a user's home a layer stack (OverlayFS + baked .sqsh
+     * layers on the persist path) or hosted directly on a plain path with no
+     * layers at all? Mirrors HealthService::hasLayers's own glob (kept private
+     * there) and detect_backend.sh's engine=layering|passthrough split — 'direct'
+     * here is the passthrough case: nothing to bake, the merged home IS the
+     * durable copy already.
+     *
+     * @param string|int $user
+     * @return string 'layers'|'direct'
+     */
+    public static function homeHostingMode($user): string {
+        $user = self::normalizeUser($user);
+        $persist = self::homePersistPath($user);
+        $files = @glob("$persist/home_{$user}_*.sqsh");
+        return (is_array($files) && $files !== []) ? 'layers' : 'direct';
+    }
+
+    /**
+     * Alias for homeMount() — HOME_BACKUP.md names it homeMountPath (the mounted
+     * home a backup rsyncs FROM, whatever hosts it).
+     *
+     * @param string|int $user
+     */
+    public static function homeMountPath($user): string {
+        return self::homeMount($user);
+    }
+
+    /**
      * Path to the layer manifest JSON file. Always on flash.
      */
     public static function manifestPath(): string {
@@ -106,9 +134,14 @@ class StoragePathResolver {
 
     /**
      * OverlayFS mount point for an agent binary directory.
+     *
+     * SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): delegates to
+     * AgentRegistry::agentPath() instead of repeating the literal AGENT_BASE
+     * path independently — this method and AgentRegistry::AGENT_BASE used to
+     * be two separately-maintained sources of the same value.
      */
     public static function agentMount(string $id): string {
-        return self::normalize('/usr/local/emhttp/plugins/unraid-aicliagents/agents/' . $id);
+        return self::normalize(AgentRegistry::agentPath($id));
     }
 
     /**

@@ -107,16 +107,88 @@ ENV_HASH=$(echo -n "${ROOT_DIR}${AGENT_ID}" | md5sum | cut -d' ' -f1)
 log_aicli "DEBUG" 3 "Env Setup: HOME=$HOME_DIR USER=$TARGET_USER ROOT=$ROOT_DIR"
 perf_log env.setup.done
 
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-09): resolve the agent's
+# STABLE directory (agents/<id> — a plain directory today, a symlink to
+# agents/.versions/<id>/<gen> once Phase 2 migrates it) to its REAL target
+# exactly once, here, at session launch. BINARY_PRIMARY / BINARY_FALLBACK
+# arrive from TerminalService built on the stable name (AgentRegistry::
+# agentPath()), so freezing them verbatim — as the two lines below used to —
+# freezes a path whose LAST COMPONENT can still move if the stable symlink is
+# flipped later. Substituting the resolved directory in NOW turns that path
+# pin into a version pin (R2): every later relaunch iteration re-checks these
+# same frozen strings for existence (never re-reads BINARY_PRIMARY/FALLBACK),
+# so once they name a concrete generation directory, nothing that happens to
+# the stable symlink afterward can move this session.
+#
+# Both layouts behave identically: pre-migration, agents/<id> is a real
+# directory and agent_mount_real() (readlink -f) resolves it to itself, so
+# _AICLI_AGENT_REAL_DIR == _AICLI_AGENT_STABLE_DIR and the substitution below
+# is a byte-for-byte no-op — the expected, unchanged state on this box today.
+_AICLI_RESOLVE_PATHS_SH="$PLUGIN_SRC/scripts/storage/resolve_paths.sh"
+# shellcheck source=./storage/resolve_paths.sh
+[ -f "$_AICLI_RESOLVE_PATHS_SH" ] && source "$_AICLI_RESOLVE_PATHS_SH" 2>/dev/null
+_AICLI_AGENT_STABLE_DIR=""
+_AICLI_AGENT_REAL_DIR=""
+if command -v agent_mount_real >/dev/null 2>&1 && [ -n "$AGENT_ID" ] && [ "$AGENT_ID" != "terminal" ]; then
+    _AICLI_AGENT_STABLE_DIR="$(agent_mount "$AGENT_ID" 2>/dev/null)"
+    _AICLI_AGENT_REAL_DIR="$(agent_mount_real "$AGENT_ID" 2>/dev/null)"
+fi
+
+# _aicli_pin_to_real_generation <raw-path>
+# Rewrites <raw-path> to route through the resolved generation directory when
+# it is rooted under the stable agent directory; echoes it unchanged otherwise
+# (empty, a bare proxy command with no '/', or already outside the agent
+# tree). Pure string substitution — no filesystem access beyond what already
+# happened above, so it is cheap to call for all three frozen binaries.
+_aicli_pin_to_real_generation() {
+    local raw="$1"
+    if [ -n "$raw" ] && [ -n "$_AICLI_AGENT_STABLE_DIR" ] && [ -n "$_AICLI_AGENT_REAL_DIR" ] \
+       && [ "$_AICLI_AGENT_STABLE_DIR" != "$_AICLI_AGENT_REAL_DIR" ] \
+       && [[ "$raw" == "$_AICLI_AGENT_STABLE_DIR"/* ]]; then
+        printf '%s' "${_AICLI_AGENT_REAL_DIR}${raw#"$_AICLI_AGENT_STABLE_DIR"}"
+    else
+        printf '%s' "$raw"
+    fi
+}
+
 # Freeze variables for tmux
-frozen_binary="$BINARY"
 # Fix A: freeze the two RAW binary paths (primary + fallback) so the run-loop
 # can re-resolve on every relaunch. BINARY is the *already-resolved* effective
 # path (primary if it existed at session-open, else fallback). An in-place
 # upgrade that drops cli.js and adds bin/claude.exe would leave frozen_binary
 # pointing at the deleted file; re-resolving from BINARY_PRIMARY / BINARY_FALLBACK
-# picks up the new layout without closing the workspace.
+# picks up the new layout without closing the workspace. This survival
+# mechanism is preserved UNCHANGED and stays scoped to the one generation
+# pinned above — it re-resolves the binary LAYOUT inside that generation, it
+# never re-resolves the generation itself.
+#
 frozen_binary_primary="${BINARY_PRIMARY:-$BINARY}"
 frozen_binary_fallback="${BINARY_FALLBACK:-}"
+# _stable variants keep the ORIGINAL (un-pinned) paths, still expressed
+# through the stable name, captured BEFORE the pin substitution below
+# overwrites frozen_binary_primary/frozen_binary_fallback in place. They are
+# exported below too, and used ONLY as a degrade path in the run-loop if the
+# pinned generation directory itself is ever reaped out from under a
+# still-open session (R4's "missing pinned version" case) — never for
+# ordinary layout re-resolution.
+frozen_binary_primary_stable="$frozen_binary_primary"
+frozen_binary_fallback_stable="$frozen_binary_fallback"
+frozen_binary_primary="$(_aicli_pin_to_real_generation "$frozen_binary_primary")"
+frozen_binary_fallback="$(_aicli_pin_to_real_generation "$frozen_binary_fallback")"
+frozen_binary="$(_aicli_pin_to_real_generation "$BINARY")"
+# The pinned generation directory itself (empty when this agent has no
+# resolvable stable/real split, e.g. "terminal" or an uninstalled agent) —
+# the run-loop's degrade check below tests this directory's continued
+# existence, not the individual binary files, so a mid-generation shape
+# change (cli.js -> bin/claude.exe) is never mistaken for the whole
+# generation vanishing.
+frozen_agent_generation_dir="$_AICLI_AGENT_REAL_DIR"
+# The stable dir too, so the run-loop's degrade check can tell "this agent was
+# never installed / has no versioned split" (generation dir == stable dir,
+# always the case pre-migration) apart from "the pinned generation was reaped
+# out from under a live session" (generation dir != stable dir, and the
+# generation dir is gone) — only the latter should log R4's degrade WARN.
+frozen_agent_stable_dir="$_AICLI_AGENT_STABLE_DIR"
 frozen_resume_cmd="$RESUME_CMD"
 frozen_resume_latest="$RESUME_LATEST"
 frozen_agent_name="${AGENT_NAME:-$AGENT_ID}"
@@ -172,9 +244,48 @@ if ! mountpoint -q "$HOME_DIR" || [ ! -w "$HOME_DIR" ]; then
 fi
 
 export HOME="$HOME_DIR"
+
+# Kimi Code defaults to replacing its own executable during update checks.
+# The plugin owns agent versions, so enforce that one vendor setting while
+# preserving every unrelated user setting in tui.toml.
+_aicli_set_toml_bool() {
+    local file="$1" section="$2" key="$3" value="$4"
+    local dir tmp
+    dir=$(dirname "$file")
+    mkdir -p "$dir" 2>/dev/null || return 1
+    tmp="${file}.aicli.$$"
+    if [ ! -f "$file" ] || ! grep -Eq "^[[:space:]]*\\[${section}\\][[:space:]]*$" "$file"; then
+        [ -s "$file" ] && printf '\n' >> "$file"
+        printf '[%s]\n%s = %s\n' "$section" "$key" "$value" >> "$file"
+        return 0
+    fi
+    awk -v section="$section" -v key="$key" -v value="$value" '
+        BEGIN { inside=0; written=0 }
+        /^\[[^]]+\][[:space:]]*$/ {
+            if (inside && !written) { print key " = " value; written=1 }
+            inside=($0 == "[" section "]")
+        }
+        inside && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            if (!written) print key " = " value
+            written=1
+            next
+        }
+        { print }
+        END { if (inside && !written) print key " = " value }
+    ' "$file" > "$tmp" && mv -f "$tmp" "$file"
+}
+
+if [ "$AGENT_ID" = "kimi-code" ]; then
+    _aicli_set_toml_bool "$HOME_DIR/.kimi-code/tui.toml" upgrade auto_install false || \
+        log_aicli "WARN" 1 "Could not disable Kimi Code self-update; plugin-managed version may drift"
+fi
 mkdir -p "$HOME" 2>/dev/null
-cd "$ROOT_DIR" || cd /mnt || echo "Warning: Could not enter $ROOT_DIR"
-export PATH="/usr/local/emhttp/plugins/unraid-aicliagents/bin:$PATH"
+# #110: WORK_CWD is where the agent RUNS (the pool path when the operator opted in
+# for a cache-only share); ROOT_DIR stays the workspace identity for hashes/resume.
+WORK_CWD="${AICLI_CWD:-$ROOT_DIR}"
+[ -d "$WORK_CWD" ] || WORK_CWD="$ROOT_DIR"
+cd "$WORK_CWD" || cd "$ROOT_DIR" || cd /mnt || echo "Warning: Could not enter $WORK_CWD"
+export PATH="$HOME/.local/bin:/usr/local/emhttp/plugins/unraid-aicliagents/bin:$PATH"
 export TERM=xterm-256color
 export COLORTERM=truecolor
 export LANG=en_US.UTF-8
@@ -236,9 +347,98 @@ fi
 # plugin's alone, so tmux's tmux-<uid> dir inside it cannot be corrupted from
 # outside. Exported so the tmux server and every child inherit the same socket
 # location; every other plugin script that calls tmux sets it identically.
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+# Bug #141: ONE tmux server per session, not one shared by the whole fleet.
+# The shared server inherited the AICLI_SESSION_ID of whichever session forked
+# it, and tmux copies its environment into every session created afterwards —
+# so gracefulClose's environment-matched reap SIGKILLed the shared server and
+# every other workspace died with it (twice on 2026-08-11). A per-session
+# TMUX_TMPDIR gives each session a private server, so a close can only ever
+# reach its own processes. Setting TMUX_TMPDIR (rather than passing -S) means
+# every bare `tmux` call in this script, in RUN_SCRIPT, and in any child
+# automatically targets the right server with no call-site changes.
+#
+# AICLI_TMUX_ROOT stays shared: PHP writes per-agent quirk files there, and
+# socket discovery (ProcessManager::tmuxSocketPaths) scans it for both layouts.
+export AICLI_TMUX_ROOT="/tmp/unraid-aicliagents/tmux"
+mkdir -p "$AICLI_TMUX_ROOT" 2>/dev/null
+# Sticky world-writable (like /tmp) so multiple agent uids can each create their
+# own subtree but cannot delete or replace another uid's.
+chmod 1777 "$AICLI_TMUX_ROOT" 2>/dev/null
+
+# Keyed on the session id ONLY (not the full session name), so it matches
+# ProcessManager::sessionTmuxTmpdir() exactly — TmuxSocketLayoutTest pins both.
+export TMUX_TMPDIR="$AICLI_TMUX_ROOT/s-$ID"
 mkdir -p "$TMUX_TMPDIR" 2>/dev/null
-chmod 0777 "$TMUX_TMPDIR" 2>/dev/null
+# Owner-only: this directory belongs to exactly one session's server.
+chmod 0700 "$TMUX_TMPDIR" 2>/dev/null
+
+# An inherited $TMUX PINS every tmux call to the server named in it and silently
+# overrides TMUX_TMPDIR — which would put this session back on a shared server
+# and re-open the exact cross-workspace kill this change exists to prevent. The
+# normal launch path (php-fpm → ttyd → runuser) has no $TMUX, but any invocation
+# from inside a pane does, and that failure is silent. Drop it unconditionally;
+# nothing in this script reads $TMUX.
+unset TMUX TMUX_PANE
+
+# ADOPT an existing server before creating one here.
+#
+# The socket location moved in v2026.08.11.02 (shared -> per-session). A session
+# launched by an older generation therefore lives somewhere this script would
+# not look, and every existence check below ("does my session exist?") consults
+# only $TMUX_TMPDIR. The result is a FORK: the script sees nothing on the
+# per-session socket, starts a second agent there, and the real one is orphaned
+# on the old socket, still running, invisible to the browser.
+#
+# That happened for real on 2026-08-11: reconnecting one workspace onto a newer
+# generation produced two tmux sessions of the same name — the original agent
+# from 10:47 stranded on the shared socket, and a fresh empty agent on the
+# per-session socket that the browser attached to.
+#
+# So: look for this session on EVERY plugin socket first and adopt the server
+# that already has it. Only when it exists nowhere do we use the per-session
+# default set above. Ordering matters — the per-session location is preferred,
+# so a session already migrated is never dragged back to the shared server.
+adopt_existing_session_socket() {
+    local uid sock dir
+    uid="$(id -u)"
+    for sock in "$AICLI_TMUX_ROOT/s-$ID/tmux-$uid/default" \
+                "$AICLI_TMUX_ROOT"/s-*/tmux-"$uid"/default \
+                "$AICLI_TMUX_ROOT/tmux-$uid/default"; do
+        [ -S "$sock" ] || continue
+        tmux -S "$sock" has-session -t "$SESSION" 2>/dev/null || continue
+        # TMUX_TMPDIR is the grandparent of the socket (<dir>/tmux-<uid>/default).
+        dir="$(dirname "$(dirname "$sock")")"
+        if [ "$dir" != "$TMUX_TMPDIR" ]; then
+            export TMUX_TMPDIR="$dir"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ADOPT-SOCKET] sess=$SESSION adopted existing server at $sock (TMUX_TMPDIR=$dir)" >> "$DEBUG_LOG"
+        fi
+        return 0
+    done
+    return 0
+}
+adopt_existing_session_socket
+
+# Bug #1054 follow-up: tmux 3.4+ hard-refuses its per-uid socket dir unless it is
+# mode 0700 AND owned by the running uid — it aborts new-session with
+# "directory <TMUX_TMPDIR>/tmux-<uid> has unsafe permissions", which surfaces to
+# the user as "Terminal session not found". The world-writable parent lets another
+# uid create tmux-<uid> first, and an overlay/tmpfs restore can bring the dir back
+# with loose perms. Force it ours-and-0700 before tmux ever looks at it; if it is
+# owned by a uid we cannot chown and is still not 0700, remove it so tmux recreates
+# it cleanly (a directory tmux rejects can hold no live server anyway).
+sanitize_tmux_uid_dir() {
+    local dir="$TMUX_TMPDIR/tmux-$(id -u)"
+    [ -e "$dir" ] || return 0
+    chown "$(id -u):$(id -g)" "$dir" 2>/dev/null
+    chmod 0700 "$dir" 2>/dev/null
+    local perm own
+    perm="$(stat -c '%a' "$dir" 2>/dev/null)"
+    own="$(stat -c '%u' "$dir" 2>/dev/null)"
+    if [ "$perm" != "700" ] || [ "$own" != "$(id -u)" ]; then
+        rm -rf "$dir" 2>/dev/null
+    fi
+}
+sanitize_tmux_uid_dir
 
 # Bug #1054 root cause: tmux uses the user's login SHELL (from /etc/passwd, or
 # $SHELL env if set) to run the session's command. System users created with
@@ -292,6 +492,30 @@ perf_log() {
 FUNCOEF
 
     printf 'export AICLI_SESSION_ID=%q\n' "$ID" >> "$RUN_SCRIPT"
+    # Relay's MCP child is launched by the agent from this generated script,
+    # not from the original ttyd command. Preserve the launch-bound command
+    # here so reconnects and shell relaunches retain the complete Relay context.
+    # Pin Relay to this immutable launcher generation. A later hot-swap may
+    # advance the mutable src link while this workspace is still running.
+    printf 'export AICLI_RELAY_COMMAND=%q\n' "${AICLI_RELAY_COMMAND:-php $PLUGIN_SRC/scripts/relay-agent.php}" >> "$RUN_SCRIPT"
+    # Plugin management (read-only) self-service, pinned the same way and for the
+    # same reason. This is the fallback for an agent with no MCP support — pi-coder
+    # is HubProjector::MCP_EXEMPT and will never read an MCP config file — and it is
+    # also what a user's own script calls. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
+    printf 'export AICLI_ADMIN_COMMAND=%q\n' "${AICLI_ADMIN_COMMAND:-php $PLUGIN_SRC/scripts/admin-agent.php}" >> "$RUN_SCRIPT"
+    # (Relay 'watch' mode retired 2026-08-22: every agent now receives the
+    # readiness-gated paste, so no per-session watcher command is injected here.
+    # The old watcher env var + relay-watch.sh were removed — the watcher died on
+    # every resume and duplicated the paste. History in git.)
+    # Bind the remaining identity variables to THIS session. Without these two the
+    # run script never sets them, so they arrive only by inheritance — and a tmux
+    # session started later picks up whatever the tmux server was launched with,
+    # i.e. the first workspace to start. A Codex workspace in saas-businessOS was
+    # observed running with AICLI_ROOT=/mnt/user/DevelopmentProjects/mvp-dmoe and
+    # AICLI_CHAT_SESSION_ID=DMoE. AICLI_ROOT is used as the cd fallback below, so a
+    # leaked value lands the agent in another workspace's directory. Issue #124.
+    printf 'export AICLI_ROOT=%q\n' "${AICLI_ROOT:-/mnt}" >> "$RUN_SCRIPT"
+    printf 'export AICLI_CHAT_SESSION_ID=%q\n' "$frozen_chat_id" >> "$RUN_SCRIPT"
     printf 'export AGENT_ID=%q\n' "$AGENT_ID" >> "$RUN_SCRIPT"
     printf 'export HOME=%q\n' "$HOME_DIR" >> "$RUN_SCRIPT"
 
@@ -332,6 +556,14 @@ FUNCOEF
     # on every iteration (survives cli.js → native-binary in-place upgrades).
     printf 'export frozen_binary_primary=%q\n' "$frozen_binary_primary" >> "$RUN_SCRIPT"
     printf 'export frozen_binary_fallback=%q\n' "$frozen_binary_fallback" >> "$RUN_SCRIPT"
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3: export the un-pinned stable paths
+    # and the pinned generation directory too, so the run-loop's degrade check
+    # (R4) can fall back to the stable name if the pinned generation is ever
+    # reaped out from under this session.
+    printf 'export frozen_binary_primary_stable=%q\n' "$frozen_binary_primary_stable" >> "$RUN_SCRIPT"
+    printf 'export frozen_binary_fallback_stable=%q\n' "$frozen_binary_fallback_stable" >> "$RUN_SCRIPT"
+    printf 'export frozen_agent_generation_dir=%q\n' "$frozen_agent_generation_dir" >> "$RUN_SCRIPT"
+    printf 'export frozen_agent_stable_dir=%q\n' "$frozen_agent_stable_dir" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_cmd=%q\n' "$frozen_resume_cmd" >> "$RUN_SCRIPT"
     printf 'export frozen_resume_latest=%q\n' "$frozen_resume_latest" >> "$RUN_SCRIPT"
     printf 'export frozen_plugin_args=%q\n' "$frozen_plugin_args" >> "$RUN_SCRIPT"
@@ -397,6 +629,7 @@ FUNCOEF
     # _aicli_load_envs can hot-apply changes without needing to recompute
     # them. Per WP #736 hot-apply.
     printf 'export AICLI_WORKSPACE_PATH=%q\n' "$ROOT_DIR" >> "$RUN_SCRIPT"
+    printf 'export AICLI_CWD=%q\n' "${WORK_CWD:-$ROOT_DIR}" >> "$RUN_SCRIPT"
     printf 'export AICLI_EXPORTED_KEYS_FILE=%q\n' "$EXPORTED_KEYS_FILE" >> "$RUN_SCRIPT"
 
     cat << 'EOF' >> "$RUN_SCRIPT"
@@ -413,7 +646,7 @@ export LC_ALL=en_US.UTF-8
 # self-contained belt-and-braces guard so the agent process is in the workspace
 # even if a Tier-4 user .conf overrides tmux options. AICLI_WORKSPACE_PATH is
 # exported just above (= the resolved workspace root).
-cd "$AICLI_WORKSPACE_PATH" 2>/dev/null || cd "${AICLI_ROOT:-/mnt}" 2>/dev/null || true
+cd "${AICLI_CWD:-$AICLI_WORKSPACE_PATH}" 2>/dev/null || cd "$AICLI_WORKSPACE_PATH" 2>/dev/null || cd "${AICLI_ROOT:-/mnt}" 2>/dev/null || true
 # WP #1259: non-interactive defaults for the agent shell + every child it spawns.
 # A TUI agent (notably agy/antigravity) runs child commands with NO controlling
 # TTY and does NOT forward keystrokes to them -- a regression from gemini-cli's
@@ -547,6 +780,16 @@ _aicli_sync_claude_chat() {
 # or kill after a healthy, long-running session.
 _aicli_record_agent_exit() {
     local _attempt="$1" _rc="$2" _started="$3"
+    local _dynamic_recorder="$PLUGIN_SRC/scripts/user/agent-exit-recorder.sh"
+    if [ -f "$_dynamic_recorder" ]; then
+        unset -f aicli_dynamic_record_agent_exit 2>/dev/null || true
+        # shellcheck source=/dev/null -- release symlink intentionally resolves at call time
+        source "$_dynamic_recorder"
+        if declare -F aicli_dynamic_record_agent_exit >/dev/null 2>&1; then
+            aicli_dynamic_record_agent_exit "$_attempt" "$_rc" "$_started"
+            return
+        fi
+    fi
     local _ended _termination="exit"
     _ended=$(date +%s)
     last_launch_duration=$((_ended - _started))
@@ -637,6 +880,13 @@ _aicli_load_envs() {
     unset _AICLI_NEW_KEYS _old_key _k
 }
 
+# #37: consecutive immediate-crash counter. A broken/incompatible agent binary
+# exits in <3s every launch (opencode rc=1 on Tower). After a few in a row we
+# escalate the message from "missing configuration" to "binary is broken, upgrade
+# it" so the operator gets an actionable diagnosis instead of a confusing loop of
+# retry prompts. Reset on any launch that survived >=3s.
+consecutive_fast_crashes=0
+
 while true; do
     # Graceful-close sentinel — TOP-of-loop re-check (close-race fix 2026-06-07).
     # gracefulClose keeps this session alive (so it can scrape the exit screen for a
@@ -678,17 +928,153 @@ while true; do
     # env values are picked up here before the agent execs below.
     _aicli_load_envs
 
-    # D-52: SURGICAL DB REPAIR (Safe Version)
+    # #144: OpenCode single-instance DB safety + per-workspace isolation.
+    # OpenCode keeps ONE sqlite DB per data dir; two server processes writing it at
+    # once (Reconnect / generation-drift double-spawn, or two OpenCode workspaces)
+    # corrupt it ("database disk image is malformed"). Three defences below:
+    #   C) isolate the DB per workspace so distinct workspaces never share a store;
+    #   A) before launching, gracefully stop any OTHER process still holding THIS
+    #      workspace's DB (so it flushes its working copy back to disk first);
+    #   B) only then run the D-52 WAL/SHM cleanup — provably single-instance, so it
+    #      can never delete a live WAL out from under a running server.
+    # See docs/specs/OPENCODE_DB_SINGLE_INSTANCE.md.
     if [[ "$AGENT_ID" == "opencode" ]]; then
-       db_file="$HOME_DIR/.local/share/opencode/opencode.db"
-       rm -f "$db_file-wal" "$db_file-shm" 2>/dev/null
+       # --- C: per-workspace DB isolation (XDG_DATA_HOME relocates opencode.db;
+       #        config/plugins/relay stay in ~/.config/opencode, untouched). ---
+       # The store is keyed by the WORKSPACE PATH (per user), not the session id:
+       # a workspace that is closed and re-added gets a NEW session id, so the
+       # session-keyed dir of #144 started from the stale shared seed and the
+       # `-s <chatId>` resume failed with "Session not found" (2026-09-07). The
+       # first launch under the path key ADOPTS the session-keyed store that holds
+       # the resume id (or, without one, this workspace's most recent store).
+       _oc_ws_path="${_oc_ws_path:-$PWD}"
+       _oc_ws_key="ws-$(printf '%s:%s' "${USER_NAME:-${AICLI_USER:-$(id -un)}}" "$_oc_ws_path" | sha1sum | cut -c1-16)"
+       _oc_root="$HOME_DIR/.local/share/aicli-opencode"
+       export XDG_DATA_HOME="$_oc_root/$_oc_ws_key"
+       _oc_data="$XDG_DATA_HOME/opencode"
+       _oc_legacy="$HOME_DIR/.local/share/opencode"
+       db_file="$_oc_data/opencode.db"
+       mkdir -p "$_oc_data" 2>/dev/null
+
+       # Adopt a legacy session-keyed store for THIS workspace (exactly once: only
+       # while the path-keyed DB does not exist). Preference: the newest store whose
+       # DB holds the session we are about to resume; else the newest store whose DB
+       # names this workspace directory. Moved when idle, copied when a live process
+       # still holds it (never yank a DB out from under a running server).
+       if [ ! -f "$db_file" ] && [ -d "$_oc_root" ]; then
+           _oc_pick=""; _oc_pick_why=""; _oc_pick_mtime=0
+           for _cand in "$_oc_root"/*/opencode/opencode.db; do
+               [ -f "$_cand" ] || continue
+               case "$_cand" in "$_oc_root/ws-"*) continue ;; esac
+               _why=""
+               if [ -n "${frozen_chat_id:-}" ] && grep -q -a -F -- "$frozen_chat_id" "$_cand" 2>/dev/null; then
+                   _why="resume-id"
+               elif [ -z "${frozen_chat_id:-}" ] && grep -q -a -F -- "$_oc_ws_path" "$_cand" 2>/dev/null; then
+                   _why="workspace-path"
+               fi
+               [ -n "$_why" ] || continue
+               _m=$(stat -c %Y "$_cand" 2>/dev/null || echo 0)
+               if [ "$_m" -gt "$_oc_pick_mtime" ]; then _oc_pick="$_cand"; _oc_pick_why="$_why"; _oc_pick_mtime="$_m"; fi
+           done
+           if [ -n "$_oc_pick" ]; then
+               _oc_src_dir="$(dirname "$(dirname "$_oc_pick")")"
+               _oc_src_sid="$(basename "$_oc_src_dir")"
+               _held=""
+               for _p in $(pgrep -f 'opencode-ai/bin/opencode.exe' 2>/dev/null); do
+                   [ "$_p" = "$$" ] && continue
+                   for _l in /proc/"$_p"/fd/*; do
+                       _t=$(readlink "$_l" 2>/dev/null) || continue
+                       case "${_t% (deleted)}" in "$_oc_pick"|"$_oc_pick-wal") _held="$_p"; break 2 ;; esac
+                   done
+               done
+               rmdir "$_oc_data" 2>/dev/null; rmdir "$XDG_DATA_HOME" 2>/dev/null
+               if [ -z "$_held" ] && mv "$_oc_src_dir" "$XDG_DATA_HOME" 2>/dev/null; then
+                   log_aicli "INFO" 1 "OpenCode #144: adopted store $_oc_src_sid -> $_oc_ws_key for $_oc_ws_path (moved; reason=$_oc_pick_why)"
+               else
+                   mkdir -p "$XDG_DATA_HOME" 2>/dev/null
+                   cp -a "$_oc_src_dir/." "$XDG_DATA_HOME/" 2>/dev/null
+                   rm -f "$db_file-wal" "$db_file-shm" 2>/dev/null
+                   log_aicli "INFO" 1 "OpenCode #144: adopted store $_oc_src_sid -> $_oc_ws_key for $_oc_ws_path (copied; held by pid ${_held:-?}; reason=$_oc_pick_why)"
+               fi
+               mkdir -p "$_oc_data" 2>/dev/null
+               touch "$_oc_data/.aicli-migrated" 2>/dev/null
+           fi
+       fi
+
+       # One-time migration: seed this workspace's store from the legacy shared DB
+       # so existing history carries over. Sentinel + non-blocking flock => exactly
+       # once, never mid-write. OpenCode namespaces sessions by project internally,
+       # so carrying the whole DB is safe (unrelated rows are inert).
+       if [ ! -f "$_oc_data/.aicli-migrated" ] && [ ! -f "$db_file" ] && [ -f "$_oc_legacy/opencode.db" ]; then
+           (
+               if flock -n 9; then
+                   log_aicli "INFO" 2 "OpenCode #144: migrating shared DB -> per-workspace store ($AICLI_SESSION_ID)"
+                   cp -a "$_oc_legacy/opencode.db" "$db_file" 2>/dev/null
+                   [ -d "$_oc_legacy/snapshot" ] && cp -a "$_oc_legacy/snapshot" "$_oc_data/" 2>/dev/null
+                   [ -d "$_oc_legacy/repos" ]    && cp -a "$_oc_legacy/repos"    "$_oc_data/" 2>/dev/null
+                   [ -f "$_oc_legacy/auth.json" ] && ln -sf "$_oc_legacy/auth.json" "$_oc_data/auth.json" 2>/dev/null
+                   rm -f "$db_file-wal" "$db_file-shm" 2>/dev/null
+                   touch "$_oc_data/.aicli-migrated"
+               fi
+           ) 9>"$_oc_data/.aicli-migrate.lock"
+       fi
+
+       # Print PIDs of OTHER opencode processes holding THIS workspace's DB (or its
+       # WAL) open — matching a deleted inode too (a mid-session working copy shows
+       # "<path> (deleted)"). Excludes our own launcher pid.
+       _oc_db_holders() {
+           local _p _l _t
+           for _p in $(pgrep -f 'opencode-ai/bin/opencode.exe' 2>/dev/null); do
+               [ "$_p" = "$$" ] && continue
+               for _l in /proc/"$_p"/fd/*; do
+                   _t=$(readlink "$_l" 2>/dev/null) || continue
+                   _t=${_t% (deleted)}
+                   if [ "$_t" = "$db_file" ] || [ "$_t" = "$db_file-wal" ]; then
+                       echo "$_p"; break
+                   fi
+               done
+           done | sort -u
+       }
+
+       # --- A: single-instance guard — stop any competing holder gracefully. ---
+       _oc_grace="${AICLI_OPENCODE_STOP_GRACE:-8}"
+       _oc_hold=$(_oc_db_holders)
+       if [ -n "$_oc_hold" ]; then
+           log_aicli "WARN" 1 "OpenCode #144: DB held by other pid(s) [$(echo $_oc_hold)] — stopping gracefully before launch"
+           for _p in $_oc_hold; do kill -TERM "$_p" 2>/dev/null; done
+           _oc_deadline=$(( $(date +%s) + _oc_grace ))
+           while [ "$(date +%s)" -lt "$_oc_deadline" ]; do
+               [ -z "$(_oc_db_holders)" ] && break
+               sleep 0.3
+           done
+           _oc_hold=$(_oc_db_holders)
+           if [ -n "$_oc_hold" ]; then
+               log_aicli "WARN" 1 "OpenCode #144: pid(s) [$(echo $_oc_hold)] survived ${_oc_grace}s SIGTERM — SIGKILL"
+               for _p in $_oc_hold; do kill -KILL "$_p" 2>/dev/null; done
+               sleep 0.5
+           fi
+       fi
+
+       # --- B: guarded D-52 WAL/SHM cleanup — only when the DB is unheld. ---
+       if [ -z "$(_oc_db_holders)" ]; then
+           rm -f "$db_file-wal" "$db_file-shm" 2>/dev/null
+       else
+           log_aicli "WARN" 1 "OpenCode #144: DB still held after guard — SKIPPING WAL cleanup to avoid corruption"
+       fi
     fi
 
-    # D-159: Metadata Alignment - Ensure agent config directories are accessible
+    # D-159: Metadata Alignment - Ensure agent config directories are accessible.
+    #
+    # Do not recursively chmod a persisted agent home here.  On an overlay home,
+    # chmod -R copy-ups every lower-layer file into the writable layer.  Claude's
+    # history/plugins can contain tens of thousands of files, so that operation
+    # can block startup indefinitely while ZFS commits the copy-ups.  The agent
+    # runs as the workspace user and needs its config-root directory traversable;
+    # content permissions are owned by the agent that created them.
     case "$AGENT_ID" in
-        gemini-cli)  [ -d "$HOME_DIR/.gemini" ] && chmod -R 775 "$HOME_DIR/.gemini" > /dev/null 2>&1 ;;
-        claude-code) [ -d "$HOME_DIR/.claude" ] && chmod -R 775 "$HOME_DIR/.claude" > /dev/null 2>&1 ;;
-        opencode)    [ -d "$HOME_DIR/.local/share/opencode" ] && chmod -R 775 "$HOME_DIR/.local/share/opencode" > /dev/null 2>&1 ;;
+        gemini-cli)  [ -d "$HOME_DIR/.gemini" ] && chmod 775 "$HOME_DIR/.gemini" > /dev/null 2>&1 ;;
+        claude-code) [ -d "$HOME_DIR/.claude" ] && chmod 775 "$HOME_DIR/.claude" > /dev/null 2>&1 ;;
+        opencode)    [ -d "${XDG_DATA_HOME:-$HOME_DIR/.local/share}/opencode" ] && chmod 775 "${XDG_DATA_HOME:-$HOME_DIR/.local/share}/opencode" > /dev/null 2>&1 ;;
     esac
 
     # D-170: Ensure HOME is present and writable for this user
@@ -723,6 +1109,30 @@ while true; do
     # delta layer.
     if [[ "$AGENT_ID" == "antigravity-cli" ]]; then
         mkdir -p "$HOME_DIR/.gemini/antigravity-cli/log" 2>/dev/null
+    fi
+
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, R4: degrade sanely if the pinned
+    # generation DIRECTORY itself has vanished (reaped by GC once a later phase
+    # ships concurrent generations, or the agent was uninstalled). This is
+    # keyed on the generation ROOT, not on frozen_binary_primary/fallback
+    # individually — a single missing file inside a still-present generation
+    # is the ordinary cli.js -> bin/claude.exe shape change the block below
+    # already handles; only a missing generation root means this session's
+    # pinned version is gone, not just reshaped. Guarded on
+    # frozen_agent_generation_dir != frozen_agent_stable_dir so a not-yet-
+    # migrated or never-installed agent (the two are always equal there) never
+    # takes this path — that case already falls through to the ordinary
+    # "binary not found" handling below, unchanged. Falls back to the STABLE
+    # (un-pinned) paths, which resolve through whatever the stable name
+    # currently names — the session keeps running on a different version
+    # rather than failing to relaunch. Logged once, not every loop iteration,
+    # to avoid spamming a crash-loop.
+    if [ -n "$frozen_agent_generation_dir" ] && [ "$frozen_agent_generation_dir" != "$frozen_agent_stable_dir" ] \
+       && [ ! -d "$frozen_agent_generation_dir" ] && [ "${_aicli_degraded_to_stable:-0}" != "1" ]; then
+        log_aicli "WARN" 1 "Pinned agent generation vanished (${frozen_agent_generation_dir}); falling back to the current stable agent path"
+        frozen_binary_primary="$frozen_binary_primary_stable"
+        frozen_binary_fallback="$frozen_binary_fallback_stable"
+        _aicli_degraded_to_stable=1
     fi
 
     # Fix A: Re-resolve the effective binary on every relaunch iteration.
@@ -815,6 +1225,14 @@ while true; do
         if [ -d "$HOME_DIR/.gemini/antigravity-cli/conversations" ] && [ -n "$(find "$HOME_DIR/.gemini/antigravity-cli/conversations" -name '*.pb' -type f 2>/dev/null)" ]; then
             can_resume=1
         fi
+    elif [ "$AGENT_ID" == "grok-build" ]; then
+        if [ -d "$HOME_DIR/.grok/sessions" ] && [ -n "$(find "$HOME_DIR/.grok/sessions" -type f 2>/dev/null)" ]; then
+            can_resume=1
+        fi
+    elif [ "$AGENT_ID" == "kimi-code" ]; then
+        if [ -s "$HOME_DIR/.kimi-code/session_index.jsonl" ]; then
+            can_resume=1
+        fi
     fi
 
     # D-400: Safe command execution (no eval). Uses bash -c with validated commands.
@@ -900,6 +1318,24 @@ while true; do
         _aicli_record_agent_exit "latest-resume" "$_attempt_rc" "$_attempt_started"
         if [ "$_attempt_rc" -eq 0 ]; then
             status="ok"
+        elif [ -z "$frozen_chat_id" ] && ! _aicli_resume_was_established "$last_launch_duration"; then
+            # 2026-09-10: a SPECULATIVE latest-resume that never started must fall through
+            # to a fresh launch, not park.
+            #
+            # can_resume is decided per agent from a HOME-WIDE store (grok-build looks at
+            # ~/.grok/sessions, and so on), but '--continue' resolves a session for the
+            # CURRENT DIRECTORY. So a brand-new workspace in a new folder sets can_resume=1
+            # off another workspace's sessions, runs '--continue', and the agent exits with
+            # "No session found for current directory" — the workspace then parked on the
+            # [Agent Exited Immediately] banner and could never be used. Observed on .4 for
+            # grok-build and kilocode by creating a fresh workspace for each.
+            #
+            # Parking exists to protect a KNOWN conversation. frozen_chat_id is empty here,
+            # so there is nothing to lose: no id was handed in and getResumeId/findSession
+            # found nothing for this workspace. The explicit-chatId branch above is
+            # untouched and still parks.
+            log_aicli "WARN" 1 "Speculative latest-resume failed at startup (rc=$_attempt_rc) and this workspace has no known conversation; starting fresh instead of parking"
+            status="fail"
         elif _aicli_resume_was_established "$last_launch_duration"; then
             status="ok"
             log_aicli "WARN" 1 "Resumed agent exited non-zero after ${last_launch_duration}s (rc=$_attempt_rc); preserving conversation for resume-first relaunch"
@@ -952,7 +1388,7 @@ while true; do
     if [ "$status" = "resume_failed" ]; then
         log_aicli "ERROR" 1 "Resume failed for $AGENT_ID (rc=$last_launch_rc); refusing silent fresh fallback"
     elif [ "$status" != "ok" ]; then
-        log_aicli "ERROR" 1 "All launch attempts failed for $AGENT_ID. Binary corrupted or Node error. Check $DEBUG_LOG"
+        log_aicli "ERROR" 1 "Agent launch attempts ended before an interactive session was established (agent=$AGENT_ID rc=$last_launch_rc). Check $DEBUG_LOG and the captured crash record."
     fi
 
     # Restore PTY line discipline after every agent exit. TUI agents (agy,
@@ -1032,10 +1468,21 @@ while true; do
     # 10s so the user has a chance to read the message and close the workspace.
     launch_duration="$last_launch_duration"
     if [ "$launch_duration" -lt 3 ]; then
-        echo -e "\n\033[1;31m[Agent Exited Immediately]\033[0m The agent exited after ${launch_duration}s — likely missing configuration."
-        echo -e "Press ENTER to retry, or close this workspace from the UI."
+        consecutive_fast_crashes=$((consecutive_fast_crashes + 1))
+        # #37: after repeated immediate crashes, stop blaming "configuration" — the
+        # binary itself is almost certainly broken/incompatible. Give the operator the
+        # real remedy (upgrade/reinstall) instead of a bare retry that just crashes again.
+        if [ "$consecutive_fast_crashes" -ge 3 ]; then
+            log_aicli "WARN" 1 "Agent $AGENT_ID exited immediately $consecutive_fast_crashes times in a row — binary likely broken; not auto-retrying"
+            echo -e "\n\033[1;31m[Agent Keeps Crashing]\033[0m $AGENT_ID has exited immediately ${consecutive_fast_crashes} times in a row — its binary is likely broken or incompatible (not a config problem)."
+            echo -e "Upgrade or reinstall $AGENT_ID from Settings, then reopen this workspace. Press ENTER to try again, or close this workspace from the UI."
+        else
+            echo -e "\n\033[1;31m[Agent Exited Immediately]\033[0m The agent exited after ${launch_duration}s — likely missing configuration."
+            echo -e "Press ENTER to retry, or close this workspace from the UI."
+        fi
         read -r
     else
+        consecutive_fast_crashes=0
         echo -e "\n\033[1;33m[Agent Exited]\033[0m Press ENTER to reload..."
         read -t 10 -r
     fi
@@ -1048,6 +1495,10 @@ EOF
     chmod +x "$RUN_SCRIPT"
     log_aicli "DEBUG" 3 "Launching tmux session $SESSION for script $RUN_SCRIPT"
     perf_log tmux.new.begin
+    # Bug #1054 follow-up: re-sanitize the per-uid socket dir immediately before
+    # new-session, in case anything since the early setup left it with perms tmux
+    # rejects. Cheap and idempotent.
+    sanitize_tmux_uid_dir
     # Bug #1054 diagnostic: capture caller env + cwd so we can compare working
     # vs failing launches. Removed once root cause is fixed.
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-PRE-TMUX] sess=$SESSION uid=$(id -u) cwd=$(pwd) TMUX_TMPDIR=$TMUX_TMPDIR tmux_v=$(tmux -V) script_size=$(wc -c < "$RUN_SCRIPT")" >> "$DEBUG_LOG"
@@ -1056,7 +1507,7 @@ EOF
     # relaunch landed the agent in the server's /mnt instead of $ROOT_DIR (agy
     # exposed this; cwd-sensitive agents masked it on browser starts). $ROOT_DIR
     # is ${AICLI_ROOT:-/mnt} so it's never empty.
-    tmux -u new-session -d -s "$SESSION" -c "$ROOT_DIR" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
+    tmux -u new-session -d -s "$SESSION" -c "${WORK_CWD:-$ROOT_DIR}" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
     _tmux_rc=$?
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-POST-TMUX] new-session rc=$_tmux_rc has-session-now=$(tmux has-session -t "$SESSION" 2>&1 && echo YES || echo NO)" >> "$DEBUG_LOG"
     if [ $? -ne 0 ]; then
@@ -1087,6 +1538,12 @@ tmux set-option -t "$SESSION" focus-events on 2>/dev/null
 # sequence -> intermittent blank/garble of streamed output. 0 is the canonical
 # TUI-app setting and is harmless on a fast local-socket terminal.
 tmux set-option -t "$SESSION" escape-time 0 2>/dev/null
+# Two clients may now be attached at once (desktop + phone). tmux's default
+# sizes the window to the SMALLEST attached client, so a phone would squash a
+# desktop tab down to its width for as long as it stayed connected. 'latest'
+# sizes to the most recently used client, so whichever device you are actually
+# typing on gets the correct geometry.
+tmux set-option -t "$SESSION" window-size latest 2>/dev/null
 # xterm-256color: tells apps inside tmux the correct terminal type (not screen),
 # avoiding line-translation issues when TUI agents (agy, gemini-cli) set raw PTY mode.
 # The terminal-overrides appends enable 24-bit colour pass-through from ttyd/the browser.
@@ -1143,7 +1600,9 @@ unset _legacy _legacy_base
 # after the safety-net defaults but can still be overridden by the user.
 # apply_tmux_json supports APPEND_KEYS (-ga semantics) so terminal-features
 # accumulates rather than clobbers the BUILTIN terminal-overrides entries.
-apply_tmux_json "$TMUX_TMPDIR/quirks_${AGENT_ID}.json"
+# Bug #141: quirk files are written by PHP (TmuxService::quirkPath) into the
+# SHARED tmux root, not the per-session TMUX_TMPDIR — read them from there.
+apply_tmux_json "$AICLI_TMUX_ROOT/quirks_${AGENT_ID}.json"
 
 # Tier 2 — Agent-level defaults (edited via the Store card's Terminal panel).
 apply_tmux_json "$HOME_DIR/.aicli/tmux/tmux_agent_${AGENT_ID}.json"
@@ -1184,15 +1643,47 @@ if [ "$AICLI_ENSURE_ONLY" -eq 1 ]; then
     exit 0
 fi
 
+# Bound the number of simultaneously attached clients, keeping the NEWEST.
+#
+# This replaces `attach-session -d` (detach-others). -d was introduced for the
+# reconnect leak (2026-06-06): ttyd's web client reconnects on ANY websocket
+# drop — background-tab throttling, proxy idle timeout, a network blip — and
+# each reconnect attaches a NEW client while the previous one is NOT reaped
+# (runuser/setsid puts each attach in its own session, so ttyd can't SIGHUP it
+# on disconnect). Clients accumulated without bound; tmux mirrors the agent TUI
+# to every one of them on every redraw, so CPU compounded (7 clients on one
+# session, load avg ~5).
+#
+# But -d evicts EVERY other client, which is fine for one browser and broken
+# for two. Opening the same workspace on a phone while a desktop tab is open
+# put them in an eviction loop: the phone's attach evicted the desktop, the
+# desktop's terminal auto-reconnected and evicted the phone, and so on without
+# end — each side seeing a permanent reconnect churn.
+#
+# A cap fixes both. Leaked clients are ALWAYS older than a live reconnect, so
+# pruning oldest-first removes exactly the stale ones while letting genuine
+# concurrent viewers coexist. Set AICLI_MAX_TMUX_CLIENTS=1 to restore the old
+# evict-everyone behaviour.
+prune_excess_tmux_clients() {
+    local session="$1" limit="${2:-4}" keep list total drop client_tty
+    # We are about to attach as one more client, so at most limit-1 may remain.
+    keep=$(( limit - 1 ))
+    [ "$keep" -lt 0 ] && keep=0
+    list="$(tmux list-clients -t "$session" -F '#{client_created} #{client_tty}' 2>/dev/null \
+            | sort -n | awk 'NF==2 {print $2}')"
+    [ -n "$list" ] || return 0
+    total=$(printf '%s\n' "$list" | wc -l)
+    drop=$(( total - keep ))
+    [ "$drop" -gt 0 ] || return 0
+    # Feed the loop from a here-string, NOT `... | while`: a piped while runs in
+    # a subshell, so anything it changes is discarded when the pipeline ends.
+    while IFS= read -r client_tty; do
+        [ -n "$client_tty" ] && tmux detach-client -t "$client_tty" 2>/dev/null
+    done <<< "$(printf '%s\n' "$list" | head -n "$drop")"
+    return 0
+}
+
+prune_excess_tmux_clients "$SESSION" "${AICLI_MAX_TMUX_CLIENTS:-4}"
+
 perf_log tmux.attach.exec
-# -d (detach-others): ttyd's web client auto-reconnects on ANY websocket drop
-# (hidden/background-iframe throttling, proxy idle-timeout, network blip) — an
-# unavoidable trait of a web terminal. Each reconnect re-runs this script and
-# attaches a NEW client; without -d the prior client is NOT reaped (runuser/setsid
-# detaches each attach into its own session, so ttyd can't SIGHUP it on disconnect),
-# so stale "attached" clients accumulate without bound. tmux mirrors the agent TUI
-# to every attached client on every redraw -> compounding CPU + the visible
-# "constantly reconnecting" churn (reconnect-leak 2026-06-06; observed 7 clients on
-# one session, load avg ~5). -d makes each (re)connect evict all other clients,
-# keeping exactly one live client per session — self-healing across reconnects.
-exec tmux -u attach-session -d -t "$SESSION" 2>>"$DEBUG_LOG"
+exec tmux -u attach-session -t "$SESSION" 2>>"$DEBUG_LOG"

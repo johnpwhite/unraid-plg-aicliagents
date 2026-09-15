@@ -768,7 +768,18 @@
             + ' · auto-commit ' + (s.autocommit ? 'on (30 s debounce)' : 'off')
             + (s.pending ? ' · changes pending commit' : '');
         if (s.lastCommit) line += ' · last: ' + new Date(s.lastCommit.ts * 1000).toLocaleString();
-        document.getElementById('hub-git-statusline').textContent = line;
+        // R-14 (#211): a failing auto-commit used to be invisible — the card read
+        // "Backup enabled" for ten days while nothing was saved. Lead with the fault.
+        var sl = document.getElementById('hub-git-statusline');
+        if (s.healthy === false) {
+            var err = (s.lastError && s.lastError.message) ? s.lastError.message : 'the last commit failed';
+            var when = (s.lastError && s.lastError.ts) ? new Date(s.lastError.ts * 1000).toLocaleString() : '';
+            sl.textContent = 'Backup is NOT saving — ' + err + (when ? ' (' + when + ')' : '') + ' · ' + line;
+            sl.style.color = '#e0493b';
+        } else {
+            sl.textContent = line;
+            sl.style.color = '';
+        }
         var urlInput = document.getElementById('hub-git-remote-url');
         if (document.activeElement !== urlInput) urlInput.value = s.remote || '';
         document.getElementById('hub-git-token').placeholder =

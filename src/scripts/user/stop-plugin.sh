@@ -140,7 +140,10 @@ safe_pkill 'dbus-daemon .*unraid-aicliagents/secret-service'
 if command -v tmux >/dev/null 2>&1; then
     # Non-root audit: iterate every per-uid tmux socket so non-root sessions
     # get killed too.
-    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+    # Bug #141: per-session servers (s-<sid>/tmux-<uid>) plus any pre-#141
+    # session still live on the legacy shared socket.
+    for _sock in /tmp/unraid-aicliagents/tmux/s-*/tmux-*/default \
+                 /tmp/unraid-aicliagents/tmux/tmux-*/default; do
         [ -S "$_sock" ] || continue
         tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r sess; do
             tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
@@ -221,7 +224,14 @@ if [ -d "$WORK_BASE" ]; then
 fi
 
 # 8b. Unmount agent overlays
-AGENT_BASE="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): resolve_paths.sh is
+# already sourced above — route through its agent_base(), falling back to the
+# literal only if sourcing ever failed.
+if declare -f agent_base >/dev/null 2>&1; then
+    AGENT_BASE="$(agent_base)"
+else
+    AGENT_BASE="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
+fi
 if [ -d "$AGENT_BASE" ]; then
     for mnt in "$AGENT_BASE"/*; do
         [ -d "$mnt" ] && mountpoint -q "$mnt" 2>/dev/null && umount -l "$mnt" 2>/dev/null

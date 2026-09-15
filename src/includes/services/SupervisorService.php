@@ -553,17 +553,108 @@ class SupervisorService {
         int $priority,
         ?string $consolidateEpoch = null
     ): ?string {
+        $jobId = self::generateJobId($op, $type, $id);
+        if (!self::enqueue($type, $id, $op, $reason, $priority, $jobId, false, $consolidateEpoch)) {
+            return null;
+        }
+        return $jobId;
+    }
+
+    /**
+     * The same job-id shape enqueueJob() mints, exposed so a caller that must
+     * write job-keyed side data BEFORE the queue file can possibly be popped
+     * (HOME_BACKUP.md's per-job options sidecar — target/quiesce/keep/excludes)
+     * can generate the id first, write its sidecar, then enqueue with THIS id
+     * via enqueue() directly instead of enqueueJob() (which would mint a
+     * different one).
+     */
+    public static function generateJobId(string $op, string $type, string $id): string {
         $safeId = preg_replace('/[^A-Za-z0-9._\-]/', '_', $id);
         try {
             $rand = substr(bin2hex(random_bytes(4)), 0, 6);
         } catch (\Throwable $e) {
             $rand = substr((string)mt_rand(100000, 999999), 0, 6);
         }
-        $jobId = sprintf('%s-%s-%s-%d-%s', preg_replace('/[^a-z]/', '', $op), $type, $safeId, time(), $rand);
-        if (!self::enqueue($type, $id, $op, $reason, $priority, $jobId, false, $consolidateEpoch)) {
-            return null;
+        return sprintf('%s-%s-%s-%d-%s', preg_replace('/[^a-z]/', '', $op), $type, $safeId, time(), $rand);
+    }
+
+    /**
+     * HOME_BACKUP.md: per-job backup options sidecar (target/quiesce/keep/
+     * excludes/nudge_working), written by StorageHandler::backupHome() BEFORE
+     * the job is enqueued so `op_backup_home` always finds it. Lives next to
+     * the job ledger so the AICLI_JOBS_DIR test hook redirects both together.
+     */
+    public static function backupOptionsPath(string $jobId): string {
+        $safe = preg_replace('/[^A-Za-z0-9._\-]/', '_', $jobId);
+        return dirname(self::jobsDir()) . "/backup-opts/$safe.json";
+    }
+
+    /**
+     * Write the backup options sidecar for $jobId. Never throws; returns false
+     * on any I/O failure so the caller can refuse the request cleanly.
+     *
+     * @param array{target:string,quiesce:string,keep:int,excludes:array<int,string>,nudge_working:bool} $opts
+     */
+    public static function writeBackupOptions(string $jobId, array $opts): bool {
+        $path = self::backupOptionsPath($jobId);
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return false;
         }
-        return $jobId;
+        return @file_put_contents($path, json_encode($opts)) !== false;
+    }
+
+    /** Read back a backup options sidecar (or [] if absent/corrupt). */
+    public static function readBackupOptions(string $jobId): array {
+        $path = self::backupOptionsPath($jobId);
+        if (!is_file($path)) return [];
+        $data = json_decode((string)@file_get_contents($path), true);
+        return is_array($data) ? $data : [];
+    }
+
+    /** Best-effort cleanup of a job's backup-options sidecar once the job is terminal. */
+    public static function deleteBackupOptions(string $jobId): void {
+        @unlink(self::backupOptionsPath($jobId));
+    }
+
+    /**
+     * HOME_RESTORE.md: per-job restore options sidecar (snapshot/mode/
+     * safety_snapshot/target/keep/excludes), written by
+     * StorageHandler::restoreHome() BEFORE the job is enqueued, mirroring the
+     * backup options sidecar above. A separate directory (restore-opts/, not
+     * backup-opts/) so a backup job id and a restore job id can never collide.
+     */
+    public static function restoreOptionsPath(string $jobId): string {
+        $safe = preg_replace('/[^A-Za-z0-9._\-]/', '_', $jobId);
+        return dirname(self::jobsDir()) . "/restore-opts/$safe.json";
+    }
+
+    /**
+     * Write the restore options sidecar for $jobId. Never throws; returns
+     * false on any I/O failure so the caller can refuse the request cleanly.
+     *
+     * @param array{snapshot:string,mode:string,safety_snapshot:bool,target:string,keep?:int,excludes?:array<int,string>} $opts
+     */
+    public static function writeRestoreOptions(string $jobId, array $opts): bool {
+        $path = self::restoreOptionsPath($jobId);
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return false;
+        }
+        return @file_put_contents($path, json_encode($opts)) !== false;
+    }
+
+    /** Read back a restore options sidecar (or [] if absent/corrupt). */
+    public static function readRestoreOptions(string $jobId): array {
+        $path = self::restoreOptionsPath($jobId);
+        if (!is_file($path)) return [];
+        $data = json_decode((string)@file_get_contents($path), true);
+        return is_array($data) ? $data : [];
+    }
+
+    /** Best-effort cleanup of a job's restore-options sidecar once the job is terminal. */
+    public static function deleteRestoreOptions(string $jobId): void {
+        @unlink(self::restoreOptionsPath($jobId));
     }
 
     /**
@@ -617,6 +708,93 @@ class SupervisorService {
     }
 
     /**
+     * HOME_BACKUP.md R10: the tray step label for a backup job's ledger
+     * "phase" field. An unrecognised or empty phase (job just started, or an
+     * older supervisor build that never set one) falls back to the generic
+     * "running" pill every other tracked op shows.
+     */
+    private static function backupPhaseStep(string $phase): string {
+        $labels = [
+            'pre-flight'  => 'Checking target',
+            'closing'     => 'Closing sessions',
+            'baking'      => 'Baking the home layer',
+            'copying'     => 'Copying files',
+            'verifying'   => 'Verifying the copy',
+            'relaunching' => 'Resuming sessions',
+        ];
+        return $labels[$phase] ?? 'running';
+    }
+
+    /** Rough tray progress for a backup step label (see backupPhaseStep). */
+    private static function backupPhaseProgress(string $step): int {
+        $progress = [
+            'Checking target'       => 10,
+            'Closing sessions'      => 25,
+            'Baking the home layer' => 40,
+            'Copying files'         => 60,
+            'Verifying the copy'    => 80,
+            'Resuming sessions'     => 90,
+        ];
+        return $progress[$step] ?? 50;
+    }
+
+    /**
+     * HOME_RESTORE.md R4: the tray step label for a restore job's ledger
+     * "phase" field (pre-flight/closing/safety-snapshot/restoring/verifying/
+     * baking/relaunching), mirroring backupPhaseStep().
+     */
+    private static function restorePhaseStep(string $phase): string {
+        $labels = [
+            'pre-flight'      => 'Checking the snapshot',
+            'closing'         => 'Closing sessions',
+            'safety-snapshot' => 'Taking a safety snapshot',
+            'restoring'       => 'Restoring files',
+            'verifying'       => 'Verifying the copy',
+            'baking'          => 'Baking the home layer',
+            'relaunching'     => 'Resuming sessions',
+        ];
+        return $labels[$phase] ?? 'running';
+    }
+
+    /** Rough tray progress for a restore step label (see restorePhaseStep). */
+    private static function restorePhaseProgress(string $step): int {
+        $progress = [
+            'Checking the snapshot'    => 10,
+            'Closing sessions'         => 20,
+            'Taking a safety snapshot' => 35,
+            'Restoring files'          => 55,
+            'Verifying the copy'       => 75,
+            'Baking the home layer'    => 85,
+            'Resuming sessions'        => 92,
+        ];
+        return $progress[$step] ?? 50;
+    }
+
+    /**
+     * The tray opId a ledger job mirrors into. Every op except `backup`/
+     * `restore` uses the generic `storage_job_<jobId>` id
+     * StorageHandler::trackJobActivity() registers. HOME_BACKUP.md and
+     * HOME_RESTORE.md name their tray entries `user_backup_home_<user>_<jobId>`
+     * and `user_restore_home_<user>_<jobId>` instead (StorageHandler's
+     * backupHome()/restoreHome() register under those same ids) — kept
+     * distinct from each other and from the generic id so neither can ever
+     * collide for the same user/jobId shape.
+     */
+    private static function trayOpIdForJob(array $job, string $jobId): string {
+        $op = (string)($job['op'] ?? '');
+        $entity = (string)($job['entity'] ?? '');
+        if ($op === 'backup' && strpos($entity, 'home/') === 0) {
+            $user = substr($entity, 5);
+            return "user_backup_home_{$user}_{$jobId}";
+        }
+        if ($op === 'restore' && strpos($entity, 'home/') === 0) {
+            $user = substr($entity, 5);
+            return "user_restore_home_{$user}_{$jobId}";
+        }
+        return 'storage_job_' . $jobId;
+    }
+
+    /**
      * S-08 bridge to the activity tray: the bash supervisor cannot call PHP
      * cheaply, so PHP polling paths (list_activities, storage_job_status,
      * storage_jobs_active) call this to mirror tracked-job state into any
@@ -631,7 +809,7 @@ class SupervisorService {
             if ($jobId === '') {
                 continue;
             }
-            $opId  = 'storage_job_' . $jobId;
+            $opId  = self::trayOpIdForJob($job, $jobId);
             $entry = ActivityService::get($opId);
             if ($entry === null) {
                 continue; // not user-initiated — no tray entry to mirror into
@@ -669,8 +847,24 @@ class SupervisorService {
                     }
                     break;
                 case 'running':
-                    if (($entry['step'] ?? '') !== 'running') {
-                        ActivityService::update($opId, ['step' => 'running', 'progress' => 50]);
+                    // HOME_BACKUP.md R10 / HOME_RESTORE.md R4: a backup or
+                    // restore job reports its OWN step via the ledger's
+                    // additive "phase" field (job_ledger_set_phase in
+                    // queue_helpers.sh), instead of the generic "running" pill
+                    // every other tracked op shows.
+                    $jobOp = (string)($job['op'] ?? '');
+                    if ($jobOp === 'backup') {
+                        $step = self::backupPhaseStep((string)($job['phase'] ?? ''));
+                        $progress = self::backupPhaseProgress($step);
+                    } elseif ($jobOp === 'restore') {
+                        $step = self::restorePhaseStep((string)($job['phase'] ?? ''));
+                        $progress = self::restorePhaseProgress($step);
+                    } else {
+                        $step = 'running';
+                        $progress = 50;
+                    }
+                    if (($entry['step'] ?? '') !== $step) {
+                        ActivityService::update($opId, ['step' => $step, 'progress' => $progress]);
                     } else {
                         ActivityService::heartbeat($opId);
                     }
@@ -702,11 +896,13 @@ class SupervisorService {
         $liveOpIds = [];
         foreach (self::listJobs(false) as $job) {
             $jid = (string)($job['job_id'] ?? '');
-            if ($jid !== '') $liveOpIds['storage_job_' . $jid] = true;
+            if ($jid !== '') $liveOpIds[self::trayOpIdForJob($job, $jid)] = true;
         }
         foreach (ActivityService::listAll() as $a) {
             $opId = (string)($a['opId'] ?? '');
-            if (strpos($opId, 'storage_job_') !== 0) continue;
+            if (strpos($opId, 'storage_job_') !== 0
+                && strpos($opId, 'user_backup_home_') !== 0
+                && strpos($opId, 'user_restore_home_') !== 0) continue;
             if (isset($liveOpIds[$opId])) continue;
             $st = (string)($a['status'] ?? '');
             if ($st === 'running' || $st === 'stalled') {
@@ -793,12 +989,14 @@ class SupervisorService {
         string $type,
         string $id,
         int $timeoutSec = 30,
-        int $heartbeatGraceSec = 6
+        int $heartbeatGraceSec = 6,
+        ?callable $onWait = null
     ): array {
         $startedAt = microtime(true);
         $deadline = $startedAt + max(1, $timeoutSec);
         $entity = $type . '/' . $id;
         $sawAction = false;
+        $lastOnWait = 0.0;
 
         while (microtime(true) < $deadline) {
             $work = self::getWorkState();
@@ -810,6 +1008,13 @@ class SupervisorService {
 
             if ($busyForOurs || $queuedForOurs) {
                 $sawAction = true;
+                // Caller-visible wait feedback (and activity-heartbeat refresh):
+                // fire immediately on the first busy observation, then at most
+                // every ~15 s. Never let a callback fault break the wait.
+                if ($onWait !== null && (microtime(true) - $lastOnWait) >= 15.0) {
+                    $lastOnWait = microtime(true);
+                    try { $onWait(); } catch (\Throwable $e) { /* best-effort */ }
+                }
             } else {
                 $elapsed = microtime(true) - $startedAt;
                 if ($sawAction) {

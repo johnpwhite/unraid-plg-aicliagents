@@ -40,16 +40,18 @@ warn() {
 log "Array stop detected."
 lifecycle_log "info" "event_stopping_array" "array_stop_received" "{}" 2>/dev/null || true
 
-# Publish storage status change to Nchan (Unix socket, not HTTP)
+# Publish the storage_status snapshot (Unix socket, not HTTP).
+# REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E2: this used to curl a hand-built
+# three-field guess straight to Nchan (no `ts`) and tee a second, separate
+# ledger line. Both are now ONE call into event-publish.php, which builds the
+# FULL snapshot (StorageMetricsService::getStatus() + the maintenance key) via
+# NchanService::publish() — the exact object a browser's own reconcile read
+# sees, with `ts` stamped and the ledger tee handled inside that one publish.
+# Best-effort — never blocks the array stop. The former $1/$2/$3 guess
+# (home/agents/emergency) is no longer needed: the snapshot computes those
+# itself from live state, more accurately than a caller's own assumption.
 nchan_notify() {
-    local home_avail="${1:-true}"
-    local agents_avail="${2:-true}"
-    local emergency="${3:-false}"
-    curl -s -X POST --unix-socket /var/run/nginx.socket \
-        "http://localhost/pub/aicli_storage_status?buffer_length=1" \
-        -H "Content-Type: application/json" \
-        -d "{\"home_available\":$home_avail,\"agents_available\":$agents_avail,\"emergency_mode\":$emergency}" \
-        --max-time 2 >/dev/null 2>&1 || true
+    php "$EMHTTP_DEST/src/scripts/event-publish.php" storage_status storage_status >/dev/null 2>&1 || true
 }
 
 classify() {
@@ -121,7 +123,7 @@ if needs_array "$STORAGE_CLASS"; then
         fi
     fi
 
-    nchan_notify false false true
+    nchan_notify
     # S-05 (#1352): dual-write — tmpfs .emergency_mode (existing consumers) +
     # durable state/degraded.json (survives a recovery reboot).
     if declare -f degraded_set >/dev/null 2>&1; then
@@ -179,6 +181,12 @@ else
                     tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
                     pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
                     KILLED=$((KILLED + 1))
+                    # REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E2: this selective
+                    # eviction used to leave no `stopped` event behind — one
+                    # 'workspaces' publish per killed id, best-effort.
+                    php "$EMHTTP_DEST/src/scripts/event-publish.php" workspaces \
+                        "{\"type\":\"stopped\",\"id\":\"${SESS_ID}\",\"reason\":\"array_stopped\"}" \
+                        >/dev/null 2>&1 || true
                 else
                     log "  Keeping session $sess (not on array/pool)"
                 fi
@@ -212,7 +220,7 @@ else
         log "No sessions or processes with array/pool workspace paths. Nothing to evict."
     fi
 
-    nchan_notify true true false
+    nchan_notify
 fi
 
 lifecycle_log "info" "event_stopping_array" "array_stop_complete" "{\"storage_class\":\"$STORAGE_CLASS\"}" 2>/dev/null || true

@@ -60,7 +60,9 @@ class StorageMigrationService {
         LogService::log("Initiating nuclear wipe sequence for $type $id...", LogService::LOG_WARN, "StorageMigrationService");
         
         // 1. Unmount
-        $mnt = ($type === 'agent') ? "/usr/local/emhttp/plugins/unraid-aicliagents/agents/$id" : UtilityService::getWorkDir($id) . "/home";
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: route the agent-mount arm through
+        // AgentRegistry::agentPath() instead of repeating the literal AGENT_BASE path.
+        $mnt = ($type === 'agent') ? AgentRegistry::agentPath($id) : UtilityService::getWorkDir($id) . "/home";
         exec("umount -l " . escapeshellarg($mnt) . " 2>/dev/null");
         
         // 2. Wipe Flash

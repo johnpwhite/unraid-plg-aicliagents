@@ -18,6 +18,254 @@ class AgentRegistry {
     const AGENT_BASE    = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
 
     /**
+     * The character class every legitimate agent id already satisfies —
+     * lowercase letters, digits, hyphens, 1-64 chars, never starting with a
+     * hyphen. Matches the pattern already used by sibling code that treats an
+     * agent id as filesystem-path input: UpgradeRelaunchService,
+     * PaneInputRules, AgentUpgradeAdmissionService, PendingAgentUpgradeService,
+     * TerminalHandler, AgentHandler. Not introducing a new convention — reusing
+     * the one this codebase already settled on.
+     */
+    private const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/';
+
+    /**
+     * STRUCTURAL RULE (docs/specs/AGENT_SELF_UPDATE_SUPPRESSION.md, 2026-09-10):
+     * every agent this plugin defines must have a self-update decision — EITHER
+     * listed here (a verified suppression is applied in that agent's own
+     * getDefaultAgents() entry: an env var in `default_envs`, a CLI flag in
+     * `plugin_args`, or a config-file key in `default_settings`)
+     * OR listed in SELF_UPDATE_EXEMPT with a reason. RegressionGuardsTest::
+     * testEveryRegisteredAgentHasSelfUpdateDecision fails CI if a newly added
+     * agent has neither. This exists because an agent's own in-TUI "update
+     * available, install now?" prompt writes into the plugin-managed overlay's
+     * flash-backed upper layer, silently desyncs the plugin's version tracking
+     * (versions.json), and bypasses the plugin's upgrade machinery (closed-set
+     * relaunch, layer activation, rollback) entirely — observed live on
+     * 2026-09-10 for kimi-code (see that agent's entry below).
+     * @var string[]
+     */
+    const SELF_UPDATE_SUPPRESSED = [
+        'claude-code', 'opencode', 'kilocode', 'pi-coder', 'codex-cli',
+        'factory-cli', 'antigravity-cli', 'grok-build', 'kimi-code',
+        // Suppressed through `default_settings` (a settings.json key) rather than
+        // an env var or CLI flag — see AgentSettingsSeedService.
+        'gemini-cli', 'qwen-code',
+    ];
+
+    /**
+     * Agents with NO verified, wireable self-update suppression today. Each
+     * reason states whether a real mechanism exists upstream and, if so, why
+     * this plugin cannot apply it yet (see docs/specs/AGENT_SELF_UPDATE_SUPPRESSION.md
+     * for the full research trail and citations behind each entry).
+     * @var array<string,string> agentId => reason
+     */
+    const SELF_UPDATE_EXEMPT = [
+        'gh-copilot' => 'No verified mechanism for the CLI BINARY\'s own self-update. '
+            . 'COPILOT_AUTO_UPDATE/autoUpdate only gate first-party PLUGIN '
+            . 'auto-update per the official docs, not the copilot binary. A '
+            . '--no-auto-update flag appears only in an unofficial GitHub '
+            . 'Discussion workaround with no maintainer confirmation and no entry '
+            . 'in the official CLI command reference; not applied unverified.',
+        'nanocoder' => 'No self-update mechanism exists to suppress — the published '
+            . 'npm package.json (registry.npmjs.org, checked 2026-09-10) ships no '
+            . 'update-notifier or auto-updater dependency of any kind.',
+        'goose' => 'The installed CLI binary (github_release asset) has no automatic '
+            . 'self-update at all — updating requires the user to explicitly run '
+            . '`goose update` (https://goose-docs.ai/docs/guides/updating-goose/). '
+            . 'GOOSE_DISABLE_AUTO_DOWNLOAD only gates the separate Electron desktop '
+            . "app's auto-updater, which this plugin does not install.",
+    ];
+
+    /**
+     * Root directory under which every agent's overlay-mounted directory
+     * lives. Today this is just AGENT_BASE — the indirection exists so Phase
+     * 2+ of docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md (2026-09-09) can change
+     * what this returns (e.g. a version-qualified root) in ONE place instead
+     * of in every one of the ~20 files that used to read AGENT_BASE directly
+     * or repeat its literal value. No behaviour change today: same string,
+     * same callers, same mounts.
+     */
+    public static function agentBase(): string {
+        return self::AGENT_BASE;
+    }
+
+    /**
+     * The overlay-mounted directory for one agent. This is the resolver Phase
+     * 1 of docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md (2026-09-09) introduces:
+     * every PHP call site that used to build `AgentRegistry::AGENT_BASE . "/$id"`
+     * (or re-derive the same literal independently) now calls this instead, so
+     * a later phase can make this version-aware without touching those callers
+     * again. Today it returns exactly what the inline concatenation always did.
+     *
+     * $agentId is validated against AGENT_ID_RE before it reaches a filesystem
+     * path — an agent id is frequently only one hop from request input (e.g.
+     * $_GET['agentId']), and this is the single place that value funnels
+     * through on its way to a real path, so it is the right place to refuse a
+     * hostile one (path traversal, null bytes, empty string) rather than build
+     * a bad path and let it propagate.
+     *
+     * @throws \InvalidArgumentException if $agentId is empty or contains
+     *         anything outside the registry's own id character class.
+     */
+    public static function agentPath(string $agentId): string {
+        if (!preg_match(self::AGENT_ID_RE, $agentId)) {
+            throw new \InvalidArgumentException("AgentRegistry::agentPath: invalid agent id '$agentId'");
+        }
+        return self::agentBase() . "/$agentId";
+    }
+
+    /**
+     * Where an install WRITES, as opposed to where the agent RUNS.
+     *
+     * docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15). These were
+     * the same path until now, and that identity is precisely why an upgrade had
+     * to close every session first: `npm install` ran straight against the merged
+     * view of the live mount, so the new version landed in the running sessions'
+     * own writable layer before any mount swap was even considered.
+     *
+     * With a staging overlay bound (StorageMountService::stageAgentInstall) the
+     * two separate: the install writes into a layer of its own over the same
+     * read-only lowers, and the version in service is untouched until the new
+     * generation is activated. Every other caller keeps using agentPath().
+     *
+     * The override is process-scoped and set for the duration of one install, so
+     * an AgentSource keeps deriving its own paths rather than having an install
+     * root threaded through an interface every source would have to change.
+     */
+    private static ?string $installRootOverride = null;
+
+    /** Point installs at $path (null clears). Callers MUST clear it on every exit path. */
+    public static function setInstallRoot(?string $path): void {
+        self::$installRootOverride = ($path === null || $path === '') ? null : rtrim($path, '/');
+    }
+
+    /** The staging root currently in force, or null when installs go to the live mount. */
+    public static function installRoot(): ?string {
+        return self::$installRootOverride;
+    }
+
+    /**
+     * The directory an install should write this agent into: the staging mount
+     * when one is bound, otherwise exactly what agentPath() has always returned.
+     *
+     * @throws \InvalidArgumentException if $agentId is empty or malformed.
+     */
+    public static function agentInstallPath(string $agentId): string {
+        if (!preg_match(self::AGENT_ID_RE, $agentId)) {
+            throw new \InvalidArgumentException("AgentRegistry::agentInstallPath: invalid agent id '$agentId'");
+        }
+        return self::$installRootOverride ?? self::agentPath($agentId);
+    }
+
+    /**
+     * The version-qualified directory one agent generation is (or would be)
+     * mounted at — agents/.versions/<id>/<generation>. SIDE_BY_SIDE_AGENT_INSTALLS.md
+     * Phase 2 (2026-09-09): the shell mount pipeline (storage_ops.sh op_mount /
+     * resolve_paths.sh agent_versioned_mount + agent_activate_stable_symlink) is
+     * the actual authority that creates one of these and activates it; this PHP
+     * twin is for read-only callers that need to reason about the real,
+     * version-qualified path without duplicating the shell's arithmetic (status
+     * surfaces, a future GC view). It does NOT mount anything.
+     *
+     * agentPath() — the STABLE symlink once an agent is migrated — remains what
+     * every other caller should keep using; only code that genuinely needs the
+     * real, generation-qualified path belongs here (see also agentLiveMountTarget()
+     * below, for "whatever the stable name resolves to RIGHT NOW").
+     *
+     * @throws \InvalidArgumentException on an invalid agent id or generation id.
+     */
+    public static function agentVersionedPath(string $agentId, string $generationId): string {
+        if (!preg_match(self::AGENT_ID_RE, $agentId)) {
+            throw new \InvalidArgumentException("AgentRegistry::agentVersionedPath: invalid agent id '$agentId'");
+        }
+        // Mirrors generation.sh's own sanitisation of a generation id part
+        // (_aicli_sanitize_generation_part): the id is a hash + a sanitised
+        // layer-basename tag, never arbitrary, so a strict allow-list is safe.
+        $safeGen = preg_replace('/[^A-Za-z0-9._-]/', '', $generationId);
+        if ($safeGen === null || $safeGen === '') {
+            throw new \InvalidArgumentException("AgentRegistry::agentVersionedPath: invalid generation id '$generationId'");
+        }
+        return self::agentBase() . "/.versions/$agentId/$safeGen";
+    }
+
+    /**
+     * The directory agentPath()'s stable name ACTUALLY resolves to right now —
+     * as opposed to agentPath() itself, which every ordinary caller should keep
+     * using unchanged. SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): once
+     * an agent is migrated, agentPath() is a symlink into agentVersionedPath(),
+     * and a handful of callers need the REAL path specifically because they are
+     * about to match it, literally, against /proc/mounts — which records the
+     * kernel's actual mount target and never a symlink's own name (today: only
+     * liveAgentLowerdir() below). realpath() is exactly the right primitive: it
+     * returns the stable path itself, unchanged, for a not-yet-migrated agent
+     * (still a real directory — byte-identical to Phase 1) and for an agent
+     * that was never installed (nonexistent path — realpath() returns false,
+     * so this falls back to the stable path exactly as it would have resolved
+     * before Phase 2 existed).
+     */
+    public static function agentLiveMountTarget(string $agentId): string {
+        $stable = self::agentPath($agentId);
+        $real = @realpath($stable);
+        return $real !== false ? $real : $stable;
+    }
+
+    /**
+     * How many versions of one agent may be mounted at the same time.
+     *
+     * docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, R6. Two — the one being
+     * activated and one aging out. This is a much tighter ceiling than the
+     * rollback buffer the plugin keeps for its own code, and deliberately so:
+     * a plugin generation is a directory tree of a few megabytes, an agent
+     * generation is a live overlay plus a writable layer measured at 255-450 MB
+     * per agent on this box, against roughly 6 GB free on a write-endurance-
+     * limited USB device. An uncapped overlap is a realistic route to an
+     * out-of-space install, not a theoretical one.
+     */
+    public const MAX_CONCURRENT_GENERATIONS = 2;
+
+    /**
+     * Every generation of this agent with an overlay bound to it right now.
+     *
+     * Reads /proc/mounts rather than listing directories, because a directory
+     * under .versions/ proves nothing about whether anything is mounted on it —
+     * a crash between the mount and the symlink flip leaves one behind, and
+     * treating that as a live version would refuse upgrades forever.
+     *
+     * @param string|null $mountsText /proc/mounts content; injected by tests.
+     * @return array<int,string> generation ids, in mount-table order
+     */
+    public static function mountedGenerations(string $agentId, ?string $mountsText = null): array {
+        if (!preg_match(self::AGENT_ID_RE, $agentId)) return [];
+        $text = $mountsText ?? (string)@file_get_contents('/proc/mounts');
+        if ($text === '') return [];
+        $prefix = self::agentBase() . "/.versions/$agentId/";
+        $found = [];
+        foreach (explode("\n", $text) as $line) {
+            // /proc/mounts is space-separated with octal escapes; the target is
+            // field 2. Only the prefix match matters here, and a generation id
+            // never contains a space.
+            $parts = preg_split('/\s+/', trim($line));
+            if (!is_array($parts) || count($parts) < 2) continue;
+            $target = $parts[1];
+            if (strncmp($target, $prefix, strlen($prefix)) !== 0) continue;
+            $gen = substr($target, strlen($prefix));
+            // Only the generation directory itself, never something mounted
+            // deeper inside one.
+            if ($gen === '' || strpos($gen, '/') !== false) continue;
+            if (!in_array($gen, $found, true)) $found[] = $gen;
+        }
+        return $found;
+    }
+
+    /**
+     * True when another version of this agent may be brought up beside the ones
+     * already mounted. Pure given its inputs so the ceiling is unit-testable.
+     */
+    public static function canAddGeneration(int $mountedCount, int $max = self::MAX_CONCURRENT_GENERATIONS): bool {
+        return $mountedCount < $max;
+    }
+
+    /**
      * Retrieves the unified agent registry (Default + Custom).
      */
     public static function getRegistry() {
@@ -122,10 +370,14 @@ class AgentRegistry {
     }
 
     public static function getDefaultAgents() {
-        $agentBase = self::AGENT_BASE;
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: route through agentBase()
+        // instead of reading the constant directly, even here in its own
+        // defining class — see agentBase()'s docblock for why.
+        $agentBase = self::agentBase();
         return [
             'gemini-cli' => [
                 'id' => 'gemini-cli',
+                'data_dir_env' => ['GEMINI_CLI_HOME' => 'Relocates ALL Gemini CLI state (sessions, config, credentials) away from ~/.gemini. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin, so history and logins vanish on reboot.'],
                 'name' => 'Gemini CLI',
                 'description' => 'Google\'s high-performance AI agent for advanced coding and system analysis.',
                 'npm_package' => '@google/gemini-cli',
@@ -145,6 +397,24 @@ class AgentRegistry {
                 // is needed — it'll be seeded additively (never overwrites a user
                 // value, never auto-removed later, user deletions honoured via the
                 // seeded sidecar). Per WP #736 ENV_AND_SECRETS_TIERS.
+                //
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): re-researched why
+                // the env var above never worked. Gemini CLI's real, DOCUMENTED
+                // self-update control is the settings.json key
+                // `general.enableAutoUpdate: false` in ~/.gemini/settings.json —
+                // confirmed at https://geminicli.com/docs/cli/settings/ — not an env
+                // var and not a CLI flag; its own docs page states no environment
+                // variable equivalent exists. Do not re-add an env var here; that
+                // was already tried and doesn't work.
+                //
+                // Seeded through `default_settings` by AgentSettingsSeedService on
+                // the same unconditional install / plugin-upgrade path that seeds
+                // `default_envs` — additive, never overwrites a user value, and a
+                // deliberate deletion is not resurrected (seeded sidecar).
+                'default_settings' => [
+                    'file'   => '.gemini/settings.json',
+                    'values' => ['general.enableAutoUpdate' => false],
+                ],
             ],
             'claude-code' => [
                 'id' => 'claude-code',
@@ -174,7 +444,16 @@ class AgentRegistry {
                 // A user who already has IS_SANDBOX in their agent-env tier wins
                 // (5-tier merge: default_envs → seeded into tier-4 agent-env, but any
                 // higher-tier value beats it at buildEffectiveEnv time).
-                'default_envs' => ['IS_SANDBOX' => '1'],
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): DISABLE_UPDATES blocks
+                // EVERY update path — background auto-updater AND `claude update` /
+                // `claude install` run manually inside the session — so an agent
+                // upgrade can only happen through this plugin's Store. Confirmed via
+                // the official docs: https://code.claude.com/docs/en/setup
+                // ("Disable auto-updates" section) — "DISABLE_AUTOUPDATER only stops
+                // the background check; claude update and claude install still work.
+                // To block all update paths, including manual updates, set
+                // DISABLE_UPDATES instead." We use the stronger of the two on purpose.
+                'default_envs' => ['IS_SANDBOX' => '1', 'DISABLE_UPDATES' => '1'],
                 // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys
                 // for Shift+Enter to be delivered as a distinct key chord (vs. plain Enter).
                 // This is agent-specific: applied as tier 1.5 (after BUILTIN, before user JSON
@@ -188,6 +467,7 @@ class AgentRegistry {
             ],
             'opencode' => [
                 'id' => 'opencode',
+                'data_dir_env' => ['OPENCODE_CONFIG' => 'Points OpenCode at a config file outside ~/.config/opencode. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin.'],
                 'name' => 'OpenCode',
                 'description' => 'An open-source oriented agent optimized for local development workflows.',
                 'npm_package' => 'opencode-ai',
@@ -207,6 +487,19 @@ class AgentRegistry {
                 // npm package carries no repository metadata — npm versions page
                 // is the verified fallback (no GitHub releases to point at).
                 'changelog_url' => 'https://www.npmjs.com/package/opencode-ai?activeTab=versions',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): OpenCode's DOCUMENTED
+                // knob is the config-file key `"autoupdate": false` in opencode.json
+                // (https://opencode.ai/docs/config/) — this plugin has no facility to
+                // write into an agent's own JSON config today, only launch-time env
+                // vars/flags. OPENCODE_DISABLE_AUTOUPDATE is an UNDOCUMENTED env-var
+                // workaround reported in https://github.com/anomalyco/opencode/issues/20027
+                // ("`\"autoupdate\": false` setting is ignored for local config file")
+                // — verified as REAL (not invented) by grepping the literal string
+                // OPENCODE_DISABLE_AUTOUPDATE out of the installed opencode.exe binary
+                // on this box on 2026-09-10 (bin/opencode.exe under this agent's
+                // overlay). Primary-evidence verified per CLAUDE.md; flag as
+                // undocumented if the vendor ever changes this.
+                'default_envs' => ['OPENCODE_DISABLE_AUTOUPDATE' => 'true'],
             ],
             'kilocode' => [
                 'id' => 'kilocode',
@@ -225,9 +518,19 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'KILOCODE',
                 'changelog_url' => 'https://github.com/Kilo-Org/kilocode/releases',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): Kilo Code CLI is an
+                // opencode fork (identical `service=default ... opencode` startup log
+                // line, identical command set) and carries the same env var pattern
+                // under its own KILO_ prefix. No vendor doc page documents this (Kilo
+                // Code's own docs at kilo.ai don't cover it); verified as REAL by
+                // grepping the literal string KILO_DISABLE_AUTOUPDATE out of the real
+                // bundled binary bin/.kilo (the wrapper at bin/kilo execs it) on this
+                // box on 2026-09-10. Primary-evidence verified per CLAUDE.md.
+                'default_envs' => ['KILO_DISABLE_AUTOUPDATE' => '1'],
             ],
             'pi-coder' => [
                 'id' => 'pi-coder',
+                'data_dir_env' => ['PI_CODING_AGENT_DIR' => 'Relocates ALL pi-coder state away from ~/.pi/agent. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin, so sessions and keys vanish on reboot.'],
                 'name' => 'Pi Coder',
                 'description' => 'Specialized Python and Data Science agent with deep tool integration.',
                 'npm_package' => '@mariozechner/pi-coding-agent',
@@ -241,6 +544,13 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'PI_CODER',
                 'changelog_url' => 'https://github.com/badlogic/pi-mono/releases',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): official docs
+                // (https://pi.dev/docs/latest/settings) — "Set PI_SKIP_VERSION_CHECK=1
+                // to disable the Pi version update check." We use the narrow flag
+                // rather than PI_OFFLINE=1 (which also disables package-update checks
+                // and install/update telemetry) to avoid touching behaviour beyond
+                // the self-update surface this suppression is scoped to.
+                'default_envs' => ['PI_SKIP_VERSION_CHECK' => '1'],
             ],
             'gh-copilot' => [
                 'id' => 'gh-copilot',
@@ -263,9 +573,27 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'GH_COPILOT',
                 'changelog_url' => 'https://github.com/github/copilot-cli/releases',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): NO VERIFIED
+                // mechanism found for disabling the Copilot CLI BINARY's own
+                // self-update. `COPILOT_AUTO_UPDATE=false` / the `autoUpdate`
+                // setting DO exist in the official CLI plugin reference
+                // (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference)
+                // but that page explicitly scopes them to "First-party plugins ...
+                // automatically update at the start of each session" — plugin
+                // auto-update, NOT the copilot binary itself. Searched the official
+                // CLI command reference
+                // (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
+                // for a binary-self-update flag: it documents `copilot update` and
+                // `copilot version` only, no disable flag. A `--no-auto-update` flag
+                // appears ONLY in a user's own unofficial workaround in a GitHub
+                // Discussion (github/copilot-cli#1199) with no maintainer
+                // confirmation, and the binary isn't installed on this box to probe
+                // via --help. Not applying an unverified flag — see
+                // AgentRegistry::SELF_UPDATE_EXEMPT.
             ],
             'codex-cli' => [
                 'id' => 'codex-cli',
+                'data_dir_env' => ['CODEX_HOME' => 'Relocates ALL Codex state (sessions, config, auth) away from ~/.codex. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin, so history and logins vanish on reboot.'],
                 'name' => 'Codex CLI',
                 'description' => 'OpenAI Codex-powered agent for translating natural language to code and shell commands.',
                 'npm_package' => '@openai/codex',
@@ -295,7 +623,15 @@ class AgentRegistry {
                 // plugin_args is appended LAST so codex's last-`-c`-wins
                 // makes the plugin sandbox_mode override any user workspace arg.
                 // See docs/specs/CODEX_SANDBOX_MODE_UNRAID.md
-                'plugin_args' => '-c sandbox_mode=danger-full-access -c approval_policy=on-request',
+                //
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): check_for_update_on_startup
+                // is a documented config.toml key — "Check for Codex updates on
+                // startup (set to false only when updates are centrally managed)" —
+                // confirmed at https://developers.openai.com/codex/config-reference
+                // (redirects to https://learn.chatgpt.com/docs/config-file/config-reference).
+                // Applied as a `-c` override alongside the sandbox flags above so it
+                // always wins over any user workspace arg, same rationale.
+                'plugin_args' => '-c sandbox_mode=danger-full-access -c approval_policy=on-request -c check_for_update_on_startup=false',
                 // Codex 0.144.1 grammar is `codex [OPTIONS] resume [SESSION_ID]`.
                 // Keep user and plugin global options before the subcommand;
                 // a plain Codex invocation starts a new conversation.
@@ -322,9 +658,19 @@ class AgentRegistry {
                 'env_prefix' => 'FACTORY',
                 // @factory/cli has no public release history — npm versions page.
                 'changelog_url' => 'https://www.npmjs.com/package/@factory/cli?activeTab=versions',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): official docs
+                // (https://docs.factory.ai/reference/cli-reference) — "The npm
+                // distribution has auto-updates disabled at build time and does not
+                // require this variable [FACTORY_DROID_AUTO_UPDATE_ENABLED]." This
+                // agent installs via npm_package above, so droid's self-updater is
+                // already inert; the env var is set anyway as a defensive belt-and-
+                // suspenders measure in case a future change moves this agent off the
+                // npm distribution.
+                'default_envs' => ['FACTORY_DROID_AUTO_UPDATE_ENABLED' => 'false'],
             ],
             'nanocoder' => [
                 'id' => 'nanocoder',
+                'data_dir_env' => ['NANOCODER_DATA_DIR' => 'Relocates ALL Nanocoder data away from ~/.local/share/nanocoder. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin.'],
                 'name' => 'NanoCoder',
                 'description' => 'Lightweight, ultra-portable coding agent for small-scale tasks.',
                 'npm_package' => '@nanocollective/nanocoder',
@@ -334,6 +680,14 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'NANOCODER',
                 'changelog_url' => 'https://github.com/Nano-Collective/nanocoder/releases',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): no self-update
+                // mechanism to suppress — Nanocoder ships no update-notifier/
+                // auto-updater dependency at all. Verified by fetching
+                // @nanocollective/nanocoder's published package.json from the npm
+                // registry (registry.npmjs.org) on 2026-09-10 and inspecting its
+                // full `dependencies` list: no update-notifier, simple-update-
+                // notifier, or any auto-update package is present. See
+                // AgentRegistry::SELF_UPDATE_EXEMPT.
             ],
             'goose' => [
                 'id' => 'goose',
@@ -375,6 +729,17 @@ class AgentRegistry {
                     ['env' => '{GOOSE_PROVIDER}_API_KEY', 'label' => 'API Key', 'type' => 'password',
                      'help' => 'Stored as ANTHROPIC_API_KEY / OPENAI_API_KEY / etc. — resolved from the Provider selection above.'],
                 ],
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): no self-update
+                // mechanism to suppress for the CLI binary this agent installs
+                // (source.type github_release, the goose-*-unknown-linux-gnu.tar.bz2
+                // asset). Confirmed at https://goose-docs.ai/docs/guides/updating-goose/
+                // — updating requires the user to explicitly run `goose update`;
+                // there is no automatic startup check or background download for the
+                // CLI. (A GOOSE_DISABLE_AUTO_DOWNLOAD env var and a
+                // "disableAutoDownload" setting DO exist, from PR block/goose#9872 —
+                // but those gate the separate Electron DESKTOP app's auto-updater
+                // [autoUpdater.ts/main.ts/preload.ts], which this plugin does not
+                // install or run.) See AgentRegistry::SELF_UPDATE_EXEMPT.
             ],
             'qwen-code' => [
                 'id' => 'qwen-code',
@@ -398,6 +763,20 @@ class AgentRegistry {
                     ['env' => 'DASHSCOPE_API_KEY', 'label' => 'DashScope API Key', 'type' => 'password',
                      'help' => 'Required for Alibaba\'s official Qwen API. Alternative providers (Ollama, vLLM) can be configured via the general env panel.'],
                 ],
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): Qwen Code is a
+                // gemini-cli fork and shares its settings architecture. Its
+                // documented self-update control is also a settings.json key —
+                // `general.enableAutoUpdate: false` in ~/.qwen/settings.json
+                // (legacy `disableAutoUpdate`/`disableUpdateNag` keys were folded
+                // into it) — confirmed at
+                // https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/settings.md.
+                // No env var or CLI flag equivalent is documented, so this is
+                // seeded through `default_settings` by AgentSettingsSeedService,
+                // exactly like gemini-cli above.
+                'default_settings' => [
+                    'file'   => '.qwen/settings.json',
+                    'values' => ['general.enableAutoUpdate' => false],
+                ],
             ],
             'antigravity-cli' => [
                 'id' => 'antigravity-cli',
@@ -413,6 +792,9 @@ class AgentRegistry {
                     'type' => 'curl_install',
                     'script_url' => 'https://antigravity.google/cli/install.sh',
                     'version_probe' => '{binary} --version',
+                    // CURL_INSTALL_VERSION_PIN_AND_TIMEOUT.md: ~200 MB download;
+                    // the script has no version input (manifest is latest-only).
+                    'timeout_s' => 900,
                     // WP #963: Antigravity ships via a self-updater, not a
                     // release history — its manifest serves only the current
                     // {version,url,sha512}. CurlInstallSource probes manifest_url
@@ -436,6 +818,93 @@ class AgentRegistry {
                 // API-key env var.
                 // T-12: first-run wizard auth hint — shown in step 3 checklist.
                 'auth_hint' => 'On first launch, `agy` prints a Google authorization URL — open it in a browser, approve access, and paste the code back into the terminal. Credentials persist in your managed home directory.',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): AGY_CLI_DISABLE_AUTO_UPDATE=true
+                // disables agy's own self-updater. Not on antigravity.google's own
+                // docs pages we could reach, but corroborated by multiple independent
+                // third-party CLI references and verified as REAL by grepping the
+                // literal string AGY_CLI_DISABLE_AUTO_UPDATE out of the installed agy
+                // binary on this box on 2026-09-10. Primary-evidence verified per
+                // CLAUDE.md.
+                'default_envs' => ['AGY_CLI_DISABLE_AUTO_UPDATE' => 'true'],
+            ],
+            'grok-build' => [
+                'id' => 'grok-build',
+                'name' => 'Grok Build',
+                'description' => 'xAI\'s official terminal coding agent with planning, subagents, MCP, skills and resumable sessions.',
+                'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/grok.svg',
+                'source' => [
+                    'type' => 'curl_install',
+                    'script_url' => 'https://x.ai/cli/install.sh',
+                    'version_probe' => '{binary} --version',
+                    'manifest_url' => 'https://x.ai/cli/stable',
+                    'manifest_format' => 'plain',
+                    'env' => ['GROK_CHANNEL' => 'stable'],
+                    // CURL_INSTALL_VERSION_PIN_AND_TIMEOUT.md: install.sh takes the
+                    // version as its first positional argument (`bash -s 0.1.42`,
+                    // TARGET="$1"), so a pinned/channel-resolved target is honoured.
+                    'version_args' => ['{version}'],
+                    'timeout_s' => 900,
+                ],
+                'binary' => "$agentBase/grok-build/home/.grok/bin/grok",
+                // Grok otherwise self-updates the plugin-owned binary. Keep the
+                // plugin Store as the sole version authority on every launch.
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): confirmed at
+                // https://docs.x.ai/build/cli/headless-scripting — "pass
+                // --no-auto-update ... to skip background update checks." A
+                // persistent alternative also exists (`auto_update = false` under
+                // [cli] in ~/.grok/config.toml) but the CLI flag already covers every
+                // launch this plugin makes, so no config-file write is needed.
+                'plugin_args' => '--no-auto-update',
+                'resume_cmd' => '{binary} {args} {plugin_args} --resume {chatId}',
+                'resume_latest' => '{binary} {args} {plugin_args} --continue',
+                'env_prefix' => 'GROK',
+                'changelog_url' => 'https://x.ai/cli/changelog',
+                'auth_hint' => 'On first workspace launch, follow Grok Build\'s in-agent account-linking flow. As an optional alternative, add XAI_API_KEY in Secrets.',
+                'default_envs' => ['GROK_TELEMETRY_ENABLED' => 'false'],
+                'default_secrets' => [
+                    ['env' => 'XAI_API_KEY', 'label' => 'xAI API Key', 'type' => 'password',
+                     'help' => 'Optional alternative to Grok device authentication.'],
+                ],
+            ],
+            'kimi-code' => [
+                'id' => 'kimi-code',
+                'name' => 'Kimi Code',
+                'description' => 'Moonshot AI\'s current terminal coding agent with subagents, MCP, skills and persistent sessions.',
+                'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/kimi-code.svg',
+                'source' => [
+                    'type' => 'curl_install',
+                    'script_url' => 'https://code.kimi.com/kimi-code/install.sh',
+                    'version_probe' => '{binary} --version',
+                    'manifest_url' => 'https://code.kimi.com/kimi-code/latest',
+                    'manifest_format' => 'plain',
+                    'env' => ['KIMI_NO_MODIFY_PATH' => '1'],
+                    // CURL_INSTALL_VERSION_PIN_AND_TIMEOUT.md: install.sh honours
+                    // KIMI_VERSION (else it resolves ITS OWN latest — on 2026-09-06
+                    // that fetched 0.41.0 for a 0.40.1 upgrade). The binary is
+                    // ~183 MB from a Singapore CDN; the old fixed 300 s budget
+                    // killed the download mid-way.
+                    'version_env' => 'KIMI_VERSION',
+                    'timeout_s' => 900,
+                ],
+                'binary' => "$agentBase/kimi-code/home/.kimi-code/bin/kimi",
+                'resume_cmd' => '{binary} {args} --session {chatId}',
+                'resume_latest' => '{binary} {args} --continue',
+                'env_prefix' => 'KIMI_CODE',
+                'changelog_url' => 'https://github.com/MoonshotAI/kimi-code/releases',
+                'auth_hint' => 'Kimi Code may already recognise your account. If it asks for authentication, use the login option inside the running agent workspace.',
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): this is the exact
+                // agent that prompted this suppression sweep — on 2026-09-10 its
+                // in-TUI self-update prompt was accepted live and downloaded 172 MB
+                // straight into the plugin's flash-backed overlay upper layer,
+                // bypassing the plugin's own version tracking and upgrade machinery.
+                // KIMI_CODE_NO_AUTO_UPDATE=1 "Fully disable[s] the update preflight:
+                // no check, background install, or prompt" — confirmed at
+                // https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html
+                // and verified as REAL by grepping the literal string
+                // KIMI_CODE_NO_AUTO_UPDATE (plus its legacy alias
+                // KIMI_CLI_NO_AUTO_UPDATE) out of the installed kimi binary on this
+                // box on 2026-09-10.
+                'default_envs' => ['KIMI_DISABLE_TELEMETRY' => '1', 'KIMI_CODE_NO_AUTO_UPDATE' => '1'],
             ],
 
         ];
@@ -529,6 +998,44 @@ class AgentRegistry {
     }
 
     /**
+     * Cheap pre-gate for the mtime-throttled version self-heal.
+     *
+     * Returns the binary's current mtime when a probe IS needed (the binary
+     * changed since the last probe, or no real version is recorded), and null
+     * when it is not (binary missing/unreadable, or unchanged since the last
+     * probe). It stats one file and reads versions.json — it never mounts an
+     * overlay and never spawns a process, so a caller can use it to decide
+     * whether the expensive part (mount + probe) is worth doing at all.
+     */
+    public static function versionProbeMtime(string $agentId, string $binPath): ?int {
+        if (empty($binPath) || !file_exists($binPath)) {
+            return null;
+        }
+
+        clearstatcache(true, $binPath);
+        $mtime = @filemtime($binPath);
+        if ($mtime === false) {
+            return null;
+        }
+
+        $versions = self::getVersions();
+        $entry = $versions[$agentId] ?? null;
+
+        $recorded = is_array($entry) ? ($entry['installed'] ?? null) : (is_string($entry) ? $entry : null);
+        $sentinels = ['', '0.0.0', 'unknown', 'installed', null];
+        $hasRealVersion = !in_array($recorded, $sentinels, true) && preg_match('/^\d+\.\d+\.\d+/', (string)$recorded);
+
+        $storedMtime = is_array($entry) ? ($entry['probed_mtime'] ?? 0) : 0;
+
+        if ($hasRealVersion && $mtime <= $storedMtime) {
+            // Binary unchanged — no probe needed.
+            return null;
+        }
+
+        return (int)$mtime;
+    }
+
+    /**
      * Mtime-throttled version self-heal. Checks whether the binary at $binPath
      * has changed since the last probe (via stored 'probed_mtime') and, if so,
      * invokes $discoverFn to re-discover the version and persist the result.
@@ -545,29 +1052,13 @@ class AgentRegistry {
      *  - Otherwise: skip (binary unchanged, recorded version still valid).
      */
     public static function maybeRefreshVersion(string $agentId, string $binPath, callable $discoverFn): void {
-        if (empty($binPath) || !file_exists($binPath)) {
+        $mtime = self::versionProbeMtime($agentId, $binPath);
+        if ($mtime === null) {
+            // Binary missing, unreadable, or unchanged since the last probe.
             return;
         }
 
-        clearstatcache(true, $binPath);
-        $mtime = @filemtime($binPath);
-        if ($mtime === false) {
-            return;
-        }
-
-        $versions = self::getVersions();
-        $entry = $versions[$agentId] ?? null;
-
-        $recorded = is_array($entry) ? ($entry['installed'] ?? null) : (is_string($entry) ? $entry : null);
         $sentinels = ['', '0.0.0', 'unknown', 'installed', null];
-        $hasRealVersion = !in_array($recorded, $sentinels, true) && preg_match('/^\d+\.\d+\.\d+/', (string)$recorded);
-
-        $storedMtime = is_array($entry) ? ($entry['probed_mtime'] ?? 0) : 0;
-
-        if ($hasRealVersion && $mtime <= $storedMtime) {
-            // Binary unchanged — skip probe.
-            return;
-        }
 
         // Binary is new or changed (or version was missing): probe.
         $v = $discoverFn($agentId);
@@ -659,6 +1150,20 @@ class AgentRegistry {
      * agent (e.g. curl_install with no repo), which surfaces as N/A in the Store tab.
      */
     public static function checkUpdates() {
+        // Re-probe what is REALLY installed before comparing against what is
+        // available. Without this the recorded version only ever refreshes
+        // during a plugin upgrade (the PLG INLINE block is the sole other
+        // caller), so an agent that updated itself through its own CLI keeps
+        // reporting its old version — and the update badge compares the
+        // available version against a number that is no longer on disk.
+        // recoverMissingVersions() is mtime-throttled: an agent whose binary
+        // has not changed since the last probe costs one stat.
+        try {
+            self::recoverMissingVersions();
+        } catch (\Throwable $e) {
+            LogService::log("checkUpdates: version self-heal failed: " . $e->getMessage(), LogService::LOG_WARN, "AgentRegistry");
+        }
+
         $registry = self::getRegistry();
         $updates = [];
 
@@ -762,9 +1267,19 @@ class AgentRegistry {
 
             if ($effectiveBin && file_exists($effectiveBin)) {
                 // Mount the overlay so node_modules/<pkg>/package.json (or the
-                // source-specific version probe) can read its data.
-                if (class_exists('\AICliAgents\Services\FileStorage')) {
-                    @\AICliAgents\Services\FileStorage::ensureReady("agent/$id");   // Epic #1310: facade intent
+                // source-specific version probe) can read its data. Only do it
+                // when a probe is actually needed: the mount is the expensive
+                // half, and this method now also runs on the user-initiated
+                // "Check updates" path, where mounting every installed agent
+                // unconditionally would be a large and pointless cost.
+                //
+                // An agent whose overlay is not mounted at all does not reach
+                // this branch — its binary is invisible, so the enclosing
+                // file_exists() sends it down the "no binary found" path below.
+                if (self::versionProbeMtime($id, $effectiveBin) !== null) {
+                    if (class_exists('\AICliAgents\Services\FileStorage')) {
+                        @\AICliAgents\Services\FileStorage::ensureReady("agent/$id");   // Epic #1310: facade intent
+                    }
                 }
 
                 $agentRef = $agent; // capture for closure

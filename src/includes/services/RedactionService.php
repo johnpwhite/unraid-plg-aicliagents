@@ -141,7 +141,43 @@ class RedactionService {
         $text = (string)preg_replace('/\bxox[bp]-[A-Za-z0-9-]{8,}/',         "\u{AB}redacted:slack\u{BB}", $text);
         $text = (string)preg_replace('/\bAIza[0-9A-Za-z_-]{30,}/',           "\u{AB}redacted:aiza\u{BB}", $text);
         // Long encoded runs: base64(url) >= 40 chars, hex >= 40 chars.
-        $text = (string)preg_replace('/(?<![A-Za-z0-9+\/=_-])[A-Za-z0-9+\/=_-]{40,}(?![A-Za-z0-9+\/=_-])/', "\u{AB}redacted:b64\u{BB}", $text);
+        //
+        // '/' is a base64 alphabet character, so this rule used to match ACROSS path
+        // separators and join short directory names into an imaginary 40-character
+        // token: every filesystem path longer than 40 characters without a dot was
+        // reported as a secret. In a diagnostics bundle that is noise; in the
+        // plugin-management log tool (2026-09-08) it replaced ordinary log lines with
+        // «redacted:b64» and made them useless.
+        //
+        // Evaluate each slash-separated RUN on its own instead. This is a precision
+        // fix, not a relaxation: a 40-character opaque segment is still redacted
+        // wherever it appears, including inside a path. Only the accidental joining of
+        // several short segments stops producing a false positive. A secret long
+        // enough to matter does not survive being split at a '/' it does not contain.
+        // A run is treated as a path, and split per segment, ONLY when it is
+        // path-anchored: it either starts with '/', or reaches its first '/'
+        // immediately after an '=' (the shape of every "key=/some/path" our own log
+        // writes, e.g. "saveWorkspaces ok: count=6 path=/tmp/..."). '=' is in the
+        // base64 alphabet, so without that second case the whole "path=/tmp/..." run
+        // is one match that does not begin with '/' and the real log lines this rule
+        // exists to protect were still destroyed — found 2026-09-08 by checking an
+        // actual log line instead of a hand-written example.
+        //
+        // Anything NOT path-anchored keeps the original whole-run redaction. That
+        // restraint matters: splitting every run would let a base64 secret containing
+        // a '/' escape when neither half reached 40 characters, and a 44-character
+        // base64 token contains a '/' about half the time. Base64 padding only ever
+        // trails a token, so a legitimate secret never shows '=' just before a '/'.
+        $text = (string)preg_replace_callback('/[A-Za-z0-9+\/=_-]{40,}/', static function (array $m): string {
+            $slash = strpos($m[0], '/');
+            $anchored = $slash === 0 || ($slash > 0 && $m[0][$slash - 1] === '=');
+            if (!$anchored) return "\u{AB}redacted:b64\u{BB}";   // opaque blob: unchanged strength
+            $parts = explode('/', $m[0]);
+            foreach ($parts as $i => $part) {
+                if (preg_match('/^[A-Za-z0-9+=_-]{40,}$/', $part)) $parts[$i] = "\u{AB}redacted:b64\u{BB}";
+            }
+            return implode('/', $parts);
+        }, $text);
         $text = (string)preg_replace('/\b[0-9a-fA-F]{40,}\b/',               "\u{AB}redacted:hex\u{BB}",  $text);
         // Emails.
         $text = (string)preg_replace('/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/', "\u{AB}email\u{BB}", $text);

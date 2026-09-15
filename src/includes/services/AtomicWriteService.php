@@ -11,6 +11,47 @@
 namespace AICliAgents\Services;
 
 class AtomicWriteService {
+    /** @var array{stage:string,path:string,warning:string}|null Diagnostic for the most recent write in this request. */
+    private static ?array $lastFailure = null;
+
+    /**
+     * The I/O boundary normally returns only false, which made an OverlayFS
+     * ESTALE indistinguishable from disk-full or a permission failure. Keep a
+     * request-local diagnostic for callers and logs without exposing PHP
+     * warnings to an AJAX response.
+     *
+     * @return array{stage:string,path:string,warning:string}|null
+     */
+    public static function lastFailure(): ?array {
+        return self::$lastFailure;
+    }
+
+    /** True when the last failed operation was an OverlayFS stale-handle error. */
+    public static function lastFailureIsStaleHandle(): bool {
+        return self::$lastFailure !== null
+            && stripos(self::$lastFailure['warning'], 'stale file handle') !== false;
+    }
+
+    /** Execute one I/O operation while retaining (rather than emitting) its warning. */
+    private static function captureWarning(callable $operation): array {
+        $warning = '';
+        set_error_handler(static function (int $_severity, string $message) use (&$warning): bool {
+            $warning = $message;
+            return true;
+        });
+        try {
+            $result = $operation();
+        } finally {
+            restore_error_handler();
+        }
+        return [$result, $warning];
+    }
+
+    private static function fail(string $stage, string $path, string $warning = ''): bool {
+        self::$lastFailure = ['stage' => $stage, 'path' => $path, 'warning' => $warning];
+        return false;
+    }
+
     /**
      * Writes $content to $path atomically (temp+rename). Concurrent writers
      * produce distinct tmp paths via getmypid() + microtime, so two PHP-FPM
@@ -19,9 +60,22 @@ class AtomicWriteService {
      * Returns true on success, false on any I/O failure (caller should log).
      */
     public static function write(string $path, string $content): bool {
+        self::$lastFailure = null;
+        // #151 (mvp-dmoe): rename() REPLACES a symlink target rather than writing
+        // through it, so a managed file the user linked into their config repo (e.g.
+        // ~/.claude/CLAUDE.md -> dotfiles repo) silently becomes a plain file the first
+        // time a projector writes it, and the repo quietly stops receiving edits.
+        // Resolve a live link to its real target so the temp file lands beside the
+        // target and renames ONTO it, keeping the link. A dangling link (realpath
+        // false) falls through and is replaced, matching the previous behaviour.
+        if (is_link($path)) {
+            $real = realpath($path);
+            if ($real !== false) $path = $real;
+        }
         $dir = dirname($path);
         if (!is_dir($dir)) {
-            @mkdir($dir, 0755, true);
+            [$made, $warning] = self::captureWarning(static fn() => mkdir($dir, 0755, true));
+            if (!$made && !is_dir($dir)) return self::fail('mkdir', $path, $warning);
         }
 
         $tmpPath = $path . '.tmp.' . getmypid() . '.' . str_replace('.', '', (string)microtime(true));
@@ -34,26 +88,32 @@ class AtomicWriteService {
         // bytes go straight to the kernel on every fwrite), and pairing it
         // with an explicit fflush+fsync before close gives durability before
         // the rename.
-        $fh = @fopen($tmpPath, 'w');
+        [$fh, $warning] = self::captureWarning(static fn() => fopen($tmpPath, 'w'));
         if ($fh === false) {
-            return false;
+            return self::fail('fopen', $path, $warning);
         }
-        @stream_set_write_buffer($fh, 0);
-        $written = @fwrite($fh, $content);
+        stream_set_write_buffer($fh, 0);
+        [$written, $warning] = self::captureWarning(static fn() => fwrite($fh, $content));
         if ($written === false || $written !== strlen($content)) {
-            @fclose($fh);
+            fclose($fh);
             @unlink($tmpPath);
-            return false;
+            return self::fail('fwrite', $path, $warning);
         }
-        @fflush($fh);
+        [$flushed, $warning] = self::captureWarning(static fn() => fflush($fh));
+        if (!$flushed) {
+            fclose($fh);
+            @unlink($tmpPath);
+            return self::fail('fflush', $path, $warning);
+        }
         if (function_exists('fsync')) {
-            @fsync($fh);
+            @fsync($fh); // Best effort: some supported filesystems do not implement it.
         }
-        @fclose($fh);
+        fclose($fh);
 
-        if (!@rename($tmpPath, $path)) {
+        [$renamed, $warning] = self::captureWarning(static fn() => rename($tmpPath, $path));
+        if (!$renamed) {
             @unlink($tmpPath);
-            return false;
+            return self::fail('rename', $path, $warning);
         }
 
         // Flash durability: writes under /boot/ (the FAT32 USB) otherwise sit in

@@ -29,17 +29,21 @@ require_once __DIR__ . '/services/BootIntegrityService.php';
 require_once __DIR__ . '/services/HaltService.php';
 require_once __DIR__ . '/services/SupervisorService.php';
 require_once __DIR__ . '/services/StorageMountService.php';
+require_once __DIR__ . '/services/PoolPathService.php';
 require_once __DIR__ . '/services/StorageMetricsService.php';
 require_once __DIR__ . '/services/FileStorage.php';   // Epic #1310 — the storage facade (now consumed)
+require_once __DIR__ . '/services/RepairService.php'; // #96 — fail-closed current-architecture repair
 require_once __DIR__ . '/services/StorageMigrationService.php';
 require_once __DIR__ . '/services/StorageTargetService.php';   // S-11 #1355 — target picker enumeration
 require_once __DIR__ . '/services/TaskService.php';
 require_once __DIR__ . '/services/InstallerService.php';
 require_once __DIR__ . '/services/TerminalService.php';
+require_once __DIR__ . '/services/ClaudePluginPathService.php';
 require_once __DIR__ . '/services/TerminalGenerationService.php';
 require_once __DIR__ . '/services/AutoLaunchService.php';
 require_once __DIR__ . '/services/UpgradeRelaunchService.php';
 require_once __DIR__ . '/services/ConsolidateState.php';   // HOME_CONSOLIDATE_INPROGRESS_GUARD — per-user consolidate marker
+require_once __DIR__ . '/services/AutoLaunchSuppression.php';   // Fix 2026-09-12 — an explicit close suppresses auto-launch
 require_once __DIR__ . '/services/UtilityService.php';
 require_once __DIR__ . '/services/PendingAgentUpgradeService.php';   // #71 — non-destructive pre-install queue
 require_once __DIR__ . '/services/AgentUpgradeAdmissionService.php'; // #71 — closes terminal-start/install race
@@ -47,13 +51,24 @@ require_once __DIR__ . '/services/NchanService.php';
 require_once __DIR__ . '/services/ActivityService.php';
 require_once __DIR__ . '/services/VersionClassifier.php';
 require_once __DIR__ . '/services/VersionCheckService.php';
+require_once __DIR__ . '/services/PaneInputRules.php';
 require_once __DIR__ . '/services/TmuxService.php';
 require_once __DIR__ . '/services/ArgsService.php';
 require_once __DIR__ . '/services/SecretService.php';
 require_once __DIR__ . '/services/EnvService.php';
+require_once __DIR__ . '/services/AgentSettingsSeedService.php';
 // R-08 (Feature #1371) — diagnostics bundle + fail-closed redaction
 require_once __DIR__ . '/services/RedactionService.php';
 require_once __DIR__ . '/services/DiagnosticsService.php';
+// PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11) — the event ledger.
+// Depends on NchanService (server clock), RedactionService (secret scrub) and
+// AtomicWriteService (all required above). Loaded before any caller that could
+// publish executes, so the NchanService::publish() tee always finds it.
+require_once __DIR__ . '/services/EventActor.php';
+require_once __DIR__ . '/services/EventLedger.php';
+// RELAY_WAITING_PILL.md (2026-09-09) Part 2 — capture-on-deliver samples for the
+// readiness gate. Depends on ConfigService/RedactionService/AtomicWriteService, all above.
+require_once __DIR__ . '/services/RelayGateSampleService.php';
 // R-09/R-14 (Feature #1372) — proactive health checks + status chip + cron notify
 require_once __DIR__ . '/services/HealthService.php';
 // Feature #1382 — programmatic state-invariant auditor (live-box twin of the
@@ -61,6 +76,34 @@ require_once __DIR__ . '/services/HealthService.php';
 require_once __DIR__ . '/services/StorageStateAuditService.php';
 // T-11 (Feature #1360) — workspace export/import bundles
 require_once __DIR__ . '/services/WorkspaceBundleService.php';
+require_once __DIR__ . '/services/AgentRelayService.php';
+require_once __DIR__ . '/services/RelayMcpTools.php';   // #113 — one tool table for both Relay transports
+// Plugin management: AdminService (Tier 1 read + Tier 2 change) reads/writes the
+// state; AdminMcpTools is the one tool table shared by the MCP adapter and the CLI,
+// the same split the Relay uses. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
+// ValidationService was previously required only by AICliAjax.php (the browser AJAX
+// front controller) — Tier 2's path-validating tools (aicli_create_workspace,
+// aicli_update_workspace) are the first callers of it from THIS shared load chain
+// (admin-mcp.php / admin-agent.php / phpunit), which never included AICliAjax.php,
+// so it must be required here too or ValidationService::validatePath() fatals with
+// "Class not found" the moment a Tier 2 path tool is actually dispatched.
+require_once __DIR__ . '/services/ValidationService.php';
+require_once __DIR__ . '/services/SecretPaths.php'; // FILE_VIEWER_SECRET_DROP.md — .claude/secrets/ path + mode rules
+// AGENT_VOICE.md (2026-09-11) — required before AdminService.php: its speak()
+// method calls VoiceService::speak() directly.
+require_once __DIR__ . '/services/VoiceMailService.php';
+require_once __DIR__ . '/services/ClaudeSessionNameResolver.php';
+require_once __DIR__ . '/services/VoiceService.php';
+require_once __DIR__ . '/services/AdminService.php';
+require_once __DIR__ . '/services/AdminMcpTools.php';
+require_once __DIR__ . '/services/BackupCronService.php'; // HOME_BACKUP.md R1 — owns the backup cron file
+// PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11) — per-session event
+// subscription + cursor store, used by AdminService's subscribeEvents()/
+// getEvents()/ackEvents(). Depends only on ConfigService/AtomicWriteService
+// (both above); added at the end of this block per the in-flight-coordination
+// note in the same section.
+require_once __DIR__ . '/services/EventSubscriptionStore.php';
+require_once __DIR__ . '/services/RelayHttpService.php'; // #113 — plugin-owned HTTP listener request handling
 // Config Hub (OP #1362 / H-01 phase 1 — canonical MCP store + per-vendor projectors)
 require_once __DIR__ . '/services/hub/HubStore.php';
 require_once __DIR__ . '/services/hub/Transpiler.php';
@@ -77,16 +120,22 @@ require_once __DIR__ . '/services/hub/FactoryProjector.php';
 require_once __DIR__ . '/services/hub/NanocoderProjector.php';
 require_once __DIR__ . '/services/hub/CopilotProjector.php';
 require_once __DIR__ . '/services/hub/CodexProjector.php';
+require_once __DIR__ . '/services/hub/GrokProjector.php'; // same fenced mcp_servers TOML grammar
+require_once __DIR__ . '/services/hub/KimiCodeProjector.php';
 require_once __DIR__ . '/services/hub/GooseProjector.php';
 // Config Hub phase 2 (OP #1363 / H-02 — instruction-file projection)
 require_once __DIR__ . '/services/hub/InstructionProjector.php';
-require_once __DIR__ . '/services/hub/KiloInstructionProjector.php'; // extends InstructionProjector
+require_once __DIR__ . '/services/hub/RulesFileInstructionProjector.php'; // extends InstructionProjector (Kilo + Claude rules dir)
 // File-path-convention always-on policy block (docs/specs/AGENT_FILE_PATH_CONVENTION.md)
 require_once __DIR__ . '/services/hub/FilePathConventionProjector.php'; // extends InstructionProjector
-require_once __DIR__ . '/services/hub/FilePathConventionKiloProjector.php'; // extends FilePathConventionProjector
+require_once __DIR__ . '/services/hub/RulesFileFilePathProjector.php'; // extends FilePathConventionProjector (Kilo + Claude rules dir)
+require_once __DIR__ . '/services/hub/RelayInstructionProjector.php'; // always-on Relay guidance
+require_once __DIR__ . '/services/hub/RulesFileRelayProjector.php'; // dedicated Relay rule (Kilo + Claude rules dir)
 // Config Hub phase 3 (OP #1364 / H-03 — skills/commands mirrored-tree projection)
 require_once __DIR__ . '/services/hub/TreeProjector.php';
 require_once __DIR__ . '/services/hub/GeminiCommandsProjector.php'; // extends TreeProjector
+require_once __DIR__ . '/services/hub/RelaySkillProjector.php'; // always-on Relay skill
+require_once __DIR__ . '/services/hub/AdminSkillProjector.php'; // plugin-management skill (extends TreeProjector; gated by admin_tools_enabled)
 require_once __DIR__ . '/services/hub/HubProjector.php';
 // Config Hub git layer (OP #1365 / H-04 — git-backed home config, opt-in)
 require_once __DIR__ . '/services/hub/GitHomeService.php';
@@ -114,6 +163,7 @@ use AICliAgents\Services\FileStorage;
 use AICliAgents\Services\StorageMigrationService;
 use AICliAgents\Services\InstallerService;
 use AICliAgents\Services\TerminalService;
+use AICliAgents\Services\AutoLaunchSuppression;
 use AICliAgents\Services\UtilityService;
 use AICliAgents\Services\NchanService;
 
@@ -336,9 +386,11 @@ function isAICliRunning($id = 'default') {
 
 /**
  * Wrapper for stopping a terminal session.
+ * $reason feeds the WORKSPACE_LIFECYCLE_EVENTS.md `stopped` event:
+ * graceful_close|stop|evict|upgrade.
  */
-function stopAICliTerminal($id = 'default', $killTmux = false) {
-    return ProcessManager::stopTerminal($id, $killTmux);
+function stopAICliTerminal($id = 'default', $killTmux = false, string $reason = 'stop') {
+    return ProcessManager::stopTerminal($id, $killTmux, $reason);
 }
 
 /**
@@ -387,6 +439,15 @@ function saveAICliVersion($agentId, $version) {
  * Wrapper for starting a terminal session.
  */
 function startAICliTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli') {
+    // Fix 2026-09-12: this wrapper is the single funnel for every explicit,
+    // browser-initiated start (TerminalHandler start/emergency_start/restart/
+    // restart_fresh — see docs/specs/2026-04-27-auto-launch-workspaces-design.md).
+    // The operator asking for the workspace back overrides an earlier close, so
+    // clear the auto-launch suppression marker before starting it. Headless
+    // starts (AutoLaunchService, the Relay actor wake) call
+    // TerminalService::startTerminal directly and never pass through here, so
+    // they never clear a marker they did not set.
+    AutoLaunchSuppression::clear((string)$id);
     return TerminalService::startTerminal($id, $path, $chatId, $agentId);
 }
 
@@ -447,8 +508,8 @@ function aicli_get_workspaces() {
  * Writes workspaces.json to the overlay. Durability is coalesced by the supervisor's
  * scheduled/pressure/shutdown persistence instead of creating a layer for each UI save.
  */
-function aicli_save_workspaces($data) {
-    return \AICliAgents\Services\ConfigService::saveWorkspaces($data);
+function aicli_save_workspaces($data, array $removedIds = []) {
+    return \AICliAgents\Services\ConfigService::saveWorkspaces($data, $removedIds);
 }
 
 /**

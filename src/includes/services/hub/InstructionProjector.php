@@ -65,6 +65,16 @@ class InstructionProjector extends VendorProjector {
     public function relPath(): string { return $this->rel; }
     public function label(): string   { return $this->name; }
 
+    /**
+     * True when this projector emits the Claude native @import line instead of a
+     * verbatim content copy. Protected accessor so the dedicated-rules-file
+     * subclass (RulesFileInstructionProjector) can honour the same flag when it
+     * writes a whole file: Claude's ~/.claude/rules/aicli-hub-global.md carries
+     * the @import line, Kilo's ~/.kilo/rules/aicli-hub-global.md carries the
+     * content itself.
+     */
+    protected function usesImport(): bool { return $this->useImport; }
+
     /** All agent ids that READ this file (e.g. AGENTS.md serves codex-cli + gh-copilot). */
     public function servedAgentIds(): array { return $this->served; }
 

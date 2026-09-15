@@ -787,9 +787,11 @@ final class FileStorage
             // nosemgrep: php.lang.security.exec-use.exec-use — workDir derived from validated id
             @shell_exec('rm -rf ' . escapeshellarg($workDir) . ' 2>/dev/null');
         }
-        // Halt markers for this entity.
-        @unlink("/tmp/unraid-aicliagents/supervisor/halts/home/{$id}");
-        @unlink("/tmp/unraid-aicliagents/supervisor/halts/home/{$id}.json");
+        // Halt markers for this entity. There are two current producers:
+        // HaltService writes halts/<type>/<id>[.json], while the bash
+        // supervisor writes halts/<type>_<id>:<reason>. Clear both exact,
+        // validated-id forms so a deleted entity cannot remain visibly halted.
+        self::clearEntityHalts('home', $id);
 
         // Invalidate boot integrity cache so next fetch reflects the deletion.
         @unlink('/tmp/unraid-aicliagents/.boot_integrity_cache.json');
@@ -820,6 +822,19 @@ final class FileStorage
         // nosemgrep: php.lang.security.exec-use.exec-use — $mnt fully escaped
         $fuserOut = @shell_exec('fuser -sm ' . escapeshellarg($mnt) . ' 2>/dev/null && echo busy');
         return str_contains((string)$fuserOut, 'busy');
+    }
+
+    /** Remove structured PHP and flat supervisor halt markers for one entity. */
+    private static function clearEntityHalts(string $type, string $id): void
+    {
+        require_once __DIR__ . '/HaltService.php';
+        $base = HaltService::HALT_DIR;
+        @unlink("$base/$type/$id");
+        @unlink("$base/$type/$id.json");
+        @unlink("$base/{$type}_{$id}");
+        foreach (glob("$base/{$type}_{$id}:*") ?: [] as $halt) {
+            if (is_file($halt)) @unlink($halt);
+        }
     }
 
     // ---- Manifest intent verbs (Epic #1310 Follow-on 2) ----------------------

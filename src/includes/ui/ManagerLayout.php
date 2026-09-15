@@ -32,6 +32,7 @@
         <div class="aicli-tab-btn" onclick="switchMainTab('store', this)">Agent Store</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('storage', this)">Home Storage</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('hub', this)">Config Hub</div>
+        <div class="aicli-tab-btn" onclick="switchMainTab('relay', this)">Agent Relay</div>
         <div class="aicli-tab-btn" id="aicli-tab-btn-debug" onclick="switchMainTab('debug', this)">Debug Console</div>
     </div>
     <!-- R-09 (#1372): plugin health chip — green/amber/red dot, tooltip lists

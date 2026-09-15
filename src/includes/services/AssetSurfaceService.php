@@ -172,9 +172,14 @@ class AssetSurfaceService {
      * Claude Code — FULLY populated per the spec's worked-reference table
      * (docs/specs/WORKSPACE_ASSET_TREE.md §Design). Every path here matches an
      * existing, doc-verified Hub projector relPath where one exists
-     * (InstructionProjector '.claude/CLAUDE.md', TreeProjector '.claude/skills'
-     * + '.claude/commands', ClaudeProjector '.claude.json'), so `managed`
-     * detection lines up automatically. The spec's global mcp cell literally
+     * (RulesFileInstructionProjector '.claude/rules/aicli-hub-global.md',
+     * TreeProjector '.claude/skills' + '.claude/commands', ClaudeProjector
+     * '.claude.json'), so `managed` detection lines up automatically.
+     * '.claude/CLAUDE.md' stays listed as the user's OWN global instruction file
+     * (still read by Claude, now unmanaged since the hub moved its block to the
+     * rules dir); '.claude/rules' is the directory Claude auto-loads, so the
+     * hub-managed aicli-*.md files (and the user's own rule files) show under it.
+     * The spec's global mcp cell literally
      * reads "~/.claude.json, ~/.claude/mcp*" — the glob half is not a concrete,
      * verifiable path (no such file is documented/observed), so only the
      * verified '.claude.json' is listed; see the task report for this call-out.
@@ -182,7 +187,9 @@ class AssetSurfaceService {
     private static function claudeDescriptor(): array {
         return [
             'instruction' => [
-                'global'            => ['.claude/CLAUDE.md'],
+                // The user's own global file PLUS the rules dir Claude auto-loads
+                // (holds the hub-managed aicli-*.md files and the user's own rules).
+                'global'            => ['.claude/CLAUDE.md', '.claude/rules'],
                 'project'           => ['CLAUDE.md', '.claude/CLAUDE.md'],
                 'ancestorFilenames' => ['CLAUDE.md'],
             ],

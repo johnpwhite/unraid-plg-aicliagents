@@ -19,6 +19,7 @@ SCRIPT_PATH="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor
 RESOLVE_SH="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh"
 QUEUE_HELPERS_SH="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/queue_helpers.sh"
 STORAGE_DIR="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage"
+GENERATION_SH="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/generation.sh"
 
 PIDFILE="/var/run/aicli-supervisor.pid"
 TICKFILE="/var/run/aicli-supervisor.tick"
@@ -80,6 +81,11 @@ STORAGE_TARGET_WAIT_S="${storage_target_wait_s:-300}"
 # after a graduate-to-passthrough migration (the rollback copies). Reaped by
 # _op_reconcile once older than this. cfg key: graduated_retention_days.
 GRADUATED_RETENTION_DAYS="${graduated_retention_days:-14}"
+# PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): the event ledger's
+# circular-log cap, in EVENTS (not chunks — the ledger writes 1 000-event
+# chunks; see EventLedger::CHUNK_SIZE). Reaped by _op_reconcile via
+# _events_ledger_sweep. cfg key: event_ledger_max_events.
+EVENT_LEDGER_MAX_EVENTS="${event_ledger_max_events:-20000}"
 # S-10: total wall-clock budget for a deferred graduate job's requeue-with-backoff
 # (60→300→600 s capped) before it FAILS + notifies. A graduate legitimately waits
 # out long busy sessions, so the cap is 24 h — storage_target_wait_s does NOT apply.
@@ -113,6 +119,11 @@ _LAST_CRITICAL_NOTIFY=0
 if [ -f "$RESOLVE_SH" ]; then
     # shellcheck disable=SC1090
     source "$RESOLVE_SH" 2>/dev/null || true
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3: aicli_gc_agent_generations, for the
+    # periodic superseded-version sweep. It needs resolve_paths.sh's agent_*
+    # helpers, so it is sourced here, after them, and never before.
+    # shellcheck disable=SC1090
+    [ -f "$GENERATION_SH" ] && source "$GENERATION_SH" 2>/dev/null || true
 else
     lifecycle_log() { true; }
     agent_persist_path() { echo "/boot/config/plugins/unraid-aicliagents"; }
@@ -133,6 +144,14 @@ if [ -f "$QUEUE_HELPERS_SH" ]; then
     # shellcheck disable=SC1090
     source "$QUEUE_HELPERS_SH" 2>/dev/null || true
 fi
+
+# HOME_BACKUP.md: the home-backup op's step functions (pre-flight re-check,
+# close/bake/rsync/verify/manifest/prune/relaunch) live in their own file —
+# sourced here (not exec'd) so they share this process's SUPERVISOR_DIR,
+# SUP_LOCK_FD, lifecycle_log, and queue_helpers.sh job_ledger_* functions
+# without re-deriving any of them.
+# shellcheck source=../storage/backup_home.sh
+[ -f "$STORAGE_DIR/backup_home.sh" ] && { source "$STORAGE_DIR/backup_home.sh" 2>/dev/null || true; }
 
 # ---------------------------------------------------------------------------
 # Logging helpers (stderr only — stdout is reserved for --status JSON)
@@ -385,6 +404,19 @@ _manifest_read() {
     else
         cat "$mpath" 2>/dev/null || true
     fi
+}
+
+# Does one immutable manifest snapshot still contain this exact entity?
+# Reconcile captures its entity list before taking per-entity locks. A wipe may
+# legitimately remove an entity while reconcile waits, so every entity must be
+# re-confirmed from a fresh locked snapshot before expected layers are checked.
+_manifest_has_entity() {
+    local entity="${1:-}" manifest_json="${2:-}"
+    [ -n "$entity" ] && [ -n "$manifest_json" ] || return 1
+    printf '%s' "$manifest_json" | php -d display_errors=0 -r '
+        $m = json_decode(stream_get_contents(STDIN), true);
+        exit(is_array($m) && array_key_exists($argv[1], $m["entities"] ?? []) ? 0 : 1);
+    ' "$entity" 2>/dev/null
 }
 
 # _manifest_get_entities
@@ -711,6 +743,77 @@ _watchdog_check_child() {
 # Runs unconditionally at the top of every tick.
 # Budget: op_max_duration_s=30 (we don't spawn a child — must complete inline)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# #175: reap an op child without mistaking a trapped signal for its exit.
+# The supervisor traps USR1 ("wake now" — SupervisorService::wake()). A signal
+# arriving while an op handler is blocked in `wait` makes wait return
+# 128+signum WITH THE CHILD STILL RUNNING. The handlers recorded that (138)
+# as the child's exit code — on 2026-09-04 a live home bake was declared
+# bake_failed while it completed minutes later, the fail counter moved toward
+# auto-disabling consolidation, and the orphaned child ran on concurrently,
+# invisible to the watchdog (the handler clears _CHILD_PID after "failure").
+# Loop until the child is actually gone, and enforce the op ceiling INLINE via
+# _watchdog_check_child — the tick-start watchdog can never fire while the
+# loop is blocked here, so this is the only place the ceiling can act.
+# Result lands in _WAIT_OP_RC (not stdout: a $() subshell could not `wait`
+# for the parent's child).
+_WAIT_OP_RC=0
+_wait_op_child() {
+    local child_pid="$1"
+    local rc
+    while :; do
+        wait "$child_pid" 2>/dev/null
+        rc=$?
+        if [ "$rc" -le 128 ] || ! _pid_alive "$child_pid" 2>/dev/null; then
+            _WAIT_OP_RC="$rc"
+            return 0
+        fi
+        # Trapped-signal interruption; the child is still alive. Enforce the
+        # ceiling (TERM→KILL + notify when exceeded; no-op below it), then
+        # resume waiting for the real exit.
+        _watchdog_check_child
+    done
+}
+
+# ---------------------------------------------------------------------------
+# #174: per-entity reconcile log de-duplication. The reconcile pass runs every
+# tick (~7 s) and used to log an identical per-entity status line each time —
+# thousands of reconcile_ok / reconcile_halt_persisted / reconcile_skipped_locked
+# lines a day that buried real events. Emit only on STATE CHANGE per
+# (event, entity), plus a proof-of-life re-emit at most hourly carrying a
+# "repeats" count of the suppressed lines, so a silent log still reads as
+# healthy-and-deduped rather than dead. Cache is in-memory (the reconcile pass
+# runs in the long-lived supervisor process); a supervisor restart re-emits one
+# line per entity, which is desirable.
+declare -gA _RECON_LOG_STATE
+_RECONCILE_REEMIT_S=3600
+
+# _reconcile_log_dedup <level> <event> <entity> <state> <json>
+_reconcile_log_dedup() {
+    local level="$1" event="$2" entity="$3" state="$4" json="$5"
+    local key="${event}|${entity}"
+    local now
+    now=$(date +%s)
+    local prev="${_RECON_LOG_STATE[$key]:-}"
+    local pstate="" pepoch=0 pcount=0
+    if [ -n "$prev" ]; then
+        pstate="${prev%%|*}"
+        local _rest="${prev#*|}"
+        pepoch="${_rest%%|*}"
+        pcount="${_rest##*|}"
+    fi
+    if [ "$state" = "$pstate" ] && [ $(( now - pepoch )) -lt "$_RECONCILE_REEMIT_S" ]; then
+        _RECON_LOG_STATE[$key]="${state}|${pepoch}|$(( pcount + 1 ))"
+        return 0
+    fi
+    local suffix=""
+    if [ "$state" = "$pstate" ] && [ "$pcount" -gt 0 ]; then
+        suffix=",\"repeats\":$(( pcount + 1 ))"
+    fi
+    lifecycle_log "$level" "supervisor" "$event" "${json%\}}$suffix}" 2>/dev/null || true
+    _RECON_LOG_STATE[$key]="${state}|${now}|0"
+}
+
 _op_reconcile() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
@@ -783,7 +886,20 @@ _op_reconcile() {
         exec 8>"/var/run/aicli-bake-${type}-${_rec_lock_id}.lock"
         if ! flock -n 8; then
             log_info "Reconcile: $entity — storage lock held (bake/consolidate in flight), skipping this tick"
-            lifecycle_log "info" "supervisor" "reconcile_skipped_locked" \
+            _reconcile_log_dedup info reconcile_skipped_locked "$entity" "locked" \
+                "{\"entity\":\"$entity\"}"
+            continue
+        fi
+
+        # #99: the pass-wide snapshot predates this entity lock. Refresh it
+        # now, while holding the same lock used by bake/consolidate/wipe. This
+        # prevents a completed deletion or layer change from being compared
+        # against stale expected_layers and turned into a false durable halt.
+        local entity_manifest_snapshot=""
+        entity_manifest_snapshot="$(_manifest_read "$mpath")"
+        if ! _manifest_has_entity "$entity" "$entity_manifest_snapshot"; then
+            log_info "Reconcile: $entity disappeared before its locked check — skipping stale snapshot entry"
+            lifecycle_log "info" "supervisor" "reconcile_skipped_removed" \
                 "{\"entity\":\"$entity\"}" 2>/dev/null || true
             continue
         fi
@@ -803,7 +919,7 @@ _op_reconcile() {
             _mig_fresh=1
         fi
         local manifest_stored_path
-        manifest_stored_path=$(_manifest_entity_persist_path "$entity" "$manifest_snapshot")
+        manifest_stored_path=$(_manifest_entity_persist_path "$entity" "$entity_manifest_snapshot")
         if [ -n "$manifest_stored_path" ] && [ "$manifest_stored_path" != "$persist_path" ] \
            && [ "$_mig_fresh" = "0" ]; then
             _write_halt "$entity" "path_drift" "Manifest path $manifest_stored_path != current $persist_path"
@@ -819,8 +935,8 @@ _op_reconcile() {
         # verified repair. Do not repeatedly rewrite the marker, notify again,
         # and then claim reconcile_ok on later ticks.
         if _halt_exists "$entity" "corrupt_layers"; then
-            lifecycle_log "warn" "supervisor" "reconcile_halt_persisted" \
-                "{\"entity\":\"$entity\",\"reason\":\"corrupt_layers\"}" 2>/dev/null || true
+            _reconcile_log_dedup warn reconcile_halt_persisted "$entity" "halted:corrupt_layers" \
+                "{\"entity\":\"$entity\",\"reason\":\"corrupt_layers\"}"
             continue
         fi
 
@@ -833,7 +949,7 @@ _op_reconcile() {
                 [ -n "$layer_filename" ] || continue
                 expected_files+=("$layer_filename")
                 expected_sha256s+=("$layer_sha256")
-            done < <(_manifest_entity_layer_records "$entity" "$manifest_snapshot")
+            done < <(_manifest_entity_layer_records "$entity" "$entity_manifest_snapshot")
         fi
 
         # Get actual files on disk
@@ -1030,8 +1146,8 @@ _op_reconcile() {
 
         [ "$integrity_verdict" -eq 0 ] || continue
 
-        lifecycle_log "info" "supervisor" "reconcile_ok" \
-            "{\"entity\":\"$entity\",\"active_count\":${#actual_files[@]}}" 2>/dev/null || true
+        _reconcile_log_dedup info reconcile_ok "$entity" "ok:${#actual_files[@]}" \
+            "{\"entity\":\"$entity\",\"active_count\":${#actual_files[@]}}"
 
     done <<< "$entities_json"
 
@@ -1123,9 +1239,19 @@ _op_reconcile() {
                 continue
             fi
             if losetup -d "$_lp_dev" 2>/dev/null; then
-                log_info "Reconcile: reaped abandoned loop $_lp_dev (deleted backing, not mounted)"
-                lifecycle_log "info" "supervisor" "reconcile_orphan_loop_reaped" \
-                    "{\"loop\":\"$_lp_dev\"}" 2>/dev/null || true
+                local _lp_name="${_lp_dev##*/}"
+                local _lp_autoclear="/sys/block/${_lp_name}/loop/autoclear"
+                if losetup "$_lp_dev" >/dev/null 2>&1 \
+                    && [ -r "$_lp_autoclear" ] \
+                    && [ "$(tr -d '[:space:]' < "$_lp_autoclear" 2>/dev/null)" = "1" ]; then
+                    log_info "Reconcile: detach pending for busy loop $_lp_dev (kernel autoclear armed)"
+                    lifecycle_log "info" "supervisor" "reconcile_orphan_loop_autoclear" \
+                        "{\"loop\":\"$_lp_dev\"}" 2>/dev/null || true
+                else
+                    log_info "Reconcile: reaped abandoned loop $_lp_dev (deleted backing, not mounted)"
+                    lifecycle_log "info" "supervisor" "reconcile_orphan_loop_reaped" \
+                        "{\"loop\":\"$_lp_dev\"}" 2>/dev/null || true
+                fi
             fi
         done < <(losetup -a 2>/dev/null || true)
     fi
@@ -1133,6 +1259,10 @@ _op_reconcile() {
     # S-08 (#1353): reap terminal job-ledger entries (done 1 h, failed/deferred 24 h)
     # + orphaned retry pen entries.
     _reap_job_ledger
+
+    # 1a.7 (PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md): unlink event-ledger
+    # chunks beyond the configured cap.
+    _events_ledger_sweep
 }
 
 # ---------------------------------------------------------------------------
@@ -1191,9 +1321,10 @@ _op_bake() {
     _atomic_json_write "$WORKFILE" "$work_json" || true
     _atomic_json_write "$STATUSFILE" "$(_status_json running bake "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
 
-    # Wait for child
-    wait "$child_pid" 2>/dev/null
-    local exit_code=$?
+    # Wait for child (#175: immune to trapped-signal interruption; ceiling
+    # enforced inline via the watchdog while blocked here)
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
     _OP_EXIT="$exit_code"   # S-08: recorded verbatim in the job ledger (if tracked)
 
     _CHILD_PID=""
@@ -1303,9 +1434,10 @@ _op_consolidate() {
     _atomic_json_write "$WORKFILE" "$work_json" || true
     _atomic_json_write "$STATUSFILE" "$(_status_json running consolidate "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
 
-    # Wait for child
-    wait "$child_pid" 2>/dev/null
-    local exit_code=$?
+    # Wait for child (#175: immune to trapped-signal interruption; ceiling
+    # enforced inline via the watchdog while blocked here)
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
     _OP_EXIT="$exit_code"   # S-08: recorded verbatim in the job ledger (if tracked)
 
     _CHILD_PID=""
@@ -1487,9 +1619,10 @@ _op_mount() {
     _atomic_json_write "$WORKFILE" "$(_running_work_json "mount" "$entity" "$child_pid" "$started_at" "$_MOUNT_MAX_DURATION_S" "$qdepth")" || true
     _atomic_json_write "$STATUSFILE" "$(_status_json running mount "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
 
-    # Wait for child
-    wait "$child_pid" 2>/dev/null
-    local exit_code=$?
+    # Wait for child (#175: immune to trapped-signal interruption; ceiling
+    # enforced inline via the watchdog while blocked here)
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
     _OP_EXIT="$exit_code"
 
     _CHILD_PID=""
@@ -1612,9 +1745,10 @@ _op_graduate() {
     _atomic_json_write "$WORKFILE" "$(_running_work_json "graduate" "$entity" "$child_pid" "$started_at" "$_GRADUATE_MAX_DURATION_S" "$qdepth")" || true
     _atomic_json_write "$STATUSFILE" "$(_status_json running graduate "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
 
-    # Wait for child
-    wait "$child_pid" 2>/dev/null
-    local exit_code=$?
+    # Wait for child (#175: immune to trapped-signal interruption; ceiling
+    # enforced inline via the watchdog while blocked here)
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
     _OP_EXIT="$exit_code"
 
     _CHILD_PID=""
@@ -1656,6 +1790,192 @@ _op_graduate() {
             "Graduating $entity to the passthrough backend failed (exit $exit_code). The layered data is untouched. Check the lifecycle log." \
             "graduate_failed_${entity}" 3600
     fi
+}
+
+# Op handler: backup (HOME_BACKUP.md). The heavy lifting (close/bake/rsync/
+# verify/manifest/prune/relaunch) lives in the sourced backup_home.sh
+# function _backup_home_execute — this wrapper only owns the job-ledger/
+# work-state/watchdog bookkeeping every op handler owns, mirroring _op_bake
+# and _op_consolidate above. Only ever dispatched for type=home.
+# ---------------------------------------------------------------------------
+_op_backup_home() {
+    local type="${1:-home}"
+    local id="${2:-}"
+    local reason="${3:-user_backup_home}"
+    local job_id="${4:-}"
+
+    local entity="home/${id}"
+    _OP_EXIT=""
+    _OP_DEFER_REASON=""
+
+    if [ -z "$id" ] || ! declare -f _backup_home_execute >/dev/null 2>&1; then
+        log_error "Home backup for $entity cannot run: missing id or backup_home.sh not loaded"
+        _OP_EXIT=1
+        return 0
+    fi
+    if [ -z "$job_id" ]; then
+        # backup is always enqueued tracked (StorageHandler::backupHome mints
+        # its own job id before enqueueing) — an untracked request has no
+        # options sidecar to read and cannot run.
+        log_error "Home backup for $entity has no job id — refusing (no options to read)"
+        _OP_EXIT=1
+        return 0
+    fi
+
+    local started_at
+    started_at=$(date +%s)
+    local max_dur="${BACKUP_MAX_DURATION_S:-3600}"
+
+    log_info "Starting home backup: $entity (reason=$reason, job=$job_id)"
+    lifecycle_log "info" "supervisor" "backup_start" \
+        "{\"entity\":\"$entity\",\"reason\":\"$reason\",\"job_id\":\"$job_id\"}" 2>/dev/null || true
+
+    # Background subshell (not exec — _backup_home_execute is a sourced bash
+    # function, not a separate program) so the watchdog's kill -0/-TERM/-KILL
+    # and _wait_op_child still target a real PID, and an orphaned run does not
+    # keep the single-instance lock fd held (Bug #757 pattern; see _op_bake).
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        _backup_home_execute "$id" "$reason" "$job_id"
+    ) &
+    local child_pid=$!
+
+    _CHILD_PID="$child_pid"
+    _CHILD_OP="backup"
+    _CHILD_ENTITY="$entity"
+    _CHILD_STARTED_AT="$started_at"
+    _CHILD_MAX_DURATION="$max_dur"
+
+    local qdepth
+    qdepth="$(queue_depth 2>/dev/null || echo 0)"
+    _atomic_json_write "$WORKFILE" "$(_running_work_json "backup" "$entity" "$child_pid" "$started_at" "$max_dur" "$qdepth")" || true
+    _atomic_json_write "$STATUSFILE" "$(_status_json running backup "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
+
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
+    _OP_EXIT="$exit_code"
+
+    _CHILD_PID=""
+    _CHILD_OP=""
+    _CHILD_ENTITY=""
+
+    local now
+    now=$(date +%s)
+    _LAST_COMPLETED_AT="$now"
+
+    if [ "$exit_code" -eq 0 ]; then
+        log_info "Home backup completed: $entity"
+        lifecycle_log "info" "supervisor" "backup_ok" "{\"entity\":\"$entity\",\"job_id\":\"$job_id\"}" 2>/dev/null || true
+    else
+        log_error "Home backup failed: $entity (exit=$exit_code)"
+        lifecycle_log "error" "supervisor" "backup_failed" \
+            "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"exit_code\":$exit_code}" 2>/dev/null || true
+    fi
+    # The options sidecar has done its job either way — never leak it.
+    declare -f _backup_delete_options >/dev/null 2>&1 && _backup_delete_options "$job_id"
+}
+
+# Op handler: restore (HOME_RESTORE.md). The heavy lifting (close/safety-
+# snapshot/rsync/verify/bake/relaunch) lives in the sourced backup_home.sh
+# function _restore_home_execute — this wrapper only owns the job-ledger/
+# work-state/watchdog bookkeeping every op handler owns, mirroring
+# _op_backup_home just above. Only ever dispatched for type=home.
+# ---------------------------------------------------------------------------
+_op_restore_home() {
+    local type="${1:-home}"
+    local id="${2:-}"
+    local reason="${3:-user_restore_home}"
+    local job_id="${4:-}"
+
+    local entity="home/${id}"
+    _OP_EXIT=""
+    _OP_DEFER_REASON=""
+
+    if [ -z "$id" ] || ! declare -f _restore_home_execute >/dev/null 2>&1; then
+        log_error "Home restore for $entity cannot run: missing id or backup_home.sh not loaded"
+        _OP_EXIT=1
+        return 0
+    fi
+    if [ -z "$job_id" ]; then
+        # restore is always enqueued tracked (StorageHandler::restoreHome mints
+        # its own job id before enqueueing) — an untracked request has no
+        # options sidecar to read and cannot run.
+        log_error "Home restore for $entity has no job id — refusing (no options to read)"
+        _OP_EXIT=1
+        return 0
+    fi
+
+    local started_at
+    started_at=$(date +%s)
+    local max_dur="${RESTORE_MAX_DURATION_S:-3600}"
+
+    log_info "Starting home restore: $entity (reason=$reason, job=$job_id)"
+    lifecycle_log "info" "supervisor" "restore_start" \
+        "{\"entity\":\"$entity\",\"reason\":\"$reason\",\"job_id\":\"$job_id\"}" 2>/dev/null || true
+
+    # Background subshell (not exec — _restore_home_execute is a sourced bash
+    # function, not a separate program) so the watchdog's kill -0/-TERM/-KILL
+    # and _wait_op_child still target a real PID, and an orphaned run does not
+    # keep the single-instance lock fd held (Bug #757 pattern; see _op_bake).
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        _restore_home_execute "$id" "$reason" "$job_id"
+    ) &
+    local child_pid=$!
+
+    _CHILD_PID="$child_pid"
+    _CHILD_OP="restore"
+    _CHILD_ENTITY="$entity"
+    _CHILD_STARTED_AT="$started_at"
+    _CHILD_MAX_DURATION="$max_dur"
+
+    local qdepth
+    qdepth="$(queue_depth 2>/dev/null || echo 0)"
+    _atomic_json_write "$WORKFILE" "$(_running_work_json "restore" "$entity" "$child_pid" "$started_at" "$max_dur" "$qdepth")" || true
+    _atomic_json_write "$STATUSFILE" "$(_status_json running restore "$entity" "$qdepth" "$_LAST_COMPLETED_AT")" || true
+
+    _wait_op_child "$child_pid"
+    local exit_code="$_WAIT_OP_RC"
+    _OP_EXIT="$exit_code"
+
+    _CHILD_PID=""
+    _CHILD_OP=""
+    _CHILD_ENTITY=""
+
+    local now
+    now=$(date +%s)
+    _LAST_COMPLETED_AT="$now"
+
+    if [ "$exit_code" -eq 0 ]; then
+        log_info "Home restore completed: $entity"
+        lifecycle_log "info" "supervisor" "restore_ok" "{\"entity\":\"$entity\",\"job_id\":\"$job_id\"}" 2>/dev/null || true
+    else
+        log_error "Home restore failed: $entity (exit=$exit_code)"
+        lifecycle_log "error" "supervisor" "restore_failed" \
+            "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"exit_code\":$exit_code}" 2>/dev/null || true
+    fi
+    # The options sidecar has done its job either way — never leak it.
+    declare -f _restore_delete_options >/dev/null 2>&1 && _restore_delete_options "$job_id"
+}
+
+# ---------------------------------------------------------------------------
+# docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.3/1b.4: the supervisor publishes
+# storage figures and maintenance state, for the first time. Same pattern as
+# sync-activity.php/activity-sweep.php (a short-lived PHP child, spawned
+# in the background so it can never block the tick).
+# ---------------------------------------------------------------------------
+AICLI_PUBLISH_STORAGE_STATUS_PHP="${AICLI_PUBLISH_STORAGE_STATUS_PHP:-/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/publish-storage-status.php}"
+
+# _publish_storage_status — push the full aicli_storage_status snapshot
+# (figures + `maintenance`) after a job finalizes or a maintenance marker
+# changes. Gated exactly like _job_activity_push: skipped in a sandboxed/unit
+# test run (AICLI_JOBS_DIR set), skipped if the script is absent (container
+# tests) or php is missing. Backgrounded — never blocks the tick.
+_publish_storage_status() {
+    [ -z "${AICLI_JOBS_DIR:-}" ] || return 0
+    [ -f "$AICLI_PUBLISH_STORAGE_STATUS_PHP" ] || return 0
+    command -v php >/dev/null 2>&1 || return 0
+    php -d display_errors=0 "$AICLI_PUBLISH_STORAGE_STATUS_PHP" >/dev/null 2>&1 &
 }
 
 # ---------------------------------------------------------------------------
@@ -1851,6 +2171,11 @@ _job_finalize() {
 
     job_ledger_write "$job_id" "$op" "$type" "$id" "$state" "$exit_code" "$defer" \
         "$attempt" "$queued_at" "$started_at" "$now" "$reason" "$trace" "$prev_epoch" || true
+
+    # docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.3: every job outcome — done,
+    # failed, deferred, requeued — publishes the storage snapshot, not only a
+    # user-clicked one. Figures move without waiting for a browser poll.
+    _publish_storage_status
 }
 
 # _check_job_retries — re-enqueue parked deferred jobs whose retry_at passed.
@@ -1940,8 +2265,16 @@ _check_deferred_consolidate_resume() {
         local r_op r_reason r_type r_id
         r_op="$(queue_read_field "$f" op 2>/dev/null)"
         r_reason="$(queue_read_field "$f" reason 2>/dev/null)"
-        case "$r_op" in consolidate|bake) : ;; *) continue ;; esac
-        case "$r_reason" in user_consolidate|user_persist) : ;; *) continue ;; esac
+        # Eligible: user consolidate/bake retries (OP#1381) and parked upgrade
+        # activations (UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md §Event fallback —
+        # the moment the agent mount goes idle the layer swap runs on THIS tick
+        # instead of waiting out the 10→30→60 s backoff).
+        local r_kind=""
+        case "$r_op:$r_reason" in
+            consolidate:user_consolidate|consolidate:user_persist|bake:user_consolidate|bake:user_persist) r_kind="user" ;;
+            mount:upgrade_relaunch) r_kind="upgrade" ;;
+            *) continue ;;
+        esac
         r_type="$(queue_read_field "$f" type 2>/dev/null)"
         r_id="$(queue_read_field "$f" id 2>/dev/null)"
         [ -n "$r_type" ] && [ -n "$r_id" ] || continue
@@ -1978,8 +2311,13 @@ _check_deferred_consolidate_resume() {
         _atomic_json_write "$f" \
             "$(printf '{"job_id":"%s","type":"%s","id":"%s","op":"%s","reason":"%s","priority":%d,"retry_at":%d%s}' \
                 "$r_job" "$r_type" "$r_id" "$r_op" "$r_reason" "$r_prio" "$now" "$rt_trace_kv")" || true
-        lifecycle_log "info" "supervisor" "user_consolidate_resume_on_idle" \
-            "{\"entity\":\"${r_type}/${r_id}\",\"job_id\":\"$r_job\",\"op\":\"$r_op\"}" 2>/dev/null || true
+        if [ "$r_kind" = "upgrade" ]; then
+            lifecycle_log "info" "supervisor" "upgrade_activation_resume_on_idle" \
+                "{\"entity\":\"${r_type}/${r_id}\",\"job_id\":\"$r_job\"}" 2>/dev/null || true
+        else
+            lifecycle_log "info" "supervisor" "user_consolidate_resume_on_idle" \
+                "{\"entity\":\"${r_type}/${r_id}\",\"job_id\":\"$r_job\",\"op\":\"$r_op\"}" 2>/dev/null || true
+        fi
         log_info "Overlay idle for ${r_type}/${r_id} — pulling parked $r_op (job=$r_job) forward for immediate retry"
     done
 }
@@ -2015,6 +2353,47 @@ _reap_job_ledger() {
     fi
 }
 
+# _events_ledger_sweep — 1a.7 (PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md):
+# unlink the oldest event-ledger chunk(s) while more than the configured cap
+# remain. EventLedger writes 1 000-event chunks named by the seq of their
+# first event (see EventLedger::CHUNK_SIZE); this never rewrites a chunk,
+# only unlinks whole ones, so the overshoot is at most one chunk. Cheap: a
+# sorted glob and a count, no PHP child. Called from _op_reconcile.
+# $1 (test seam) overrides the ledger directory; default is the real one.
+_events_ledger_sweep() {
+    local dir="${1:-/tmp/unraid-aicliagents/events}"
+    [ -d "$dir" ] || return 0
+
+    local max_events="${EVENT_LEDGER_MAX_EVENTS:-20000}"
+    case "$max_events" in ''|*[!0-9]*) max_events=20000 ;; esac
+    local chunk_size=1000
+    local max_chunks=$(( (max_events + chunk_size - 1) / chunk_size ))
+    [ "$max_chunks" -ge 1 ] || max_chunks=1
+
+    local sorted f base
+    sorted=$(
+        for f in "$dir"/[0-9]*.jsonl; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f" .jsonl)"
+            case "$base" in ''|*[!0-9]*) continue ;; esac
+            printf '%s %s\n' "$base" "$f"
+        done | sort -n -k1,1
+    )
+    [ -n "$sorted" ] || return 0
+
+    local count
+    count=$(printf '%s\n' "$sorted" | grep -c .)
+    local excess=$(( count - max_chunks ))
+    [ "$excess" -gt 0 ] || return 0
+
+    local _seq path
+    while IFS=' ' read -r _seq path; do
+        [ -n "$path" ] || continue
+        rm -f "$path" 2>/dev/null || true
+        log_info "Events ledger sweep: unlinked $path (over cap: $count chunks > $max_chunks)"
+    done < <(printf '%s\n' "$sorted" | head -n "$excess")
+}
+
 # ---------------------------------------------------------------------------
 # Dirty-pressure watchdog
 # Called every tick. Computes total dirty bytes; enqueues bakes at thresholds.
@@ -2033,6 +2412,9 @@ _check_dirty_pressure() {
     # appear in an agent's upper, the supervisor should NOT paper over it by
     # enqueueing a delta-bake (that would re-introduce multi-layer agents).
     local upper_root
+    # The single-item loop keeps this walk structurally parallel with the
+    # entity scans below while deliberately excluding the agents tree.
+    # shellcheck disable=SC2066
     for upper_root in "$zram_base/homes"; do
         [ -d "$upper_root" ] || continue
         local entity_type="home"
@@ -2183,46 +2565,6 @@ _check_schedule_trigger() {
             fi
         fi
     done <<< "$entity_data"
-}
-
-# ---------------------------------------------------------------------------
-# WP #748 Phase 1 (E): wants-bake flag check
-# gracefulClose writes /tmp/unraid-aicliagents/supervisor/wants-bake/home_<user>
-# instead of enqueuing an immediate bake. This function consumes those flags on
-# every tick — enqueuing a bake for each flagged home entity (bypassing the
-# schedule-window check so the next tick bakes even if recently baked) — then
-# deletes each flag atomically. Missed ticks are fine: the flag just accumulates
-# until the next tick; the bake deduplicates via the queue.
-# ---------------------------------------------------------------------------
-_check_wants_bake_flags() {
-    local wants_bake_dir="${STATUS_DIR}/supervisor/wants-bake"
-    [ -d "$wants_bake_dir" ] || return 0
-
-    local flag_file
-    for flag_file in "$wants_bake_dir"/home_*; do
-        [ -f "$flag_file" ] || continue
-        local fname
-        fname="$(basename "$flag_file")"
-        # Extract id: flag name is home_<safeUser>
-        local user_id="${fname#home_}"
-        [ -n "$user_id" ] || continue
-
-        # Consume the flag first (atomic remove) so we don't double-enqueue on crash
-        rm -f "$flag_file" 2>/dev/null || true
-
-        # Only enqueue if there are dirty bytes — same guard as schedule trigger
-        local upper_dir
-        upper_dir="$(zram_upper "home" "$user_id" 2>/dev/null || true)"
-        if [ -d "$upper_dir" ] && [ -n "$(ls -A "$upper_dir" 2>/dev/null)" ]; then
-            queue_enqueue 20 "home" "$user_id" "bake" "workspace_close" 2>/dev/null || true
-            lifecycle_log "info" "supervisor" "wants_bake_flag_consumed" \
-                "{\"entity\":\"home/$user_id\",\"reason\":\"workspace_close\"}" 2>/dev/null || true
-            log_info "wants-bake flag consumed for home/$user_id — bake enqueued"
-        else
-            lifecycle_log "info" "supervisor" "wants_bake_flag_skipped_empty" \
-                "{\"entity\":\"home/$user_id\"}" 2>/dev/null || true
-        fi
-    done
 }
 
 # ---------------------------------------------------------------------------
@@ -2416,6 +2758,9 @@ _clear_home_consolidating() {
             );
         }
     ' 2>/dev/null || true
+    # docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.4: the consolidate marker
+    # just cleared — publish so the maintenance banner drops without a poll.
+    _publish_storage_status
 }
 
 # _relaunch_home_sessions <user> [job_id] — relaunch exactly the sessions that the manual
@@ -2457,6 +2802,10 @@ _relaunch_home_sessions() {
             \AICliAgents\Services\UpgradeRelaunchService::relaunchHomeSet((string)getenv("AICLI_RELAUNCH_USER"));
         }
     ' ) 2>/dev/null || true
+    # docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.4: the consolidate marker
+    # just cleared here too — publish so the maintenance banner drops without
+    # waiting for a poll.
+    _publish_storage_status
 }
 
 # The wait-state machine. See block comment above. Stub-overridable helpers:
@@ -2498,6 +2847,9 @@ _check_force_reclaim_escalation() {
                 lifecycle_log "warn" "supervisor" "reclaim_waiting_for_idle" \
                     "{\"entity\":\"home/$id\",\"reason\":\"$_RECLAIM_REASON\"}" 2>/dev/null || true
                 log_info "Storage maintenance waiting for home/$id to become idle (reason=$_RECLAIM_REASON)"
+                # docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.4: the maintenance
+                # marker just appeared — publish it on aicli_storage_status.
+                _publish_storage_status
             else
                 # Normalize an old countdown/closing state left in /tmp by a
                 # previous plugin version. It must not retain auto-close semantics.
@@ -2507,6 +2859,7 @@ _check_force_reclaim_escalation() {
                     _atomic_json_write "$state_file" \
                         "$(printf '{"entity":"home/%s","reason":"%s","started_at":%d,"state":"waiting"}' \
                             "$id" "$_RECLAIM_REASON" "$now")" || true
+                    _publish_storage_status
                 fi
             fi
         else
@@ -2517,6 +2870,9 @@ _check_force_reclaim_escalation() {
                 lifecycle_log "info" "supervisor" "force_reclaim_cleared" \
                     "{\"entity\":\"home/$id\",\"recommended\":$recommended,\"busy\":$busy}" 2>/dev/null || true
                 log_info "Force-reclaim stood down for home/$id (recommended=$recommended busy=$busy)"
+                # docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.4: the marker just
+                # cleared — publish so a stale "waiting" banner does not outlive it.
+                _publish_storage_status
             fi
         fi
     done <<< "$ids"
@@ -2526,6 +2882,12 @@ _check_force_reclaim_escalation() {
 # the newly baked layer. The relaunch service consumes the exact closed set and
 # removes its manifest; setInstallStatus(100) is deliberately last so browsers
 # cannot reopen a retired ttyd during the activation gap.
+# True while ANY activation barrier exists for the agent: a retained closed set
+# (sessions to relaunch) OR a pending-activation record (a baked layer that is
+# not live yet, written by install-bg when nothing was closed — see
+# UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md). Before that record existed an
+# upgrade with no session to close was dropped here as "superseded" and its new
+# layer never activated.
 _has_pending_agent_upgrade() {
     local agent_id="$1"
     case "$agent_id" in ''|*[!a-z0-9-]*) return 1 ;; esac
@@ -2533,7 +2895,7 @@ _has_pending_agent_upgrade() {
     AICLI_RELAUNCH_AGENT="$agent_id" php -d display_errors=0 -r '
         $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
         require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
-        exit(\AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade(
+        exit(\AICliAgents\Services\UpgradeRelaunchService::activationPending(
             (string)getenv("AICLI_RELAUNCH_AGENT")
         ) ? 0 : 1);
     ' >/dev/null 2>&1
@@ -2549,14 +2911,35 @@ _relaunch_pending_agent_upgrade() {
         $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
         require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
         $agent = (string)getenv("AICLI_RELAUNCH_AGENT");
-        if (!\AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade($agent)) exit(0);
-        $result = \AICliAgents\Services\UpgradeRelaunchService::relaunchClosedSet($agent);
-        setInstallStatus("Installation complete", 100, $agent);
-        \AICliAgents\Services\LifecycleLogService::log(
-            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
-            "installer", "deferred_upgrade_relaunch_complete",
-            ["agent"=>$agent, "relaunched"=>$result["relaunched"], "skipped"=>$result["skipped"]]
-        );
+        $hasClosedSet = \AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade($agent);
+        $hasPending   = \AICliAgents\Services\UpgradeRelaunchService::hasPendingActivation($agent);
+        if (!$hasClosedSet && !$hasPending) exit(0);
+        // 2026-09-03 wedge: the manifest is written at session-close time, so it
+        // exists while install-bg is still running. Consuming it then relaunches
+        // the closed set onto the OLD binary mid-install and strands the upgrade
+        // at 99%. Leave the manifest for the post-install activation instead.
+        if (\AICliAgents\Services\UpgradeRelaunchService::activationBlocked($agent)) {
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+                "supervisor", "upgrade_activation_deferred_install_running",
+                ["agent" => $agent]
+            );
+            exit(0);
+        }
+        // The mount succeeded, so the newest layer is live now. Relaunch the
+        // closed set when there is one, then publish 100% exactly once and clear
+        // the pending-activation record (UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md:
+        // an upgrade that closed nothing has nothing to relaunch but still needs
+        // this completion — it finishes the tray entry parked in `waiting`).
+        if ($hasClosedSet) {
+            $result = \AICliAgents\Services\UpgradeRelaunchService::relaunchClosedSet($agent);
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+                "installer", "deferred_upgrade_relaunch_complete",
+                ["agent"=>$agent, "relaunched"=>$result["relaunched"], "skipped"=>$result["skipped"]]
+            );
+        }
+        \AICliAgents\Services\UpgradeRelaunchService::completeActivation($agent);
     ' ) 2>/dev/null
 }
 
@@ -2580,13 +2963,26 @@ _check_queued_agent_upgrades() {
 # Self-heal the crash window between install-bg retaining a manifest and
 # enqueuing its activation job. A stable job id plus queue/retry checks makes
 # this idempotent; mount_busy retries live in the supervisor retry pen.
+# 2026-09-03 wedge: a manifest also exists while its install-bg is still
+# RUNNING (it is written at session-close time). activationBlocked() filters
+# those out so a live install is never mistaken for crash residue — enqueueing
+# activation then relaunches the closed set onto the old binary mid-install.
 _check_pending_agent_upgrades() {
     [ "$(command -v php)" ] || return 0
     local ids
     ids="$(php -d display_errors=0 -r '
         $_SERVER["DOCUMENT_ROOT"]="/usr/local/emhttp";
         require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
-        foreach (\AICliAgents\Services\UpgradeRelaunchService::pendingAgentIds() as $id) echo $id, PHP_EOL;
+        // Closed-set manifests, plus pending-activation records without a closed
+        // set (UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md). The reconcile completes
+        // any record whose layer is already live instead of queueing a mount
+        // that a live session would make defer forever.
+        $ids = \AICliAgents\Services\UpgradeRelaunchService::pendingAgentIds();
+        foreach (\AICliAgents\Services\UpgradeRelaunchService::reconcilePendingActivations() as $id) $ids[] = $id;
+        foreach (array_values(array_unique($ids)) as $id) {
+            if (\AICliAgents\Services\UpgradeRelaunchService::activationBlocked($id)) continue;
+            echo $id, PHP_EOL;
+        }
     ' 2>/dev/null)"
     [ -n "$ids" ] || return 0
 
@@ -2601,6 +2997,133 @@ _check_pending_agent_upgrades() {
         fi
         queue_enqueue 1 agent "$id" mount upgrade_relaunch "" "$job_id" >/dev/null 2>&1 || true
     done <<< "$ids"
+}
+
+# #86: browser-independent restart of saved drawer workspaces. The PHP service
+# owns the grace period, upgrade barriers and bounded retry state.
+_check_saved_workspace_restarts() {
+    [ "$(command -v php)" ] || return 0
+    local reconciler="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/reconcile-autolaunch.php"
+    [ -f "$reconciler" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 20 php -d display_errors=0 "$reconciler" >/dev/null 2>&1
+    ) || true
+}
+
+# docs/specs/EVENT_FIRST_RECONCILIATION.md "Rules for the supervisor tick":
+# a 30 s sweep runs ActivityService::sweep() through a PHP child (same pattern
+# as _check_saved_workspace_restarts above) — the watchdog (stall/timeout/
+# done-pruning), the orphan storage-job finish, and the stale install-marker
+# reap now all run with no browser open at all. Rate-limited with a last-run
+# epoch, like _relay_drain_tick; bounded with `timeout` so it can never stall
+# the work tick.
+_ACTIVITY_SWEEP_LAST=0
+_activity_sweep_tick() {
+    [ "$(command -v php)" ] || return 0
+    local now; now=$(date +%s)
+    [ $(( now - _ACTIVITY_SWEEP_LAST )) -ge 30 ] || return 0
+    _ACTIVITY_SWEEP_LAST="$now"
+    local sweeper="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/activity-sweep.php"
+    [ -f "$sweeper" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 20 php -d display_errors=0 "$sweeper" >/dev/null 2>&1
+    ) || true
+}
+
+# ---------------------------------------------------------------------------
+# Superseded agent version sweep (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, R4)
+# ---------------------------------------------------------------------------
+# Since Phase 3 an agent upgrade leaves the previous version mounted for as long
+# as a session is still running it. op_mount sweeps on every activation and on
+# every launch of an already-current agent, which covers the common case — but
+# both of those need SOMETHING to happen. A box where the last workspace of an
+# upgraded agent is closed and nothing is opened afterwards would hold that
+# version's overlay and its writable layer indefinitely, and on this hardware
+# that is 255-450 MB of a flash device with roughly 6 GB free.
+#
+# So the supervisor sweeps too, every 5 minutes, with no browser open and
+# nothing else happening. The sweep only ever releases a version that no live
+# process names, so an idle tick on a healthy box does nothing and costs one
+# /proc scan per installed agent.
+_AGENT_GEN_SWEEP_LAST=0
+_agent_generation_sweep_tick() {
+    local now; now=$(date +%s)
+    [ $(( now - _AGENT_GEN_SWEEP_LAST )) -ge 300 ] || return 0
+    _AGENT_GEN_SWEEP_LAST="$now"
+
+    declare -f aicli_gc_agent_generations >/dev/null 2>&1 || return 0
+    declare -f agent_base >/dev/null 2>&1 || return 0
+
+    local versions_root agent_dir agent_id persist
+    versions_root="$(agent_base)/.versions"
+    [ -d "$versions_root" ] || return 0
+    persist="$(agent_persist_path 2>/dev/null)" || return 0
+    [ -n "$persist" ] || return 0
+
+    for agent_dir in "$versions_root"/*/; do
+        [ -d "$agent_dir" ] || continue
+        agent_id="$(basename -- "${agent_dir%/}")"
+        case "$agent_id" in .*) continue ;; esac
+        # Called directly, in THIS shell. `timeout bash -c '...'` would start a
+        # new shell with none of these functions defined: it would exit 127 and,
+        # with the failure swallowed, the sweep would quietly never run. The
+        # umount inside the reaper carries its own timeout instead, which is the
+        # only step that can block.
+        aicli_gc_agent_generations "$agent_id" "$persist" 0 >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Relay DM re-drain — deliver any deferred direct-message notice to live sessions
+# ---------------------------------------------------------------------------
+# The plugin queues a Relay DM notice when the recipient pane is mid-decision (a
+# menu / unsent input), then re-delivers it on the drawer poll. That poll only
+# runs while a Manager browser tab is FOCUSED — background tabs throttle their
+# timers — so a notice to a live but backgrounded workspace waited until the user
+# opened it. This server-side tick re-drains regardless of any browser.
+# docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.7: rate-limited to the tick rate
+# (5 s) while any pending queue file exists, 30 s otherwise — enqueuePendingRelay
+# also wakes the supervisor on arrival, so this cadence is the backstop, not the
+# only path to a fast drain. Runs the plugin's own relay-agent.php drain-all
+# (readiness-gated per session); best-effort with a hard timeout so it can
+# NEVER stall the work tick.
+
+# _relay_pending_exists — true when at least one session has a non-empty
+# deferred-relay queue file. Mirrors TmuxService::relayPendingDir(): a
+# per-user path under AICLI_RELAY_STATE_DIR when the test/CLI hook is set,
+# else a glob across every user's own relay/pending dir (this box is normally
+# single-tenant, but the glob costs nothing when there is only one match).
+_relay_pending_exists() {
+    local f
+    if [ -n "${AICLI_RELAY_STATE_DIR:-}" ]; then
+        for f in "${AICLI_RELAY_STATE_DIR}"/pending/*.json; do
+            [ -f "$f" ] && return 0
+        done
+        return 1
+    fi
+    for f in /tmp/unraid-aicliagents/work/*/home/relay/pending/*.json; do
+        [ -f "$f" ] && return 0
+    done
+    return 1
+}
+
+_RELAY_DRAIN_LAST=0
+_relay_drain_tick() {
+    [ "$(command -v php)" ] || return 0
+    local now interval; now=$(date +%s); interval=30
+    _relay_pending_exists && interval=5
+    [ $(( now - _RELAY_DRAIN_LAST )) -ge "$interval" ] || return 0
+    _RELAY_DRAIN_LAST="$now"
+    timeout 20 php -d display_errors=0 \
+        "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php" drain-all \
+        >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -2634,14 +3157,22 @@ _work_tick() {
     # backoff-managed activation job, even if install-bg crashed after writing it.
     _check_pending_agent_upgrades
 
+    # Step 1c (#86): recreate crashed saved workspaces without needing a browser.
+    _check_saved_workspace_restarts
+
+    # Step 1d: EVENT_FIRST_RECONCILIATION.md — the activity watchdog sweep,
+    # rate-limited to 30 s internally, runs with no browser open.
+    _activity_sweep_tick
+
+    # Step 1e: SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 — release superseded agent
+    # versions once nothing is running them, rate-limited to 5 min internally.
+    _agent_generation_sweep_tick
+
     # Step 2: Check dirty-pressure thresholds (may enqueue bakes)
     _check_dirty_pressure
 
     # Step 3: Check schedule trigger (may enqueue bakes)
     _check_schedule_trigger
-
-    # Step 3a: WP #748 Phase 1 (E) — consume wants-bake flags from workspace closes
-    _check_wants_bake_flags
 
     # Step 3b: Phase 5 — homes-only policy-driven consolidate enqueue (replaces the
     # old count>=5 PHP trigger). Enqueues a consolidate when storagectl recommends it.
@@ -2758,6 +3289,12 @@ _work_tick() {
                         ;;
                     graduate)
                         _op_graduate "$req_type" "$req_id" "$req_reason"
+                        ;;
+                    backup)
+                        _op_backup_home "$req_type" "$req_id" "$req_reason" "$req_job"
+                        ;;
+                    restore)
+                        _op_restore_home "$req_type" "$req_id" "$req_reason" "$req_job"
                         ;;
                     *)
                         log_warn "Unknown op: $req_op (ignored)"
@@ -2937,6 +3474,8 @@ _do_start() {
         [ -n "$_v" ] && STORAGE_TARGET_WAIT_S="$_v"
         _v=$(grep -oP '^graduated_retention_days="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
         [ -n "$_v" ] && GRADUATED_RETENTION_DAYS="$_v"
+        _v=$(grep -oP '^event_ledger_max_events="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
+        [ -n "$_v" ] && EVENT_LEDGER_MAX_EVENTS="$_v"
     fi
 
     log_info "Supervisor starting (pid $$, version $DAEMON_VERSION)"
@@ -2962,6 +3501,7 @@ _do_start() {
     # Main work loop
     while [ "$_STOPPING" -eq 0 ]; do
         _work_tick
+        _relay_drain_tick
 
         # Reset the wake flag for THIS sleep window; a SIGUSR1 arriving during a
         # `sleep 1` runs the trap when that second elapses, sets _WAKE, and the

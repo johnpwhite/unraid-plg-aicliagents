@@ -43,6 +43,12 @@ if (empty($agentId)) {
 $verLabel = $targetVersion ? " (version: $targetVersion)" : " (latest)";
 aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmypid() . ")", AICLI_LOG_INFO);
 
+// #150: run this whole install job — the npm fetch + flash consolidation and its
+// child processes (npm, mksquashfs) — at idle IO + low CPU priority so it can't
+// starve interactive IO on a slow USB flash. Children spawned after this inherit it.
+@exec('ionice -c3 -p ' . (int)getmypid() . ' 2>/dev/null');
+@exec('renice -n 19 -p ' . (int)getmypid() . ' 2>/dev/null');
+
 // T-08 (ACTIVITY_TRAY.md): (re-)register the install activity with this worker's
 // pid/pgid so cancel_activity can kill the whole process group (npm children
 // included). Every setInstallStatus call from here on refreshes heartbeatAt via
@@ -60,15 +66,40 @@ aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmy
     ]
 );
 
+// #150: serialize installs globally so parallel upgrades never consolidate to the
+// USB flash at once (that caused dstate backpressure, deferred agent-home mounts —
+// bake_lock_held — and a shfs-wedge-watch trip on Tower). The heavy phase runs
+// one-at-a-time; the rest queue here (the UI shows the "upgrading" chip meanwhile).
+// Non-blocking with a deadline: a wedged holder can never hang every other install.
+require_once "$pluginDir/includes/services/InstallLock.php";
+$installLock = \AICliAgents\Services\InstallLock::acquire(
+    function () use ($agentId) {
+        setInstallStatus("Queued — waiting for another agent upgrade to finish...", 5, $agentId);
+    }
+);
+if (($installLock['queued'] ?? false) && !($installLock['held'] ?? false)) {
+    aicli_log("Install lock deadline hit for $agentId — proceeding unlocked to avoid an indefinite queue", AICLI_LOG_WARN, "InstallBG");
+} elseif ($installLock['queued'] ?? false) {
+    aicli_log("Install for $agentId queued behind another install; lock acquired, proceeding", AICLI_LOG_INFO, "InstallBG");
+}
+
 // WP #859: gate the binary swap on the pre-install home bake completing.
 // AgentHandler::install enqueued a home bake before spawning this script;
-// wait for the supervisor to pick it up and drain. Bounded by 30s; on
-// timeout we proceed anyway (commit_stack.sh's marker-timestamp guard
-// still protects against data loss — see AGENT_UPGRADE_HOME_BAKE_SYNC.md).
+// wait for the supervisor to pick it up and drain. Bounded by 300s (a real
+// xz home bake takes minutes — the old 30s bound let the agent bake overlap
+// the still-running home bake); on timeout we proceed anyway
+// (commit_stack.sh's marker-timestamp guard still protects against data
+// loss — see AGENT_UPGRADE_HOME_BAKE_SYNC.md). The onWait callback surfaces
+// the wait in the agent card's install-status area and keeps the activity
+// heartbeat fresh while we legitimately wait.
 $cfg = function_exists('getAICliConfig') ? getAICliConfig() : [];
 $user = $cfg['user'] ?? 'root';
 if (empty($user)) $user = 'root';
-$wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user, 30, 6);
+$wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user, 300, 6,
+    function () use ($agentId) {
+        setInstallStatus("Upgrade queued — saving workspace data first...", 5, $agentId);
+    }
+);
 aicli_log("Pre-install bake wait: {$wait['status']} (waited {$wait['waited_s']}s, user=$user)", AICLI_LOG_INFO);
 \AICliAgents\Services\LifecycleLogService::log(
     \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
@@ -168,15 +199,68 @@ try {
             \AICliAgents\Services\LifecycleLogService::log(
                 \AICliAgents\Services\LifecycleLogService::LEVEL_WARN, 'installer',
                 'relaunch_skipped_layer_stale', ['agent' => $agentId]);
-            setInstallStatus(
-                "Upgrade installed — waiting for running processes before activation...",
-                99,
-                $agentId
-            );
+
+            // UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md: name what the activation
+            // waits for (best-effort — a detection miss just yields the generic text).
+            $holderCount = 0;
+            try {
+                $ahFile = "$pluginDir/includes/handlers/AgentHandler.php";
+                if (is_file($ahFile)) require_once $ahFile;
+                if (class_exists('\AICliAgents\Handlers\AgentHandler')
+                    && method_exists('\AICliAgents\Handlers\AgentHandler', 'externalBinaryHolders')) {
+                    $holderCount = count(\AICliAgents\Handlers\AgentHandler::externalBinaryHolders($agentId, []));
+                }
+            } catch (\Throwable $e) { $holderCount = 0; }
+            $who = $holderCount > 0
+                ? "$holderCount process(es) still running the previous version"
+                : 'the processes still running the previous version';
+            $hasClosedSet = \AICliAgents\Services\UpgradeRelaunchService::hasPendingAgentUpgrade($agentId);
+
+            if ($hasClosedSet) {
+                // Sessions were closed for this upgrade: the closed-set manifest is
+                // the install barrier (#72) — stay at 99% so terminals cannot reopen
+                // a retired session onto the old layer before the relaunch.
+                $waitStep = "Upgrade installed — waiting for $who to close before activation and relaunch";
+                setInstallStatus($waitStep, 99, $agentId);
+            } else {
+                // Nothing was closed, so there is nothing to relaunch and no barrier
+                // to hold: the merged overlay already serves the new files to any new
+                // workspace; only the consolidated-layer swap (storage clean-up) waits
+                // for the mount to go idle. Publish completion so the Store card and
+                // terminals stay usable — the wait is tracked separately below.
+                $waitStep = "Upgrade installed — storage clean-up runs when $who close";
+                setInstallStatus($waitStep, 100, $agentId);
+            }
+            // Stamp phase=awaiting_activation: activationBlocked() treats this as
+            // the ONE in-flight marker state where the supervisor MUST run the
+            // activation (install-bg is done; the barrier now belongs to the
+            // supervisor). get_install_status enumerates the blockers (#87) while
+            // this phase is set. Then write the manifest-independent barrier
+            // BEFORE enqueueing the job that consumes it, and park the tray entry
+            // (no worker heartbeats from here; the wait has no upper bound — the
+            // 20-minute cap turned a healthy install into "FAILED: timeout").
+            $statusFile = rtrim(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents', '/')
+                . '/install-status-' . $agentId;
+            $statusJson = json_decode((string)@file_get_contents($statusFile), true);
+            if (is_array($statusJson)) {
+                $statusJson['phase'] = 'awaiting_activation';
+                @file_put_contents($statusFile, json_encode($statusJson));
+            }
+            \AICliAgents\Services\UpgradeRelaunchService::markActivationPending(
+                $agentId, (string)($newest ?? ''), $hasClosedSet);
+            \AICliAgents\Services\ActivityService::wait("install_$agentId", $waitStep);
             \AICliAgents\Services\UpgradeRelaunchService::schedulePendingActivation($agentId);
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer',
+                'upgrade_activation_pending',
+                ['agent' => $agentId, 'layer' => (string)($newest ?? ''), 'closed_set' => $hasClosedSet, 'holders' => $holderCount]);
         }
     }
 } catch (\Throwable $e) {
     aicli_log("Background Install Job EXCEPTION for $agentId: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine(), AICLI_LOG_ERROR);
     setInstallStatus("Fatal Error: " . $e->getMessage(), 0, $agentId, $e->getTraceAsString());
 }
+
+// #150: release the global install lock so any queued install can start promptly
+// (process exit would release it anyway — this just hands off without waiting for it).
+\AICliAgents\Services\InstallLock::release($installLock);

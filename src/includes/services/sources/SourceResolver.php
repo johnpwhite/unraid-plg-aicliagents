@@ -51,6 +51,38 @@ class SourceResolver {
     }
 
     /**
+     * Source types whose install output is entirely reconstructible, and which
+     * can therefore be installed into a layer of their own beside the version
+     * that is running — docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3.
+     *
+     * The line is drawn where the spec's own 2026-09-09 investigation drew it.
+     * For these three types the install writes nothing a user would recognise as
+     * their own data: it is the same bytes the same install command would
+     * produce again, on this box, right now. Credentials and history live in the
+     * shared managed home, outside every agent layer, so two versions of one
+     * agent share nothing writable.
+     *
+     * `curl_install` is deliberately absent. Those agents' vendor scripts land
+     * their binary inside a captive home directory inside the agent's own tree,
+     * so a versioned layout has to version that path too — a real piece of work
+     * the spec defers to its own phase, not something to infer here. Until then
+     * they keep the existing behaviour: an upgrade waits for their sessions.
+     */
+    private const SIDE_BY_SIDE_SOURCE_TYPES = ['npm', 'tarball', 'github_release'];
+
+    /**
+     * True when a new version of this agent can be installed while the version
+     * in service keeps running. Reads the same normalised descriptor resolve()
+     * uses, so the legacy top-level npm_package shim is honoured here too — an
+     * agent declared the old way is npm-sourced and qualifies.
+     */
+    public static function supportsSideBySideInstall(array $agent): bool {
+        $desc = self::descriptor($agent);
+        $type = (string)($desc['type'] ?? '');
+        return $type !== '' && in_array($type, self::SIDE_BY_SIDE_SOURCE_TYPES, true);
+    }
+
+    /**
      * Return the normalised source descriptor used by a resolved AgentSource.
      * Applies the same legacy-shim synthesis as resolve().
      */

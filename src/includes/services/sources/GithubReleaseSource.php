@@ -50,7 +50,7 @@ class GithubReleaseSource implements AgentSource {
         if (!$this->download($asset['browser_download_url'], $dlPath)) return false;
 
         if (is_callable($progress)) $progress("Extracting…", 55);
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
         $pkgDir = "$agentDir/pkg";
         @mkdir($pkgDir, 0755, true);
         if (!$this->extractArchive($dlPath, $pkgDir)) return false;
@@ -68,7 +68,7 @@ class GithubReleaseSource implements AgentSource {
             LogService::log("GithubReleaseSource::stage: missing binary_in_archive/executable for $agentId", LogService::LOG_ERROR, "GithubReleaseSource");
             return '';
         }
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
         $pkgBin = "$agentDir/pkg/$inArchive";
         if (!file_exists($pkgBin)) {
             $glob = glob("$agentDir/pkg/*/$inArchive") ?: [];
@@ -90,7 +90,7 @@ class GithubReleaseSource implements AgentSource {
     }
 
     public function discoverVersion(string $agentId, array $agent): ?string {
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
         $bin = $agent['binary'] ?? '';
         $probe = $agent['source']['version_probe'] ?? '{binary} --version';
         if ($bin !== '' && file_exists($bin)) {

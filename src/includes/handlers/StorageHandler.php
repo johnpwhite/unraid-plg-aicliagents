@@ -31,6 +31,12 @@ class StorageHandler {
             case 'persist_home':                $result = self::persistHome(); break;
             case 'consolidate_storage':         $result = self::consolidate(); break;
             case 'get_home_sessions':            return self::getHomeSessions();    // R1: read-only, list open sessions for home consolidate warning
+            case 'backup_home':                 $result = self::backupHomeAction(); break; // HOME_BACKUP.md
+            case 'backup_status':               return self::backupStatusAction();  // HOME_BACKUP.md: read-only, no Nchan publish
+            case 'backup_validate_target':       return self::backupValidateTargetAction(); // HOME_BACKUP.md: read-only, no Nchan publish
+            case 'list_backups':                return self::listBackupsAction();   // HOME_RESTORE.md: read-only, no Nchan publish
+            case 'restore_home':                $result = self::restoreHomeAction(); break; // HOME_RESTORE.md
+            case 'restore_status':              return self::restoreStatusAction(); // HOME_RESTORE.md: read-only, no Nchan publish
             case 'graduate_targets':            return self::graduateTargets();    // Bug #1380: read-only, qualifying relocation targets
             case 'graduate_storage':            $result = self::graduate(); break; // Bug #1380: relocate off USB flash to a durable target
             case 'expand_storage':              $result = self::expand(); break;
@@ -60,7 +66,9 @@ class StorageHandler {
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'get_home_sessions', 'graduate_targets', 'graduate_storage', 'expand_storage', 'shrink_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage',
-                'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts'];
+                'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
+                'backup_home', 'backup_status', 'backup_validate_target',
+                'list_backups', 'restore_home', 'restore_status'];
     }
 
     private static function getStatus() {
@@ -144,6 +152,12 @@ class StorageHandler {
             $queueDepth = (int)$workState['queue_depth'];
         }
 
+        // #165: derive a plain-English "a workspace save/bake is running now" flag
+        // from the live work state, so the Manager Store cards can show a persistent
+        // indicator (not just the transient notification pill) while an upgrade is
+        // deferred behind a home bake.
+        $bake = self::describeSupervisorBake($workState);
+
         return [
             'running'           => $running,
             'tick_age_s'        => $tickAge,
@@ -152,7 +166,30 @@ class StorageHandler {
             'queue_depth'       => $queueDepth,
             'pressure'          => self::_computeDirtyPressure(),
             'consolidate_fails' => self::_readConsolidateFails(),
+            'baking'            => $bake['baking'],
+            'baking_label'      => $bake['label'],
         ];
+    }
+
+    /**
+     * #165: PURE — describe the supervisor's live work as a user-facing "baking"
+     * state. A running bake/consolidate is the condition that defers an agent
+     * upgrade behind a home save; queued/deferred/idle are NOT "baking now".
+     *
+     * @param array<string,mixed>|null $work  SupervisorService::getWorkState()
+     * @return array{baking:bool, op:string, entity:string, label:string}
+     */
+    public static function describeSupervisorBake(?array $work): array
+    {
+        $state  = is_array($work) ? (string)($work['state'] ?? '')  : '';
+        $op     = is_array($work) ? (string)($work['op'] ?? '')     : '';
+        $entity = is_array($work) ? (string)($work['entity'] ?? '') : '';
+        $baking = ($state === 'running' && ($op === 'bake' || $op === 'consolidate'));
+        if (!$baking) {
+            return ['baking' => false, 'op' => '', 'entity' => '', 'label' => ''];
+        }
+        $label = $op === 'consolidate' ? 'Consolidating workspace data…' : 'Saving workspace data…';
+        return ['baking' => true, 'op' => $op, 'entity' => $entity, 'label' => $label];
     }
 
     /**
@@ -170,20 +207,43 @@ class StorageHandler {
      *                             "started_at":<epoch> }
      */
     private static function getForceReclaimState(): array {
+        return self::forceReclaimState();
+    }
+
+    /**
+     * Shared static (docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.4): the SAME
+     * computation the `get_force_reclaim_state` AJAX action answers with, also
+     * called by the supervisor-tick publisher (publish-storage-status.php) so
+     * the `maintenance` key on `aicli_storage_status` can never drift from what
+     * this read reports. Still read-only — computing this value has no side
+     * effect; only a caller that PUBLISHES the result (the AJAX handler's own
+     * mutating-action tail, or the supervisor script) makes it visible on the
+     * wire.
+     */
+    public static function forceReclaimState(): array {
         $config = getAICliConfig();
         $user   = (string)($config['user'] ?? 'root');
         if (empty($user)) $user = 'root';
+
+        // #131: surface an in-progress home consolidation on the same poll the
+        // drawer and Storage tab already use, so both can show a live "tidy-up
+        // underway" banner and guard conflicting actions. Distinct from `state`
+        // (which means reclaim is RECOMMENDED / waiting, not running).
+        require_once __DIR__ . '/../services/ConsolidateState.php';
+        $consolidating = \AICliAgents\Services\ConsolidateState::isHomeConsolidating($user);
+        $extra = ['consolidating' => $consolidating, 'consolidating_user' => $consolidating ? $user : ''];
+
         $safeId = str_replace(['/', ' '], '_', $user);
         $path   = "/tmp/unraid-aicliagents/supervisor/escalation/home_{$safeId}.json";
 
-        $none = ['status' => 'ok', 'state' => 'none', 'now' => time()];
+        $none = array_merge(['status' => 'ok', 'state' => 'none', 'now' => time()], $extra);
         if (!file_exists($path)) return $none;
         $raw = @file_get_contents($path);
         if ($raw === false || $raw === '') return $none;
         $decoded = @json_decode($raw, true);
         if (!is_array($decoded)) return $none;
 
-        return array_merge(['status' => 'ok', 'now' => time()], $decoded);
+        return array_merge(['status' => 'ok', 'now' => time()], $decoded, $extra);
     }
 
     /**
@@ -564,6 +624,588 @@ class StorageHandler {
         return ['status' => 'ok', 'sessions' => array_values($mapped)];
     }
 
+    // -------------------------------------------------------------------
+    // HOME_BACKUP.md — a clean, restorable copy of a user's home
+    // -------------------------------------------------------------------
+
+    /** AJAX: POST user, optional target/quiesce overrides. */
+    private static function backupHomeAction(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
+        if ($user === '0') $user = 'root';
+        $opts = [];
+        if (isset($_REQUEST['target']))  $opts['target']  = (string)$_REQUEST['target'];
+        if (isset($_REQUEST['quiesce'])) $opts['quiesce'] = (string)$_REQUEST['quiesce'];
+        aicli_log("AJAX Request: Back up home for $user", AICLI_LOG_INFO);
+        return self::backupHome($user, $opts);
+    }
+
+    /**
+     * Public static entry point for the admin tool's approve path
+     * (`aicli_backup_home`, Tier 3) — same result shape as the AJAX action.
+     *
+     * @param array{target?:string,quiesce?:string} $opts request-time overrides;
+     *        anything omitted falls back to the cfg keys (backup_target etc.).
+     * @return array{status:string,jobId?:string,opId?:string,message?:string}
+     */
+    public static function backupHome(string $user, array $opts = []): array {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        require_once __DIR__ . '/../services/StorageTargetService.php';
+        require_once __DIR__ . '/../services/StoragePathResolver.php';
+        require_once __DIR__ . '/../services/SupervisorService.php';
+        require_once __DIR__ . '/../services/ActivityService.php';
+
+        $config = getAICliConfig();
+        $target = trim((string)($opts['target'] ?? ($config['backup_target'] ?? '')));
+        if ($target === '') {
+            return ['status' => 'error', 'message' => 'No backup target is configured. Choose one in Settings > Storage first.'];
+        }
+        $quiesce = (string)($opts['quiesce'] ?? ($config['backup_quiesce'] ?? 'cold'));
+        if (!in_array($quiesce, ['cold', 'warm'], true)) $quiesce = 'cold';
+        $keep = (int)($config['backup_keep'] ?? 5);
+        if ($keep < 1) $keep = 1;
+        $excludes = self::parseExcludes((string)($config['backup_excludes'] ?? ''));
+        $nudgeWorking = (string)($config['backup_nudge_working'] ?? '1') === '1';
+
+        // R2 pre-flight — any failure ends the job before a session is touched.
+        $entity = "home/$user";
+        if (\AICliAgents\Services\SupervisorService::isHalted($entity)) {
+            return ['status' => 'error', 'message' => "Home backup refused: $user's home is halted."];
+        }
+        $resolved = \AICliAgents\Services\StorageTargetService::resolveBackupTarget($target, $config);
+        if (!$resolved['ok']) {
+            return ['status' => 'error', 'message' => $resolved['message']];
+        }
+        $homeMount = \AICliAgents\Services\StoragePathResolver::homeMount($user);
+        if (!is_dir($homeMount)) {
+            return ['status' => 'error', 'message' => "Home backup refused: $user's home is not mounted."];
+        }
+        $homeBytes = self::duBytes($homeMount);
+        $needed = self::requiredBackupSpace($homeBytes);
+        if (!self::hasEnoughBackupSpace($resolved['free_bytes'], $homeBytes)) {
+            return ['status' => 'error', 'message' => sprintf(
+                'Home backup refused: the target has %s free but needs at least %s (1.5x the %s home).',
+                self::humanBytes($resolved['free_bytes']), self::humanBytes($needed), self::humanBytes($homeBytes)
+            )];
+        }
+
+        // Mint the job id ourselves so the options sidecar exists BEFORE the
+        // queue file can possibly be popped (enqueueJob would mint its own).
+        $jobId = \AICliAgents\Services\SupervisorService::generateJobId('backup', 'home', $user);
+        $wrote = \AICliAgents\Services\SupervisorService::writeBackupOptions($jobId, [
+            'target'        => $resolved['resolved'],
+            'quiesce'       => $quiesce,
+            'keep'          => $keep,
+            'excludes'      => $excludes,
+            'nudge_working' => $nudgeWorking,
+        ]);
+        if (!$wrote) {
+            return ['status' => 'error', 'message' => 'Could not prepare the backup job. Try again.'];
+        }
+        if (!\AICliAgents\Services\SupervisorService::enqueue('home', $user, 'backup', 'user_backup_home', 5, $jobId)) {
+            \AICliAgents\Services\SupervisorService::deleteBackupOptions($jobId);
+            return ['status' => 'error', 'message' => 'Could not queue the backup job. Try again.'];
+        }
+
+        $opId = "user_backup_home_{$user}_{$jobId}";
+        \AICliAgents\Services\ActivityService::register($opId, 'storage', "Back up home $user", [
+            'step' => 'queued', 'progress' => 5, 'meta' => ['jobId' => $jobId],
+        ]);
+        \AICliAgents\Services\SupervisorService::wake();
+        \AICliAgents\Services\LifecycleLogService::log(
+            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+            'storage', 'storage_backup_queued',
+            ['user' => $user, 'target' => $resolved['resolved'], 'quiesce' => $quiesce, 'job_id' => $jobId]
+        );
+        return ['status' => 'ok', 'jobId' => $jobId, 'opId' => $opId];
+    }
+
+    /** AJAX: GET user. */
+    private static function backupStatusAction(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
+        if ($user === '0') $user = 'root';
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        return self::backupStatusFor($user);
+    }
+
+    /**
+     * HOME_BACKUP.md R10: `{status, last_backup:{at,path,bytes,files,warm,ok}|null,
+     * running:{jobId,step}|null, snapshots:[{path,at,bytes}]}`. Reused by
+     * `backup_status` AND (for just the `last_backup` object) by
+     * StorageMetricsService::getStatus()'s per-user `last_backup` field, so
+     * the two surfaces can never disagree.
+     */
+    public static function backupStatusFor(string $user): array {
+        require_once __DIR__ . '/../services/SupervisorService.php';
+        $config = getAICliConfig();
+        $target = trim((string)($config['backup_target'] ?? ''));
+        $running = self::runningBackupJob($user);
+        // The job writes a durable per-user record of its last run (finished or
+        // failed) with the target it really used. It is the source of truth when
+        // the run used a target override or the setting changed since.
+        $lastRun = null;
+        $safeUser = preg_replace('/[^A-Za-z0-9._-]/', '', $user);
+        $recordPath = "/boot/config/plugins/unraid-aicliagents/backup-last-$safeUser.json";
+        if ($safeUser !== '' && is_file($recordPath)) {
+            $decoded = json_decode((string)@file_get_contents($recordPath), true);
+            if (is_array($decoded)) {
+                $lastRun = [
+                    'ok'      => (bool)($decoded['ok'] ?? false),
+                    'at'      => $decoded['at'] ?? null,
+                    'target'  => (string)($decoded['target'] ?? ''),
+                    'warm'    => (bool)($decoded['warm'] ?? false),
+                    'summary' => (string)($decoded['summary'] ?? ''),
+                ];
+                if ($target === '' && $lastRun['target'] !== '') {
+                    $target = $lastRun['target'];
+                }
+            }
+        }
+        if ($target === '') {
+            return ['status' => 'ok', 'last_backup' => null, 'last_run' => $lastRun, 'running' => $running, 'snapshots' => []];
+        }
+
+        $base = rtrim($target, '/') . '/aicli-home-backup/' . $user;
+        $snapshots = [];
+        foreach (@glob("$base/*", GLOB_ONLYDIR) ?: [] as $dir) {
+            $name = basename($dir);
+            if (!preg_match('/^\d{8}T\d{6}Z$/', $name)) continue; // skips 'latest' + stray dirs
+            $manifest = self::readBackupManifest("$dir/backup.json");
+            $snapshots[] = [
+                'path'  => $dir,
+                'at'    => $manifest['finished_at'] ?? null,
+                'bytes' => (int)($manifest['bytes'] ?? 0),
+            ];
+        }
+        usort($snapshots, static fn($a, $b) => strcmp((string)($b['at'] ?? ''), (string)($a['at'] ?? '')));
+
+        $lastBackup = null;
+        $latestDir = self::resolveLatestSnapshotDir($base);
+        if ($latestDir !== null) {
+            $manifest = self::readBackupManifest("$latestDir/backup.json");
+            if ($manifest !== null) {
+                $lastBackup = [
+                    'at'    => $manifest['finished_at'] ?? null,
+                    'path'  => $latestDir,
+                    'bytes' => (int)($manifest['bytes'] ?? 0),
+                    'files' => (int)($manifest['file_count'] ?? 0),
+                    'warm'  => (bool)($manifest['warm'] ?? false),
+                    'ok'    => true,
+                ];
+            }
+        }
+        return ['status' => 'ok', 'last_backup' => $lastBackup, 'last_run' => $lastRun, 'running' => $running, 'snapshots' => $snapshots];
+    }
+
+    /** AJAX: POST target. Server-side re-check for the picker's "Validate" button. */
+    private static function backupValidateTargetAction(): array {
+        require_once __DIR__ . '/../services/StorageTargetService.php';
+        $target = trim((string)($_REQUEST['target'] ?? ''));
+        if ($target === '') {
+            return ['status' => 'error', 'ok' => false, 'message' => 'A target path is required.'];
+        }
+        $resolved = \AICliAgents\Services\StorageTargetService::resolveBackupTarget($target, getAICliConfig());
+        return array_merge(['status' => $resolved['ok'] ? 'ok' : 'error'], $resolved);
+    }
+
+    /** Resolve the `latest` symlink under a user's backup base dir to an absolute path, or null. */
+    private static function resolveLatestSnapshotDir(string $base): ?string {
+        $link = "$base/latest";
+        if (!is_link($link) && !is_dir($link)) return null;
+        if (is_link($link)) {
+            $target = @readlink($link);
+            if ($target === false) return null;
+            return (strpos($target, '/') === 0) ? $target : "$base/$target";
+        }
+        return $link;
+    }
+
+    /**
+     * REVIEW_2026-09-13_EVENTS_AND_SECURITY.md S3: resolve $snapshotArg (a raw
+     * path, or 'latest') to a REAL, on-disk directory PROVEN to sit inside
+     * $user's own backup root — the same root listBackups() reads,
+     * `<effective target>/aicli-home-backup/<user>`. Before this check,
+     * `restoreHome()` used a caller-supplied `snapshot` path (or a `latest`
+     * symlink target) as-is: a path outside the backup root — or a `latest`
+     * symlink deliberately pointed outside it with an absolute target
+     * (resolveLatestSnapshotDir() follows an absolute symlink target
+     * verbatim) — would still pass every check below it (a real backup.json
+     * for the right user, a real tree/ dir) if one happened to exist there,
+     * and would then be copied into the user's home as if it were a
+     * legitimate snapshot.
+     *
+     * realpath() resolves both the root and the candidate to their real,
+     * symlink-free, `..`-free on-disk path, so the prefix check below cannot
+     * be fooled by a relative escape (`../../etc`) OR a symlink (anywhere in
+     * either path) pointing outside the root — both collapse to the same
+     * real path realpath() would report for a direct copy.
+     *
+     * @return array{ok:bool,path?:string,message?:string}
+     */
+    private static function resolveSnapshotWithinBackupRoot(string $target, string $user, string $snapshotArg): array {
+        if ($target === '') {
+            return ['ok' => false, 'message' => 'Home restore refused: no backup target is known to resolve this snapshot.'];
+        }
+        $root = rtrim($target, '/') . '/aicli-home-backup/' . $user;
+        $realRoot = realpath($root);
+        if ($realRoot === false) {
+            return ['ok' => false, 'message' => 'Home restore refused: no backup snapshots exist for this user under the configured target.'];
+        }
+        $realRoot = rtrim($realRoot, '/');
+
+        if ($snapshotArg === 'latest') {
+            $latest = self::resolveLatestSnapshotDir($root);
+            if ($latest === null) {
+                return ['ok' => false, 'message' => 'Home restore refused: there is no "latest" snapshot for this user.'];
+            }
+            $candidate = $latest;
+        } else {
+            $candidate = $snapshotArg;
+        }
+
+        $real = realpath($candidate);
+        if ($real === false || strpos($real, $realRoot . '/') !== 0) {
+            return ['ok' => false, 'message' => "Home restore refused: the snapshot path is not inside $user's own backup folder."];
+        }
+        return ['ok' => true, 'path' => $real];
+    }
+
+    /** @return array|null decoded backup.json, or null when absent/corrupt. */
+    private static function readBackupManifest(string $path): ?array {
+        if (!is_file($path)) return null;
+        $data = json_decode((string)@file_get_contents($path), true);
+        return is_array($data) ? $data : null;
+    }
+
+    /** The active backup job for $user, or null. Shape: {jobId, step}. */
+    private static function runningBackupJob(string $user): ?array {
+        $job = \AICliAgents\Services\SupervisorService::findActiveJob('home', $user, 'backup');
+        if ($job === null) return null;
+        return ['jobId' => (string)($job['job_id'] ?? ''), 'step' => (string)($job['phase'] ?? 'running')];
+    }
+
+    /** cfg's newline-list format -> a clean array, blank lines dropped. */
+    private static function parseExcludes(string $raw): array {
+        $lines = preg_split('/\r\n|\r|\n/', $raw) ?: [];
+        return array_values(array_filter(array_map('trim', $lines), static fn($l) => $l !== ''));
+    }
+
+    /** `du -sb` in bytes for a mounted path; 0 on any failure (never blocks the pre-flight). */
+    private static function duBytes(string $path): int {
+        $out = [];
+        $rc = 1;
+        // nosemgrep: php.lang.security.exec-use.exec-use — path is a resolved plugin mount, no shell interpolation
+        @exec('du -sb ' . escapeshellarg($path) . ' 2>/dev/null', $out, $rc);
+        if ($rc !== 0 || empty($out)) return 0;
+        $first = trim((string)$out[0]);
+        return (preg_match('/^(\d+)/', $first, $m)) ? (int)$m[1] : 0;
+    }
+
+    /** Human-readable byte size for an error message (GB, one decimal). */
+    private static function humanBytes(int $bytes): string {
+        return sprintf('%.1f GB', $bytes / 1073741824);
+    }
+
+    /** HOME_BACKUP.md R2: free space must be >= 1.5x the merged home's size. Pure. */
+    public static function requiredBackupSpace(int $homeBytes): int {
+        return (int)ceil($homeBytes * 1.5);
+    }
+
+    /**
+     * HOME_BACKUP.md R2 space pre-flight, pure and unit-testable. `free_bytes
+     * <= 0` (unknown / a probe that could not statfs) never refuses on its
+     * own — it is treated as "can't tell", the same permissive default
+     * StorageTargetService::freeBytes()'s callers already use elsewhere.
+     */
+    public static function hasEnoughBackupSpace(int $freeBytes, int $homeBytes): bool {
+        return $freeBytes <= 0 || $freeBytes >= self::requiredBackupSpace($homeBytes);
+    }
+
+    // -------------------------------------------------------------------
+    // HOME_RESTORE.md — put a backup snapshot back into a user's home
+    // -------------------------------------------------------------------
+
+    /** AJAX: GET user. The `list_backups` action. */
+    private static function listBackupsAction(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
+        if ($user === '0') $user = 'root';
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        return self::listBackups($user);
+    }
+
+    /**
+     * HOME_RESTORE.md R2: `{status, target, snapshots:[{path, at, warm, files,
+     * bytes, ok, label}]}`. `target` is the effective target: the cfg value,
+     * or (when unset) the target the last backup run actually used. `label`
+     * is `'pre-restore'` for a safety snapshot a restore took, else `''`.
+     */
+    public static function listBackups(string $user): array {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        $target = self::effectiveBackupTarget($user);
+        if ($target === '') {
+            return ['status' => 'ok', 'target' => '', 'snapshots' => []];
+        }
+
+        $base = rtrim($target, '/') . '/aicli-home-backup/' . $user;
+        $snapshots = [];
+        foreach (@glob("$base/*", GLOB_ONLYDIR) ?: [] as $dir) {
+            $name = basename($dir);
+            if (!preg_match('/^\d{8}T\d{6}Z$/', $name)) continue; // skips 'latest' + stray dirs
+            $manifest = self::readBackupManifest("$dir/backup.json");
+            if ($manifest === null) continue;
+            $snapshots[] = self::snapshotRowFromManifest($dir, $manifest);
+        }
+        usort($snapshots, static fn($a, $b) => strcmp((string)($b['at'] ?? ''), (string)($a['at'] ?? '')));
+        return ['status' => 'ok', 'target' => $target, 'snapshots' => $snapshots];
+    }
+
+    /**
+     * HOME_RESTORE.md R2: pure, unit-testable — a decoded backup.json ->
+     * a `list_backups` snapshot row. `label` is 'pre-restore' only when the
+     * manifest says so (a restore's own safety snapshot); every other
+     * snapshot (a normal backup) gets ''.
+     *
+     * @param array<string,mixed> $manifest
+     * @return array{path:string,at:mixed,warm:bool,files:int,bytes:int,ok:bool,label:string}
+     */
+    public static function snapshotRowFromManifest(string $path, array $manifest): array {
+        $label = (string)($manifest['label'] ?? '');
+        return [
+            'path'  => $path,
+            'at'    => $manifest['finished_at'] ?? null,
+            'warm'  => (bool)($manifest['warm'] ?? false),
+            'files' => (int)($manifest['file_count'] ?? 0),
+            'bytes' => (int)($manifest['bytes'] ?? 0),
+            'ok'    => true,
+            'label' => $label === 'pre-restore' ? 'pre-restore' : '',
+        ];
+    }
+
+    /** The cfg's backup_target, or (when unset) the target the user's last backup run used. */
+    private static function effectiveBackupTarget(string $user): string {
+        $config = getAICliConfig();
+        $target = trim((string)($config['backup_target'] ?? ''));
+        if ($target !== '') return $target;
+        $safeUser = preg_replace('/[^A-Za-z0-9._-]/', '', $user);
+        if ($safeUser === '') return '';
+        $recordPath = "/boot/config/plugins/unraid-aicliagents/backup-last-$safeUser.json";
+        if (!is_file($recordPath)) return '';
+        $decoded = json_decode((string)@file_get_contents($recordPath), true);
+        return is_array($decoded) ? trim((string)($decoded['target'] ?? '')) : '';
+    }
+
+    /** AJAX: POST user, snapshot (path or 'latest'), mode, safety_snapshot. */
+    private static function restoreHomeAction(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
+        if ($user === '0') $user = 'root';
+        $opts = ['snapshot' => (string)($_REQUEST['snapshot'] ?? '')];
+        if (isset($_REQUEST['mode']))            $opts['mode']            = (string)$_REQUEST['mode'];
+        if (isset($_REQUEST['safety_snapshot'])) $opts['safety_snapshot'] = (string)$_REQUEST['safety_snapshot'];
+        aicli_log("AJAX Request: Restore home for $user", AICLI_LOG_INFO);
+        return self::restoreHome($user, $opts);
+    }
+
+    /**
+     * Public static entry point for the admin tool's approve path
+     * (`aicli_restore_home`, Tier 3) and the CLI — same result shape as the
+     * AJAX action.
+     *
+     * @param array{snapshot?:string,mode?:string,safety_snapshot?:mixed} $opts
+     * @return array{status:string,jobId?:string,opId?:string,safety_snapshot?:bool,message?:string}
+     */
+    public static function restoreHome(string $user, array $opts = []): array {
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        require_once __DIR__ . '/../services/StorageTargetService.php';
+        require_once __DIR__ . '/../services/StoragePathResolver.php';
+        require_once __DIR__ . '/../services/SupervisorService.php';
+        require_once __DIR__ . '/../services/ActivityService.php';
+
+        $snapshotArg = trim((string)($opts['snapshot'] ?? ''));
+        if ($snapshotArg === '') {
+            return ['status' => 'error', 'message' => 'A snapshot is required.'];
+        }
+        $mode = (string)($opts['mode'] ?? 'replace');
+        if (!in_array($mode, ['replace', 'merge'], true)) $mode = 'replace';
+        $safetySnapshot = self::optBool($opts['safety_snapshot'] ?? null, true);
+
+        $config = getAICliConfig();
+        $target = self::effectiveBackupTarget($user);
+
+        // S3: resolve 'latest' (or take the given path) and PROVE it is a real,
+        // on-disk directory inside this user's own backup root — never a path
+        // (or a 'latest' symlink) pointing anywhere else. This is the FIRST
+        // check on $snapshotArg, before backup.json is even read, so nothing
+        // outside the backup root is ever opened, let alone copied into a home.
+        $resolvedSnapshot = self::resolveSnapshotWithinBackupRoot($target, $user, $snapshotArg);
+        if (!$resolvedSnapshot['ok']) {
+            return ['status' => 'error', 'message' => (string)$resolvedSnapshot['message']];
+        }
+        $snapshotDir = (string)$resolvedSnapshot['path'];
+
+        // R3 pre-flight — any failure ends the job before a session is touched.
+        $manifest = is_dir($snapshotDir) ? self::readBackupManifest("$snapshotDir/backup.json") : null;
+        if ($manifest === null) {
+            return ['status' => 'error', 'message' => 'Home restore refused: the snapshot has no backup.json for this user.'];
+        }
+        if ((string)($manifest['user'] ?? '') !== $user) {
+            return ['status' => 'error', 'message' => 'Home restore refused: that snapshot belongs to a different user.'];
+        }
+        if (!is_dir("$snapshotDir/tree")) {
+            return ['status' => 'error', 'message' => 'Home restore refused: the snapshot has no tree/ directory.'];
+        }
+        $homeMount = \AICliAgents\Services\StoragePathResolver::homeMountPath($user);
+        if (!is_dir($homeMount)) {
+            return ['status' => 'error', 'message' => "Home restore refused: $user's home is not mounted."];
+        }
+        $entity = "home/$user";
+        if (\AICliAgents\Services\SupervisorService::isHalted($entity)) {
+            return ['status' => 'error', 'message' => "Home restore refused: $user's home is halted."];
+        }
+
+        $snapshotBytes = (int)($manifest['bytes'] ?? 0);
+        $needed = self::requiredRestoreSpace($snapshotBytes, $mode);
+        $free = (int)@disk_free_space($homeMount);
+        if (!self::hasEnoughRestoreSpace($free, $snapshotBytes, $mode)) {
+            $margin = $mode === 'merge' ? ' (1.2x the snapshot, for a merge)' : '';
+            return ['status' => 'error', 'message' => sprintf(
+                'Home restore refused: the home filesystem has %s free but needs at least %s%s.',
+                self::humanBytes($free), self::humanBytes($needed), $margin
+            )];
+        }
+
+        $safetyTarget = '';
+        if ($safetySnapshot) {
+            if ($target === '') {
+                return ['status' => 'error', 'message' => 'Home restore refused: a safety snapshot was requested but no backup target is configured.'];
+            }
+            $resolvedTarget = \AICliAgents\Services\StorageTargetService::resolveBackupTarget($target, $config);
+            if (!$resolvedTarget['ok']) {
+                return ['status' => 'error', 'message' => 'Home restore refused: the safety-snapshot target failed pre-flight: ' . $resolvedTarget['message']];
+            }
+            $safetyTarget = $resolvedTarget['resolved'];
+            $homeBytes = self::duBytes($homeMount);
+            if (!self::hasEnoughBackupSpace($resolvedTarget['free_bytes'], $homeBytes)) {
+                return ['status' => 'error', 'message' => sprintf(
+                    'Home restore refused: the safety-snapshot target has %s free but needs at least %s.',
+                    self::humanBytes($resolvedTarget['free_bytes']), self::humanBytes(self::requiredBackupSpace($homeBytes))
+                )];
+            }
+        }
+
+        $keep = (int)($config['backup_keep'] ?? 5);
+        if ($keep < 1) $keep = 1;
+        $excludes = self::parseExcludes((string)($config['backup_excludes'] ?? ''));
+
+        // Mint the job id ourselves so the options sidecar exists BEFORE the
+        // queue file can possibly be popped (mirrors backupHome()).
+        $jobId = \AICliAgents\Services\SupervisorService::generateJobId('restore', 'home', $user);
+        $wrote = \AICliAgents\Services\SupervisorService::writeRestoreOptions($jobId, [
+            'snapshot'        => $snapshotDir,
+            'mode'            => $mode,
+            'safety_snapshot' => $safetySnapshot,
+            'target'          => $safetyTarget,
+            'keep'            => $keep,
+            'excludes'        => $excludes,
+        ]);
+        if (!$wrote) {
+            return ['status' => 'error', 'message' => 'Could not prepare the restore job. Try again.'];
+        }
+        if (!\AICliAgents\Services\SupervisorService::enqueue('home', $user, 'restore', 'user_restore_home', 5, $jobId)) {
+            \AICliAgents\Services\SupervisorService::deleteRestoreOptions($jobId);
+            return ['status' => 'error', 'message' => 'Could not queue the restore job. Try again.'];
+        }
+
+        $opId = "user_restore_home_{$user}_{$jobId}";
+        \AICliAgents\Services\ActivityService::register($opId, 'storage', "Restore home $user", [
+            'step' => 'queued', 'progress' => 5, 'meta' => ['jobId' => $jobId],
+        ]);
+        \AICliAgents\Services\SupervisorService::wake();
+        \AICliAgents\Services\LifecycleLogService::log(
+            \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+            'storage', 'storage_restore_queued',
+            ['user' => $user, 'snapshot' => $snapshotDir, 'mode' => $mode, 'safety_snapshot' => $safetySnapshot, 'job_id' => $jobId]
+        );
+        return ['status' => 'ok', 'jobId' => $jobId, 'opId' => $opId, 'safety_snapshot' => $safetySnapshot];
+    }
+
+    /** AJAX: GET user. */
+    private static function restoreStatusAction(): array {
+        $user = trim((string)($_REQUEST['user'] ?? ''));
+        if ($user === '') $user = (string)(getAICliConfig()['user'] ?? 'root');
+        if ($user === '0') $user = 'root';
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['status' => 'error', 'message' => 'invalid_user'];
+        }
+        return self::restoreStatusFor($user);
+    }
+
+    /**
+     * HOME_RESTORE.md R2/R4: `{status, last_restore:{ok,at,snapshot,mode,
+     * safety_snapshot_path,cause}|null, running:{jobId,step}|null}`. Reads the
+     * durable per-user record the restore job writes at
+     * /boot/config/plugins/unraid-aicliagents/restore-last-<user>.json.
+     */
+    public static function restoreStatusFor(string $user): array {
+        require_once __DIR__ . '/../services/SupervisorService.php';
+        $safeUser = preg_replace('/[^A-Za-z0-9._-]/', '', $user);
+        $lastRestore = null;
+        $recordPath = "/boot/config/plugins/unraid-aicliagents/restore-last-$safeUser.json";
+        if ($safeUser !== '' && is_file($recordPath)) {
+            $decoded = json_decode((string)@file_get_contents($recordPath), true);
+            if (is_array($decoded)) {
+                $lastRestore = [
+                    'ok'                   => (bool)($decoded['ok'] ?? false),
+                    'at'                   => $decoded['at'] ?? null,
+                    'snapshot'             => (string)($decoded['snapshot'] ?? ''),
+                    'mode'                 => (string)($decoded['mode'] ?? ''),
+                    'safety_snapshot_path' => (string)($decoded['safety_snapshot_path'] ?? ''),
+                    'cause'                => (string)($decoded['cause'] ?? ''),
+                ];
+            }
+        }
+        $running = self::runningRestoreJob($user);
+        return ['status' => 'ok', 'last_restore' => $lastRestore, 'running' => $running];
+    }
+
+    /** The active restore job for $user, or null. Shape: {jobId, step}. */
+    private static function runningRestoreJob(string $user): ?array {
+        $job = \AICliAgents\Services\SupervisorService::findActiveJob('home', $user, 'restore');
+        if ($job === null) return null;
+        return ['jobId' => (string)($job['job_id'] ?? ''), 'step' => (string)($job['phase'] ?? 'running')];
+    }
+
+    /** cfg-style truthy parse: bool passthrough, else '0'/'false'/'no'/'off' -> false, '' -> $default. */
+    private static function optBool($val, bool $default): bool {
+        if ($val === null) return $default;
+        if (is_bool($val)) return $val;
+        $s = strtolower(trim((string)$val));
+        if ($s === '') return $default;
+        return !in_array($s, ['0', 'false', 'no', 'off'], true);
+    }
+
+    /** HOME_RESTORE.md R3: replace needs >= the snapshot's bytes; merge needs >= 1.2x. Pure. */
+    public static function requiredRestoreSpace(int $snapshotBytes, string $mode): int {
+        return $mode === 'merge' ? (int)ceil($snapshotBytes * 1.2) : $snapshotBytes;
+    }
+
+    /** Same "free_bytes <= 0 never refuses" permissive default as hasEnoughBackupSpace(). Pure. */
+    public static function hasEnoughRestoreSpace(int $freeBytes, int $snapshotBytes, string $mode): bool {
+        return $freeBytes <= 0 || $freeBytes >= self::requiredRestoreSpace($snapshotBytes, $mode);
+    }
+
     private static function consolidate() {
         $type = $_GET['type'] ?? 'agent';
         $id   = $_GET['id']   ?? 'default';
@@ -763,6 +1405,13 @@ class StorageHandler {
         $user = $_GET['user'] ?? '';
         if (empty($user) && strpos($type, 'home_') === 0) $user = substr($type, 5);
         if (empty($user)) $user = getAICliConfig()['user'];
+        // #131: a repair remounts the overlay — refuse while a consolidation is
+        // baking that same home, or the reclaim aborts (mirrors the client guard
+        // and how the interactive `start` is gated).
+        require_once __DIR__ . '/../services/ConsolidateState.php';
+        if (\AICliAgents\Services\ConsolidateState::isHomeConsolidating((string)$user)) {
+            return ['status' => 'error', 'message' => "Storage tidy-up is in progress for $user — please wait for it to finish before repairing."];
+        }
         aicli_log("AJAX Request: Repair Home storage for $user", AICLI_LOG_INFO);
         $res = aicli_repair_home_storage($user);
         return ['status' => $res ? 'ok' : 'error', 'message' => $res ? '' : "Repair failed for $user. Check debug log."];
@@ -1222,8 +1871,10 @@ class StorageHandler {
 
     /**
      * T-08 (ACTIVITY_TRAY.md): one writer API for migration progress — publishes
-     * the legacy `migrate_progress` Nchan channel (kept for the existing manager
-     * overlay) AND mirrors the step into the activity registry as the singleton
+     * the `migrate_progress` Nchan channel (the shared channel, D9/R7 in
+     * EVENT_PUBLISH_OBSERVABILITY.md: migrate-btrfs-to-squashfs.sh publishes here
+     * too, so there is only one migration channel and one Manager subscriber)
+     * AND mirrors the step into the activity registry as the singleton
      * `storage_migrate` op (type `migrate`). progress>=100 finishes the activity.
      */
     private static function migrateProgress(string $step, int $progress, array $extra = []): void {

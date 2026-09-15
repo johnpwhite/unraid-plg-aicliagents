@@ -310,6 +310,10 @@ function av2_secrets_schema(array $agent): array {
                                         ⚠ <?=htmlspecialchars($agentPillLabel, ENT_QUOTES, 'UTF-8')?>
                                     </span>
                                 <?php endif; ?>
+                                <?php /* #165 rev 2026-09-04: the all-cards "Saving…" bake pill
+                                   was removed on user feedback — waiting states now render only
+                                   in the waiting agent's own install-status area (see
+                                   docs/specs/AGENT_CARD_BAKE_INDICATOR.md). */ ?>
                             </span>
                         </div>
 
@@ -360,19 +364,33 @@ function av2_secrets_schema(array $agent): array {
                                     <input type="radio" id="ch-pinned-<?=$id?>" name="ch-<?=$id?>" value="pinned" onchange="av2SetChannel('<?=$id?>', 'pinned')" <?=!empty($agent['pinned']) ? 'checked' : ''?>>
                                     <label for="ch-pinned-<?=$id?>">Pinned</label>
                                 </div>
+                                <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Stable gets tested releases, Beta gets newer releases that may be less tested, and Pinned locks the agent to one specific version so it never changes until you pick a new one.</p>
 
                                 <div class="av2-chan-section" id="av2-pin-row-<?=$id?>">
                                     <h4>Version</h4>
                                     <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
                                         <option value="">v<?=htmlspecialchars($installedVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
-                                    <p class="av2-help" style="margin-top:6px;">Pick a version to install. Upgrade button in the card footer applies the latest on the selected channel.</p>
+                                    <p class="av2-help" style="margin-top:6px;">Pick a version to install. The Upgrade button in the card footer installs the latest version on the selected channel.</p>
                                 </div>
                             </div>
 
                             <!-- Envs panel (environment variables injected at launch; secrets + config) -->
                             <div class="av2-panel" data-panel="secrets">
                                 <h4>Envs · injected at launch</h4>
+                                <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Agent-specific settings, such as API keys, that the plugin sets as environment variables each time this agent starts.</p>
+                                <?php if (!empty($agent['data_dir_env']) && is_array($agent['data_dir_env'])): ?>
+                                <?php /* #4: this agent honours an env var that relocates ALL its durable state.
+                                         A value pointing outside the plugin home lands outside the persistent
+                                         storage and silently vanishes on reboot — say so where envs are edited. */ ?>
+                                <div class="av2-datadir-note" style="margin:0 0 8px;padding:6px 8px;border-radius:4px;font-size:11px;background:var(--mild-background-color,rgba(255,165,0,.08));border:1px solid rgba(255,165,0,.35);">
+                                    <?php foreach ($agent['data_dir_env'] as $ddKey => $ddHelp): ?>
+                                    <div><strong><code><?=htmlspecialchars((string)$ddKey, ENT_QUOTES, 'UTF-8')?></code></strong>
+                                        <?php $ddSet = (string)($agentFfEnvs[$ddKey] ?? ''); if ($ddSet !== ''): ?><span style="color:#d9822b;font-weight:600;"> · currently set to <code><?=htmlspecialchars($ddSet, ENT_QUOTES, 'UTF-8')?></code></span><?php endif; ?>
+                                        — <?=htmlspecialchars((string)$ddHelp, ENT_QUOTES, 'UTF-8')?></div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <?php endif; ?>
                                 <form class="av2-secrets-form" data-agent="<?=$id?>" onsubmit="return av2SaveSecrets(this, event)">
                                     <?php foreach ($secretsSchema as $sec):
                                         $env = $sec['env'] ?? '';
@@ -475,6 +493,7 @@ function av2_secrets_schema(array $agent): array {
                                 <?php else: ?>
                                 <h4>Storage</h4>
                                 <?php endif; ?>
+                                <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">How much disk space this agent uses on the server, and whether it has recent changes that are not yet saved to permanent storage.</p>
                                 <div class="av2-storage-body" data-agent="<?=$id?>">
                                     <div style="padding: 12px; text-align:center; color: var(--text-color); opacity: 0.6; font-size: 11px;">Loading…</div>
                                 </div>
@@ -495,7 +514,7 @@ function av2_secrets_schema(array $agent): array {
                                     <div style="display:flex; flex-direction:column; gap:8px;">
                                         <textarea name="args" rows="3" style="width:100%; box-sizing:border-box; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; padding:8px 10px; border:1px solid var(--border-color,rgba(128,128,128,0.35)); border-radius:3px; background:var(--input-bg-color,rgba(255,255,255,0.03)); color:inherit; resize:vertical;" placeholder="--max-turns 10 --output-format json"><?=htmlspecialchars($agentArgs, ENT_QUOTES, 'UTF-8')?></textarea>
                                         <div class="av2-args-error" style="display:none; color:#dc6b44; font-size:11px;"></div>
-                                        <p class="av2-help">Extra flags appended to the agent's launch command. Workspace-level overrides are set in the session drawer. Rejected: <code>; | &amp; ` $</code></p>
+                                        <p class="av2-help">Extra flags appended to the agent's launch command; workspace-level overrides are set in the session drawer. Rejected: <code>; | &amp; ` $</code></p>
                                     </div>
                                     <div class="av2-panel-footer">
                                         <button type="submit" class="av2-btn primary">Save</button>
@@ -535,12 +554,14 @@ function av2_secrets_schema(array $agent): array {
                                     <input type="radio" id="ch-pinned-<?=$id?>" name="ch-<?=$id?>" value="pinned" onchange="av2SetChannel('<?=$id?>', 'pinned')" <?=!empty($agent['pinned']) ? 'checked' : ''?>>
                                     <label for="ch-pinned-<?=$id?>">Pinned</label>
                                 </div>
+                                <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Stable gets tested releases, Beta gets newer releases that may be less tested, and Pinned locks the agent to one specific version so it never changes until you pick a new one.</p>
 
                                 <div class="av2-chan-section" id="av2-pin-row-<?=$id?>">
                                     <h4>Version</h4>
                                     <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
                                         <option value="">v<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
+                                    <p class="av2-help" style="margin-top:6px;">Pick a version, then use the Install button below to install it.</p>
                                 </div>
 
                                 <div class="av2-panel-footer">

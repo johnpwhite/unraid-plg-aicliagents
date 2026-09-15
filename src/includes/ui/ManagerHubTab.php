@@ -153,6 +153,7 @@
                     <label style="font-size:11px;">Skill name<br>
                         <input type="text" id="hub-skill-name" maxlength="64" pattern="[a-zA-Z0-9_-]+" placeholder="my-skill" style="width:220px;">
                     </label>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">A short identifier for this skill; it becomes the folder name inside each agent's skills directory, so use only letters, numbers, hyphens and underscores.</p>
                     <div id="hub-skill-files" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;"></div>
                     <button type="button" class="aicli-btn-slim" style="margin-top:6px;" onclick="hubAddSkillFileRow('', '', false)"><i class="fa fa-plus"></i> Add file</button>
                     <div style="margin-top:10px; display:flex; gap:8px;">
@@ -170,6 +171,7 @@
                     <textarea id="hub-command-content" rows="10" spellcheck="false"
                               style="width:100%; font-family:monospace; font-size:11px; resize:vertical; margin-top:6px;"
                               placeholder="# /my-command&#10;&#10;What the command should do…"></textarea>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">The full text of the slash command, written in markdown; this is what the agent reads when someone runs the command.</p>
                     <div style="margin-top:10px; display:flex; gap:8px;">
                         <button type="button" class="aicli-btn-slim" onclick="hubSaveCommand()"><i class="fa fa-check"></i> Save Command</button>
                         <button type="button" class="aicli-btn-slim" onclick="hubCloseCommandEditor()">Cancel</button>
@@ -212,6 +214,7 @@
                 </div>
                 <!-- enabled: status + timeline -->
                 <div id="hub-git-enabled-ui" style="display:none;">
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Every change here is committed automatically. Use Commit now to save one right away, or Restore settings to overwrite your current plugin settings with the last saved backup.</p>
                     <div id="hub-git-statusline" style="font-size:11px; opacity:0.75; margin-bottom:8px;"></div>
                     <div id="hub-git-timeline" style="display:flex; flex-direction:column; gap:4px;"></div>
                     <div id="hub-git-diffwrap" style="display:none; margin-top:10px;">
@@ -257,15 +260,18 @@
                         </select>
                     </label>
                 </div>
+                <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Name is a label you choose to identify this server. Transport is how it is reached — a program run on this box (stdio), or a remote web address (http or sse).</p>
                 <div id="hub-f-stdio" style="margin-top:10px;">
                     <label style="font-size:11px;">Command<br>
                         <input type="text" id="hub-f-command" placeholder="/usr/local/bin/my-mcp" style="width:100%; max-width:520px;">
                     </label>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">The full path to the program that starts this MCP server on the Unraid box.</p>
                     <label style="font-size:11px; display:block; margin-top:8px;">Arguments (one per line)<br>
                         <textarea id="hub-f-args" rows="3" style="width:100%; max-width:520px; font-family:monospace; font-size:11px;" placeholder="--port&#10;3000"></textarea>
                     </label>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Extra options passed to the command above, one per line, in the order the program expects them.</p>
                     <div style="margin-top:8px;">
-                        <span style="font-size:11px;">Environment variables <span style="opacity:0.5;">(values are masked after save; <code>{SECRET_KEY}</code> placeholders resolve from the secrets vault at projection time)</span></span>
+                        <span style="font-size:11px;">Environment variables <span style="opacity:0.5;">(values are masked after you save; <code>{SECRET_KEY}</code> placeholders resolve from the secrets vault when applied to agents)</span></span>
                         <div id="hub-env-rows" style="display:flex; flex-direction:column; gap:4px; margin-top:4px;"></div>
                         <button type="button" class="aicli-btn-slim" style="margin-top:4px;" onclick="hubAddEnvRow('', false)"><i class="fa fa-plus"></i> Add variable</button>
                     </div>
@@ -274,9 +280,11 @@
                     <label style="font-size:11px;">URL<br>
                         <input type="text" id="hub-f-url" placeholder="https://example.com/mcp" style="width:100%; max-width:520px;">
                     </label>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">The full web address of the remote MCP server, including https://.</p>
                 </div>
                 <div style="margin-top:12px;">
                     <span style="font-size:11px;">Enable for agents</span>
+                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Tick each agent that should receive this server the next time you click Apply to agents.</p>
                     <div id="hub-agent-checks" class="hub-agent-grid"></div>
                     <div id="hub-agent-checks-empty" style="display:none; font-size:11px; opacity:0.6;">
                         No supported agents are installed yet — the server definition is stored and can be targeted later.

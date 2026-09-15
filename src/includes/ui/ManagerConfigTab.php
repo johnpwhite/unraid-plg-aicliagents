@@ -22,6 +22,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
                                 <?=mk_option($config['enable_tab'], "0", _('No'))?>
                             </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Choose No to hide the AI Cli Agents tab from Unraid's top menu without removing the plugin.</div>
                         </dd>
 
                         <dt>Logging Level</dt>
@@ -32,19 +33,36 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['log_level'], "2", _('Normal (Info)'))?>
                                 <?=mk_option($config['log_level'], "3", _('Debug (Verbose)'))?>
                             </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How much detail the plugin writes to its log; a higher level helps with troubleshooting but produces more output.</div>
                         </dd>
 
                         <dt>Backup Interval</dt>
                         <dd>
                             <div class="input-row">
-                                <select name="sync_interval_hours" aria-label="Backup interval, hours" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                    <?php for($i=0; $i<=23; $i++): echo mk_option($config['sync_interval_hours']??0, $i, $i."h"); endfor; ?>
-                                </select>
-                                <select name="sync_interval_mins" aria-label="Backup interval, minutes" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                    <?php for($i=0; $i<=59; $i++): echo mk_option($config['sync_interval_mins']??30, $i, $i."m"); endfor; ?>
+                                <?php
+                                // #153: this control drives the REAL automatic-save cadence the
+                                // storage supervisor reads (bake_schedule_minutes). The old
+                                // sync_interval_hours/mins selects were wired to nothing.
+                                $bakeEvery = (string)($config['bake_schedule_minutes'] ?? '120');
+                                $bakeChoices = ['15' => 'Every 15 minutes', '30' => 'Every 30 minutes', '60' => 'Every hour', '120' => 'Every 2 hours', '240' => 'Every 4 hours', '480' => 'Every 8 hours', '720' => 'Every 12 hours', '1440' => 'Once a day'];
+                                if (!isset($bakeChoices[$bakeEvery]) && ctype_digit($bakeEvery)) $bakeChoices[$bakeEvery] = "Every $bakeEvery minutes";
+                                ?>
+                                <select name="bake_schedule_minutes" aria-label="Automatic backup interval" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                    <?php foreach ($bakeChoices as $mins => $label): echo mk_option($bakeEvery, (string)$mins, $label); endforeach; ?>
                                 </select>
                                 <button type="button" class="aicli-btn-slim" onclick="persistEntity('home', activeTerminalUser)"><i class="fa fa-save"></i> Persist</button>
                             </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How often the plugin saves your home directory automatically when it has unsaved changes. Click Persist to save it now instead of waiting for the schedule.</div>
+                        </dd>
+
+                        <dt>Workspace working directory</dt>
+                        <dd>
+                            <?php $cwdMode = (string)($config['workspace_cwd'] ?? 'share'); ?>
+                            <select name="workspace_cwd" aria-label="Workspace working directory" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($cwdMode, 'share', _('Share path (/mnt/user/…) — default'))?>
+                                <?=mk_option($cwdMode, 'pool', _('Pool path (/mnt/<pool>/…) when the share is cache-only'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The share path, the default, keeps the array from stopping while a workspace is open; the pool path runs the agent directly on the pool of a cache-only share, so the array can stop and small files are faster. Only new or reopened sessions change, and an agent that keeps a history per folder, such as Claude Code, starts a fresh history after you switch.</div>
                         </dd>
 
                         <dt>Version Check Schedule</dt>
@@ -55,6 +73,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 6 * * 1', 'Weekly (Monday 6am)')?>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '', 'Disabled')?>
                             </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How often the plugin checks online for new agent versions.</div>
                         </dd>
 
                         <dt>Version History (months)</dt>
@@ -65,6 +84,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['version_check_months']??'3', '6', '6 months')?>
                                 <?=mk_option($config['version_check_months']??'3', '12', '12 months')?>
                             </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How long past version check results are kept before they're cleared out.</div>
                         </dd>
                     </dl>
                 </div>
@@ -81,6 +101,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($config['theme']??'dark', "light", _('Light'))?>
                                 <?=mk_option($config['theme']??'dark', "solarized", _('Solarized'))?>
                             </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The color scheme for the terminal windows in this plugin.</div>
                         </dd>
 
                         <dt>Font Size</dt>
@@ -89,6 +110,20 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <input type="number" name="font_size" aria-label="Terminal font size in pixels" value="<?=$config['font_size'] ?? 12?>" min="8" max="32" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
                                 <span style="opacity:0.75; font-size:11px;">px</span>
                             </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The text size, in pixels, for the terminal windows.</div>
+                        </dd>
+
+                        <!-- CONTINUE_ON_RESTART.md (2026-09-09): relocated from the Agent Relay
+                             tab (Relay messaging never owned this). Saves through the same
+                             autoSaveConfig()/`save` path as every other select on this tab. -->
+                        <dt>Continue after a restart</dt>
+                        <dd>
+                            <select name="auto_continue_on_restart" aria-label="Continue after a restart" style="width: 100%;" <?=$autoSave?>>
+                                <?php $autoContinue = \AICliAgents\Services\ConfigService::autoContinueOnRestart() ? '1' : '0'; ?>
+                                <?=mk_option($autoContinue, "1", _('On (default)'))?>
+                                <?=mk_option($autoContinue, "0", _('Off'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">When on, a workspace continues its work by itself after a restart, upgrade, or reload it detects, never after a plain page load; on by default.</div>
                         </dd>
 
                         <dt>Terminal User</dt>
@@ -112,6 +147,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <button type="button" class="aicli-btn-slim" onclick="window.open('/Users/UserAdd', '_blank')" title="Add User"><i class="fa fa-user-plus"></i></button>
                                 <button type="button" class="aicli-btn-slim" onclick="safeReload()" title="Refresh"><i class="fa fa-refresh"></i></button>
                             </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The Unraid user account that terminal sessions run as. Switching it changes whose home directory, files, and settings you see.</div>
                         </dd>
 
                         <dt>Workspace Root</dt>
@@ -120,7 +156,34 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <input type="text" name="root_path" id="root_path" aria-label="Workspace root path" value="<?=htmlspecialchars($config['root_path'] ?? '/mnt/user', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;" <?=$autoSave?>>
                                 <button type="button" class="aicli-btn-slim" onclick="openPathPicker('root_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
                             </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The starting folder for a terminal or file browser when you open one for an agent.</div>
                         </dd>
+
+                        <!-- WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3: the setting is stored in bytes
+                             (upload_max_bytes) but shown and edited here in MB. The visible field
+                             has no name attribute, so the form never submits it directly; onchange
+                             writes the byte value into the hidden field, which autoSaveConfig()
+                             then serializes and saves like every other setting on this tab. -->
+                        <dt>Upload size limit</dt>
+                        <dd>
+                            <?php
+                            $uploadMaxBytes = (int)($config['upload_max_bytes'] ?? 536870912);
+                            $uploadMaxMb = $uploadMaxBytes > 0 ? (int) round($uploadMaxBytes / 1048576) : 0;
+                            ?>
+                            <div class="input-row">
+                                <input type="number" id="upload_max_mb" aria-label="Upload size limit in megabytes" value="<?=$uploadMaxMb?>" min="0" step="1" style="width:100px !important; flex-shrink:0;" onchange="aicliApplyUploadMaxBytes(this.value)">
+                                <span style="opacity:0.75; font-size:11px;">MB (0 = no limit)</span>
+                            </div>
+                            <input type="hidden" name="upload_max_bytes" id="upload_max_bytes" value="<?=$uploadMaxBytes?>">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The largest file the upload overlay accepts. Set it to 0 to allow a file of any size.</div>
+                        </dd>
+                        <script>
+                        function aicliApplyUploadMaxBytes(mb) {
+                            var n = Math.max(0, parseInt(mb, 10) || 0);
+                            document.getElementById('upload_max_bytes').value = n > 0 ? (n * 1048576) : 0;
+                            autoSaveConfig();
+                        }
+                        </script>
 
                         <dt>Home Storage</dt>
                         <dd>
@@ -133,6 +196,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <input type="text" name="home_storage_path" id="home_storage_path" readonly value="<?=htmlspecialchars($config['home_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current home storage location — use Change to move it">
                                 <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('home')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Where this user's persistent home directory data lives on disk. Use Change to move it to a different disk or pool.</div>
                             <div id="aicli-storage-picker-home" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
                             <?php $homeClass = \AICliAgents\Services\StorageMountService::classifyPath($config['home_storage_path'] ?? ''); ?>
                             <?php if ($homeClass === 'array'): ?>
@@ -148,6 +212,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
                                 <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('agent')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Where each agent's installed files and workspace data live on disk. Use Change to move it to a different disk or pool.</div>
                             <div id="aicli-storage-picker-agent" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
                             <?php $agentClass = \AICliAgents\Services\StorageMountService::classifyPath($config['agent_storage_path'] ?? ''); ?>
                             <?php if ($agentClass === 'array'): ?>
@@ -170,19 +235,548 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <span style="font-size:11px; opacity:0.7; margin-left:8px;">layers</span>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
-                                Home overlay layer ceiling. Consolidation runs automatically at this minus 2
-                                (or under disk-space pressure, or on a manual "Consolidate Layers" click).
-                                Higher = fewer consolidations (less Flash churn) but slower cold mounts.
-                                Range 4–40; default 30 (consolidates at 28). Agents are unaffected — one layer per install.
+                                How many saved layers a home can build up before the plugin merges them into one; higher means fewer merges but a slower first load.
+                                Default 30: merging starts at 28, or sooner when disk space is low, and agents always use one layer.
+                            </div>
+                        </dd>
+
+                        <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
+                           only — stored in localStorage, never sent to the server on its own, and
+                           never round-tripped through this form's own action=save. It travels only
+                           as the X-AICli-Device header/aicli_device param on every OTHER AJAX call
+                           this browser makes (CommonLogging.php's aicliAjax(), ajaxUrl() in the SPA),
+                           so an event this browser causes can say which device it came from. */ ?>
+                        <dt>Device label (this browser only)</dt>
+                        <dd>
+                            <input type="text" id="aicli_device_label" aria-label="Device label" maxlength="40"
+                                   placeholder="for example phone, laptop" style="flex: 1; min-width: 0;"
+                                   oninput="window.aicliSaveDeviceLabel(this.value)">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">
+                                Names this browser in the event record, for example "phone" or "office
+                                laptop." The name stays on this device and reaches the plugin only when you
+                                use this browser again.
                             </div>
                         </dd>
                     </dl>
+
+                    <script>
+                    (function () {
+                        'use strict';
+                        var KEY = 'aicli_device_label';
+                        window.aicliSaveDeviceLabel = function (value) {
+                            try {
+                                var trimmed = (value || '').trim();
+                                if (trimmed === '') localStorage.removeItem(KEY);
+                                else localStorage.setItem(KEY, trimmed);
+                            } catch (e) { /* best-effort — a blocked localStorage must not break the field */ }
+                        };
+                        document.addEventListener('DOMContentLoaded', function () {
+                            var el = document.getElementById('aicli_device_label');
+                            if (!el) return;
+                            try { el.value = localStorage.getItem(KEY) || ''; } catch (e) { /* leave blank */ }
+                        });
+                    }());
+                    </script>
+
+
+                    <!-- RELAY_WAITING_PILL.md (2026-09-09) Part 3: capture-on-deliver. Beside the
+                         pane-input controls above because it feeds the SAME readiness gate — a
+                         sample is only useful for improving the rules just above it. Saves
+                         through the same autoSaveConfig()/`save` path as every other select on
+                         this tab. -->
+                    <dl style="margin-top:14px;">
+                        <dt>Record a screen sample when I deliver a waiting message</dt>
+                        <dd>
+                            <select name="relay_gate_sampling_enabled" aria-label="Record a screen sample when I deliver a waiting message" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['relay_gate_sampling_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['relay_gate_sampling_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">When you click to deliver a waiting Relay message, this also keeps a scrubbed screen sample on this server to help the plugin recognise the agent's screen; nothing is sent anywhere, and it is off by default.</div>
+                        </dd>
+                    </dl>
+
+                    <!-- Moved to the bottom of the card (operator request 2026-09-13) so the settings rows stay together. -->
+                    <!-- PANE_INPUT_HYBRID_ALLOWLIST.md (2026-09-09): moved here from the Agent
+                         Relay tab and renamed from "Relay delivery rules". These rules decide
+                         when the plugin may type into an agent's terminal — they apply to a
+                         Relay notice, to Continue, and to Reload, not only to Relay, so they
+                         belong with session behaviour, not Relay messaging. The JS stays in
+                         ManagerRelayScripts.php (loaded on every tab already); only the control
+                         moved. -->
+                    <details style="border:1px solid var(--border-color,#e0e0e0);border-radius:6px;padding:10px 14px;margin-top:14px;" id="pane-input-rules-section">
+                        <summary style="cursor:pointer;font-weight:700;">Terminal input safety rules</summary>
+                        <p style="margin:10px 0 8px;opacity:.7;font-size:12px;">
+                          Before the plugin types into an agent's terminal, it reads the bottom of the screen. It
+                          does this for a Relay notice, for Continue, and for Reload. A <strong>block</strong> rule
+                          (shared by every agent) holds the input when the screen shows a question, a menu, a yes/no
+                          prompt, a pager, or a settings overlay. An <strong>idle</strong> rule (per agent) describes
+                          that agent's empty prompt. When an agent has idle rules, the plugin types only when it
+                          recognises the prompt; otherwise it holds. An agent with no idle rules uses the block
+                          rules only. Write each rule as a regular expression, in <code>/body/flags</code> form. You
+                          (or your coding agent) can also edit
+                          <code>/boot/config/plugins/unraid-aicliagents/pane-input-rules.json</code> directly. A
+                          pattern that does not compile is dropped, and the built-in rule stays in force, so this
+                          check can never break.
+                        </p>
+                        <div id="pane-input-errors" style="display:none;color:#b45309;font-size:12px;margin-bottom:8px;"></div>
+                        <h4 style="margin:8px 0 4px;font-size:13px;">Block rules (all agents)</h4>
+                        <div id="pane-input-block" role="list" style="display:grid;gap:4px;font-size:12px;"><span style="opacity:.7">Loading…</span></div>
+                        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0 12px;">
+                          <input id="pane-input-block-new" placeholder="/pattern to hold input/i" style="flex:1 1 260px;min-width:0;font-family:monospace;" aria-label="New block pattern">
+                          <button type="button" class="aicli-btn-slim" onclick="paneInputAdd('block')">Add block rule</button>
+                        </div>
+                        <h4 style="margin:8px 0 4px;font-size:13px;">Idle rules for
+                          <select id="pane-input-agent" aria-label="Agent" onchange="paneInputRenderIdle()"></select>
+                        </h4>
+                        <div id="pane-input-idle" role="list" style="display:grid;gap:4px;font-size:12px;"></div>
+                        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0 12px;">
+                          <input id="pane-input-idle-new" placeholder="/pattern that matches this agent's empty prompt/mu" style="flex:1 1 260px;min-width:0;font-family:monospace;" aria-label="New idle pattern">
+                          <button type="button" class="aicli-btn-slim" onclick="paneInputAdd('idle')">Add idle rule</button>
+                        </div>
+                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                          <button type="button" class="aicli-btn-slim" onclick="paneInputSave()">Save rules</button>
+                          <button type="button" class="aicli-btn-slim" onclick="paneInputReset()">Discard changes</button>
+                          <span style="font-size:12px;opacity:.75;">Test:</span>
+                          <select id="pane-input-probe-session" aria-label="Workspace to test"></select>
+                          <button type="button" class="aicli-btn-slim" onclick="paneInputProbe()">Check screen now</button>
+                          <span id="pane-input-probe-result" style="font-size:12px;"></span>
+                        </div>
+                    </details>
                 </div>
             </div>
 
             <!-- Secrets Vault moved to per-agent Store cards (Secrets panel). See AGENT_LEVEL_TMUX_CONF.md
                  and the av2 card mockup. Single-key-per-agent agents (env_prefix + _API_KEY) still
                  work unchanged; the new Secrets panel also supports multi-field agents like Goose. -->
+
+            <!-- VOICE_SWITCHES.md (R3/R7/R8; supersedes AGENT_VOICE.md R7/R8's
+                 per-device toggle): the ONE global Voice switch plus the
+                 plugin-wide text-to-speech (TTS) settings. The toggle sets
+                 `voice_enabled` through save_voice_settings and, when it
+                 turns voice ON, calls window.aicliVoice.enable() (voice.js,
+                 loaded once by both .page files) inside the same click so
+                 this device is unlocked and says "Voice on" — it never goes
+                 through this form's autoSaveConfig()/action=save path. The
+                 endpoint/voice/speed/key fields load and save through their
+                 own get_voice_settings / save_voice_settings AJAX actions
+                 (VoiceHandler), the same way the SSH Keys card above uses its
+                 own AJAX actions instead of the settings form. The key field
+                 never shows the stored value — only whether one is set — and
+                 is sent over POST, not as a URL query parameter, because
+                 aicliAjax()'s GET helper would put a secret in server access
+                 logs and browser history. AGENT_VOICE.md R13: the Voice id
+                 field is a `<select>` filled from the read-only `list_voices`
+                 action when the engine can answer it, falling back to the
+                 plain text field — see aicliVoiceRefreshVoiceList() below. -->
+            <div class="aicli-card">
+                <div class="aicli-card-header"><i class="fa fa-volume-up text-orange-500"></i> Agent voice</div>
+                <div class="aicli-card-body">
+                    <p style="font-size:12px; opacity:0.8; margin-bottom:12px;">
+                        An agent can speak to get your attention. By default it uses the
+                        browser's own voice. Set an endpoint URL to use a real text-to-speech
+                        server instead.
+                    </p>
+                    <dl>
+                        <dt>Voice (all devices)</dt>
+                        <dd>
+                            <button type="button" id="aicli-voice-toggle" class="aicli-btn-slim" onclick="aicliVoiceToggleGlobal()">
+                                <i id="aicli-voice-toggle-icon" class="fa fa-volume-off"></i> <span id="aicli-voice-toggle-label">Off</span>
+                            </button>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Turns speech on or off for every open tab on every device; to mute one workspace only, use its "..." menu in the terminal drawer.</div>
+                        </dd>
+
+                        <dt>Endpoint URL</dt>
+                        <dd>
+                            <input type="text" id="aicli-voice-tts-url" aria-label="Text-to-speech endpoint URL" onchange="aicliVoiceSaveField('tts_url')" placeholder="http://192.168.1.4:8880" style="width:100%;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Leave empty to use the browser's own voice, or enter the address of an OpenAI-compatible text-to-speech server such as Kokoro-FastAPI.</div>
+                        </dd>
+
+                        <dt>Voice id</dt>
+                        <dd>
+                            <!-- R13: when the engine can list its own voices
+                                 (GET /v1/audio/voices, a Kokoro-FastAPI
+                                 extension), the select replaces the text
+                                 field. Both share the same "tts_voice" value;
+                                 aicliVoiceSaveField('tts_voice') reads
+                                 whichever one is visible. -->
+                            <select id="aicli-voice-tts-voice-select" aria-label="Voice id" onchange="aicliVoiceSelectChanged()" style="width:100%; display:none;"></select>
+                            <input type="text" id="aicli-voice-tts-voice" aria-label="Voice id" onchange="aicliVoiceSaveField('tts_voice')" placeholder="af_heart" style="width:100%;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Which of the engine's voices to use; ignored in browser mode. When the engine can list its own voices, choose from this list, or pick "Other…" to type one by hand.</div>
+                        </dd>
+
+                        <dt>Speed</dt>
+                        <dd>
+                            <input type="number" id="aicli-voice-tts-speed" aria-label="Speech speed" onchange="aicliVoiceSaveField('tts_speed')" min="0.5" max="2.0" step="0.1" style="width:90px !important;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How fast the engine speaks, where 1.0 is normal speed. Ignored in browser mode.</div>
+                        </dd>
+
+                        <dt>API key</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="password" id="aicli-voice-tts-key" aria-label="Text-to-speech API key" onchange="aicliVoiceSaveField('tts_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
+                                <button type="button" id="aicli-voice-key-clear" onclick="aicliVoiceClearKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Key status: <strong id="aicli-voice-key-status">unknown</strong>. Only needed when the endpoint requires one; the stored key is never shown here.</div>
+                        </dd>
+
+                        <dt aria-hidden="true">&nbsp;</dt>
+                        <dd>
+                            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceTest()"><i class="fa fa-play"></i> Test</button>
+                            </div>
+                            <!-- The result has its own full-width line with a fixed minimum
+                                 height, so a long message can never resize the card or move
+                                 the buttons. -->
+                            <div id="aicli-voice-test-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
+                        </dd>
+
+                        <!-- VOICE_MAIL.md R8: how much voice mail is kept. Saved one field
+                             per request through save_voice_settings, like the fields above. -->
+                        <dt style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px; font-weight:600;">Voice mail</dt>
+                        <dd style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px;">
+                            <div style="font-size:12px; opacity:0.8;">Every spoken message is also kept as voice mail, so you can play one you missed from the terminal drawer.</div>
+                        </dd>
+
+                        <dt>Messages kept per workspace</dt>
+                        <dd>
+                            <input type="number" id="aicli-voicemail-max-per-workspace" aria-label="Voice mail messages kept per workspace" onchange="aicliVoiceSaveField('voicemail_max_per_workspace')" min="1" max="500" step="1" placeholder="50" style="width:90px !important;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">1 to 500. When a workspace has more, the oldest messages you have heard are removed first.</div>
+                        </dd>
+
+                        <dt>Days kept</dt>
+                        <dd>
+                            <input type="number" id="aicli-voicemail-max-age-days" aria-label="Days to keep voice mail" onchange="aicliVoiceSaveField('voicemail_max_age_days')" min="1" max="90" step="1" placeholder="7" style="width:90px !important;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">1 to 90. Older messages are removed, heard or not.</div>
+                            <div id="aicli-voicemail-save-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
+                        </dd>
+
+                        <!-- VOICE_INPUT.md: "Voice input" section, in the SAME card — the
+                             reverse direction from the TTS settings above (dictating INTO a
+                             workspace, not the agent speaking). `stt_url` empty means browser
+                             mode: the Web Speech API runs entirely on this device and nothing
+                             leaves it. Loads/saves through the same get_voice_settings /
+                             save_voice_settings actions and the same masked-key handling as
+                             the TTS key above (aicliVoiceSaveField / aicliVoicePost). The Test
+                             button here records 3 s on this device and shows the recognised
+                             text — it calls window.aicliVoice.startInput() with a fixed
+                             non-workspace id ('manager') and never dictates anywhere. -->
+                        <dt style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px; font-weight:600;">Voice input</dt>
+                        <dd style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px;">
+                            <div style="font-size:12px; opacity:0.8;">Dictate into a workspace from the microphone icon in the terminal drawer. Leave the endpoint empty to use the browser's own speech recognition.</div>
+                        </dd>
+
+                        <dt>Transcription endpoint URL</dt>
+                        <dd>
+                            <input type="text" id="aicli-voice-stt-url" aria-label="Transcription endpoint URL" onchange="aicliVoiceSaveField('stt_url')" placeholder="http://192.168.1.4:8000" style="width:100%;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Leave empty to use the browser's own speech recognition, or enter the address of an OpenAI-compatible transcription server such as Speaches.</div>
+                        </dd>
+
+                        <dt>Model</dt>
+                        <dd>
+                            <input type="text" id="aicli-voice-stt-model" aria-label="Transcription model" onchange="aicliVoiceSaveField('stt_model')" placeholder="whisper-1" style="width:100%;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Which model the endpoint should use. Ignored in browser mode.</div>
+                        </dd>
+
+                        <dt>Language</dt>
+                        <dd>
+                            <input type="text" id="aicli-voice-stt-language" aria-label="Spoken language" onchange="aicliVoiceSaveField('stt_language')" placeholder="en" style="width:100%;">
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The language you will speak, for example "en". Leave empty to let the browser or the engine detect it.</div>
+                        </dd>
+
+                        <dt>API key</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="password" id="aicli-voice-stt-key" aria-label="Transcription API key" onchange="aicliVoiceSaveField('stt_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
+                                <button type="button" id="aicli-voice-stt-key-clear" onclick="aicliVoiceClearSttKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Key status: <strong id="aicli-voice-stt-key-status">unknown</strong>. Only needed when the endpoint requires one; the stored key is never shown here.</div>
+                        </dd>
+
+                        <dt aria-hidden="true">&nbsp;</dt>
+                        <dd>
+                            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceInputTest()"><i class="fa fa-microphone"></i> Test (records 3 s)</button>
+                            </div>
+                            <div id="aicli-voice-input-test-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
+                        </dd>
+                    </dl>
+                </div>
+            </div>
+
+            <script>
+            (function () {
+                'use strict';
+
+                function csrfTok() { return window.csrf_token || ''; }
+
+                // Sensitive fields (the key) go over POST, with csrf_token in the
+                // body, not the URL — matching aicliSshAjax below for the same
+                // reason: aicliAjax()'s GET helper would put the value in a
+                // query string, which server access logs and browser history
+                // both keep.
+                function aicliVoicePost(action, body) {
+                    var token = csrfTok();
+                    var url = '/plugins/unraid-aicliagents/AICliAjax.php?action=' + encodeURIComponent(action) + '&csrf_token=' + encodeURIComponent(token);
+                    var postBody = Object.assign({}, body, { csrf_token: token });
+                    return fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: new URLSearchParams(postBody).toString()
+                    }).then(function (r) { return r.json(); });
+                }
+
+                // VOICE_SWITCHES.md R3/R8: `voice_enabled` (the one global
+                // switch) travels in the same settings object as the TTS
+                // engine fields. Every call here that carries it also tells
+                // voice.js, so this tab's known state (and its toggle) is
+                // never behind what the server just reported.
+                function applySettings(r) {
+                    if (!r || r.status !== 'ok' || !r.settings) return;
+                    var s = r.settings;
+                    $('#aicli-voice-tts-url').val(s.tts_url || '');
+                    $('#aicli-voice-tts-voice').val(s.tts_voice || 'af_heart');
+                    $('#aicli-voice-tts-speed').val(s.tts_speed || '1.0');
+                    $('#aicli-voice-key-status').text(s.tts_api_key_set ? 'set' : 'not set');
+                    // VOICE_INPUT.md: the reverse-direction (dictation) settings,
+                    // loaded/saved the same way as the TTS fields above.
+                    $('#aicli-voice-stt-url').val(s.stt_url || '');
+                    $('#aicli-voicemail-max-per-workspace').val(s.voicemail_max_per_workspace || '50');
+                    $('#aicli-voicemail-max-age-days').val(s.voicemail_max_age_days || '7');
+                    $('#aicli-voice-stt-model').val(s.stt_model || 'whisper-1');
+                    $('#aicli-voice-stt-language').val(s.stt_language || '');
+                    $('#aicli-voice-stt-key-status').text(s.stt_api_key_set ? 'set' : 'not set');
+                    if (typeof s.voice_enabled !== 'undefined' && window.aicliVoice) {
+                        window.aicliVoice.setState(!!s.voice_enabled);
+                    }
+                    syncToggle();
+                }
+
+                // R13: fill the select from the engine's own voice list, or
+                // fall back to the plain text field when the engine cannot
+                // list its voices. currentVoice is kept selected even when
+                // the engine's own list does not carry it.
+                function applyVoiceList(result, currentVoice) {
+                    var select = $('#aicli-voice-tts-voice-select');
+                    var input = $('#aicli-voice-tts-voice');
+                    if (!result || !result.supported) {
+                        select.hide().empty();
+                        input.show();
+                        return;
+                    }
+                    var voices = result.voices || [];
+                    var found = false;
+                    select.empty();
+                    voices.forEach(function (v) {
+                        var label = v.grade ? (v.id + ' — ' + v.grade) : v.id;
+                        select.append($('<option>').attr('value', v.id).text(label));
+                        if (v.id === currentVoice) found = true;
+                    });
+                    if (currentVoice && !found) {
+                        select.append($('<option>').attr('value', currentVoice).text(currentVoice));
+                    }
+                    select.append($('<option>').attr('value', '__other__').text('Other…'));
+                    if (currentVoice) select.val(currentVoice);
+                    select.show();
+                    input.hide();
+                }
+
+                // Whichever control currently holds the value the operator
+                // means to keep — the select unless it is hidden or sitting
+                // on the "Other…" placeholder.
+                function currentVoiceValue() {
+                    var select = $('#aicli-voice-tts-voice-select');
+                    if (select.is(':visible') && select.val() && select.val() !== '__other__') return select.val();
+                    return ($('#aicli-voice-tts-voice').val() || '').trim();
+                }
+
+                // Called on load, after an Endpoint URL save, and after Test —
+                // the three moments the engine's voice list can have changed.
+                window.aicliVoiceRefreshVoiceList = function () {
+                    var current = currentVoiceValue();
+                    aicliAjax('list_voices', {}, function (r) {
+                        applyVoiceList(r, current);
+                    });
+                };
+
+                // Picking "Other…" swaps to the text field instead of saving.
+                // Picking a real id copies it into the text field (so the two
+                // controls never disagree) and saves at once.
+                window.aicliVoiceSelectChanged = function () {
+                    var select = $('#aicli-voice-tts-voice-select');
+                    var value = select.val();
+                    if (value === '__other__') {
+                        $('#aicli-voice-tts-voice').val('').show();
+                        select.hide();
+                        $('#aicli-voice-tts-voice').trigger('focus');
+                        return;
+                    }
+                    $('#aicli-voice-tts-voice').val(value);
+                    aicliVoiceSaveField('tts_voice');
+                };
+
+                function syncToggle() {
+                    var on = !!(window.aicliVoice && window.aicliVoice.enabled());
+                    $('#aicli-voice-toggle-icon').attr('class', 'fa ' + (on ? 'fa-volume-up' : 'fa-volume-off'));
+                    $('#aicli-voice-toggle-label').text(on ? 'On' : 'Off');
+                }
+
+                // The one global Voice switch (VOICE_SWITCHES.md R3). Turning it
+                // ON runs window.aicliVoice.enable() synchronously inside this
+                // click, so this device is unlocked and says "Voice on" — the
+                // save below is what changes the setting; every open tab
+                // (including this one) repaints from the `state` message the
+                // save triggers, via applySettings()'s setState() above.
+                window.aicliVoiceToggleGlobal = function () {
+                    var v = window.aicliVoice;
+                    var turningOn = !(v && v.enabled());
+                    if (turningOn && v) v.enable();
+                    aicliVoicePost('save_voice_settings', { voice_enabled: turningOn ? '1' : '0' }).then(function (r) {
+                        applySettings(r);
+                        if (!(r && r.status === 'ok')) swal('Error', (r && r.message) || 'Failed to save voice settings.', 'error');
+                    }).catch(function () { swal('Error', 'Network error — could not save voice settings.', 'error'); });
+                };
+
+                window.aicliVoiceLoadSettings = function () {
+                    aicliAjax('get_voice_settings', {}, function (r) {
+                        applySettings(r);
+                        window.aicliVoiceRefreshVoiceList();
+                    });
+                };
+
+                // Save on change, like every other card on this tab: one field
+                // per request (save_voice_settings changes only the fields it
+                // receives). The key field is sent only when it holds a value
+                // and is blanked afterwards; the stored key is never shown.
+                // tts_voice reads from whichever control (select or text
+                // field) is visible right now, per currentVoiceValue() above.
+                window.aicliVoiceSaveField = function (key) {
+                    var ids = {
+                        tts_url: "#aicli-voice-tts-url", tts_voice: "#aicli-voice-tts-voice", tts_speed: "#aicli-voice-tts-speed", tts_api_key: "#aicli-voice-tts-key",
+                        // VOICE_INPUT.md: the reverse-direction fields save through the
+                        // SAME save_voice_settings action, one field per request.
+                        stt_url: "#aicli-voice-stt-url", stt_model: "#aicli-voice-stt-model", stt_language: "#aicli-voice-stt-language", stt_api_key: "#aicli-voice-stt-key",
+                        // VOICE_MAIL.md R8: retention, same action, own result line.
+                        voicemail_max_per_workspace: "#aicli-voicemail-max-per-workspace", voicemail_max_age_days: "#aicli-voicemail-max-age-days"
+                    };
+                    if (!ids[key]) return;
+                    var value = key === "tts_voice" ? currentVoiceValue() : ($(ids[key]).val() || "").trim();
+                    if ((key === "tts_api_key" || key === "stt_api_key") && value === "") return;
+                    var body = {}; body[key] = value;
+                    var box = key === "stt_url" || key === "stt_model" || key === "stt_language" || key === "stt_api_key"
+                        ? $("#aicli-voice-input-test-result")
+                        : (key.indexOf("voicemail_") === 0 ? $("#aicli-voicemail-save-result") : $("#aicli-voice-test-result"));
+                    aicliVoicePost("save_voice_settings", body).then(function (r) {
+                        applySettings(r);
+                        if (key === "tts_api_key") $("#aicli-voice-tts-key").val("");
+                        if (key === "stt_api_key") $("#aicli-voice-stt-key").val("");
+                        if (r && r.status === "ok") {
+                            box.css("color", "").text("Saved."); setTimeout(function () { if (box.text() === "Saved.") box.text(""); }, 1500);
+                            // The endpoint changing is the one field save that
+                            // can change the voice catalogue itself.
+                            if (key === "tts_url") window.aicliVoiceRefreshVoiceList();
+                        } else box.css("color", "#f87171").text((r && r.message) || "Failed to save voice settings.");
+                    }).catch(function () { box.css("color", "#f87171").text("Network error — could not save voice settings."); });
+                };
+                window.aicliVoiceClearKey = function () {
+                    swal({ title: 'Clear the API key?', text: 'The endpoint will be called without a key.', type: 'warning', showCancelButton: true, confirmButtonText: 'Clear' }, function (confirmed) {
+                        if (!confirmed) return;
+                        aicliVoicePost('save_voice_settings', { tts_api_key: '__clear__' }).then(function (r) {
+                            applySettings(r);
+                            if (r && r.status === 'ok') swal({ title: 'Cleared', type: 'success', timer: 1200, showConfirmButton: false });
+                            else swal('Error', (r && r.message) || 'Failed to clear the key.', 'error');
+                        }).catch(function () { swal('Error', 'Network error — could not clear the key.', 'error'); });
+                    });
+                };
+                // VOICE_INPUT.md: same __clear__ contract as the TTS key, for stt_api_key.
+                window.aicliVoiceClearSttKey = function () {
+                    swal({ title: 'Clear the transcription API key?', text: 'The endpoint will be called without a key.', type: 'warning', showCancelButton: true, confirmButtonText: 'Clear' }, function (confirmed) {
+                        if (!confirmed) return;
+                        aicliVoicePost('save_voice_settings', { stt_api_key: '__clear__' }).then(function (r) {
+                            applySettings(r);
+                            if (r && r.status === 'ok') swal({ title: 'Cleared', type: 'success', timer: 1200, showConfirmButton: false });
+                            else swal('Error', (r && r.message) || 'Failed to clear the key.', 'error');
+                        }).catch(function () { swal('Error', 'Network error — could not clear the key.', 'error'); });
+                    });
+                };
+
+                window.aicliVoiceTest = function () {
+                    var box = $('#aicli-voice-test-result');
+                    box.css('color', '').text('Testing…');
+                    aicliVoicePost('test_voice', {}).then(function (r) {
+                        if (r && r.status === 'ok') box.css('color', '').text(r.message || ('Done (' + (r.mode || '') + ').'));
+                        else box.css('color', '#f87171').text((r && r.message) || 'Test failed.');
+                        // A Test click is also a good moment to see whether
+                        // the engine's voice list has changed.
+                        window.aicliVoiceRefreshVoiceList();
+                    }).catch(function () { box.css('color', '#f87171').text('Network error.'); });
+                };
+
+                // VOICE_INPUT.md R7: records 3 s on this device through the SAME
+                // window.aicliVoice module the terminal drawer's mic uses, and
+                // only ever shows the recognised text — it never dictates
+                // anywhere. A fixed 'manager' workspace id satisfies voice.js's
+                // one eligibility check (this page has no active workspace of
+                // its own); engine mode calls voice_transcribe exactly the way
+                // the terminal drawer's mic does, browser mode never leaves
+                // this device.
+                window.aicliVoiceInputTest = function () {
+                    var box = $('#aicli-voice-input-test-result');
+                    var api = window.aicliVoice;
+                    if (!api || !api.startInput) { box.css('color', '#f87171').text('Voice input is not available on this page.'); return; }
+                    var sttUrl = ($('#aicli-voice-stt-url').val() || '').trim();
+                    var sttLanguage = ($('#aicli-voice-stt-language').val() || '').trim();
+                    var done = false;
+                    box.css('color', '').text('Listening… 3 s');
+                    var onEvt = function (e) {
+                        var d = (e && e.detail) || {};
+                        if (d.state === 'refused') {
+                            done = true;
+                            window.removeEventListener('aicli-voice-input', onEvt);
+                            box.css('color', '#f87171').text(d.error || 'Test failed.');
+                        } else if (d.state === 'idle' && typeof d.text === 'string') {
+                            done = true;
+                            window.removeEventListener('aicli-voice-input', onEvt);
+                            box.css('color', '').text(d.text ? d.text : 'Nothing was recognised.');
+                        }
+                    };
+                    window.addEventListener('aicli-voice-input', onEvt);
+                    api.startInput({ workspaceId: 'manager', sttUrl: sttUrl, sttLanguage: sttLanguage });
+                    setTimeout(function () {
+                        if (!done) api.stopInput();
+                    }, 3000);
+                };
+
+                window.addEventListener('aicli-voice-state', syncToggle);
+
+                document.addEventListener('DOMContentLoaded', function () {
+                    syncToggle();
+                    window.aicliVoiceLoadSettings();
+                    var cfgTab = document.querySelector('[data-tab="config"]');
+                    if (cfgTab) cfgTab.addEventListener('click', window.aicliVoiceLoadSettings);
+                });
+            }());
+            </script>
+
+            <!-- PLUGIN_MANAGEMENT_TOOLS.md Phase 1: the one master switch for the
+                 read-only admin MCP tool catalogue (AdminMcpTools). Saves through
+                 the same autoSaveConfig()/`save` path as every other select on this
+                 tab, so ConfigService::saveConfig() calls AdminMcpTools::ensureMcpRegistered()
+                 for us the instant this is changed — no separate Apply button needed. -->
+            <div class="aicli-card">
+                <div class="aicli-card-header"><i class="fa fa-wrench text-orange-500"></i> Plugin management</div>
+                <div class="aicli-card-body">
+                    <dl>
+                        <dt>Plugin management tools</dt>
+                        <dd>
+                            <select name="admin_tools_enabled" aria-label="Plugin management tools" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['admin_tools_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['admin_tools_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Lets agents in your workspaces ask the plugin about its own state, for example to list workspaces or check storage; every tool is read-only, and this is off by default.</div>
+                        </dd>
+                    </dl>
+                </div>
+            </div>
 
             <div class="aicli-card">
                 <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between; padding:5px 15px;">
@@ -203,7 +797,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <textarea id="aicli-ssh-pubkey-input" placeholder="Paste your public key here (ssh-ed25519 AAA...)" rows="3"
                                   style="width:100%; font-family:monospace; font-size:11px; resize:vertical; padding:6px;"
                                   onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();}"></textarea>
-                        <input id="aicli-ssh-key-label" type="text" placeholder="Label (e.g. MacBook Pro)" style="width:100%; padding:6px;"
+                        <input id="aicli-ssh-key-label" type="text" placeholder="Label (for example MacBook Pro)" style="width:100%; padding:6px;"
                                onkeydown="if(event.key==='Enter'){event.preventDefault();aicliAddSshKey();}">
                         <button type="button" class="aicli-btn-slim" onclick="aicliAddSshKey()" style="align-self:flex-start;">
                             <i class="fa fa-plus"></i> Add Key
@@ -637,3 +1231,73 @@ $autoSave = 'onchange="autoSaveConfig()"';
 }());
 </script>
 
+<script>
+/* Settings card columns (see .aicli-config-grid in ManagerStyles.php). Each
+   card goes into the shortest of N equal columns, N from the grid width at
+   400 px per column plus the 20 px gap, so the page width is used and no
+   card is taller than its content. Cards are MOVED, never cloned, so their
+   handlers survive. Runs when the tab is shown and again when the width
+   changes the column count. */
+(function () {
+    'use strict';
+    var COL_MIN = 400, GAP = 20;
+    var grid = null, cards = [], lastN = 0, lastW = 0;
+
+    function collectCards() {
+        var list = grid.querySelectorAll('.aicli-card');
+        return Array.prototype.filter.call(list, function (c) {
+            return c.parentNode === grid || (c.parentNode && c.parentNode.classList.contains('aicli-config-col'));
+        });
+    }
+
+    function layout(force) {
+        if (!grid) return;
+        var w = grid.clientWidth;
+        if (!w) return; // the tab is hidden; layout when it is shown
+        var n = Math.max(1, Math.floor((w + GAP) / (COL_MIN + GAP)));
+        if (!force && n === lastN && Math.abs(w - lastW) < 2) return;
+        lastN = n; lastW = w;
+        if (!cards.length) cards = collectCards();
+        cards.forEach(function (c) { grid.appendChild(c); });
+        Array.prototype.forEach.call(grid.querySelectorAll('.aicli-config-col'), function (col) { col.parentNode.removeChild(col); });
+        if (n === 1) { grid.classList.remove('aicli-config-grid--cols'); return; }
+        var cols = [];
+        for (var i = 0; i < n; i++) {
+            var d = document.createElement('div');
+            d.className = 'aicli-config-col';
+            grid.appendChild(d);
+            cols.push(d);
+        }
+        grid.classList.add('aicli-config-grid--cols');
+        cards.forEach(function (c) {
+            var best = cols[0];
+            for (var k = 1; k < cols.length; k++) {
+                if (cols[k].offsetHeight < best.offsetHeight) best = cols[k];
+            }
+            best.appendChild(c);
+        });
+    }
+
+    function init() {
+        grid = document.querySelector('#tab-config .aicli-config-grid');
+        if (!grid) return;
+        layout(true);
+        var timer = null;
+        window.addEventListener('resize', function () {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(function () { layout(false); }, 120);
+        });
+        // The tab is display:none until its button is clicked: lay out on show.
+        var tab = document.getElementById('tab-config');
+        if (tab && typeof MutationObserver !== 'undefined') {
+            new MutationObserver(function () {
+                if (tab.classList.contains('active')) layout(true);
+            }).observe(tab, { attributes: true, attributeFilter: ['class'] });
+        }
+        window.aicliConfigColumns = function () { layout(true); };
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
+})();
+</script>

@@ -89,6 +89,7 @@ class AssetsHandler {
         }
         $allowMissing = filter_var($_POST['allow_missing'] ?? $_GET['allow_missing'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
+        $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
         $resolved = ValidationService::validatePath($rawPath);
         if ($resolved === false) {
             return ['status' => 'error', 'message' => 'File not found or access denied'];

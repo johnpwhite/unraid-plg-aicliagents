@@ -10,8 +10,8 @@
  *     I2 manifest&lt;-&gt;disk drift in BOTH directions (recorded layer missing on disk; on-disk .sqsh
  *     untracked), I3 stale defer/bake markers past their TTL, I4 supervisor single-instance + pidfile
  *     live + heartbeat fresh, I5 orphan loop devices bound to deleted .sqsh AND not currently
- *     mounted/referenced by a live overlay (an in-use deleted lower is benign deleted-but-open Unix
- *     semantics, NOT an orphan — only a truly-abandoned, unmounted deleted-backing loop is flagged).</description>
+ *     mounted/referenced by a live overlay or pending kernel autoclear (both are safe, bounded
+ *     deleted-but-open states; only a truly-abandoned loop is flagged).</description>
  *     <dependencies>HealthService, SupervisorService, LayerManifestService, StorageMountService, StoragePathResolver, ConfigService</dependencies>
  *     <constraints>FACTORING (single source of truth — see audit() docblock): this service REUSES
  *     HealthService's PURE evaluators (evalSupervisor / evalMounts / evalDeferMarkers) for the three
@@ -247,9 +247,28 @@ class StorageStateAuditService {
         if (preg_match_all('#^\S+\s+(' . $root . '/work/([^/\s]+)/home)\s+overlay\b#m', $mounts, $m, PREG_SET_ORDER)) {
             foreach ($m as $row) $out['home/' . $row[2]] = $row[1];
         }
-        $agentBase = preg_quote(StorageMountService::AGENT_MNT_BASE, '#');
-        if (preg_match_all('#^\S+\s+(' . $agentBase . '/([^/\s]+))\s+overlay\b#m', $mounts, $m, PREG_SET_ORDER)) {
-            foreach ($m as $row) $out['agent/' . $row[2]] = $row[1];
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
+        // AgentRegistry::agentBase() instead of the removed
+        // StorageMountService::AGENT_MNT_BASE duplicate constant.
+        //
+        // Phase 2 (2026-09-09): a migrated agent's overlay mounts at
+        // agents/.versions/<id>/<generation>, not agents/<id> — match both shapes
+        // (versioned first, so it can never fall through and get misread as a
+        // legacy id), same fix as HealthService::collectMounts (kept in sync,
+        // per this method's own docblock). Group 2 = versioned id, group 3 =
+        // legacy id; group 1 is still the whole mountpoint, as before.
+        $agentBase = preg_quote(AgentRegistry::agentBase(), '#');
+        if (preg_match_all(
+            '#^\S+\s+(' . $agentBase . '/(?:\.versions/([^/\s]+)/[^/\s]+|([^/\s]+)))\s+overlay\b#m',
+            $mounts,
+            $m,
+            PREG_SET_ORDER
+        )) {
+            foreach ($m as $row) {
+                $id = ($row[2] ?? '') !== '' ? $row[2] : ($row[3] ?? '');
+                if ($id === '') continue;
+                $out['agent/' . $id] = $row[1];
+            }
         }
         return $out;
     }
@@ -294,8 +313,10 @@ class StorageStateAuditService {
      * the old layer .sqsh is deleted while a LIVE agent overlay still has that
      * layer loop-MOUNTED as a lower — benign deleted-but-open Unix semantics that
      * clears on the overlay's next remount/close. Only a deleted-backing loop
-     * that is NOT mounted anywhere is truly abandoned residue (the do_wipe
-     * loop-teardown bug). In-use deleted lowers are benign and not flagged.
+     * that is NOT mounted anywhere and has NOT been marked autoclear is truly
+     * abandoned residue (the do_wipe loop-teardown bug). autoclear=1 means a
+     * successful losetup -d is pending the last indirect overlay reference;
+     * the kernel will release it deterministically, so it is not a leak.
      *
      * @return string[]
      */
@@ -310,6 +331,9 @@ class StorageStateAuditService {
             $dev = trim((string)(explode(':', $line, 2)[0] ?? ''));
             if ($dev !== '' && self::loopIsMountSource($dev, $mounts)) {
                 continue; // in-use deleted lower -> benign, not an orphan
+            }
+            if ($dev !== '' && self::loopAutoclearPending($dev)) {
+                continue; // detach accepted; kernel releases on last reference
             }
             $out[] = basename($m[1]);
         }
@@ -334,6 +358,15 @@ class StorageStateAuditService {
             if ($src === $dev) return true;
         }
         return false;
+    }
+
+    /** Whether the kernel has accepted a delayed detach for this busy loop. */
+    private static function loopAutoclearPending(string $dev): bool {
+        $root = getenv('AICLI_SL_LOOP_SYSFS_ROOT') ?: '/sys/block';
+        $name = basename($dev);
+        if ($name === '' || !preg_match('/^loop[0-9]+$/', $name)) return false;
+        $value = @file_get_contents(rtrim($root, '/') . '/' . $name . '/loop/autoclear');
+        return $value !== false && trim($value) === '1';
     }
 
     /** Count of plugin loop devices (live + deleted). */

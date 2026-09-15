@@ -48,6 +48,17 @@ class HubProjector {
         'pi-coder' => 'Author intentionally omits MCP ("pi does not and will not support MCP" — mariozechner.at); no native config file to project. The third-party pi-mcp-adapter (~/.pi/agent/mcp.json) is opt-in and cannot be assumed installed.',
     ];
 
+    /** Agents with no verified global instruction-file surface. */
+    const INSTRUCTION_EXEMPT = [
+        'nanocoder' => 'Nanocoder only reads project-local AGENTS.md and non-standard project skills; the hub must not write an invented global file.',
+        'grok-build' => 'Grok Build reads project AGENTS.md, not a global instruction file; its global Relay skill is projected instead.',
+    ];
+
+    /** Agents with no verified global SKILL.md-compatible surface. */
+    const SKILL_EXEMPT = [
+        'nanocoder' => 'Nanocoder exposes only project-local non-standard skill.yaml skills.',
+    ];
+
     /** All per-vendor projectors, keyed by agent id. @return array<string,VendorProjector> */
     public static function supportedVendors(): array {
         if (self::$vendors === null) {
@@ -55,8 +66,8 @@ class HubProjector {
             foreach ([new ClaudeProjector(), new GeminiProjector(), new QwenProjector(),
                       new OpencodeProjector(), new KilocodeProjector(), new AntigravityProjector(),
                       new FactoryProjector(), new NanocoderProjector(),
-                      new CopilotProjector(), new CodexProjector(),
-                      new GooseProjector()] as $p) {
+                      new CopilotProjector(), new CodexProjector(), new GooseProjector(),
+                      new GrokProjector(), new KimiCodeProjector()] as $p) {
                 self::$vendors[$p->agentId()] = $p;
             }
         }
@@ -86,16 +97,24 @@ class HubProjector {
      * the SAME global ~/.gemini/GEMINI.md as Gemini CLI (officially confirmed at
      * antigravity.google/docs/gcli-migration — "Global developer context ... ~/.gemini/GEMINI.md"),
      * so it is a SECOND served agent of the Gemini projector: projecting to either writes that
-     * one shared file. Kilo Code is the odd one out: it has no fenced shared file — it
-     * AUTO-DISCOVERS every ~/.kilo/rules/*.md as a global instruction (verified live via
-     * `kilo debug config`), so KiloInstructionProjector owns one dedicated rules file there.
+     * one shared file. Claude Code and Kilo Code both AUTO-DISCOVER a rules DIRECTORY
+     * instead of reading one shared file — Claude loads every ~/.claude/rules/*.md
+     * natively (docs.claude.com), Kilo every ~/.kilo/rules/*.md (verified live via
+     * `kilo debug config`) — so each owns one dedicated fence-free file there via
+     * RulesFileInstructionProjector, and the hub never writes the user's own
+     * ~/.claude/CLAUDE.md. Legacy Claude CLAUDE.md fences from before this migration
+     * are stripped by cleanupLegacyClaudeFences() on the next projection.
      * @return array<string,InstructionProjector>
      */
     public static function instructionVendors(): array {
         if (self::$instructionVendors === null) {
             self::$instructionVendors = [];
             foreach ([
-                new InstructionProjector('claude-code', '.claude/CLAUDE.md', 'Claude Code', ['claude-code'], true),
+                // Claude Code auto-discovers ~/.claude/rules/*.md natively (docs.claude.com
+                // "Organize rules with .claude/rules/"), so the hub owns one dedicated
+                // fence-free file there and never touches the user's own ~/.claude/CLAUDE.md.
+                // useImport=true keeps the content single-sourced via the @import line.
+                new RulesFileInstructionProjector('claude-code', '.claude/rules/aicli-hub-global.md', 'Claude Code', ['claude-code'], true),
                 new InstructionProjector('gemini-cli', '.gemini/GEMINI.md', 'Gemini CLI', ['gemini-cli', 'antigravity-cli'], false),
                 new InstructionProjector('qwen-code', '.qwen/QWEN.md', 'Qwen Code', ['qwen-code'], false),
                 new InstructionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
@@ -104,8 +123,9 @@ class HubProjector {
                 new InstructionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
                 new InstructionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
                 new InstructionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
+                new InstructionProjector('kimi-code', '.kimi-code/AGENTS.md', 'Kimi Code', ['kimi-code'], false),
                 // Kilo: dedicated auto-discovered rules file (~/.kilo/rules/*.md), no fence.
-                new KiloInstructionProjector('kilocode', '.kilo/rules/aicli-hub-global.md', 'Kilo Code', ['kilocode'], false),
+                new RulesFileInstructionProjector('kilocode', '.kilo/rules/aicli-hub-global.md', 'Kilo Code', ['kilocode'], false),
             ] as $p) {
                 self::$instructionVendors[$p->agentId()] = $p;
             }
@@ -127,6 +147,36 @@ class HubProjector {
     /** @var FilePathConventionProjector[]|null */
     private static $policyInstructionVendors = null;
 
+    /** @var RelayInstructionProjector[]|null */
+    private static $relayInstructionVendors = null;
+
+    /**
+     * Always-on Relay guidance. This intentionally mirrors only agents with a
+     * verified global instruction surface. Nanocoder has project-local-only
+     * AGENTS.md/skills and therefore cannot safely receive a global projection;
+     * Grok Build has no global instruction file but receives the Relay skill.
+     * @return array<string,RelayInstructionProjector>
+     */
+    public static function relayInstructionVendors(): array {
+        if (self::$relayInstructionVendors === null) {
+            self::$relayInstructionVendors = [];
+            foreach ([
+                new RulesFileRelayProjector('claude-code', '.claude/rules/aicli-relay.md', 'Claude Code', ['claude-code'], false),
+                new RelayInstructionProjector('gemini-cli', '.gemini/GEMINI.md', 'Gemini CLI', ['gemini-cli', 'antigravity-cli'], false),
+                new RelayInstructionProjector('qwen-code', '.qwen/QWEN.md', 'Qwen Code', ['qwen-code'], false),
+                new RelayInstructionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
+                new RelayInstructionProjector('gh-copilot', '.copilot/copilot-instructions.md', 'GitHub Copilot CLI', ['gh-copilot'], false),
+                new RelayInstructionProjector('opencode', '.config/opencode/AGENTS.md', 'OpenCode', ['opencode'], false),
+                new RelayInstructionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
+                new RelayInstructionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
+                new RelayInstructionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
+                new RelayInstructionProjector('kimi-code', '.kimi-code/AGENTS.md', 'Kimi Code', ['kimi-code'], false),
+                new RulesFileRelayProjector('kilocode', '.kilo/rules/aicli-relay.md', 'Kilo Code', ['kilocode'], false),
+            ] as $p) self::$relayInstructionVendors[$p->agentId()] = $p;
+        }
+        return self::$relayInstructionVendors;
+    }
+
     /**
      * Always-on "file-path convention" policy projectors (see
      * docs/specs/AGENT_FILE_PATH_CONVENTION.md), one per agent MIRRORING
@@ -144,7 +194,7 @@ class HubProjector {
         if (self::$policyInstructionVendors === null) {
             self::$policyInstructionVendors = [];
             foreach ([
-                new FilePathConventionProjector('claude-code', '.claude/CLAUDE.md', 'Claude Code', ['claude-code'], false),
+                new RulesFileFilePathProjector('claude-code', '.claude/rules/aicli-file-paths.md', 'Claude Code', ['claude-code'], false),
                 new FilePathConventionProjector('gemini-cli', '.gemini/GEMINI.md', 'Gemini CLI', ['gemini-cli', 'antigravity-cli'], false),
                 new FilePathConventionProjector('qwen-code', '.qwen/QWEN.md', 'Qwen Code', ['qwen-code'], false),
                 new FilePathConventionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
@@ -153,8 +203,9 @@ class HubProjector {
                 new FilePathConventionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
                 new FilePathConventionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
                 new FilePathConventionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
+                new FilePathConventionProjector('kimi-code', '.kimi-code/AGENTS.md', 'Kimi Code', ['kimi-code'], false),
                 // Kilo: dedicated fence-free file, distinct from the hub-instructions dedicated file.
-                new FilePathConventionKiloProjector('kilocode', '.kilo/rules/aicli-file-paths.md', 'Kilo Code', ['kilocode'], false),
+                new RulesFileFilePathProjector('kilocode', '.kilo/rules/aicli-file-paths.md', 'Kilo Code', ['kilocode'], false),
             ] as $p) {
                 self::$policyInstructionVendors[$p->agentId()] = $p;
             }
@@ -162,6 +213,65 @@ class HubProjector {
         return self::$policyInstructionVendors;
     }
 
+    /** @var RelaySkillProjector[]|null */
+    private static $relaySkillVendors = null;
+
+    /**
+     * Every registered agent except Nanocoder has a verified global skills
+     * surface. Derive the Relay skill targets from the existing official-path
+     * skill registry so a future skill-path change cannot silently diverge.
+     * @return RelaySkillProjector[]
+     */
+    public static function relaySkillVendors(): array {
+        if (self::$relaySkillVendors === null) {
+            self::$relaySkillVendors = [];
+            foreach (self::treeVendors() as $p) {
+                if ($p->surface() !== 'skills') continue;
+                self::$relaySkillVendors[] = new RelaySkillProjector(
+                    $p->agentId(), $p->relPath(), $p->label(), 'skills', $p->servedAgentIds()
+                );
+            }
+        }
+        return self::$relaySkillVendors;
+    }
+
+    /** @var AdminSkillProjector[]|null */
+    private static $adminSkillVendors = null;
+
+    /**
+     * Plugin-management skill targets. Derived from the same official-path skill
+     * registry as the Relay skill, for the same reason: a future skill-path change
+     * must not silently diverge between the two skills we ship.
+     *
+     * Unlike the Relay skill this one is NOT always-on. It describes tools that stay
+     * off until an administrator turns them on, so projecting it unconditionally
+     * would teach every agent on the box to call something that answers "turned
+     * off". Both projection passes therefore hand it an EMPTY desired set while the
+     * feature is disabled, which makes the ledger REMOVE a previously written copy
+     * rather than strand it. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
+     * @return AdminSkillProjector[]
+     */
+    public static function adminSkillVendors(): array {
+        if (self::$adminSkillVendors === null) {
+            self::$adminSkillVendors = [];
+            foreach (self::treeVendors() as $p) {
+                if ($p->surface() !== 'skills') continue;
+                self::$adminSkillVendors[] = new AdminSkillProjector(
+                    $p->agentId(), $p->relPath(), $p->label(), 'skills', $p->servedAgentIds()
+                );
+            }
+        }
+        return self::$adminSkillVendors;
+    }
+
+    /**
+     * Is the plugin-management skill wanted right now? Kept as one helper so the
+     * two projection passes cannot drift apart on the answer.
+     */
+    private static function adminSkillWanted(): bool {
+        return class_exists('\AICliAgents\Services\AdminMcpTools')
+            && \AICliAgents\Services\AdminMcpTools::enabled();
+    }
     /**
      * Per-instruction-file change classification for the post-Apply Unraid notification
      * (the "Claude removed / OpenCode updated / Kilo added" summary). Compares the
@@ -245,6 +355,8 @@ class HubProjector {
                 // pi-coder global skills at ~/.pi/agent/skills/<name>/SKILL.md (official pi docs) —
                 // pi is MCP-exempt but DOES read the SKILL.md standard.
                 new TreeProjector('pi-coder', '.pi/agent/skills', 'pi-coder skills', 'skills'),
+                new TreeProjector('grok-build', '.grok/skills', 'Grok Build skills', 'skills'),
+                new TreeProjector('kimi-code', '.kimi-code/skills', 'Kimi Code skills', 'skills'),
                 // OpenCode commands live under the XDG config root, not ~/.opencode (corrected 2026-06).
                 new TreeProjector('opencode', '.config/opencode/commands', 'OpenCode commands', 'commands'),
                 // Factory: global flat-.md commands at ~/.factory/commands/ (verified official docs).
@@ -263,6 +375,7 @@ class HubProjector {
                 new GeminiCommandsProjector('gemini-cli', '.gemini/commands', 'Gemini CLI commands (TOML)', 'commands'),
                 // pi-coder prompts (slash commands) at ~/.pi/agent/prompts/<name>.md — flat md.
                 new TreeProjector('pi-coder', '.pi/agent/prompts', 'pi-coder commands', 'commands'),
+                new TreeProjector('grok-build', '.agents/commands', 'Grok Build commands', 'commands'),
             ];
         }
         return self::$treeVendors;
@@ -344,6 +457,45 @@ class HubProjector {
      * @return array status=ok|error; per-file results {written,removed,drift};
      *         flat drift list; written agent ids (for the session-reload prompt).
      */
+    /**
+     * Re-assert one agent's managed configuration immediately before its
+     * workspace launches.
+     *
+     * MCP clients read their server list once, at startup. Projection otherwise
+     * runs only when an administrator toggles a Hub or Relay setting, so a
+     * workspace starting later inherits whatever happens to be on disk —
+     * including nothing, when that toggle-time projection returned
+     * 'home_unavailable' because the overlay was not mounted yet. Nothing
+     * retried it, while the setting still read "enabled".
+     *
+     * Callers are launch paths, so this never throws and never blocks: a
+     * failure here costs the workspace its managed tools, not its session.
+     */
+    public static function projectForLaunch(string $agentId, ?array $installedOverride = null): array {
+        // The raw terminal has no registry entry and no managed config surface.
+        if ($agentId === '' || $agentId === 'terminal') {
+            return ['status' => 'skipped', 'reason' => 'no_managed_agent'];
+        }
+        try {
+            $result = self::projectAll([$agentId], $installedOverride);
+        } catch (\Throwable $e) {
+            \AICliAgents\Services\LogService::log(
+                "Hub projection before launch of '$agentId' failed: " . $e->getMessage(),
+                \AICliAgents\Services\LogService::LOG_WARN,
+                "HubProjector"
+            );
+            return ['status' => 'error', 'reason' => 'exception', 'message' => $e->getMessage()];
+        }
+        if (($result['status'] ?? '') !== 'ok') {
+            \AICliAgents\Services\LogService::log(
+                "Hub projection before launch of '$agentId' did not apply: " . (string)($result['reason'] ?? 'unknown'),
+                \AICliAgents\Services\LogService::LOG_WARN,
+                "HubProjector"
+            );
+        }
+        return $result;
+    }
+
     public static function projectAll(?array $targetAgentIds = null, ?array $installedOverride = null): array {
         $homeInfo = self::resolveHome();
         if (!$homeInfo['ok']) {
@@ -360,6 +512,11 @@ class HubProjector {
         $results = [];
         $driftAll = [];
         $writtenAgents = [];
+
+        // Migration: strip the pre-rules-dir Claude CLAUDE.md fences before projecting.
+        if (in_array('claude-code', $targets, true) && self::cleanupLegacyClaudeFences($home, $state)) {
+            $writtenAgents[] = 'claude-code';
+        }
 
         foreach (self::supportedVendors() as $agentId => $projector) {
             if (!in_array($agentId, $targets, true)) continue;
@@ -412,6 +569,37 @@ class HubProjector {
             }
         }
 
+        foreach (self::relayInstructionVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+        }
+
+        foreach (self::relaySkillVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+        }
+
+        // Plugin-management skill. An empty desired set while the feature is off is
+        // deliberate: it removes a copy written when it was on, so switching the
+        // feature off also withdraws the instructions that describe it.
+        $adminWanted = self::adminSkillWanted();
+        foreach (self::adminSkillVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $adminWanted ? $projector->desired([]) : [], $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+        }
+
         // Skills/commands tree pass (H-03) — same ledger/drift surface, third
         // set of vendor surfaces (mirrored file trees per agent dir).
         $tree = self::reconcileTrees($home, $state, $targets, true);
@@ -461,6 +649,11 @@ class HubProjector {
         $driftAll = [];
         $writtenAgents = [];
 
+        // Migration: strip the pre-rules-dir Claude CLAUDE.md fences before projecting.
+        if (in_array('claude-code', $targets, true) && self::cleanupLegacyClaudeFences($home, $state)) {
+            $writtenAgents[] = 'claude-code';
+        }
+
         foreach (self::policyInstructionVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
@@ -474,6 +667,37 @@ class HubProjector {
                     if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
                 }
             }
+        }
+
+        foreach (self::relayInstructionVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+        }
+
+        foreach (self::relaySkillVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
+        }
+
+        // Plugin-management skill. An empty desired set while the feature is off is
+        // deliberate: it removes a copy written when it was on, so switching the
+        // feature off also withdraws the instructions that describe it.
+        $adminWanted = self::adminSkillWanted();
+        foreach (self::adminSkillVendors() as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $adminWanted ? $projector->desired([]) : [], $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
 
         HubStore::saveState($state);
@@ -515,6 +739,20 @@ class HubProjector {
             $targeted = array_values(array_intersect($serving, $instructionTargets));
             $desired = empty($targeted) ? [] : $projector->desired(['content' => $content]);
             $r = self::reconcileVendor($projector, $home, $desired, $state, false);
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+        }
+
+        // array_values() first: policyInstructionVendors() and relayInstructionVendors()
+        // are BOTH keyed by agentId and cover the identical agent set, so a bare
+        // array_merge() of the two associative arrays lets every relay projector
+        // silently overwrite its same-agentId policy counterpart — detectDrift()
+        // would then never reconcile (or report drift on) any file-path-convention
+        // policy file, for any agent, ever. Found 2026-09-15: a policy file deleted
+        // in a prior incident stayed invisible to this drift report indefinitely.
+        foreach (array_merge(array_values(self::policyInstructionVendors()), array_values(self::relayInstructionVendors()), self::relaySkillVendors()) as $projector) {
+            $serving = array_values(array_intersect($projector->servedAgentIds(), $installed));
+            if (empty($serving)) continue;
+            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, false);
             foreach ($r['drift'] as $d) $driftAll[] = $d;
         }
 
@@ -598,12 +836,30 @@ class HubProjector {
         if (!in_array($mode, ['adopt', 'overwrite', 'release'], true)) {
             return ['status' => 'error', 'message' => "invalid mode '$mode'"];
         }
-        $projector = null;
-        foreach (array_merge(array_values(self::supportedVendors()), array_values(self::instructionVendors()), self::treeVendors()) as $p) {
+        // Relay projectors FIRST: they share a ledger file with the user
+        // instruction/tree projectors, and only they own the aicli-relay keys.
+        // Matching the user projector for a Relay key made desired[key] null, and
+        // the overwrite branch treats null as "remove" — so Overwrite reported
+        // success while deleting the guidance it was asked to restore.
+        $projector = null; $isRelay = false; $isPolicy = false;
+        foreach (array_merge(array_values(self::relayInstructionVendors()), self::relaySkillVendors()) as $p) {
+            if ($p->ledgerKey() === $file && array_key_exists($key, $p->desired([]))) { $projector = $p; $isRelay = true; break; }
+        }
+        // Policy (file-path-convention) projectors BEFORE the generic instanceof
+        // InstructionProjector check below: FilePathConventionProjector extends
+        // InstructionProjector, so without this it would fall into the
+        // instructions_enabledFor-gated branch and — for any agent not currently
+        // instruction-targeted — resolve $desired to [], making Overwrite delete
+        // the always-on policy block it was asked to restore. Same class of bug
+        // the Relay-first ordering above already exists to avoid.
+        if ($projector === null) foreach (self::policyInstructionVendors() as $p) {
+            if ($p->ledgerKey() === $file) { $projector = $p; $isPolicy = true; break; }
+        }
+        if ($projector === null) foreach (array_merge(array_values(self::supportedVendors()), array_values(self::instructionVendors()), self::treeVendors()) as $p) {
             if ($p->ledgerKey() === $file) { $projector = $p; break; }
         }
         if ($projector === null) return ['status' => 'error', 'message' => "unknown vendor file '$file'"];
-        $isInstruction = $projector instanceof InstructionProjector;
+        $isInstruction = $projector instanceof InstructionProjector && !$isPolicy;
         $isTree = $projector instanceof TreeProjector;
 
         $homeInfo = self::resolveHome();
@@ -616,7 +872,16 @@ class HubProjector {
         // too — no managed-key precondition here.
 
         $mcp = HubStore::getMcp();
-        if ($isInstruction) {
+        if ($isRelay) {
+            $serverName = null;
+            $desired = $projector->desired([]);
+        } elseif ($isPolicy) {
+            // Always-on policy content — never gated by instructions_enabledFor,
+            // and desired() ignores its argument entirely (see
+            // FilePathConventionProjector::desired()).
+            $serverName = null;
+            $desired = $projector->desired([]);
+        } elseif ($isInstruction) {
             /** @var InstructionProjector $projector */
             $serverName = null;
             $targeted = array_intersect($projector->servedAgentIds(), HubStore::getInstructionTargets());
@@ -643,7 +908,16 @@ class HubProjector {
                 $entry['managedKeys'] = array_values(array_diff($entry['managedKeys'] ?? [], [$key]));
                 self::putLedgerEntry($state, $file, $entry);
                 HubStore::saveState($state);
-                if ($isInstruction) {
+                if ($isPolicy) {
+                    // Always-on policy content has no target list to remove the
+                    // agent from (it is unconditional for every installed agent,
+                    // never gated by instructions_enabledFor) — falling through to
+                    // the generic MCP-server untargetAgent() below would strip this
+                    // agentId from every configured MCP server's enabledFor, which
+                    // has nothing to do with this file. The ledger clear above is
+                    // the whole effect: the next projection sees a fresh key
+                    // (no recorded base hash) and re-writes the block normally.
+                } elseif ($isInstruction) {
                     // Releasing an instruction fence untargets every agent that
                     // reads the file, so the next projection does not re-write it.
                     /** @var InstructionProjector $projector */
@@ -725,6 +999,50 @@ class HubProjector {
 
     // ---------- internals ----------
 
+    /**
+     * One-time migration cleanup for Claude Code. Before this release the hub
+     * spliced its three managed blocks (Config-Hub instructions, Relay guidance,
+     * file-path convention) as HTML-comment FENCES into the user's own
+     * ~/.claude/CLAUDE.md. They now live as dedicated fence-free files under
+     * ~/.claude/rules/ (Claude auto-loads that directory natively). This strips
+     * the three legacy fences from CLAUDE.md so the guidance is never loaded
+     * TWICE (rules file + stale fence), and drops the orphaned ledger rows for
+     * the CLAUDE.md file. Content OUTSIDE the fences is preserved
+     * (CodexProjector::stripFence is boundary-scoped). Called before every Claude
+     * projection so each home self-heals on its next launch; a no-op once the
+     * fences are gone (one cheap read that finds no marker). Returns true if it
+     * changed anything.
+     */
+    private static function cleanupLegacyClaudeFences(string $home, array &$state): bool {
+        $changed = false;
+        $abs = rtrim($home, '/') . '/.claude/CLAUDE.md';
+        if (is_file($abs)) {
+            $raw = (string)@file_get_contents($abs);
+            $hasFence = strpos($raw, InstructionProjector::FENCE_OPEN) !== false
+                     || strpos($raw, RelayInstructionProjector::FENCE_OPEN) !== false
+                     || strpos($raw, FilePathConventionProjector::FENCE_OPEN) !== false;
+            if ($hasFence) {
+                // Each fenced projector's write(remove) strips only its own
+                // markers (and preserves ownership); three passes remove all three.
+                (new InstructionProjector('claude-code', '.claude/CLAUDE.md', 'Claude Code', ['claude-code'], true))
+                    ->write($abs, [], [InstructionProjector::FENCE_KEY]);
+                (new RelayInstructionProjector('claude-code', '.claude/CLAUDE.md', 'Claude Code', ['claude-code'], false))
+                    ->write($abs, [], [RelayInstructionProjector::FENCE_KEY]);
+                (new FilePathConventionProjector('claude-code', '.claude/CLAUDE.md', 'Claude Code', ['claude-code'], false))
+                    ->write($abs, [], [FilePathConventionProjector::FENCE_KEY]);
+                $changed = true;
+                LogService::log('hub: stripped legacy Claude CLAUDE.md fences (migrated to ~/.claude/rules/)',
+                    LogService::LOG_INFO, 'HubProjector');
+            }
+        }
+        // Drop orphaned ledger rows for the old CLAUDE.md-based Claude projectors.
+        foreach (['~/.claude/CLAUDE.md', '~/.claude/CLAUDE.md#aicli-relay-guidance',
+                  '~/.claude/CLAUDE.md#aicli-file-paths'] as $k) {
+            if (isset($state['projections'][$k])) { unset($state['projections'][$k]); $changed = true; }
+        }
+        return $changed;
+    }
+
     /** Store a ledger entry, dropping it entirely when nothing is managed any more. */
     private static function putLedgerEntry(array &$state, string $file, array $entry): void {
         if (empty($entry['managedKeys']) && empty($entry['lastProjectedHash'])) {
@@ -742,7 +1060,15 @@ class HubProjector {
      * @param array<string,mixed> $desired
      * @return array{written:string[],removed:string[],drift:array[]}
      */
-    private static function reconcileVendor(VendorProjector $projector, string $home, array $desired, array &$state, bool $write): array {
+    /**
+     * $restoreDeleted: re-assert a managed key that has vanished from disk
+     * instead of reporting it as drift. Only for system-managed surfaces (the
+     * Relay guidance fence and Relay skill), which agents require in context and
+     * which no user chose to delete — on this host they sit under paths
+     * symlinked into a separate git repo, so a checkout removes them silently.
+     * User content keeps the safe default: a deletion is respected, not undone.
+     */
+    private static function reconcileVendor(VendorProjector $projector, string $home, array $desired, array &$state, bool $write, bool $restoreDeleted = false): array {
         $file = $projector->ledgerKey();
         $abs = $projector->absPath($home);
         $agentId = $projector->agentId();
@@ -766,6 +1092,7 @@ class HubProjector {
             if ($want !== null) {
                 if (!$hasCur) {
                     if ($base === null) { $set[$key] = $want; }                       // fresh key → write
+                    elseif ($restoreDeleted) { $set[$key] = $want; }                  // system-managed → self-heal
                     else { $drift[] = self::driftRec($file, $key, $agentId, 'deleted', null, $want); } // user deleted a managed key
                 } elseif ($base === null) {
                     if ($curHash === $wantHash) { $hashes[$key] = $wantHash; $managed[] = $key; }      // converged independently

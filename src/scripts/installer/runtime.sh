@@ -128,13 +128,50 @@ FD_SHA256="2b6bfaae8c48f12050813c2ffe1884c61ea26e750d803df9c9114550a314cd14"
 RG_TAR="ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz"
 RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/$RG_TAR"
 RG_SHA256="f84757b07f425fe5cf11d87df6644691c644a5cd2348a2c670894272999d3ba7"
+GIT_LFS_TAR="git-lfs-linux-amd64-v3.7.0.tar.gz"
+GIT_LFS_URL="https://github.com/git-lfs/git-lfs/releases/download/v3.7.0/$GIT_LFS_TAR"
+GIT_LFS_SHA256="e7ebba491af8a54e560be3a00666fa97e4cf2bbbb223178a0934b8ef74cf9bed"
 
+# Resolve a tool the plugin ships, without ever adopting our own shim.
+#
+# 2026-09-09 (reported by a workspace whose LFS commits silently dropped large
+# files): this function built a symlink LOOP on every install after the first.
+#
+#   first install : /usr/local/bin/<n> -> $BIN_DEST/<n> -> $RUNTIME_BASE/bin/<n>   correct
+#   second install: `command -v <n>` now finds OUR OWN /usr/local/bin/<n>, so the
+#                   old code did `ln -sf $(which <n>) $BIN_DEST/<n>`, pointing
+#                   $BIN_DEST/<n> back at /usr/local/bin/<n>, which already points
+#                   at $BIN_DEST/<n>. The loop closes and the tool disappears from
+#                   PATH entirely ("Too many levels of symbolic links").
+#
+# git-lfs, fd and rg were all circular on the reporting box. git-lfs is the one that
+# loses data: `git-lfs filter-process` is not found, `git add` fails its clean filter,
+# and the commit still succeeds for everything else — so large files are omitted from
+# a commit that looks clean.
+#
+# Two rules prevent it coming back:
+#   1. Only adopt a "system" tool that resolves to a real executable OUTSIDE our own
+#      trees. Anything resolving into $BIN_DEST or $RUNTIME_BASE is our own shim, and
+#      anything that does not resolve at all is an existing loop — both mean "install
+#      the portable copy", not "adopt it".
+#   2. Only replace /usr/local/bin/<n> when it is missing, already broken, or a link
+#      into our own trees. A genuine system binary there is never overwritten — which
+#      the old `[ ! -e ]` guard got right for a real file but wrong for a loop, because
+#      -e is FALSE on a circular symlink, so it happily rebuilt the other half.
 install_tool() {
     local tar=$1 url=$2 name=$3 expected_sha=$4
     log_step "$name..."
-    if command -v "$name" > /dev/null 2>&1; then
+
+    local found real=""
+    found=$(command -v "$name" 2>/dev/null || true)
+    [ -n "$found" ] && real=$(readlink -f "$found" 2>/dev/null || true)
+    case "$real" in
+        ""|"$BIN_DEST"/*|"$RUNTIME_BASE"/bin/*) real="" ;;   # our own shim, or already looping
+    esac
+
+    if [ -n "$real" ] && [ -x "$real" ]; then
         log_ok "System $name found."
-        ln -sf "$(which "$name")" "$BIN_DEST/$name"
+        ln -sfn "$real" "$BIN_DEST/$name"
     else
         if [ ! -f "$RUNTIME_BASE/bin/$name" ]; then
             echo "    > Downloading portable $name..." >&3
@@ -155,13 +192,31 @@ install_tool() {
         else
             log_ok "$name found in plugin root."
         fi
-        ln -sf "$RUNTIME_BASE/bin/$name" "$BIN_DEST/$name"
+        ln -sfn "$RUNTIME_BASE/bin/$name" "$BIN_DEST/$name"
     fi
-    [ ! -e "/usr/local/bin/$name" ] && ln -sf "$BIN_DEST/$name" "/usr/local/bin/$name"
+
+    # Publish to /usr/local/bin, and SELF-HEAL a link left looping by an older install.
+    local pub="/usr/local/bin/$name" pub_real=""
+    [ -L "$pub" ] && pub_real=$(readlink -f "$pub" 2>/dev/null || true)
+    if [ ! -e "$pub" ] || { [ -L "$pub" ] && { [ -z "$pub_real" ] || case "$pub_real" in "$BIN_DEST"/*|"$RUNTIME_BASE"/bin/*) true ;; *) false ;; esac; }; }; then
+        ln -sfn "$BIN_DEST/$name" "$pub"
+    fi
 }
 
-install_tool "$FD_TAR" "$FD_URL" "fd" "$FD_SHA256"
-install_tool "$RG_TAR" "$RG_URL" "rg" "$RG_SHA256"
+# GitHub #13 (part 2): fd and rg are optional conveniences (shell search
+# helpers some agents call), not load-bearing for persistence. install_tool
+# does `exit 1` on a failed download/checksum, which used to kill this whole
+# script — squashfs-tools below never got installed, and every bake/consolidate
+# failed with only "Atomic bake failed" and no clue why. Run each of these two
+# in a subshell so its internal exit only ends that subshell; a failure here
+# is logged and skipped, and squashfs-tools always gets a chance to install.
+# git-lfs stays fatal below (it silently drops large files if missing/broken —
+# see the 2026-09-09 note above install_tool — so failing loudly is correct).
+( install_tool "$FD_TAR" "$FD_URL" "fd" "$FD_SHA256" ) \
+    || log_warn "fd install failed — continuing without it (fd is an optional convenience tool)."
+( install_tool "$RG_TAR" "$RG_URL" "rg" "$RG_SHA256" ) \
+    || log_warn "rg install failed — continuing without it (rg is an optional convenience tool)."
+install_tool "$GIT_LFS_TAR" "$GIT_LFS_URL" "git-lfs" "$GIT_LFS_SHA256"
 
 # --- 4. squashfs-tools (mksquashfs/unsquashfs) ---
 # D-304: Ensure SquashFS tools are available for the new storage architecture.
@@ -325,8 +380,10 @@ create_proxy "nanocoder" "nanocoder/node_modules/.bin/nanocoder"
 create_proxy "goose" "goose/bin/goose"
 create_proxy "qwen" "qwen-code/node_modules/@qwen-code/qwen-code/cli.js"
 create_proxy "agy"  "antigravity-cli/home/.local/bin/agy"
+create_proxy "grok" "grok-build/home/.grok/bin/grok"
+create_proxy "kimi" "kimi-code/home/.kimi-code/bin/kimi"
 
-log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen, agy)."
+log_ok "Agent proxies established (gemini, copilot, claude, opencode, kilo, pi, codex, droid, nanocoder, goose, qwen, agy, grok, kimi)."
 
 # --- 6. Docker Tool Wrappers ---
 # Tools that require Docker containers. The wrapper either proxies to the container

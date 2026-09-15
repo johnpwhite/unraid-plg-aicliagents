@@ -14,7 +14,7 @@ class TerminalService {
     /**
      * Starts a new AICli console session via ttyd.
      */
-    public static function startTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli') {
+    public static function startTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli', string $origin = 'interactive') {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
         
         // 1. Pre-launch checks
@@ -64,9 +64,20 @@ class TerminalService {
         // overlay subscribes to aicli_activity and renders the live step text;
         // the AICLI_TTYD_READY dismissal path is unchanged (additive display).
         $actId = "start_$id";
-        ActivityService::register($actId, 'start', 'Starting ' . ($agent['name'] ?? $agentId), [
+        // Lead with the WORKSPACE. The tray is server-wide, so two "Starting Claude
+        // Code" rows side by side said nothing about which workspace each one was —
+        // the same rule the waiting-message pill follows (RELAY_WAITING_PILL.md).
+        // ACTIVITY_TRAY.md "When a start row appears": the agent's tmux session is alive and
+        // only its terminal connection (ttyd) is gone — the post-deploy click. Nothing is
+        // starting, so this is a RECONNECT, and the tray keeps it out of sight.
+        $reattach = ProcessManager::isRunning((string)$id);
+        $wsName = ConfigService::workspaceName((string)$id);
+        if ($wsName === '' && !empty($path)) $wsName = basename((string)$path);
+        $startLabel = ($reattach ? 'Reconnecting to ' : 'Starting ') . ($agent['name'] ?? $agentId);
+        if ($wsName !== '') $startLabel = "$wsName — " . lcfirst($startLabel);
+        ActivityService::register($actId, 'start', $startLabel, [
             'step' => 'preparing', 'progress' => 5,
-            'meta' => ['sessionId' => $id, 'agentId' => $agentId, 'path' => (string)($path ?? '')],
+            'meta' => ['sessionId' => $id, 'agentId' => $agentId, 'path' => (string)($path ?? ''), 'origin' => $origin, 'reattach' => $reattach],
         ]);
 
         if (!$agent) {
@@ -96,6 +107,14 @@ class TerminalService {
         AtomicWriteService::write(UtilityService::getAgentIdPath($id), (string)$agentId);
         if (!empty($path)) {
             AtomicWriteService::write(UtilityService::getWorkDirFilePath($id), (string)$path);
+        }
+        // CLAUDE_RESUME_BY_SESSION_ID.md R5: a workspace whose saved or requested resume
+        // id is still a Claude session NAME (saved before this resolver existed) heals on
+        // this launch instead of opening Claude's session picker.
+        if ((string)$agentId === ClaudeSessionNameResolver::AGENT_ID && is_string($chatId) && $chatId !== ''
+            && !ClaudeSessionNameResolver::isSessionId($chatId) && !empty($path)) {
+            $chatId = ClaudeSessionNameResolver::resolve((string)$agentId, (string)$path, $chatId, null,
+                ConfigService::isSharedFolder((string)$path, (string)$agentId, (string)$id));
         }
         if (!empty($chatId) && $chatId !== 'auto' && $chatId !== '_fresh_') {
             AtomicWriteService::write(UtilityService::getChatIdPath($id), (string)$chatId);
@@ -200,6 +219,21 @@ class TerminalService {
                 ActivityService::fail($actId, "Failed to mount home storage for $username");
                 return;
             }
+
+            // #113: re-assert this agent's managed Hub config now the home
+            // overlay is mounted and before ttyd starts the client. MCP clients
+            // read their server list once at startup, so a config written only
+            // when an administrator toggled a setting can be absent here — most
+            // often because that projection ran against an unmounted home and
+            // silently no-opped. Never blocks the launch.
+            \AICliAgents\Services\Hub\HubProjector::projectForLaunch((string)$agentId);
+
+            // Always-on Relay: give a never-configured workspace its default
+            // subscription document now, so it actually receives messages.
+            // Idempotent — an existing document, including a deliberately empty
+            // one, is left alone.
+            try { AgentRelayService::ensureWorkspaceSubscription((string)$id); }
+            catch (\Throwable $e) { LogService::log("Relay default subscription for $id failed: " . $e->getMessage(), LogService::LOG_WARN, "TerminalService"); }
         }
 
         // Environment Construction
@@ -217,8 +251,26 @@ class TerminalService {
         // the saved ID stored at clean-close for this (path, agent) pair.
         $resolvedChatId = $chatId;
         if ($resolvedChatId === 'auto' && $path) {
-            $resolvedChatId = ConfigService::getResumeId($path, $agentId);
+            $resolvedChatId = ConfigService::getResumeId($path, $agentId, (string)$id);
+            if ((string)$agentId === ClaudeSessionNameResolver::AGENT_ID && is_string($resolvedChatId) && $resolvedChatId !== '') {
+                $resolvedChatId = ClaudeSessionNameResolver::resolve((string)$agentId, (string)$path, $resolvedChatId, null,
+                    ConfigService::isSharedFolder((string)$path, (string)$agentId, (string)$id));
+            }
             LogService::log("Auto-resume: chatId=" . ($resolvedChatId ?: 'none') . " for $agentId at $path", LogService::LOG_INFO, "TerminalService");
+        }
+
+        // RESUME_IDENTITY_PER_WORKSPACE.md (V2): with no conversation resolved, the shell
+        // falls back to FOLDER-scoped discovery — the newest conversation in this folder's
+        // store. On a folder another open workspace shares, that is as likely the sibling's
+        // live conversation as this one's, so start fresh rather than guess.
+        if (($resolvedChatId === null || $resolvedChatId === '') && $path
+            && ConfigService::isSharedFolder((string)$path, (string)$agentId, (string)$id)) {
+            $resolvedChatId = '_fresh_';
+            LogService::log("Start fresh for $id: $agentId at $path is shared with another open workspace, so folder-wide conversation discovery cannot be trusted", LogService::LOG_INFO, "TerminalService");
+        }
+
+        if ($agentId === 'claude-code') {
+            ClaudePluginPathService::repairHome(UtilityService::getWorkDir($username) . '/home');
         }
 
         $env = [
@@ -252,8 +304,22 @@ class TerminalService {
             'ENV_PREFIX'        => $agent['env_prefix'] ?? '',
             'AICLI_HOME'        => UtilityService::getWorkDir($username) . "/home",
             'AICLI_ROOT'        => $path ?: '/mnt',
+            // #110: the directory the agent actually runs IN. Identical to the
+            // workspace path unless the operator opted into the pool path for
+            // cache-only shares, which keeps the agent's cwd off the /mnt/user
+            // FUSE mount (an array stop can then unmount it). The workspace
+            // IDENTITY (AICLI_ROOT, hashes, resume records) never changes.
+            'AICLI_CWD'         => $path ? PoolPathService::launchDirectory((string)$path, $config) : '/mnt',
+            // Agent Relay self-service reads this launch-bound session identity;
+            // the command itself never accepts a session argument.
+            'AICLI_RELAY_COMMAND' => 'php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php',
+            // Plugin management (read-only) self-service. Same launch-bound identity
+            // rule as the Relay: the command never accepts a session argument.
+            'AICLI_ADMIN_COMMAND' => 'php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php',
             'AICLI_CHAT_SESSION_ID' => $resolvedChatId ?: '',
-            'NODE_PATH'         => "/usr/local/emhttp/plugins/unraid-aicliagents/agents/$agentId/node_modules"
+            // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: route through the resolver
+            // instead of the literal AGENT_BASE path.
+            'NODE_PATH'         => AgentRegistry::agentPath($agentId) . "/node_modules"
         ];
 
         // Merge the full 5-tier effective env from EnvService — single source
@@ -332,6 +398,22 @@ class TerminalService {
                     // Done from PHP's perspective — the agent itself cold-starts
                     // inside tmux; AICLI_TTYD_READY covers that last leg in the UI.
                     ActivityService::finish($actId, 'starting_agent');
+                    // Tell live surfaces (the drawer, the Relay owner table) that a
+                    // workspace just started — whether from the UI, Relay "Start now",
+                    // or a system autolaunch — so they refresh without a manual reload.
+                    $startedPayload = ['event' => 'started', 'id' => (string)$id, 'agentId' => (string)$agentId, 'ts' => time()];
+                    // HOME_BACKUP.md / HOME_RESTORE.md: a home-backup or
+                    // home-restore relaunch already resumed this session
+                    // server-side (and sent its own Continue nudge when the
+                    // close recorded it as "working"). continuedBy tells the
+                    // stopped->started handler this one was already handled, so
+                    // CONTINUE_ON_RESTART's auto-continue does not nudge it twice.
+                    if ($origin === 'backup_relaunch') {
+                        $startedPayload['continuedBy'] = 'backup';
+                    } elseif ($origin === 'restore_relaunch') {
+                        $startedPayload['continuedBy'] = 'restore';
+                    }
+                    NchanService::publish('workspaces', $startedPayload);
                     $found = true;
                     break;
                 }
@@ -368,6 +450,101 @@ class TerminalService {
      * a stale index entry (conversation since deleted) can't yield a dead
      * --conversation that agy rejects -> blank session.
      */
+    /**
+     * OpenCode's newest resumable session FOR THIS WORKSPACE (#146).
+     *
+     * OpenCode keeps every session in one SQLite `session` table with a
+     * `directory` column = the workspace cwd. The old discovery ran
+     * `ORDER BY time_updated DESC LIMIT 1` with NO directory filter, so it
+     * returned the globally-newest session — which belongs to whichever
+     * workspace was used last, NOT the one being resumed (exactly the
+     * cross-workspace hazard the claude-code branch guards against). Resuming
+     * that id in a different cwd opened the wrong chat or fell back to an old one.
+     *
+     * The fix: filter by `directory = $path` and top-level sessions
+     * (`parent_id IS NULL` — child/sub sessions are not resume targets), newest
+     * first. We read BOTH the legacy shared db AND every per-session isolated db
+     * (XDG_DATA_HOME/aicli-opencode/<session>/opencode/opencode.db) and take the
+     * newest across all of them: the same session id can appear in several dbs
+     * with different `time_updated` after the isolation migration, and the
+     * freshest activity may live only in the isolated copy. Dedup by max time.
+     */
+    public static function opencodeResumeId(string $home, string $path): ?string {
+        if ($home === '') return null;
+        $dbs = [];
+        $legacy = "$home/.local/share/opencode/opencode.db";
+        if (is_file($legacy)) $dbs[] = $legacy;
+        foreach (glob("$home/.local/share/aicli-opencode/*/opencode/opencode.db") ?: [] as $d) {
+            if (is_file($d)) $dbs[] = $d;
+        }
+        return self::newestOpencodeStyleSession($dbs, $path);
+    }
+
+    /**
+     * Kilo Code's newest resumable session FOR THIS WORKSPACE (#147).
+     *
+     * Kilo is an OpenCode fork: its `.local/share/kilo/kilo.db` has the SAME
+     * `session` table (id `ses_…`, `directory` = cwd, `parent_id`, `time_updated`),
+     * so it reuses the exact directory-filtered discovery. Kilo is NOT under the
+     * per-workspace XDG isolation (that block is opencode-only), so there is a
+     * single db. Before this branch existed, discoverLatestSessionId had no
+     * kilocode case and returned null — so resume fell back to `--continue` with no
+     * chat id and Kilo started fresh ("Auto-resume: chatId=none").
+     */
+    public static function kilocodeResumeId(string $home, string $path): ?string {
+        if ($home === '') return null;
+        $db = "$home/.local/share/kilo/kilo.db";
+        return is_file($db) ? self::newestOpencodeStyleSession([$db], $path) : null;
+    }
+
+    /**
+     * Shared core for OpenCode-shaped session stores: newest top-level `ses_…`
+     * session whose `directory` matches $path, across all given dbs (dedup by max
+     * time). Prepared read-only SQLite3 — no shell-out, no escaping.
+     */
+    private static function newestOpencodeStyleSession(array $dbs, string $path): ?string
+    {
+        if ($dbs === [] || !class_exists('SQLite3')) return null;
+
+        $dir = rtrim(str_replace('\\', '/', $path), '/');
+        // Prepared statements (bound params) — no SQL escaping, no shell-out, and it
+        // works from the sqlite3 PHP extension the host + runner already ship.
+        // LIMIT 5 (not 1): a stray corrupt/foreign row at the top must not hide the
+        // newest VALID session — we take the first well-formed id in DESC order.
+        $sql = $dir !== ''
+            ? "SELECT id, time_updated FROM session WHERE (directory = :d OR directory = :d2) AND (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5"
+            // No workspace context (older call-site): last-resort global newest,
+            // matching the historical behaviour rather than returning nothing.
+            : "SELECT id, time_updated FROM session WHERE (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5";
+
+        $bestId = null; $bestTime = -1;
+        foreach ($dbs as $dbPath) {
+            try {
+                $db = new \SQLite3($dbPath, SQLITE3_OPEN_READONLY);
+            } catch (\Throwable $e) { continue; }
+            $db->busyTimeout(500);
+            $stmt = @$db->prepare($sql);
+            if ($stmt === false) { $db->close(); continue; }
+            if ($dir !== '') {
+                $stmt->bindValue(':d', $dir, SQLITE3_TEXT);
+                $stmt->bindValue(':d2', $dir . '/', SQLITE3_TEXT);
+            }
+            $res = @$stmt->execute();
+            if ($res) {
+                // Rows are DESC by time; the first well-formed id is this db's newest.
+                while (is_array($row = $res->fetchArray(SQLITE3_ASSOC))) {
+                    $id = (string)($row['id'] ?? '');
+                    if (!preg_match('/^ses_[A-Za-z0-9_-]+$/', $id)) continue;
+                    $t = (int)($row['time_updated'] ?? 0);
+                    if ($t > $bestTime) { $bestTime = $t; $bestId = $id; }
+                    break;
+                }
+            }
+            $db->close();
+        }
+        return $bestId;
+    }
+
     public static function antigravityResumeId(string $home, string $path): ?string {
         if ($home === '' || $path === '') return null;
         $cacheFile = "$home/.gemini/antigravity-cli/cache/last_conversations.json";
@@ -378,6 +555,59 @@ class TerminalService {
         if (!is_string($id) || !preg_match('/^[A-Za-z0-9-]{20,}$/', $id)) return null;
         if (!is_file("$home/.gemini/antigravity-cli/conversations/$id.pb")) return null;
         return $id;
+    }
+
+    /** Resolve Kimi Code's newest session for one exact workspace. */
+    public static function kimiCodeResumeId(string $home, string $path): ?string {
+        if ($home === '' || $path === '') return null;
+        $indexFile = "$home/.kimi-code/session_index.jsonl";
+        if (!is_file($indexFile)) return null;
+        $wanted = rtrim(str_replace('\\', '/', $path), '/');
+        $fh = @fopen($indexFile, 'rb');
+        if ($fh === false) return null;
+        $newestId = null;
+        $newestAt = -1;
+        while (($line = fgets($fh)) !== false) {
+            $row = json_decode($line, true);
+            if (!is_array($row)) continue;
+            $workDir = rtrim(str_replace('\\', '/', (string)($row['workDir'] ?? $row['work_dir'] ?? '')), '/');
+            $id = (string)($row['sessionId'] ?? $row['session_id'] ?? $row['id'] ?? '');
+            if ($workDir !== $wanted || !preg_match('/^[A-Za-z0-9_-]{8,}$/', $id)) continue;
+            $updatedAt = (int)($row['updatedAt'] ?? $row['updated_at'] ?? 0);
+            if ($updatedAt >= $newestAt) {
+                $newestAt = $updatedAt;
+                $newestId = $id;
+            }
+        }
+        fclose($fh);
+        return $newestId;
+    }
+
+    /** Resolve Grok Build's newest URL-encoded per-workspace session directory. */
+    public static function grokBuildResumeId(string $home, string $path): ?string {
+        if ($home === '' || $path === '') return null;
+        $root = "$home/.grok/sessions";
+        if (!is_dir($root)) return null;
+        $wanted = rtrim(str_replace('\\', '/', $path), '/');
+        $newestId = null;
+        $newestAt = -1;
+        foreach (glob("$root/*", GLOB_ONLYDIR) ?: [] as $workspaceDir) {
+            $decoded = rtrim(str_replace('\\', '/', rawurldecode(basename($workspaceDir))), '/');
+            if ($decoded !== $wanted) continue;
+            foreach (glob("$workspaceDir/*", GLOB_ONLYDIR) ?: [] as $sessionDir) {
+                $id = basename($sessionDir);
+                if (!preg_match('/^[A-Za-z0-9_-]{8,}$/', $id)) continue;
+                $mtime = @filemtime($sessionDir) ?: 0;
+                foreach (['summary.json', 'updates.jsonl', 'chat_history.jsonl'] as $marker) {
+                    $mtime = max($mtime, @filemtime("$sessionDir/$marker") ?: 0);
+                }
+                if ($mtime >= $newestAt) {
+                    $newestAt = $mtime;
+                    $newestId = $id;
+                }
+            }
+        }
+        return $newestId;
     }
 
     /**
@@ -436,7 +666,24 @@ class TerminalService {
             return self::antigravityResumeId($home, $path);
         }
 
-        // Claude and OpenCode handle their own session persistence internally
+        if ($agentId === 'kimi-code') {
+            $config = ConfigService::getConfig();
+            $user = $config['user'] ?? 'root';
+            if (empty($user)) $user = 'root';
+            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            return self::kimiCodeResumeId($home, $path);
+        }
+
+        if ($agentId === 'grok-build') {
+            $config = ConfigService::getConfig();
+            $user = $config['user'] ?? 'root';
+            if (empty($user)) $user = 'root';
+            $home = "/tmp/unraid-aicliagents/work/$user/home";
+            return self::grokBuildResumeId($home, $path);
+        }
+
+        // Other agents either handle persistence internally or have no safely
+        // documented workspace-to-session index.
         return null;
     }
 
@@ -452,6 +699,94 @@ class TerminalService {
      *   unraid-aicliagents-<id>.workdir      — workspace path
      *   unraid-aicliagents-<id>.chatid       — last-known resume id
      */
+    /**
+     * Which live sessions are running an agent version that is no longer the
+     * one installed — docs/specs/WORKSPACE_APPLY_AGENT_VERSION.md.
+     *
+     * Deliberately NOT phrased as "out of date". Since side-by-side installs,
+     * the installed version is simply whichever was installed LAST: switching a
+     * release channel back to Stable installs an older version, and that older
+     * version is then the current one. A session can therefore differ from the
+     * installed version in either direction, and the only honest statement is
+     * that it differs — which is why this returns a set rather than a
+     * comparison, and why every label built from it names the target version
+     * instead of calling it newer or older.
+     *
+     * A session's version is read from the generation path the launcher pinned
+     * into its environment, the same signal the generation reaper trusts. A
+     * session whose generation cannot be read is NOT reported: an unreadable
+     * process must never produce an offer to restart a workspace.
+     *
+     * @param string|null   $procRoot       injected by tests.
+     * @param callable|null $activeResolver agentId => active generation id|null.
+     *        Injected by tests so this is assertable on ANY host, including a CI
+     *        container with no versioned agents installed. Without the seam the
+     *        cases that matter — a downgrade, a mismatch — could only skip there,
+     *        and a test that skips in CI guards nothing.
+     * @return array<string,string> session id => the generation it is running
+     */
+    public static function sessionsOnOtherAgentVersion(?string $procRoot = null, ?callable $activeResolver = null): array
+    {
+        $root = $procRoot ?? '/proc';
+        $active = [];   // agentId => active generation
+        $out = [];
+        foreach (glob($root . '/[0-9]*/environ') ?: [] as $f) {
+            $raw = @file_get_contents($f);
+            if ($raw === false || $raw === '') continue;
+            $env = [];
+            foreach (explode("\0", $raw) as $pair) {
+                $eq = strpos($pair, '=');
+                if ($eq === false) continue;
+                $env[substr($pair, 0, $eq)] = substr($pair, $eq + 1);
+            }
+            $sid = (string)($env['AICLI_SESSION_ID'] ?? '');
+            $agent = (string)($env['AGENT_ID'] ?? '');
+            // frozen_binary*, NOT BINARY*. BINARY / BINARY_PRIMARY / BINARY_FALLBACK
+            // are the INPUTS the launcher receives from PHP, built on the stable
+            // symlink, and they stay that way by design. The launcher pins the
+            // resolved generation into the frozen_* copies
+            // (aicli-shell.sh `_aicli_pin_to_real_generation`), and those are what
+            // the running agent actually executes and re-resolves against.
+            //
+            // Reading BINARY here finds a stable path for every session, concludes
+            // nothing is on a different version, and the feature silently never
+            // appears — which is exactly what it did until this was caught against
+            // live sessions on 2026-09-15.
+            $binary = (string)($env['frozen_binary_primary'] ?? $env['frozen_binary'] ?? '');
+            if ($sid === '' || $agent === '' || $binary === '') continue;
+            if (isset($out[$sid])) continue;
+
+            // The generation this session is pinned to, from its own binary path.
+            if (!preg_match('#/\.versions/' . preg_quote($agent, '#') . '/([A-Za-z0-9._@-]+)/#', $binary, $m)) {
+                // Not on the versioned layout (or an unreadable shape) — nothing
+                // to offer, because there is no second version to switch to.
+                continue;
+            }
+            $sessionGen = $m[1];
+
+            if (!array_key_exists($agent, $active)) {
+                $active[$agent] = null;
+                if ($activeResolver !== null) {
+                    $resolved = $activeResolver($agent);
+                    $active[$agent] = is_string($resolved) && $resolved !== '' ? $resolved : null;
+                } else {
+                    try {
+                        $stable = AgentRegistry::agentPath($agent);
+                        $target = @readlink($stable);
+                        $prefix = ".versions/$agent/";
+                        if (is_string($target) && strncmp($target, $prefix, strlen($prefix)) === 0) {
+                            $active[$agent] = substr($target, strlen($prefix));
+                        }
+                    } catch (\Throwable $e) { /* unknown agent id — leave null */ }
+                }
+            }
+            $activeGen = $active[$agent];
+            if ($activeGen === null || $activeGen === $sessionGen) continue;
+            $out[$sid] = $sessionGen;
+        }
+        return $out;
+    }
+
     public static function listActiveSessionsForAgent(string $agentId): array
     {
         // Bug #1067: reconcile orphan ttyd processes before enumerating, so the
@@ -664,8 +999,8 @@ class TerminalService {
                     $bPath  = is_file($wdf) ? trim((string)@file_get_contents($wdf)) : '';
                     if ($bAgent !== '' && $bPath !== '') {
                         $bId = \AICliAgents\Handlers\TerminalHandler::discoverLatestSessionId($bAgent, $bPath);
-                        if ($bId !== null && $bId !== '') {
-                            \AICliAgents\Services\ConfigService::saveResumeId($bPath, $bAgent, (string)$bId);
+                        // Disk-only (newest on disk): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+                        if ($bId !== null && $bId !== '' && \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($bPath, $bAgent, (string)$bId, (string)$sessionId)) {
                             LogService::log(
                                 "forceCloseHome: disk-fallback saved resume_id=$bId for unregistered $sessName (workspace=$bPath, agent=$bAgent)",
                                 LogService::LOG_INFO, "TerminalService"
@@ -719,9 +1054,7 @@ class TerminalService {
     private static function _enumerateTmuxSessions(): array
     {
         $results = [];
-        foreach (glob('/tmp/unraid-aicliagents/tmux/tmux-*', GLOB_ONLYDIR) ?: [] as $perUserDir) {
-            $sock = $perUserDir . '/default';
-            if (!file_exists($sock)) continue;
+        foreach (\AICliAgents\Services\ProcessManager::tmuxSocketPaths() as $sock) {
             $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
             // List all sessions matching aicli-agent-* prefix.
             $raw = trim((string)@shell_exec("$tmuxBin ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-'"));
@@ -860,7 +1193,19 @@ class TerminalService {
     public static function enumerateAllLiveSessions(): array
     {
         ProcessManager::sweepOrphanSessions();
+        return self::listLiveSessions();
+    }
 
+    /**
+     * Read-only enumeration of live-terminal sessions (one per ttyd socket) with their
+     * metadata. Unlike enumerateAllLiveSessions() it does NOT run sweepOrphanSessions()
+     * — so it is safe to call on the drawer's 5 s running-state poll without triggering
+     * reap side effects. See DRAWER_ACTIVE_STATE_RECONCILE.md.
+     *
+     * @return array<int,array{id:string,agentId:string,path:string,chatId:string,user:string,started_at:int}>
+     */
+    public static function listLiveSessions(): array
+    {
         $out = [];
         foreach (glob("/var/run/aicliterm-*.sock") ?: [] as $sock) {
             if (!preg_match('/aicliterm-(.*)\.sock$/', $sock, $m)) continue;
@@ -878,6 +1223,108 @@ class TerminalService {
                 'chatId'     => is_file($chatFile)    ? trim((string)@file_get_contents($chatFile))    : '',
                 'user'       => is_file($userFile)    ? trim((string)@file_get_contents($userFile))    : '',
                 'started_at' => @filemtime($sock) ?: 0,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Live sessions that are NOT represented in the drawer's saved workspaces — i.e.
+     * running invisibly (a reconnect that minted a new id, a removed drawer entry whose
+     * agent persisted, a mid-recovery relaunch). Pure set-difference so it is
+     * unit-testable without sockets/processes. The drawer surfaces these under an
+     * "Untracked" divider so nothing can run without being visible + closable.
+     * See DRAWER_ACTIVE_STATE_RECONCILE.md.
+     *
+     * @param array<int,array{id?:string,agentId?:string,path?:string,chatId?:string,started_at?:int}> $live
+     * @param array<int,array{id?:string}|string> $drawerSessions
+     * @return array<int,array{id:string,agentId:string,path:string,chatId:string,started_at:int}>
+     */
+    // ---- Deliberate-close intent (docs/specs/WORKSPACE_CLOSE_INTENT.md, #218) --
+    //
+    // A close is not instant. Measured on a real workspace: 5s capturing the
+    // resume id, 3s waiting for tmux, 1s to kill — about 9 seconds end to end.
+    // For that whole window the workspace has already left the drawer's list
+    // while its session is still alive, which is precisely the shape
+    // reconcileOrphans reports as untracked. So closing a workspace made it
+    // appear, briefly, as an orphan offering Attach and Close — it looked like
+    // something had gone wrong when nothing had.
+    //
+    // A fixed grace period was the obvious fix and the wrong one: it has to be
+    // right for every agent on every box, and a slow-to-quiesce agent would
+    // still flash the row. Recording the INTENT instead means a healthy close
+    // never shows the row at all, however long it takes.
+    //
+    // The TTL is only a backstop for a close that died halfway — a PHP fatal, a
+    // container restart — where nothing is left to clear the mark. It can
+    // afford to be generous precisely because a healthy close clears it in
+    // seconds; it is never the thing waited on in the normal case.
+    private const CLOSE_INTENT_TTL = 60;
+
+    private static function closeIntentPath(string $sessionId): string
+    {
+        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents'), '/');
+        $safe = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        return $base . '/closing-' . ($safe !== '' ? $safe : 'invalid');
+    }
+
+    /** Mark a session as deliberately closing. Best-effort; never breaks a close. */
+    public static function markClosing(string $sessionId): void
+    {
+        if ($sessionId === '') return;
+        @mkdir(dirname(self::closeIntentPath($sessionId)), 0755, true);
+        @file_put_contents(self::closeIntentPath($sessionId), (string)time());
+    }
+
+    /** Clear the mark. Called on every exit path out of a close, success or not. */
+    public static function clearClosing(string $sessionId): void
+    {
+        if ($sessionId === '') return;
+        @unlink(self::closeIntentPath($sessionId));
+    }
+
+    /**
+     * True while this session is deliberately closing.
+     *
+     * @param int|null $now injected by tests so the TTL is assertable without sleeping.
+     */
+    public static function isClosing(string $sessionId, ?int $now = null): bool
+    {
+        if ($sessionId === '') return false;
+        $path = self::closeIntentPath($sessionId);
+        $raw = @file_get_contents($path);
+        if ($raw === false) return false;
+        $at = (int)trim((string)$raw);
+        $now = $now ?? time();
+        if ($at <= 0 || ($now - $at) > self::CLOSE_INTENT_TTL) {
+            // Stale: the close never reported back. Drop the mark so the
+            // session shows as the orphan it has turned out to be.
+            @unlink($path);
+            return false;
+        }
+        return true;
+    }
+
+    public static function reconcileOrphans(array $live, array $drawerSessions): array
+    {
+        $known = [];
+        foreach ($drawerSessions as $w) {
+            $id = is_array($w) ? (string)($w['id'] ?? '') : (string)$w;
+            if ($id !== '') $known[$id] = true;
+        }
+        $out = [];
+        foreach ($live as $s) {
+            $id = (string)($s['id'] ?? '');
+            if ($id === '' || isset($known[$id])) continue;
+            // #218: a workspace the operator is deliberately closing is not an
+            // orphan, it is a close in progress. See markClosing above.
+            if (self::isClosing($id)) continue;
+            $out[] = [
+                'id'         => $id,
+                'agentId'    => (string)($s['agentId'] ?? ''),
+                'path'       => (string)($s['path'] ?? ''),
+                'chatId'     => (string)($s['chatId'] ?? ''),
+                'started_at' => (int)($s['started_at'] ?? 0),
             ];
         }
         return $out;
@@ -926,8 +1373,9 @@ class TerminalService {
             }
             return \AICliAgents\Handlers\TerminalHandler::discoverLatestSessionId($agentId, $path);
         };
-        $save = $seams['save'] ?? function (string $path, string $agentId, string $id): void {
-            ConfigService::saveResumeId($path, $agentId, $id);
+        $save = $seams['save'] ?? function (string $path, string $agentId, string $id, string $sessionId = ''): void {
+            // Pass 1 is disk-only (newest on disk): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+            ConfigService::saveDiskFallbackResumeId($path, $agentId, $id, $sessionId);
         };
         $closeFull = $seams['closeFull'] ?? function (array $session): void {
             self::cleanCloseSession($session);
@@ -976,7 +1424,7 @@ class TerminalService {
             try {
                 $id = ($agentId !== '' && $path !== '') ? $discover($agentId, $path) : null;
                 if ($id !== null && $id !== '') {
-                    $save($path, $agentId, (string)$id);
+                    $save($path, $agentId, (string)$id, (string)($s['id'] ?? ''));
                     $summary['fallback_saved']++;
                     $hasFallback[] = $s;
                 } else {

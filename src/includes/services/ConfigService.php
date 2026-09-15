@@ -12,6 +12,7 @@ namespace AICliAgents\Services;
 
 class ConfigService {
     const CONFIG_PATH = "/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg";
+    private static ?string $lastWorkspaceSaveMessage = null;
 
     /**
      * Retrieves the plugin configuration.
@@ -27,9 +28,14 @@ class ConfigService {
             'debug_logging' => '0',
             'home_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
             'agent_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
-            'sync_interval_mins' => '0',
-            'sync_interval_hours' => '1',
+            // #153: the former sync_interval_hours/mins keys were removed — no
+            // scheduler ever read them. The automatic-save cadence is
+            // bake_schedule_minutes (below), which the Configuration tab now exposes.
             'write_protect_agents' => '1',
+            // #110: where a session RUNS: 'share' (= the workspace path, today's
+            // behaviour) or 'pool' (the pool path when the share is cache-only, so
+            // the agent's cwd never holds the /mnt/user FUSE mount open).
+            'workspace_cwd' => 'share',
             'storage_opt_last_run' => '0',
             'enable_tab' => '1',
             'version_check_schedule' => '0 6 * * *',
@@ -85,6 +91,70 @@ class ConfigService {
             // 60 s. Lift to 120-300 s if you have 100+ entities or run on slow
             // USB / contended memory.
             'event_stopping_flush_timeout_seconds' => '60',
+            // PLUGIN_MANAGEMENT_TOOLS.md: read-only "plugin management" tool
+            // catalogue for agents (AdminMcpTools). Off on a fresh install —
+            // '0' here makes that explicit instead of relying on the service's
+            // own fallback. Settings > Configuration > Plugin management.
+            'admin_tools_enabled'                  => '0',
+            // CONTINUE_ON_RESTART.md (2026-09-09): moved here from the Relay's
+            // settings.json — this governs whether a WORKSPACE resumes its own
+            // work after a restart, not Relay messaging. On by default, same as
+            // it was at the old location. A value already saved at the OLD
+            // location (including an explicit "0") is migrated the first time
+            // autoContinueOnRestart() runs — see that method.
+            'auto_continue_on_restart'             => '1',
+            // RELAY_WAITING_PILL.md (2026-09-09) Part 2/3: capture-on-deliver. Off by
+            // default — the operator turns it on deliberately in Settings > Session &
+            // Environment. When on, clicking Deliver on a waiting-message pill records
+            // one redacted pane sample paired with the gate's verdict, to build correct
+            // idle profiles for agents nobody has observed yet. See RelayGateSampleService.
+            'relay_gate_sampling_enabled'          => '0',
+            // AGENT_VOICE.md R3: empty tts_url means browser-speech mode. The
+            // matching secret (tts_api_key) is NEVER a cfg key — it lives only
+            // in secrets.cfg (SecretService::TOKEN_KEY = 'TTS_API_KEY').
+            'tts_url'                              => '',
+            'tts_voice'                            => 'af_heart',
+            'tts_speed'                            => '1.0',
+            // VOICE_SWITCHES.md R1: the one global on/off switch. Off by
+            // default. '0'/'1' string, read the same way every other
+            // plugin-config boolean is read (never a truthy cast).
+            'voice_enabled'                        => '0',
+            // VOICE_INPUT.md R1: empty stt_url means browser-recognition mode
+            // (the page's own SpeechRecognition, no server round trip). The
+            // matching secret (stt_api_key) is NEVER a cfg key — it lives only
+            // in secrets.cfg (VoiceService::STT_TOKEN_KEY = 'STT_API_KEY').
+            'stt_url'                               => '',
+            'stt_model'                             => 'whisper-1',
+            'stt_language'                          => '',
+            // VOICE_MAIL.md R8: how much voice mail to keep. A message goes when
+            // its workspace holds more than this many (heard ones first), or when
+            // it is older than this many days, whichever comes first.
+            'voicemail_max_per_workspace'           => '50',
+            'voicemail_max_age_days'                => '7',
+            // HOME_BACKUP.md: a clean, restorable copy of a user's home on a
+            // target the operator chose. Empty target = the feature is off.
+            'backup_target'                        => '',
+            // 'cold' closes the sessions first (consistent agent databases);
+            // 'warm' copies the live home with no close (best effort).
+            'backup_quiesce'                        => 'cold',
+            // How many snapshots to keep per user (oldest removed first, never
+            // the one 'latest' points to).
+            'backup_keep'                           => '5',
+            // 'off' | 'daily:HH:MM' | 'weekly:D:HH:MM' (D = 0-6, 0 = Sunday).
+            'backup_schedule'                       => 'off',
+            // Newline list of rsync exclude patterns. These are re-downloadable
+            // caches (2026-09-12 incident loss list) — never the agent's own
+            // config, memory, transcripts, or secrets.
+            'backup_excludes'                       => ".claude/plugins/**\n**/node_modules/**\n.grok/marketplace-cache/**\n.gemini/antigravity-cli/**\n.cache/**\n.claude/image-cache/**\n**/*.tmp",
+            // When on, a session recorded 'working' at close time gets one
+            // Continue nudge after it is resumed post-backup.
+            'backup_nudge_working'                  => '1',
+            // WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3: the largest single file the
+            // upload overlay accepts, in bytes. 0 = no cap. Read by
+            // UtilityHandler::getUploadLimits() as `max_file_bytes`. A file at
+            // or below this is still sent in chunks when it is bigger than one
+            // chunk — this setting only bounds the TOTAL file size.
+            'upload_max_bytes'                      => '536870912',
         ];
 
         if (!file_exists(self::CONFIG_PATH)) {
@@ -104,6 +174,77 @@ class ConfigService {
         }
 
         return $merged;
+    }
+
+    /**
+     * The config file's OWN keys, with no defaults merged in — needed to tell
+     * "never set" apart from "set to the default value" (getConfig() cannot
+     * make that distinction, since a merge fills in every missing key). Used
+     * by the auto-continue-on-restart migration below. Returns [] when the
+     * file is absent or unparsable, same as getConfig()'s own fallback.
+     */
+    private static function rawConfigFile(): array {
+        if (!file_exists(self::CONFIG_PATH)) return [];
+        $config = @parse_ini_file(self::CONFIG_PATH);
+        return is_array($config) ? $config : [];
+    }
+
+    /**
+     * CONTINUE_ON_RESTART.md (2026-09-09): auto-continue-on-restart moved here
+     * from AgentRelayService — it decides whether a WORKSPACE resumes its own
+     * work after a restart (TmuxService::submitContinueNudge()), which is
+     * session-restart behaviour, not Relay messaging. It only lived on the
+     * Relay tab because #34 needed a server-side file and reused the nearest
+     * one that existed.
+     *
+     * This getter doubles as the one-time migration: if this plugin's own
+     * config has never stored the key (rawConfigFile() has no entry — NOT the
+     * same as getConfig(), which would already show the merged-in default),
+     * read whatever the OLD Relay-owned settings.json holds — including an
+     * explicit false — adopt it, and persist it here so the read-through
+     * happens at most once per install. An install that never touched the
+     * setting at the old location adopts the new default (on).
+     */
+    public static function autoContinueOnRestart(): bool {
+        $raw = self::rawConfigFile();
+        if (array_key_exists('auto_continue_on_restart', $raw)) {
+            return (string)$raw['auto_continue_on_restart'] === '1';
+        }
+
+        $adopted = true; // new default, used when the old location never had a value either
+        if (\class_exists(AgentRelayService::class)) {
+            try {
+                $legacy = AgentRelayService::legacyAutoContinueOnRestartIfStored();
+                if ($legacy !== null) $adopted = $legacy;
+            } catch (\Throwable $e) {
+                LogService::log("Auto-continue migration read failed: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+            }
+        }
+        self::persistAutoContinueOnRestart($adopted);
+        return $adopted;
+    }
+
+    /** Explicit setter for the Manager UI / tests. Writes straight to this plugin's own config. */
+    public static function setAutoContinueOnRestart(bool $enabled): array {
+        return self::persistAutoContinueOnRestart($enabled)
+            ? ['status' => 'ok', 'enabled' => $enabled]
+            : ['status' => 'error', 'message' => 'Could not save the auto-continue setting.'];
+    }
+
+    /**
+     * Writes only the auto_continue_on_restart key, leaving every other key in
+     * the file (or its absence) untouched — deliberately narrower than
+     * saveConfig(), which would materialise the FULL default map to disk on a
+     * fresh install the first time anything reads this setting.
+     */
+    private static function persistAutoContinueOnRestart(bool $enabled): bool {
+        $raw = self::rawConfigFile();
+        $raw['auto_continue_on_restart'] = $enabled ? '1' : '0';
+        $content = "";
+        foreach ($raw as $key => $value) {
+            $content .= "$key=\"" . addslashes((string)$value) . "\"" . PHP_EOL;
+        }
+        return AtomicWriteService::write(self::CONFIG_PATH, $content);
     }
 
     // Phase 5 consolidate-policy bounds (mirror bash common.sh constants).
@@ -146,6 +287,8 @@ class ConfigService {
         $newHomePath = $newConfig['home_storage_path'] ?? $oldHomePath;
         $oldVersionSchedule = $config['version_check_schedule'] ?? '0 6 * * *';
         $oldHealthSchedule  = $config['health_check_schedule'] ?? '*/30 * * * *';
+        $oldAdminTools      = (string)($config['admin_tools_enabled'] ?? '0');
+        $oldVoiceEnabled    = (string)($config['voice_enabled'] ?? '0');
 
         $changedKeys = [];
         foreach ($newConfig as $key => $val) {
@@ -192,15 +335,87 @@ class ConfigService {
             self::updateHealthCheckCron($newHealthSchedule);
         }
 
+        // PLUGIN_MANAGEMENT_TOOLS.md: keep the plugin-management MCP server and
+        // its projected skill in step with the setting the instant it is saved,
+        // so the switch does not wait for the next boot to take effect.
+        //
+        // Gated on an actual CHANGE, exactly like the two cron schedules above.
+        // ensureMcpRegistered() is a cheap no-op when the stored registration
+        // already agrees, but saveConfig() is called from far more places than the
+        // settings screen, and an unconditional call makes every one of them read
+        // the Config Hub store to answer a question nobody asked. InitService still
+        // calls it unconditionally at boot, which is where the self-heal belongs.
+        $newAdminTools = (string)($config['admin_tools_enabled'] ?? '0');
+        if ($newAdminTools !== $oldAdminTools && \class_exists(AdminMcpTools::class)) {
+            try {
+                AdminMcpTools::ensureMcpRegistered();
+            } catch (\Throwable $e) {
+                LogService::log("AdminMcpTools::ensureMcpRegistered() failed after config save: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+            }
+        }
+
+        // VOICE_SWITCHES.md R8: tell every open tab the global switch moved,
+        // through the SAME `aicli_voice` channel a spoken clip uses — but
+        // never on a no-op save (a memory rule from an earlier incident: a
+        // publisher that fires on every save, not only on a real change,
+        // storms every open tab). Gated on an actual CHANGE, exactly like the
+        // admin_tools_enabled hook above.
+        $newVoiceEnabled = (string)($config['voice_enabled'] ?? '0');
+        if ($newVoiceEnabled !== $oldVoiceEnabled && \class_exists(VoiceService::class)) {
+            try {
+                VoiceService::publishState($newVoiceEnabled === '1');
+            } catch (\Throwable $e) {
+                LogService::log("VoiceService::publishState() failed after config save: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+            }
+        }
+
         return true;
     }
 
     /**
      * Updates the cron job for agent version checking.
      */
+    /**
+     * A cron schedule that is SAFE to write into /etc/cron.d.
+     *
+     * 2026-09-09: both cron writers interpolated the stored schedule straight into the
+     * file — `"# comment\n$schedule $script &> /dev/null\n"` — with no escaping. A value
+     * containing a newline therefore writes an ARBITRARY ROOT CRON LINE. Nothing
+     * user-facing could reach it (only the settings form writes the key, and the
+     * plugin-management allow-list deliberately excludes both schedule keys for exactly
+     * this reason), so this was a sharp edge rather than a live hole. It is still an
+     * unvalidated write to /etc/cron.d as root, and it should not survive on trust.
+     *
+     * Accept only what cron actually needs: five whitespace-separated fields built from
+     * digits, * / , - and the step/range syntax, or one of the @-shorthands cron
+     * defines. Anything else — a newline above all — is refused and the caller leaves
+     * the existing file alone rather than writing something it cannot vouch for.
+     *
+     * @return string '' when the schedule is unusable, otherwise the trimmed schedule.
+     */
+    public static function safeCronSchedule(string $schedule): string {
+        $schedule = trim($schedule);
+        if ($schedule === '') return '';
+        // No control characters anywhere — a newline is the whole attack.
+        if (preg_match('/[\x00-\x1F\x7F]/', $schedule)) return '';
+        $shorthands = ['@reboot','@yearly','@annually','@monthly','@weekly','@daily','@midnight','@hourly'];
+        if (in_array(strtolower($schedule), $shorthands, true)) return strtolower($schedule);
+        $fields = preg_split('/\s+/', $schedule);
+        if (!is_array($fields) || count($fields) !== 5) return '';
+        foreach ($fields as $field) {
+            if (!preg_match('#^[0-9*/,\-]+$#', $field)) return '';
+        }
+        return $schedule;
+    }
+
     public static function updateVersionCheckCron(string $schedule): void {
         $cronFile = '/etc/cron.d/unraid-aicliagents.agent-check';
         $script = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/agentcheck';
+
+        if ($schedule !== '' && self::safeCronSchedule($schedule) === '') {
+            LogService::log('Refused an unsafe version-check cron schedule; the existing schedule is unchanged.', LogService::LOG_ERROR, 'ConfigService');
+            return;
+        }
 
         if (empty($schedule)) {
             // Disabled — remove cron file
@@ -220,6 +435,11 @@ class ConfigService {
     public static function updateHealthCheckCron(string $schedule): void {
         $cronFile = '/etc/cron.d/unraid-aicliagents.health-check';
         $script = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/healthcheck.php';
+
+        if ($schedule !== '' && self::safeCronSchedule($schedule) === '') {
+            LogService::log('Refused an unsafe health-check cron schedule; the existing schedule is unchanged.', LogService::LOG_ERROR, 'ConfigService');
+            return;
+        }
 
         if (empty($schedule)) {
             // Disabled — remove cron file
@@ -260,8 +480,16 @@ class ConfigService {
         }
 
         @file_put_contents($configFile, $content);
-        exec("/etc/rc.d/rc.nginx reload > /dev/null 2>&1");
-        LogService::log("Nginx configuration updated and reloaded.", LogService::LOG_DEBUG, "ConfigService");
+        // #168: DETACH + DELAY the nginx reload. During a plugin install/upgrade
+        // this method runs inside the Unraid plugin-manager's `plugin … nchan`
+        // wrapper, which streams the script output to the browser THROUGH nginx.
+        // A synchronous reload severs that stream mid-progress — the dialog
+        // freezes and the wrapper can even hang on the dead pipe (zombie child +
+        // "operation continues in background" banner). Running it detached, a few
+        // seconds later, lets the wrapper finish streaming and reap cleanly first.
+        // fd 9 (the install flock) is closed so the detached child can't inherit it.
+        exec("setsid bash -c 'sleep 3; /etc/rc.d/rc.nginx reload' > /dev/null 2>&1 < /dev/null 9>&- &");
+        LogService::log("Nginx configuration updated; reload scheduled (detached).", LogService::LOG_DEBUG, "ConfigService");
     }
 
     /**
@@ -331,20 +559,208 @@ class ConfigService {
     /**
      * Gets the full list of workspaces (sessions).
      */
+    /**
+     * Resolve which agent a request is really about, and NEVER guess.
+     *
+     * Eight call sites used to write `$_GET['agentId'] ?? 'gemini-cli'`. That default
+     * is indefensible: a request that forgot to name its agent does not become a Gemini
+     * request. Four of those sites LAUNCH a terminal, so a missing parameter started the
+     * wrong agent in the user's workspace; saveEnv() WROTE environment variables into
+     * another agent's env file. A silently wrong answer is worse than a refusal, so this
+     * returns '' when it cannot be certain and the caller reports an error.
+     *
+     * Order: an explicitly supplied id wins; otherwise the workspace record for this
+     * session id; otherwise the workspace record for this path — but ONLY when exactly
+     * one workspace matches, because two workspaces may share a path with different
+     * agents. An ambiguous path refuses, the same way uniqueIdentityMatch() refuses to
+     * guess a Relay owner. Requested 2026-09-09.
+     */
+    public static function resolveAgentId($requested, string $sessionId = '', string $path = ''): string {
+        $requested = is_string($requested) ? trim($requested) : '';
+        if ($requested !== '') return $requested;
+
+        $sessions = self::getWorkspaces()['sessions'] ?? [];
+        $sessionId = trim($sessionId);
+        if ($sessionId !== '') {
+            foreach ($sessions as $w) {
+                if (is_array($w) && (string)($w['id'] ?? '') === $sessionId) {
+                    $found = trim((string)($w['agentId'] ?? ''));
+                    if ($found !== '') return $found;
+                }
+            }
+        }
+
+        $path = trim($path);
+        if ($path !== '') {
+            $match = '';
+            foreach ($sessions as $w) {
+                if (!is_array($w) || (string)($w['path'] ?? '') !== $path) continue;
+                $candidate = trim((string)($w['agentId'] ?? ''));
+                if ($candidate === '') continue;
+                if ($match !== '' && $match !== $candidate) return '';   // ambiguous — refuse
+                $match = $candidate;
+            }
+            if ($match !== '') return $match;
+        }
+        return '';
+    }
+
+    /**
+     * The single user-facing answer when resolveAgentId() gave up. Logged at ERROR
+     * because it means a caller sent an incomplete request — that is a fault to fix,
+     * not a routine condition — and worded so the user knows what to do next.
+     */
+    public static function agentIdUnresolvedError(string $action, string $sessionId = '', string $path = ''): array {
+        LogService::log(
+            "Could not resolve the agent for '$action' (session=" . ($sessionId !== '' ? $sessionId : 'none')
+            . " path=" . ($path !== '' ? $path : 'none') . "); refused rather than defaulting to another agent.",
+            LogService::LOG_ERROR,
+            'ConfigService'
+        );
+        return ['status' => 'error', 'message' =>
+            'Sorry — the plugin cannot tell which agent this workspace uses, so it stopped '
+            . 'instead of starting the wrong one. Please close this workspace and open it '
+            . 'again from the drawer. The log records what went wrong.'];
+    }
+
     public static function getWorkspaces() {
         $file = self::getUserStatePath() . "/workspaces.json";
-        
-        if (!file_exists($file)) {
-            return ['sessions' => [], 'activeId' => null];
+
+        $workspaces = file_exists($file)
+            ? (json_decode(file_get_contents($file), true) ?: ['sessions' => [], 'activeId' => null])
+            : ['sessions' => [], 'activeId' => null];
+        return self::mergeRelayManagedWorkspaces($workspaces);
+    }
+
+    /**
+     * Relay topic actors are server-managed workspaces.  The browser drawer is
+     * a view of the registry, not its authority: an actor must remain available
+     * for headless boot/recovery even if a user closes every visible tab.
+     */
+    private static function relayActorIds(): array {
+        $file = self::getUserStatePath() . '/relay/actors.json';
+        $data = is_file($file) ? json_decode((string)@file_get_contents($file), true) : [];
+        $ids = [];
+        foreach (($data['actors'] ?? []) as $actor) {
+            if (is_array($actor) && !empty($actor['paused'])) continue;
+            $id = is_array($actor) ? (string)($actor['session_id'] ?? '') : (string)$actor;
+            if ($id !== '') $ids[$id] = true;
         }
-        
-        return json_decode(file_get_contents($file), true) ?: ['sessions' => [], 'activeId' => null];
+        return $ids;
+    }
+
+    private static function relayManagedWorkspaceFile(): string {
+        return self::getUserStatePath() . '/relay/managed_workspaces.json';
+    }
+
+    /** Persist the full descriptor at actor assignment time, before any UI can remove it. */
+    public static function rememberRelayManagedWorkspace(array $workspace): bool {
+        $id = (string)($workspace['id'] ?? '');
+        $path = (string)($workspace['path'] ?? '');
+        $agentId = (string)($workspace['agentId'] ?? '');
+        if ($id === '' || $path === '' || $agentId === '') return false;
+        $file = self::relayManagedWorkspaceFile();
+        $data = is_file($file) ? json_decode((string)@file_get_contents($file), true) : [];
+        if (!is_array($data)) $data = [];
+        $records = is_array($data['workspaces'] ?? null) ? $data['workspaces'] : [];
+        $records[$id] = $workspace;
+        return AtomicWriteService::writeJson($file, ['schema' => 1, 'workspaces' => $records]);
+    }
+
+    private static function mergeRelayManagedWorkspaces(array $workspaces): array {
+        $actorIds = self::relayActorIds();
+        if ($actorIds === []) return $workspaces;
+        $file = self::relayManagedWorkspaceFile();
+        $data = is_file($file) ? json_decode((string)@file_get_contents($file), true) : [];
+        $records = is_array($data['workspaces'] ?? null) ? $data['workspaces'] : [];
+        $sessions = [];
+        foreach (($workspaces['sessions'] ?? []) as $session) {
+            if (is_array($session) && !empty($session['id'])) $sessions[(string)$session['id']] = $session;
+        }
+        foreach ($actorIds as $id => $_) {
+            if (!isset($sessions[$id]) && isset($records[$id]) && is_array($records[$id])) $sessions[$id] = $records[$id];
+        }
+        $workspaces['sessions'] = array_values($sessions);
+        if (($workspaces['activeId'] ?? null) !== null && !isset($sessions[(string)$workspaces['activeId']])) {
+            $workspaces['activeId'] = array_key_first($sessions) ?: null;
+        }
+        return $workspaces;
+    }
+
+    /** All retained topic-owner (managed) workspace descriptors, keyed by id. */
+    public static function getManagedWorkspaces(): array {
+        $file = self::relayManagedWorkspaceFile();
+        $data = is_file($file) ? json_decode((string)@file_get_contents($file), true) : [];
+        return is_array($data['workspaces'] ?? null) ? $data['workspaces'] : [];
+    }
+
+    /** The retained descriptor for one managed workspace, or null if never recorded. */
+    public static function getManagedWorkspace(string $id): ?array {
+        $rec = self::getManagedWorkspaces()[$id] ?? null;
+        return is_array($rec) && $rec !== [] ? $rec : null;
+    }
+
+    /** Drop one retained managed-workspace snapshot (e.g. after an identity re-adopt). No-op if absent. */
+    public static function forgetManagedWorkspace(string $id): bool {
+        $file = self::relayManagedWorkspaceFile();
+        $data = is_file($file) ? json_decode((string)@file_get_contents($file), true) : [];
+        if (!is_array($data)) $data = [];
+        $records = is_array($data['workspaces'] ?? null) ? $data['workspaces'] : [];
+        if (!array_key_exists($id, $records)) return true;
+        unset($records[$id]);
+        return AtomicWriteService::writeJson($file, ['schema' => 1, 'workspaces' => $records]);
+    }
+
+    /**
+     * Pure decision: return the drawer with a managed workspace re-added from its
+     * retained snapshot. Idempotent — a workspace already present (or one with no
+     * snapshot) is returned unchanged. Extracted so recovery is testable without
+     * touching the real state path. Returns [workspaces, restored].
+     *
+     * @return array{0: array, 1: bool}
+     */
+    public static function withManagedWorkspaceRestored(array $managed, array $workspaces, string $id): array {
+        $rec = is_array($managed[$id] ?? null) && $managed[$id] !== [] ? $managed[$id] : null;
+        if ($rec === null) return [$workspaces, false];
+        foreach (($workspaces['sessions'] ?? []) as $s) {
+            if (is_array($s) && (string)($s['id'] ?? '') === $id) return [$workspaces, false];
+        }
+        $workspaces['sessions'][] = $rec;
+        return [$workspaces, true];
+    }
+
+    /**
+     * Bring a closed topic-owner workspace back into the visible drawer from its
+     * retained snapshot, so "Start now" can relaunch it as a real tab (#127).
+     * Returns the descriptor (restored or already present), or null if no snapshot.
+     */
+    public static function restoreManagedWorkspaceToDrawer(string $id): ?array {
+        $rec = self::getManagedWorkspace($id);
+        if ($rec === null) return null;
+        $file = self::getUserStatePath() . '/workspaces.json';
+        $ws = file_exists($file)
+            ? (json_decode((string)file_get_contents($file), true) ?: ['sessions' => [], 'activeId' => null])
+            : ['sessions' => [], 'activeId' => null];
+        [$ws, $restored] = self::withManagedWorkspaceRestored([$id => $rec], $ws, $id);
+        if ($restored) self::saveWorkspaces($ws);
+        return $rec;
     }
 
     /**
      * Saves the list of workspaces (sessions).
+     *
+     * WORKSPACE_LIFECYCLE_EVENTS.md R2: after a write actually lands, this
+     * publishes created/updated/removed on the `workspaces` channel from the
+     * diff between the registry before this call and the merged result — the
+     * publisher lives with the writer, so every caller (the drawer's save,
+     * AdminService, boot resurrection, import) announces the same way. Pass
+     * $publish=false only for a caller that must stay silent (none exist
+     * today); a resave with no on-disk change publishes nothing regardless.
      */
-    public static function saveWorkspaces($data) {
+    public static function saveWorkspaces($data, array $removedIds = [], bool $publish = true) {
+        self::$lastWorkspaceSaveMessage = null;
+        $before = self::getWorkspaces();
+        $data = self::mergeWorkspaceSnapshot($before, $data, $removedIds);
         $count = count($data['sessions'] ?? []);
         $file = self::getUserStatePath() . "/workspaces.json";
         if (self::workspaceDataMatchesFile($file, $data)) {
@@ -356,11 +772,295 @@ class ConfigService {
         // log was DEBUG.
         $ok = AtomicWriteService::writeJson($file, $data);
         if (!$ok) {
-            LogService::log("saveWorkspaces FAILED: count=$count path=$file", LogService::LOG_ERROR, "ConfigService");
+            $failure = AtomicWriteService::lastFailure();
+            $detail = $failure ? " stage={$failure['stage']} warning={$failure['warning']}" : '';
+            LogService::log("saveWorkspaces FAILED: count=$count path=$file$detail", LogService::LOG_ERROR, "ConfigService");
+            if (AtomicWriteService::lastFailureIsStaleHandle()) {
+                $user = self::getConfig()['user'] ?? 'root';
+                if (!is_string($user) || $user === '') $user = 'root';
+                StorageMountService::markHomeWriteFault($user, $failure ?? []);
+                // The mount arbiter performs a real remount only when the home
+                // is idle. A deferred result means an agent is still using it,
+                // so do not retry against the same known-bad overlay.
+                $repair = FileStorage::ensureReady("home/$user");
+                if ($repair->ok && !$repair->deferred && AtomicWriteService::writeJson($file, $data)) {
+                    LogService::log("saveWorkspaces recovered after safe overlay refresh: count=$count path=$file", LogService::LOG_INFO, "ConfigService");
+                    if ($publish) self::publishWorkspaceDiff($before['sessions'] ?? [], $data['sessions'] ?? [], $removedIds);
+                    return true;
+                }
+                self::$lastWorkspaceSaveMessage = 'Workspace state could not be saved because its storage needs repair. Close active agent sessions, then retry; repair is queued automatically.';
+            }
             return false;
         }
         LogService::log("saveWorkspaces ok: count=$count path=$file", LogService::LOG_INFO, "ConfigService");
+        if ($publish) self::publishWorkspaceDiff($before['sessions'] ?? [], $data['sessions'] ?? [], $removedIds);
         return true;
+    }
+
+    /** User-safe explanation for the current request's failed workspace save. */
+    public static function lastWorkspaceSaveMessage(): ?string {
+        return self::$lastWorkspaceSaveMessage;
+    }
+
+    /**
+     * WORKSPACE_LIFECYCLE_EVENTS.md R2: runtime stamps excluded from the
+     * "updated" diff — they change on their own and must never make a save
+     * look like a person's edit: the last-active clock, the resumed chat id
+     * (rewritten by the agent itself), and the R5 creation audit stamp (set
+     * once, never a user edit — mergeWorkspaceSnapshot already preserves it
+     * on a resend). changedSnapshotFields() compares every OTHER key present
+     * on either record — today that means `name`, `path`, `agentId` and
+     * `title` (the fields the drawer/admin tools actually write onto a
+     * session record); `args`, `env`, `autoLaunch` and `channel` live in
+     * their own per-agent/per-workspace stores today (ArgsService,
+     * EnvService, ConfigService::setAgentAutoLaunch, AgentRegistry's channel
+     * setter) so they never appear on a record and compare as a no-op — a
+     * future record embedding one of them is compared automatically, with no
+     * second look at this list. `env` is the one exception: compared by key
+     * NAMES only (never the secret values) — see changedSnapshotFields().
+     */
+    private const VOLATILE_SNAPSHOT_KEYS = ['lastActive', 'created', 'chatSessionId', 'createdBy', 'createdAt'];
+
+    /**
+     * WORKSPACE_LIFECYCLE_EVENTS.md R2: diff the registry before a save
+     * against the sessions array after the merge, for the created/updated/
+     * removed events the writer publishes. Pure — no I/O, no publish.
+     *
+     * $removedIds is the raw list the CALLER asked to remove this save (not
+     * the merge's cumulative tombstone set) — an id no longer present in
+     * $beforeSessions (already gone from an earlier save) is dropped here,
+     * which is the "an id already tombstoned publishes nothing twice" edge
+     * case (WORKSPACE_LIFECYCLE_EVENTS.md Edge Cases).
+     *
+     * @return array{created: array[], updated: array<string,string[]>, removed: string[]}
+     */
+    public static function diffWorkspaceSnapshot(array $beforeSessions, array $afterSessions, array $removedIds): array {
+        $before = [];
+        foreach ($beforeSessions as $s) {
+            if (is_array($s) && !empty($s['id'])) $before[(string)$s['id']] = $s;
+        }
+        $beforeOrder = array_keys($before);
+
+        $after = [];
+        foreach ($afterSessions as $s) {
+            if (is_array($s) && !empty($s['id'])) $after[(string)$s['id']] = $s;
+        }
+        $afterOrder = array_keys($after);
+
+        // Order is RELATIVE, among the rows present in both snapshots. A row
+        // that was inserted or removed shifts every absolute index after it,
+        // and that is not a change to the other rows. Only a row whose
+        // position among the common rows moved carries `order`.
+        $commonBefore = array_values(array_filter($beforeOrder, static fn($id) => isset($after[$id])));
+        $commonAfter  = array_values(array_filter($afterOrder,  static fn($id) => isset($before[$id])));
+        $posBefore = array_flip($commonBefore);
+        $posAfter  = array_flip($commonAfter);
+
+        $created = [];
+        $updated = [];
+        foreach ($after as $id => $record) {
+            if (!isset($before[$id])) {
+                $created[] = $record;
+                continue;
+            }
+            $fields = self::changedSnapshotFields($before[$id], $record);
+            if (($posBefore[$id] ?? null) !== ($posAfter[$id] ?? null)) {
+                $fields[] = 'order';
+            }
+            if ($fields !== []) $updated[$id] = $fields;
+        }
+
+        $removed = [];
+        foreach (array_values(array_filter($removedIds, 'is_string')) as $id) {
+            if (isset($before[$id])) $removed[] = $id;
+        }
+
+        return ['created' => $created, 'updated' => $updated, 'removed' => $removed];
+    }
+
+    /**
+     * The fields that differ between two session records — every key present
+     * on either side EXCEPT `id` (the identity we already matched them by)
+     * and VOLATILE_SNAPSHOT_KEYS. Sorted so the reported `fields` list is
+     * deterministic regardless of key insertion order.
+     */
+    private static function changedSnapshotFields(array $prior, array $next): array {
+        $keys = array_unique(array_merge(array_keys($prior), array_keys($next)));
+        $changed = [];
+        foreach ($keys as $key) {
+            if (!is_string($key) || $key === 'id') continue;
+            if (in_array($key, self::VOLATILE_SNAPSHOT_KEYS, true)) continue;
+            if ($key === 'env') {
+                $a = array_keys(is_array($prior['env'] ?? null) ? $prior['env'] : []);
+                $b = array_keys(is_array($next['env'] ?? null) ? $next['env'] : []);
+                sort($a);
+                sort($b);
+                if ($a !== $b) $changed[] = 'env';
+                continue;
+            }
+            if (($prior[$key] ?? null) !== ($next[$key] ?? null)) $changed[] = $key;
+        }
+        sort($changed);
+        return $changed;
+    }
+
+    /**
+     * WORKSPACE_LIFECYCLE_EVENTS.md R2: publish created/updated/removed on
+     * the `workspaces` channel from the diff, AFTER the write this call
+     * describes has already landed on disk. Best-effort — a publish failure
+     * must never surface as a save failure; NchanService::publish() itself
+     * never throws.
+     */
+    private static function publishWorkspaceDiff(array $beforeSessions, array $afterSessions, array $removedIds): void {
+        if (!class_exists('\\AICliAgents\\Services\\NchanService')) return;
+        $diff = self::diffWorkspaceSnapshot($beforeSessions, $afterSessions, $removedIds);
+        foreach ($diff['created'] as $record) {
+            NchanService::publish('workspaces', [
+                'event'     => 'created',
+                'id'        => (string)($record['id'] ?? ''),
+                'agentId'   => (string)($record['agentId'] ?? ''),
+                'name'      => (string)($record['name'] ?? ''),
+                'path'      => (string)($record['path'] ?? ''),
+                'createdBy' => (string)($record['createdBy'] ?? 'human'),
+            ]);
+        }
+        foreach ($diff['updated'] as $id => $fields) {
+            NchanService::publish('workspaces', ['event' => 'updated', 'id' => $id, 'fields' => $fields]);
+        }
+        foreach ($diff['removed'] as $id) {
+            NchanService::publish('workspaces', ['event' => 'removed', 'id' => $id]);
+        }
+    }
+
+    /**
+     * Merge a browser snapshot into the server registry. Omission is not a
+     * deletion: another tab may have created that workspace after this tab
+     * loaded. Only an explicit removed id may delete a server-side row.
+     */
+    public static function mergeWorkspaceSnapshot(array $existing, array $incoming, array $removedIds = []): array {
+        // A close and an older browser save can cross on the wire.  Omission
+        // alone must not delete a workspace, but an explicit close must also
+        // not be undone by that older save arriving afterwards.  Retain a
+        // bounded tombstone set in the registry for 24 hours; ids are
+        // generated uniquely, so this only rejects stale copies of the row.
+        // Lengthened from 1 hour (WORKSPACE_LIFECYCLE_EVENTS.md "Tombstones"):
+        // once `removed` is pushed and a device has reconciled, it never
+        // resends the row, so a stale save surviving this long is a bug
+        // worth seeing rather than a normal race to tolerate.
+        $now = time();
+        $tombstones = [];
+        foreach (($existing['deletedIds'] ?? []) as $id => $deletedAt) {
+            if (is_string($id) && is_int($deletedAt) && $deletedAt > ($now - 86400)) {
+                $tombstones[$id] = $deletedAt;
+            }
+        }
+        foreach (array_values(array_filter($removedIds, 'is_string')) as $id) {
+            $tombstones[$id] = $now;
+        }
+        // Keep the on-disk registry bounded even if a client creates and closes
+        // many workspaces during the tombstone hour.
+        if (count($tombstones) > 256) {
+            arsort($tombstones, SORT_NUMERIC);
+            $tombstones = array_slice($tombstones, 0, 256, true);
+        }
+        $removed = array_fill_keys(array_keys($tombstones), true);
+        // A Relay topic actor is an operational service, not an ordinary drawer
+        // tab. Its definition is kept server-side and cannot be deleted by a
+        // stale browser snapshot or the close-workspace button.
+        foreach (self::relayActorIds() as $id => $_) unset($removed[$id]);
+
+        // WORKSPACE_LIFECYCLE_EVENTS.md R5: every workspace record carries
+        // createdBy/createdAt. Indexed once so the incoming loop below can tell
+        // "an existing record the drawer resent" (preserve its original stamp)
+        // from "a genuinely new id" (stamp it now) without a second scan.
+        $existingById = [];
+        foreach (($existing['sessions'] ?? []) as $s) {
+            if (is_array($s) && !empty($s['id'])) $existingById[(string)$s['id']] = $s;
+        }
+
+        $sessions = [];
+        foreach (($incoming['sessions'] ?? []) as $session) {
+            if (!is_array($session) || empty($session['id']) || isset($removed[$session['id']])) continue;
+            $id = (string)$session['id'];
+            $prior = $existingById[$id] ?? null;
+            if ($prior !== null) {
+                // An existing record the drawer resent without these fields
+                // (older browser state) keeps its original stamp — explicit
+                // values on $session still win, they are never overwritten.
+                if (!array_key_exists('createdBy', $session) && array_key_exists('createdBy', $prior)) {
+                    $session['createdBy'] = $prior['createdBy'];
+                }
+                if (!array_key_exists('createdAt', $session) && array_key_exists('createdAt', $prior)) {
+                    $session['createdAt'] = $prior['createdAt'];
+                }
+            } else {
+                // A genuinely new workspace — stamp it now if the caller did not.
+                if (!array_key_exists('createdAt', $session)) $session['createdAt'] = $now;
+                if (!array_key_exists('createdBy', $session)) $session['createdBy'] = self::currentActorSessionId();
+            }
+            $sessions[$id] = $session;
+        }
+        foreach (($existing['sessions'] ?? []) as $session) {
+            if (!is_array($session) || empty($session['id'])) continue;
+            $id = (string)$session['id'];
+            if (!isset($removed[$id]) && !isset($sessions[$id])) $sessions[$id] = $session;
+        }
+        // Order rule (WORKSPACE_LIFECYCLE_EVENTS.md, Edge Cases): a partial
+        // save, one record from a tool or a service, never moves a row. Only a
+        // full list, the drawer's own reorder, decides the order. A new id from
+        // a partial save goes to the end, where the drawer would put it. Without
+        // this rule a single-record save pulled that row to the front, the next
+        // full-list save from a tab moved it back, and both published `order`.
+        $incomingIds = [];
+        foreach (($incoming['sessions'] ?? []) as $s) {
+            if (is_array($s) && !empty($s['id'])) $incomingIds[(string)$s['id']] = true;
+        }
+        $liveExisting = [];
+        foreach (array_keys($existingById) as $id) {
+            if (!isset($removed[$id])) $liveExisting[] = $id;
+        }
+        $isFullList = true;
+        foreach ($liveExisting as $id) {
+            if (!isset($incomingIds[$id])) { $isFullList = false; break; }
+        }
+        if (!$isFullList) {
+            $ordered = [];
+            foreach ($liveExisting as $id) {
+                if (isset($sessions[$id])) $ordered[$id] = $sessions[$id];
+            }
+            foreach ($sessions as $id => $s) {
+                if (!isset($ordered[$id])) $ordered[$id] = $s;
+            }
+            $sessions = $ordered;
+        }
+        $incoming['sessions'] = array_values($sessions);
+        if ($tombstones !== []) $incoming['deletedIds'] = $tombstones;
+        else unset($incoming['deletedIds']);
+        if (!array_key_exists('activeId', $incoming)) $incoming['activeId'] = $existing['activeId'] ?? null;
+        if ($incoming['activeId'] !== null && !isset($sessions[(string)$incoming['activeId']])) {
+            $incoming['activeId'] = $existing['activeId'] ?? (array_key_first($sessions) ?: null);
+        }
+        return $incoming;
+    }
+
+    /**
+     * Who created a brand-new workspace record, for WORKSPACE_LIFECYCLE_EVENTS.md
+     * R5's `createdBy` field: the agent session behind AICLI_SESSION_ID, or
+     * 'human' when there is none (a browser save, or a call with no session).
+     * Guarded with class_exists so a unit test that loads ConfigService alone
+     * (without EventActor) still gets a sane default instead of a fatal.
+     */
+    private static function currentActorSessionId(): string {
+        if (!class_exists('\\AICliAgents\\Services\\EventActor')) return 'human';
+        try {
+            $actor = \AICliAgents\Services\EventActor::current();
+        } catch (\Throwable $e) {
+            return 'human';
+        }
+        if (($actor['type'] ?? '') === 'agent' && !empty($actor['sessionId'])) {
+            return (string)$actor['sessionId'];
+        }
+        return 'human';
     }
 
     /**
@@ -448,27 +1148,226 @@ class ConfigService {
      * (e.g. "claude --resume <uuid>"). Surfaced back to the UI so the
      * next session on the same combo can offer a Resume button.
      */
+    /**
+     * Human name of a workspace by session id: the live drawer first, then the
+     * retained managed snapshot (a workspace closed in the browser but still
+     * running keeps its name there). '' when neither knows it — callers pick their
+     * own fallback, and must never print a raw id like "sc8ymt" to an operator.
+     * One copy, used by the Activity tray's start rows and waiting-message pills.
+     */
+    public static function workspaceName(string $sessionId): string {
+        foreach (self::getWorkspaces()['sessions'] ?? [] as $w) {
+            if ((string)($w['id'] ?? '') === $sessionId) {
+                $n = trim((string)($w['name'] ?? ''));
+                if ($n !== '') return $n;
+            }
+        }
+        $managed = self::getManagedWorkspace($sessionId);
+        return is_array($managed) ? trim((string)($managed['name'] ?? '')) : '';
+    }
+
     private static function getResumeFilePath($path, $agentId) {
         $hash = md5($path . $agentId);
         return self::getUserStatePath() . "/resumes/resume_$hash.json";
     }
 
-    public static function getResumeId($path, $agentId) {
-        $file = self::getResumeFilePath($path, $agentId);
-        if (!file_exists($file)) return null;
-        $data = json_decode(file_get_contents($file), true);
-        return is_array($data) ? ($data['chat_id'] ?? null) : null;
+    // -----------------------------------------------------------------------
+    // Resume identity: a conversation belongs to ONE workspace
+    // (docs/specs/RESUME_IDENTITY_PER_WORKSPACE.md)
+    //
+    // Two workspaces may be open on the same folder with the same agent. The old
+    // single slot, keyed md5(path . agentId), made them one identity: whichever
+    // closed last owned it, and the other resumed that conversation. Now each
+    // workspace has its own record, and the per-folder slot survives only as a
+    // "last conversation closed in this folder" POINTER that records its owner —
+    // it still lets a NEW workspace, created with resume ticked, pick up where the
+    // folder left off, but never hands out a conversation an open sibling owns.
+    // -----------------------------------------------------------------------
+
+    /** The per-WORKSPACE record: {chat_id, path, agent, saved_at}. */
+    private static function getSessionResumeFilePath(string $sessionId): string {
+        $sid = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        return self::getUserStatePath() . "/resumes/session_$sid.json";
     }
 
-    public static function saveResumeId($path, $agentId, $chatId) {
-        $file = self::getResumeFilePath($path, $agentId);
-        $data = ['chat_id' => $chatId, 'saved_at' => time()];
-        return AtomicWriteService::writeJson($file, $data);
+    private static function readResumeJson(string $file): ?array {
+        if (!is_file($file)) return null;
+        $data = json_decode((string)@file_get_contents($file), true);
+        return is_array($data) ? $data : null;
     }
 
-    public static function clearResumeId($path, $agentId) {
-        $file = self::getResumeFilePath($path, $agentId);
-        return @unlink($file);
+    /**
+     * Ids of the OPEN drawer workspaces on this folder with this agent. Closing a
+     * workspace removes it from the drawer, which is exactly what frees its
+     * conversation for the next workspace on the folder.
+     *
+     * @return list<string>
+     */
+    public static function openWorkspaceIdsFor(string $path, string $agentId): array {
+        $want = rtrim($path, '/');
+        $out = [];
+        foreach (self::getWorkspaces()['sessions'] ?? [] as $w) {
+            if (rtrim((string)($w['path'] ?? ''), '/') !== $want) continue;
+            if ((string)($w['agentId'] ?? '') !== $agentId) continue;
+            $id = (string)($w['id'] ?? '');
+            if ($id !== '') $out[] = $id;
+        }
+        return $out;
+    }
+
+    /** Is another OPEN workspace (not $sessionId) on this same folder with this same agent? */
+    public static function isSharedFolder(string $path, string $agentId, string $sessionId): bool {
+        foreach (self::openWorkspaceIdsFor($path, $agentId) as $id) {
+            if ($id !== $sessionId) return true;
+        }
+        return false;
+    }
+
+    /**
+     * The chat id a workspace was LAUNCHED with, read from its run script. Used only
+     * as EVIDENCE to attribute a legacy (ownerless) folder slot on a shared folder —
+     * never as a live identity: Claude forks a conversation on resume, so this is
+     * where a workspace started, not where it is now. '' when unknown or fresh.
+     */
+    public static function launchedChatId(string $sessionId): string {
+        $sid = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        if ($sid === '') return '';
+        $user = (self::getConfig()['user'] ?? 'root') ?: 'root';
+        $workDir = class_exists('\AICliAgents\Services\UtilityService')
+            ? \AICliAgents\Services\UtilityService::getWorkDir($user)
+            : "/tmp/unraid-aicliagents/work/$user";
+        $script = "$workDir/aicli-run-$sid.sh";
+        if (!is_file($script)) return '';
+        if (!preg_match('/^export AICLI_CHAT_SESSION_ID=(\S*)$/m', (string)@file_get_contents($script), $m)) return '';
+        $chat = trim($m[1], "'\"");
+        return ($chat !== '_fresh_' && preg_match('/^[A-Za-z0-9_-]{1,128}$/', $chat)) ? $chat : '';
+    }
+
+    /**
+     * PURE — which conversation may THIS workspace resume? Unit-tested without files.
+     *
+     * @param array|null           $session   the workspace's own record {chat_id, path, agent}
+     * @param array|null           $pointer   the folder pointer {chat_id, owner?}
+     * @param string               $sessionId '' for a workspace that does not exist yet
+     *                                        (the new-workspace dialog)
+     * @param list<string>         $openIds   OPEN drawer workspaces on this folder + agent
+     * @param array<string,string> $launched  session id => chat id it launched with (evidence)
+     * @return array{chat:?string,reason:string}
+     */
+    public static function resumeDecision(?array $session, ?array $pointer, string $path, string $agentId,
+                                          string $sessionId, array $openIds, array $launched): array {
+        // 1. Its own record wins — but only for the folder and agent it was written for.
+        if ($session !== null) {
+            $own = (string)($session['chat_id'] ?? '');
+            if ($own !== '' && rtrim((string)($session['path'] ?? ''), '/') === rtrim($path, '/')
+                && (string)($session['agent'] ?? '') === $agentId) {
+                return ['chat' => $own, 'reason' => 'own_record'];
+            }
+        }
+        $chat = (string)($pointer['chat_id'] ?? '');
+        if ($chat === '') return ['chat' => null, 'reason' => 'none'];
+        $owner  = (string)($pointer['owner'] ?? '');
+        $others = array_values(array_filter($openIds, static fn($id) => $id !== $sessionId));
+
+        // 2. The folder pointer names its owner.
+        if ($owner !== '') {
+            if ($owner === $sessionId)              return ['chat' => $chat, 'reason' => 'own_pointer'];
+            if (in_array($owner, $openIds, true))   return ['chat' => null,  'reason' => "owned_by_open:$owner"];
+            return ['chat' => $chat, 'reason' => 'owner_closed'];
+        }
+
+        // 3. A legacy slot records no owner. Attribute it by launch evidence, and never
+        //    to two workspaces: a sibling that launched with it keeps it.
+        foreach ($others as $id) {
+            if (($launched[$id] ?? '') === $chat)   return ['chat' => null,  'reason' => "evidence_names:$id"];
+        }
+        if ($sessionId !== '' && ($launched[$sessionId] ?? '') === $chat) {
+            return ['chat' => $chat, 'reason' => 'evidence_names_self'];
+        }
+        if ($others !== [])                         return ['chat' => null,  'reason' => 'shared_no_evidence'];
+        return ['chat' => $chat, 'reason' => 'legacy_unshared'];
+    }
+
+    /**
+     * The conversation this workspace should resume, or null. $sessionId is the
+     * workspace; omit it only where no workspace exists yet (the new-workspace dialog).
+     */
+    public static function getResumeId($path, $agentId, ?string $sessionId = null) {
+        $path = (string)$path; $agentId = (string)$agentId; $sid = (string)($sessionId ?? '');
+        $session = $sid !== '' ? self::readResumeJson(self::getSessionResumeFilePath($sid)) : null;
+        $pointer = self::readResumeJson(self::getResumeFilePath($path, $agentId));
+        $open    = self::openWorkspaceIdsFor($path, $agentId);
+        // Evidence is read only for an ownerless slot on a folder other workspaces share.
+        $launched = [];
+        if ($pointer !== null && (string)($pointer['owner'] ?? '') === '' && array_diff($open, [$sid]) !== []) {
+            foreach (array_unique(array_merge($open, $sid !== '' ? [$sid] : [])) as $id) {
+                $launched[$id] = self::launchedChatId($id);
+            }
+        }
+        $d = self::resumeDecision($session, $pointer, $path, $agentId, $sid, $open, $launched);
+        if ($d['chat'] === null && $d['reason'] !== 'none') {
+            LogService::log("Resume withheld for " . ($sid !== '' ? $sid : 'a new workspace')
+                . " at $path ($agentId): {$d['reason']}", LogService::LOG_INFO, 'ConfigService');
+        }
+        return $d['chat'];
+    }
+
+    /**
+     * Record a conversation for a workspace. The folder pointer is always updated
+     * (it serves the NEXT workspace on this folder) and names its owner.
+     */
+    public static function saveResumeId($path, $agentId, $chatId, ?string $sessionId = null) {
+        $sid = (string)($sessionId ?? '');
+        $now = time();
+        // CLAUDE_RESUME_BY_SESSION_ID.md R1/R4: a named Claude session's exit line gives
+        // its NAME, which is not unique. Every save path comes through here, so resolve
+        // it to the conversation's id once, before anything is written.
+        if ((string)$agentId === ClaudeSessionNameResolver::AGENT_ID && is_string($chatId)
+            && !ClaudeSessionNameResolver::isSessionId($chatId)) {
+            $previous = $sid !== '' ? self::readResumeJson(self::getSessionResumeFilePath($sid)) : null;
+            $chatId = ClaudeSessionNameResolver::resolve((string)$agentId, (string)$path, $chatId,
+                is_array($previous) ? (string)($previous['chat_id'] ?? '') : null,
+                $sid !== '' && self::isSharedFolder((string)$path, (string)$agentId, $sid));
+        }
+        $ok = AtomicWriteService::writeJson(self::getResumeFilePath($path, $agentId),
+            ['chat_id' => $chatId, 'saved_at' => $now, 'owner' => $sid]);
+        if ($sid !== '') {
+            $ok = AtomicWriteService::writeJson(self::getSessionResumeFilePath($sid),
+                ['chat_id' => $chatId, 'path' => (string)$path, 'agent' => (string)$agentId, 'saved_at' => $now]) && $ok;
+        }
+        return $ok;
+    }
+
+    /**
+     * Record a conversation id that came from DISK — the newest in this folder's
+     * store — rather than from the workspace's own screen. On a folder another open
+     * workspace shares, "newest on disk" is as likely the sibling's conversation as
+     * this one's, so it is NOT saved: the workspace keeps its last good record. A
+     * stale conversation that is its own beats a fresh one that is someone else's.
+     *
+     * @return bool true when saved
+     */
+    public static function saveDiskFallbackResumeId($path, $agentId, $chatId, ?string $sessionId = null): bool {
+        $sid = (string)($sessionId ?? '');
+        if ($sid !== '' && self::isSharedFolder((string)$path, (string)$agentId, $sid)) {
+            LogService::log("Resume not saved for $sid at $path ($agentId): the newest conversation on disk cannot be"
+                . " attributed on a folder another open workspace shares", LogService::LOG_INFO, 'ConfigService');
+            return false;
+        }
+        return (bool)self::saveResumeId($path, $agentId, $chatId, $sessionId);
+    }
+
+    /** "Start as new": drop this workspace's record, and the folder pointer only if it is ours to drop. */
+    public static function clearResumeId($path, $agentId, ?string $sessionId = null) {
+        $sid = (string)($sessionId ?? '');
+        if ($sid !== '') @unlink(self::getSessionResumeFilePath($sid));
+        $file    = self::getResumeFilePath($path, $agentId);
+        $pointer = self::readResumeJson($file);
+        if ($pointer === null) return true;
+        $owner = (string)($pointer['owner'] ?? '');
+        $ours  = $owner === $sid
+            || ($owner === '' && ($sid === '' || !self::isSharedFolder((string)$path, (string)$agentId, $sid)));
+        return $ours ? @unlink($file) : true;
     }
 
     // -----------------------------------------------------------------------
@@ -535,7 +1434,10 @@ class ConfigService {
     {
         $map = self::getAgentAutoLaunchMap();
         $entry = $map[$agentId] ?? null;
-        if (!is_array($entry)) return ['autoLaunch' => false, 'freshIfNoResume' => false];
+        // #86: saved drawer workspaces are restart-enabled by default. An entry
+        // only exists when the user has made an explicit choice, so a stored
+        // false remains the opt-out while an absent row means ON.
+        if (!is_array($entry)) return ['autoLaunch' => true, 'freshIfNoResume' => true];
         return [
             'autoLaunch'      => !empty($entry['autoLaunch']),
             'freshIfNoResume' => !empty($entry['freshIfNoResume']),
@@ -588,7 +1490,15 @@ class ConfigService {
                 $path    = $session['path']    ?? '';
                 $agentId = $session['agentId'] ?? '';
                 if ($path === '' || $agentId === '') continue;
+                $legacyFile = self::getAutoLaunchFilePath($path, $agentId);
+                // Missing legacy files meant "no choice made", which now
+                // inherits the default-on policy. A present false file was an
+                // explicit user opt-out and must remain false after migration.
+                if (!file_exists($legacyFile)) continue;
                 $ws = self::getAutoLaunch($path, $agentId);
+                if (!array_key_exists($agentId, $agg)) {
+                    $agg[$agentId] = ['autoLaunch' => false, 'freshIfNoResume' => false];
+                }
                 if (empty($ws['autoLaunch'])) continue;
                 $cur = $agg[$agentId] ?? ['autoLaunch' => false, 'freshIfNoResume' => false];
                 $agg[$agentId] = [

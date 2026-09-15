@@ -106,7 +106,7 @@ fi
 # README.md is included so it lands at plugins/<name>/README.md where the Unraid
 # Plugins page renders it as the plugin description (see ShowPlugins.php:96).
 log_status "  > Deploying UI entry points..."
-for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page ArrayStopWarning.page README.md; do
+for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page AICliRelayMcp.page ArrayStopWarning.page README.md; do
     if [ -f "src/$f" ]; then
         cp -f "src/$f" "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
     else

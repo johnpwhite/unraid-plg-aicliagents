@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Kimi Code">
+  <defs><linearGradient id="k" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#635bff"/><stop offset="1" stop-color="#35c7ff"/></linearGradient></defs>
+  <rect width="64" height="64" rx="14" fill="url(#k)"/>
+  <path d="M17 14h9v15l13-15h11L34 32l17 18H39L26 35v15h-9z" fill="#fff"/>
+</svg>

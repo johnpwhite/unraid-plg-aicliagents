@@ -69,11 +69,17 @@ if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
     done
 
     # Remove emergency-installed agents from RAM
-    AGENT_BASE="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
     for flag in /tmp/unraid-aicliagents/.emergency_agent_*; do
         [ -f "$flag" ] || continue
         eid="${flag##*.emergency_agent_}"
-        edir="$AGENT_BASE/$eid"
+        # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): resolve_paths.sh is
+        # already sourced (best-effort) at the top of this file — route through its
+        # agent_mount() resolver, falling back to the literal only if sourcing failed.
+        if declare -f agent_mount >/dev/null 2>&1; then
+            edir="$(agent_mount "$eid")"
+        else
+            edir="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$eid"
+        fi
         if [ -d "$edir" ] && ! mountpoint -q "$edir" 2>/dev/null; then
             rm -rf "$edir"
             log "Removed emergency RAM agent: $eid"
@@ -128,6 +134,10 @@ if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
             // it during creation. A non-zero grace can't reap a session being born.
             \AICliAgents\Services\ProcessManager::sweepOrphanSessions(30);
             \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'array_started');
+            // Relay actors are explicitly selected by the administrator. Start
+            // only those marked for boot; this is independent of the normal
+            // workspace auto-launch setting and does not disturb live sessions.
+            \AICliAgents\Services\AgentRelayService::ensureBootActors();
         } else {
             aicli_log('disks_mounted: Storage path still not available. Will retry on next access.', AICLI_LOG_WARN, 'EventDisks');
         }

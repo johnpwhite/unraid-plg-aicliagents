@@ -55,7 +55,7 @@ class PendingAgentUpgradeService
      * @return array{status:string,message:string,active_sessions:int}
      */
     public static function queue(string $agentId, string $version, string $backupDest,
-                                 int $activeSessions, array $seams = []): array
+                                 int $activeSessions, array $seams = [], string $reason = ''): array
     {
         if (self::safeId($agentId) === '') {
             return ['status' => 'error', 'message' => 'Invalid agent ID', 'active_sessions' => 0];
@@ -71,20 +71,20 @@ class PendingAgentUpgradeService
         if (!AtomicWriteService::writeJson(self::requestPath($agentId), $request)) {
             return ['status' => 'error', 'message' => 'Could not save queued upgrade', 'active_sessions' => $activeSessions];
         }
-        self::setQueuedStatus($agentId, $activeSessions, $seams);
+        self::setQueuedStatus($agentId, $activeSessions, $seams, $reason);
         if (isset($seams['wake'])) $seams['wake']();
         else SupervisorService::wake();
         return [
             'status' => 'queued',
-            'message' => self::waitingMessage($activeSessions),
+            'message' => self::waitingMessage($activeSessions, $reason),
             'active_sessions' => $activeSessions,
         ];
     }
 
     /** @param array<string,callable> $seams */
-    private static function setQueuedStatus(string $agentId, int $count, array $seams): void
+    private static function setQueuedStatus(string $agentId, int $count, array $seams, string $reason = ''): void
     {
-        $message = self::waitingMessage($count);
+        $message = self::waitingMessage($count, $reason);
         if (isset($seams['status'])) {
             $seams['status']($message, 1, 'queued');
             return;
@@ -103,12 +103,23 @@ class PendingAgentUpgradeService
         ]);
     }
 
-    private static function waitingMessage(int $count): string
+    /**
+     * What the Store card says while an upgrade waits.
+     *
+     * docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): since most
+     * agents no longer wait at all, an agent that still does owes the user the
+     * reason. "Waiting for 2 active sessions to close" answers what is happening
+     * but not why this agent, nor what the user could do about it — and with
+     * other agents visibly upgrading straight away, that gap reads as a fault.
+     */
+    private static function waitingMessage(int $count, string $reason = ''): string
     {
+        $because = $reason !== '' ? " — $reason" : '';
         if ($count > 0) {
-            return "Upgrade queued safely — waiting for $count active session" . ($count === 1 ? '' : 's') . ' to close';
+            return "Upgrade queued safely — waiting for $count active session"
+                . ($count === 1 ? '' : 's') . ' to close' . $because;
         }
-        return 'Upgrade queued safely — waiting for the session boundary';
+        return 'Upgrade queued safely — waiting for the session boundary' . $because;
     }
 
     public static function cancel(string $agentId): void
@@ -176,7 +187,10 @@ class PendingAgentUpgradeService
                 $user = (string)($config['user'] ?? 'root');
                 if ($user === '' || $user === '0') $user = 'root';
                 SupervisorService::enqueue('home', $user, 'bake', 'pre_agent_install', 5, null, true);
-                $cmd = '/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php '
+                // #176: strip AICLI_SESSION_ID so the install job is never reapable
+                // as a session descendant (the supervisor caller has none today, but
+                // this keeps the guarantee regardless of who launches it).
+                $cmd = 'env -u AICLI_SESSION_ID /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php '
                     . escapeshellarg($agentId) . ' ' . escapeshellarg($version) . ' ' . escapeshellarg($backupDest);
                 UtilityService::execBg($cmd);
             }
@@ -201,7 +215,8 @@ class PendingAgentUpgradeService
         foreach (self::pendingAgentIds() as $agentId) self::processReady($agentId);
     }
 
-    private static function backgroundInstallRunning(string $agentId): bool
+    /** Public so the cancel handler can enforce the queued-only guard (#71 cancel). */
+    public static function backgroundInstallRunning(string $agentId): bool
     {
         $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
         exec($cmd, $out, $rc);

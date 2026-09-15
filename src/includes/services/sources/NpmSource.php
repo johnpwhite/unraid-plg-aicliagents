@@ -23,7 +23,7 @@ class NpmSource implements AgentSource {
             return false;
         }
 
-        $agentDir  = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir  = AgentRegistry::agentInstallPath($agentId);
         $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
         $versionSpec = $targetVersion ? "@$targetVersion" : "@latest";
 
@@ -66,7 +66,7 @@ class NpmSource implements AgentSource {
         $package = $this->packageName($agent);
         if ($package === '') return null;
 
-        $pJson = AgentRegistry::AGENT_BASE . "/$agentId/node_modules/$package/package.json";
+        $pJson = AgentRegistry::agentInstallPath($agentId) . "/node_modules/$package/package.json";
         if (file_exists($pJson)) {
             $data = json_decode(@file_get_contents($pJson), true);
             if (isset($data['version'])) return $data['version'];

@@ -54,18 +54,27 @@ function installVersionAgent(id, btn, explicitVersion) {
             // $.always receives the response on success and the xhr on fail;
             // defend against both shapes.
             var sessions = (data && data.sessions) ? data.sessions : [];
-            _showInstallConfirm(id, version, btn, label, sessions);
+            // UPGRADE_WITHOUT_INTERRUPTION.md: when the agent installs beside the
+            // running version, the operator's open sessions are irrelevant to
+            // this decision — do not warn about them and do not offer to close
+            // them. Default FALSE so an older backend, or any error, keeps the
+            // cautious old behaviour rather than silently promising safety.
+            var sideBySide = !!(data && data.side_by_side);
+            _showInstallConfirm(id, version, btn, label, sessions, sideBySide);
         });
 }
 
 // Single consolidated confirm modal. Shows the appropriate title + body for
 // install / upgrade / downgrade / reinstall. With active sessions the safe
 // default queues the change; destructive force-close is an explicit opt-in.
-function _showInstallConfirm(id, version, btn, label, sessions) {
+function _showInstallConfirm(id, version, btn, label, sessions, sideBySide) {
+    // An install that cannot affect the operator's sessions must not ask them
+    // about their sessions. Treat them as absent for every decision below.
+    var relevantSessions = sideBySide ? [] : sessions;
     // WP #964 (slice): an upgrade gets the richer keep-a-copy overlay — it
     // offers a rollback backup of the current version before replacing it.
     if (label === 'Upgrade') {
-        _showUpgradeBackupOverlay(id, version, btn, sessions);
+        _showUpgradeBackupOverlay(id, version, btn, relevantSessions, sideBySide, sessions.length);
         return;
     }
     var isInstall = !label || label === 'Install';
@@ -83,13 +92,22 @@ function _showInstallConfirm(id, version, btn, label, sessions) {
     if (label === 'Downgrade') {
         body += 'This will replace the current version with an older one.\n\n';
     }
-    if (sessions.length > 0) {
-        var lines = sessions.map(function(s) {
+    if (sideBySide && sessions.length > 0) {
+        // Say plainly that nothing stops, and what to do to pick the new one up.
+        body = '<div style="text-align:left;line-height:1.5">'
+             + 'Installs alongside the version you are running, so your '
+             + sessions.length + ' open workspace' + (sessions.length === 1 ? '' : 's')
+             + ' will not be interrupted.<br><br>'
+             + 'They keep the version they started with until you switch them over.'
+             + '</div>';
+        confirmText = isInstall ? 'Install' : ('Yes, ' + label);
+    } else if (relevantSessions.length > 0) {
+        var lines = relevantSessions.map(function(s) {
             var p = s.path || '<no workspace>';
             return '• ' + _escAttr(p) + '  (' + _escAttr((s.id || '').slice(0, 8)) + ')';
         }).join('<br>');
         body = '<div style="text-align:left;line-height:1.5">'
-             + sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
+             + relevantSessions.length + ' active session' + (relevantSessions.length === 1 ? '' : 's')
              + ' will remain running:<br>' + lines
              + '<br><br><b>The change will queue safely and start after all sessions close naturally.</b>'
              + '<label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer">'
@@ -101,18 +119,21 @@ function _showInstallConfirm(id, version, btn, label, sessions) {
         body = 'Proceed with installation.';
     }
 
-    // For an Install with no active sessions and no version-change warning,
-    // skip the modal entirely — no decision to make.
-    if (isInstall && sessions.length === 0) {
-        doInstall(id, version, btn, 0);
+    // For an Install with nothing to decide, skip the modal entirely. A
+    // side-by-side install with open workspaces still shows the one-line
+    // reassurance above rather than nothing, so the operator learns the rule
+    // once instead of wondering whether their sessions were at risk.
+    if (isInstall && relevantSessions.length === 0 && !(sideBySide && sessions.length > 0)) {
+        doInstall(id, version, btn, 0, null, false, sideBySide);
         return;
     }
 
+    var hasBody = body !== '';
     swal({
         title: title,
         text: body,
-        html: sessions.length > 0,
-        type: sessions.length > 0 ? 'warning' : (label === 'Downgrade' ? 'warning' : 'info'),
+        html: hasBody,
+        type: relevantSessions.length > 0 ? 'warning' : (label === 'Downgrade' ? 'warning' : 'info'),
         showCancelButton: true,
         confirmButtonText: confirmText,
         cancelButtonText: 'Cancel',
@@ -120,7 +141,7 @@ function _showInstallConfirm(id, version, btn, label, sessions) {
     }, function(confirmed) {
         if (!confirmed) return;
         var force = document.getElementById('aicli-force-upgrade');
-        doInstall(id, version, btn, sessions.length, null, !!(force && force.checked));
+        doInstall(id, version, btn, relevantSessions.length, null, !!(force && force.checked), sideBySide);
     });
 }
 
@@ -189,6 +210,12 @@ function _aicliRenderBackupEstimate(est) {
         toggle.checked = false; toggle.disabled = true;
         return;
     }
+    if (est.storage_format === 'unavailable') {
+        note.style.color = 'var(--orange, #e68a00)';
+        note.textContent = '⚠ No persisted current installation was found to back up.';
+        toggle.checked = false; toggle.disabled = true;
+        return;
+    }
     if (!est.sufficient) {
         note.style.color = 'var(--orange, #e68a00)';
         note.textContent = '⚠ Not enough space here for a backup. You can upgrade without one, or cancel.';
@@ -220,7 +247,11 @@ function _aicliBackupDestChanged() {
     }, 400);
 }
 
-function _showUpgradeBackupOverlay(id, version, btn, sessions) {
+function _showUpgradeBackupOverlay(id, version, btn, sessions, sideBySide, openCount) {
+    // `sessions` is already empty for a side-by-side agent (the caller strips
+    // them), so every branch below that warns about sessions or offers to close
+    // them simply does not run. openCount is the REAL number still open, used
+    // only to reassure — never to gate anything.
     _aicliBackupCtx.agentId = id;
     // Initial estimate with no dest → backend defaults it to the persistence
     // location and echoes the resolved path back.
@@ -230,6 +261,19 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
         var destVal = (est && est.dest) ? est.dest : '';
 
         var sessionHtml = '';
+        // Side by side with workspaces open: say so, once, in one line. The old
+        // flow said nothing here and then hid every terminal, which taught the
+        // operator to expect an interruption that no longer happens.
+        if (sideBySide && openCount > 0) {
+            sessionHtml = '<div style="text-align:left;line-height:1.5;margin-bottom:10px">'
+                + 'Installs alongside the version you are running — your '
+                + openCount + ' open workspace' + (openCount === 1 ? '' : 's')
+                + ' ' + (openCount === 1 ? 'is' : 'are') + ' not interrupted, and '
+                + (openCount === 1 ? 'keeps' : 'keep') + ' the version '
+                + (openCount === 1 ? 'it has' : 'they have') + ' until you switch '
+                + (openCount === 1 ? 'it' : 'them') + ' over.'
+                + '</div>';
+        }
         if (sessions.length > 0) {
             var lines = sessions.map(function(s) {
                 return '• ' + _escAttr(s.path || '<no workspace>')
@@ -274,7 +318,7 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
             text: html,
             html: true,
             showCancelButton: true,
-            confirmButtonText: sessions.length > 0 ? 'Queue upgrade safely' : 'Upgrade',
+            confirmButtonText: sessions.length > 0 ? 'Queue upgrade safely' : (sideBySide && openCount > 0 ? 'Install' : 'Upgrade'),
             cancelButtonText: 'Cancel',
             closeOnConfirm: false,
         }, function(confirmed) {
@@ -289,8 +333,23 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
                 ? { backup: true, dest: (destEl ? destEl.value.trim() : '') }
                 : null;
             swal.close();
-            doInstall(id, version, btn, sessions.length, opts, !!(forceEl && forceEl.checked));
+            doInstall(id, version, btn, sessions.length, opts, !!(forceEl && forceEl.checked), sideBySide);
         });
+
+        // Keep the primary action honest about the selected admission mode.
+        // Safe queueing remains the default; ticking the destructive opt-in
+        // immediately makes the button say what clicking it will do.
+        var forceUpgradeEl = document.getElementById('aicli-force-upgrade');
+        var confirmUpgradeEl = document.querySelector('.sweet-alert button.confirm');
+        if (forceUpgradeEl && confirmUpgradeEl) {
+            var syncUpgradeConfirmLabel = function() {
+                confirmUpgradeEl.textContent = forceUpgradeEl.checked
+                    ? 'Force upgrade now'
+                    : 'Queue upgrade safely';
+            };
+            forceUpgradeEl.addEventListener('change', syncUpgradeConfirmLabel);
+            syncUpgradeConfirmLabel();
+        }
 
         // swal renders synchronously — the overlay DOM exists now, so paint
         // the initial estimate into it.
@@ -298,7 +357,12 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions) {
     });
 }
 
-function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow) {
+// Agents whose in-flight install is running beside live workspaces, and how
+// many were open when it started — so the completion notice can tell the
+// operator exactly what to do to pick the new version up.
+var _sideBySideInstalls = {};
+
+function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, sideBySide) {
     // The click source can be a <button> OR a <select> (version picker). For
     // a select, mutating innerHTML would nuke the options, so we only swap
     // the waiting-state content on real buttons and just disable the select.
@@ -312,7 +376,9 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow) {
     $(btn).prop('disabled', true);
     if (!isSelect) $(btn).html('<i class="fa fa-spinner fa-spin"></i> WAIT...');
 
-    var safeQueue = !!(sessionsToClose && sessionsToClose > 0 && !forceNow);
+    // A side-by-side install is never queued and never closes anything: it is
+    // simply an install that happens to run while workspaces are open.
+    var safeQueue = !!(sessionsToClose && sessionsToClose > 0 && !forceNow && !sideBySide);
     _hideButtons(buttons);
     bar.css('width', safeQueue ? '1%' : '5%');
     // Status text reflects what the server is actually doing in the first
@@ -322,6 +388,8 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow) {
     // JSON takes over once polling kicks in.
     if (safeQueue) {
         status.text('Queueing safely — active sessions will keep running…');
+    } else if (sideBySide) {
+        status.text('Installing alongside your running version…');
     } else if (sessionsToClose && sessionsToClose > 0) {
         status.text('Closing ' + sessionsToClose + ' active session' + (sessionsToClose === 1 ? '' : 's') + '…');
     } else if (backupOpts && backupOpts.backup) {
@@ -359,9 +427,21 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow) {
         if (r.status === 'queued') {
             bar.css('width', '1%');
             status.text(r.message || 'Upgrade queued safely — waiting for active sessions to close');
-        } else if (!forceNow) {
+            _showCancelQueued(id);
+        } else if (!forceNow && !(sideBySide || r.side_by_side)) {
             // The backend acquired admission, raised its barrier, and started.
+            //
+            // This broadcast is what hides every terminal for this agent behind
+            // "Upgrading… session will resume automatically". That is honest
+            // ONLY when the install will really interrupt those sessions. A
+            // side-by-side install does not touch them — it writes into its own
+            // layer and the running version keeps serving — so hiding them
+            // there blocked the operator for no reason and told them their
+            // session was being resumed when it had never stopped.
+            // docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md
             _broadcastInstall('install-start', id, { at: 'install-admitted' });
+        } else if (sideBySide || r.side_by_side) {
+            _sideBySideInstalls[id] = (r.open_sessions || sessionsToClose || 0);
         }
         startInstallPolling(id, progress, bar, status, buttons, btn, originalContent);
     }).fail(function(xhr) {
@@ -396,6 +476,48 @@ function _broadcastInstall(type, agentId, extra) {
     catch (_err) { /* best-effort */ }
 }
 
+// #71 (cancel): let the user abandon a QUEUED upgrade (waiting for sessions to
+// close) before it auto-fires. Poll handles are tracked per agent so Cancel can
+// stop polling and revert the panel without a full page reload. Queued-only —
+// the backend refuses once the binary swap has begun.
+var _aicliInstallControls = {};
+function _showCancelQueued(id) {
+    if (document.getElementById('cancel-upg-' + id)) return;
+    var status = document.getElementById('status-text-' + id);
+    if (!status || !status.parentNode) return;
+    var b = document.createElement('button');
+    b.id = 'cancel-upg-' + id;
+    b.type = 'button';
+    b.className = 'aicli-cancel-queued';
+    b.textContent = 'Cancel';
+    b.title = 'Cancel this queued upgrade — it will not start';
+    b.style.cssText = 'margin-left:8px;padding:1px 8px;font-size:11px;cursor:pointer;';
+    b.onclick = function() { cancelQueuedUpgrade(id); };
+    status.parentNode.appendChild(b);
+}
+function _hideCancelQueued(id) {
+    var b = document.getElementById('cancel-upg-' + id);
+    if (b && b.parentNode) b.parentNode.removeChild(b);
+}
+function cancelQueuedUpgrade(id) {
+    var b = document.getElementById('cancel-upg-' + id);
+    if (b) { b.disabled = true; b.textContent = 'Cancelling…'; }
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=cancel_agent_upgrade&agentId=' + id + '&csrf_token=' + csrf, function(r) {
+        if (r && r.status === 'ok') {
+            if (_aicliInstallControls[id]) { try { _aicliInstallControls[id].stop(); } catch (_e) {} delete _aicliInstallControls[id]; }
+            _hideCancelQueued(id);
+            $('#progress-' + id).removeClass('active');
+            _showButtons($('#buttons-' + id));
+            _broadcastInstall('install-complete', id, { success: false, message: 'upgrade cancelled' });
+        } else {
+            swal('Could not cancel', (r && r.message) || 'The upgrade may have already started.', 'warning');
+            if (b) { b.disabled = false; b.textContent = 'Cancel'; }
+        }
+    }).fail(function() {
+        if (b) { b.disabled = false; b.textContent = 'Cancel'; }
+    });
+}
+
 function startInstallPolling(id, progress, bar, status, buttons, btn, originalContent) {
     // install-start already broadcast at doInstall entry so the Terminal tab
     // reacts immediately on confirm, not ~2 s later after the AJAX. No-op
@@ -406,6 +528,8 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
         if (d.status === 'error') {
             if (nchanSub) { nchanSub.stop(); nchanSub = null; }
             if (poller) clearInterval(poller);
+            delete _aicliInstallControls[id];
+            _hideCancelQueued(id);
             swal("Failed", d.message, "error");
             progress.removeClass('active'); _showButtons(buttons);
             _broadcastInstall('install-complete', id, { success: false, message: d.message || '' });
@@ -415,15 +539,57 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
             }
             return;
         }
+        // #71: while still queued (waiting for sessions), keep the Cancel affordance;
+        // remove it the moment the upgrade actually starts installing.
+        if (d.reason === 'queued_for_active_sessions') { _showCancelQueued(id); }
+        else { _hideCancelQueued(id); }
         if (typeof d.progress !== 'undefined' && d.progress >= 0) bar.css('width', d.progress + '%');
         if (d.status_text) status.text(d.status_text);
         else if (d.step) status.text(d.step);
+        // #87: while an installed upgrade waits for running processes, the server
+        // enumerates the blockers on every poll (pid, command, cwd, tmux, age, and
+        // whether each is a plugin workspace). Show them under the status line so
+        // the 99% wait is explained and refreshable, never an unexplained stall.
+        var blockersEl = status.next('.av2-install-blockers');
+        if (d.blockers) {
+            if (!blockersEl.length) blockersEl = $('<div class="av2-install-blockers" style="white-space:pre-wrap;font-size:11px;opacity:.8;margin-top:4px;"></div>').insertAfter(status);
+            blockersEl.text(d.blockers);
+        } else if (blockersEl.length) { blockersEl.remove(); }
         if (d.progress >= 100 || d.completed) {
             if (nchanSub) { nchanSub.stop(); nchanSub = null; }
             if (poller) clearInterval(poller);
+            delete _aicliInstallControls[id];
+            _hideCancelQueued(id);
             status.text("Finalizing...");
             _broadcastInstall('install-complete', id, { success: d.status !== 'error' });
-            setTimeout(function() { safeReload(); }, 1500);
+            // A side-by-side install finishes with the operator's workspaces
+            // still running the OLD version, and nothing on screen would say so.
+            // That is the one thing they need to know, and the only moment it is
+            // worth interrupting them for — otherwise they would reasonably
+            // assume the workspace they are looking at is now on the new
+            // version. Everything else about this install was deliberately
+            // silent. docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md
+            var openAtStart = _sideBySideInstalls[id] || 0;
+            delete _sideBySideInstalls[id];
+            if (openAtStart > 0 && d.status !== 'error') {
+                var name = (typeof agentRegistry === 'object' && agentRegistry[id] && agentRegistry[id].name) ? agentRegistry[id].name : id;
+                swal({
+                    title: 'Installed',
+                    text: '<div style="text-align:left;line-height:1.6">'
+                        + name + ' is installed and ready.<br><br>'
+                        + 'Your ' + openAtStart + ' open workspace' + (openAtStart === 1 ? '' : 's')
+                        + ' ' + (openAtStart === 1 ? 'is' : 'are') + ' still running the version '
+                        + (openAtStart === 1 ? 'it' : 'they') + ' started with, and '
+                        + (openAtStart === 1 ? 'was' : 'were') + ' never interrupted.<br><br>'
+                        + '<b>To move one onto this version, open its &ldquo;&hellip;&rdquo; menu and choose Switch to&nbsp;&hellip;</b>'
+                        + '</div>',
+                    html: true,
+                    type: 'success',
+                    confirmButtonText: 'Got it',
+                }, function() { safeReload(); });
+            } else {
+                setTimeout(function() { safeReload(); }, 1500);
+            }
         }
     }
 
@@ -432,9 +598,19 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
     if (typeof window.aicli_subscribeInstall === 'function') {
         nchanSub = window.aicli_subscribeInstall(id, handleProgress);
     }
+    // EVENT_FIRST_RECONCILIATION.md fact table: "Install / upgrade progress …
+    // 5s only while a progress bar is shown" — this poller's whole lifetime IS
+    // "a progress bar is shown" (created here, torn down at completion below),
+    // so 5s applies whether or not the nchan push is also connected; there is
+    // no separate "idle" state for it to be in.
     poller = setInterval(function() {
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_install_status&agentId=' + id + '&csrf_token=' + csrf, handleProgress);
-    }, nchanSub ? 5000 : 1000);
+    }, 5000);
+    // #71: expose stop() so Cancel can halt polling without a page reload.
+    _aicliInstallControls[id] = { stop: function() {
+        if (nchanSub) { nchanSub.stop(); nchanSub = null; }
+        if (poller) { clearInterval(poller); poller = null; }
+    } };
 }
 
 // --- Version Picker Population ---
@@ -1418,10 +1594,10 @@ function av2LoadAutoLaunchSection(agentId, panelBody) {
             const uid   = 'al-' + sanitiseId(agentId);
 
             const section = av2mkel('div', {class: 'av2-al-section'}, []);
-            section.appendChild(av2mkel('p', {class: 'av2-al-eyebrow'}, ['⚡ Auto-launch on open']));
+            section.appendChild(av2mkel('p', {class: 'av2-al-eyebrow'}, ['⚡ Keep saved workspaces running']));
             section.appendChild(av2mkel('p', {class: 'av2-al-caption'}, [
                 'When enabled, ALL of this agent’s workspaces (' + count +
-                ') start automatically when the AI Agents page opens or after a plugin upgrade.'
+                ') start after reboot and are recreated if their agent exits. Switch this off to opt out.'
             ]));
 
             const saveNote = av2mkel('span', {class: 'av2-save-note', style: 'display:inline-block; margin-top:8px;'}, ['']);
@@ -1436,7 +1612,7 @@ function av2LoadAutoLaunchSection(agentId, panelBody) {
 
             row.appendChild(av2mkel('label', {class: 'av2-al-toggle', 'for': uid}, [
                 chkAuto,
-                av2mkel('span', {}, ['Auto-launch all workspaces']),
+                av2mkel('span', {}, ['Restart all saved workspaces']),
             ]));
 
             row.appendChild(av2mkel('div', {class: 'av2-al-fresh'}, [
@@ -1458,6 +1634,9 @@ function av2LoadAutoLaunchSection(agentId, panelBody) {
             });
 
             section.appendChild(row);
+            section.appendChild(av2mkel('p', {class: 'av2-al-caption', style: 'margin-top:4px;'}, [
+                '"Start fresh" discards any saved session state and starts a brand-new session instead of resuming the previous one.'
+            ]));
             section.appendChild(saveNote);
             panelBody.appendChild(section);
         }
@@ -1522,6 +1701,9 @@ function av2LoadStoragePanel(panelOrBody, agentIdMaybe) {
             av2mkel('dd', {}, [m.mounted ? 'mounted' : 'not mounted']),
         ]);
         body.appendChild(dl);
+        body.appendChild(av2mkel('p', {style: 'margin:6px 0 0;opacity:.7;font-size:12px;'}, [
+            'Footprint is the disk space this agent uses on the server. In-memory data is recent, unsaved changes that could be lost if the agent stops before they are written to permanent storage.'
+        ]));
 
         // Show a "Persist to Flash" button when there is unsaved ZRAM data.
         // Queues a supervisor bake so the data lands on Flash even if the
@@ -1701,5 +1883,10 @@ function av2SaveArgs(form, event) {
     });
     return false;
 }
+
+// #165 rev 2026-09-04: the all-cards bake pill (av2PollBakeState + button
+// disabling) was removed on user feedback. A waiting upgrade now reports in
+// the waiting agent's own install-status area via install-bg's queued
+// statuses (see docs/specs/AGENT_CARD_BAKE_INDICATOR.md).
 
 </script>

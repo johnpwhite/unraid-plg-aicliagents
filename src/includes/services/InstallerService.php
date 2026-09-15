@@ -14,16 +14,47 @@ use AICliAgents\Services\Sources\SourceResolver;
 
 class InstallerService {
     /**
+     * #35: decide which version string to record after a successful install.
+     * The on-disk probe is ground truth; but when it can't read a version and the
+     * install was for an explicit target, that target IS what was installed — record
+     * it instead of the useless literal 'installed' that used to leave the UI showing
+     * a stale version. Returns null only when we have neither (caller falls back).
+     * Pure, so it is unit-testable without a real install.
+     */
+    public static function versionToRecord(?string $probed, ?string $targetVersion): ?string {
+        if ($probed !== null && trim($probed) !== '') return $probed;
+        if ($targetVersion !== null && trim($targetVersion) !== '') return $targetVersion;
+        return null;
+    }
+
+    /**
      * Installs an agent via NPM.
      * @param string $agentId The ID of the agent to install.
      */
+    /**
+     * End a staged install: clear the install-root override and release the
+     * staging overlay.
+     *
+     * docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3. Every exit path out of
+     * installAgent between staging and completion calls this, success or not.
+     * The override is process-scoped, so leaving it set would point the NEXT
+     * install in this process at a mount that no longer exists — which is why
+     * clearing it comes first here and is not conditional on the unstage
+     * succeeding.
+     */
+    private static function endStagedInstall(string $agentId, ?string $stagedRoot): void {
+        if ($stagedRoot === null) return;
+        AgentRegistry::setInstallRoot(null);
+        StorageMountService::unstageAgentInstall($agentId);
+    }
+
     public static function installAgent($agentId, $targetVersion = null) {
         @set_time_limit(900);
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
 
         $config = ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
-        $mnt = AgentRegistry::AGENT_BASE . "/$agentId";
+        $mnt = AgentRegistry::agentPath($agentId);
         
         $oldSize = 0;
         foreach (glob("$persistPath/agent_{$agentId}_*.sqsh") as $f) $oldSize += filesize($f);
@@ -87,8 +118,6 @@ class InstallerService {
         // also preserves the prior saved version so the user can keep using
         // the previous install — the install-status panel already surfaces the
         // failure, no need to also nuke the version metadata.
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
-
         // D-400 (#54): Dispatch on source type. NPM is handled by NpmSource; non-NPM agents
         // go through GithubReleaseSource / CurlInstallSource / TarballSource. SourceResolver
         // synthesises a {type:npm} source when the legacy top-level npm_package field is the
@@ -104,13 +133,54 @@ class InstallerService {
         LogService::log("Using source type '" . ($desc['type'] ?? '?') . "' for $agentId (target=$targetVersion)", LogService::LOG_INFO, "InstallerService");
         setInstallStatus("Starting install...", 20, $agentId);
 
+        // docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): install
+        // into a layer of this install's own, over the same read-only layers the
+        // running version is serving from, so nothing that is running sees the
+        // new version until its workspace is reloaded.
+        //
+        // Until now the install wrote straight into the live mount's writable
+        // layer, which is why an upgrade had to wait for every session of the
+        // agent to close: by the time the mount swap was even considered, the
+        // running sessions were already on the new binary.
+        //
+        // Staging is attempted only for source types whose install output is
+        // entirely reconstructible (SourceResolver::supportsSideBySideInstall).
+        // If it is unavailable for any reason the install proceeds exactly as
+        // before — a degraded install is better than a refused one, and the
+        // pre-install session queue is still in place behind it.
+        $stagedRoot = null;
+        if (SourceResolver::supportsSideBySideInstall($agent)) {
+            $stagedRoot = StorageMountService::stageAgentInstall($agentId);
+            if ($stagedRoot !== null) {
+                AgentRegistry::setInstallRoot($stagedRoot);
+                LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_install_side_by_side', [
+                    'agent' => $agentId,
+                    'version' => $targetVersion,
+                    'staged_at' => $stagedRoot,
+                ]);
+            } else {
+                LogService::log(
+                    "Side-by-side staging unavailable for $agentId — installing into the live layer (sessions of this agent must close before the new version is active).",
+                    LogService::LOG_WARN, "InstallerService"
+                );
+            }
+        }
+
         $ok = $source->fetch($agentId, $agent, $targetVersion, function(string $msg, int $pct) use ($agentId) {
             setInstallStatus($msg, $pct, $agentId);
         });
         if (!$ok) {
-            LogService::log("Fetch failed for $agentId (source=" . ($desc['type'] ?? '?') . ")", LogService::LOG_ERROR, "InstallerService");
-            setInstallStatus("Install failed", 0, $agentId, "Check logs for details");
-            return ['status' => 'error', 'message' => 'Fetch failed'];
+            // Surface the source's own reason when it has one (e.g. "Install script
+            // timed out after 900s while: ==> Downloading …") instead of the bare
+            // "Check logs for details" — that is what the activity tray shows.
+            $reason = (method_exists($source, 'lastError')) ? trim((string)$source->lastError()) : '';
+            LogService::log("Fetch failed for $agentId (source=" . ($desc['type'] ?? '?') . ")" . ($reason !== '' ? ": $reason" : ''), LogService::LOG_ERROR, "InstallerService");
+            setInstallStatus("Install failed", 0, $agentId, $reason !== '' ? $reason : "Check logs for details");
+            // A failed install leaves nothing behind: the staging layer is torn
+            // down with its half-written tree, and the version in service was
+            // never touched, so there is nothing to roll back.
+            self::endStagedInstall($agentId, $stagedRoot);
+            return ['status' => 'error', 'message' => $reason !== '' ? "Fetch failed: $reason" : 'Fetch failed'];
         }
 
         $source->stage($agentId, $agent);
@@ -119,16 +189,30 @@ class InstallerService {
         setInstallStatus("Finalizing permissions...", 80, $agentId);
 
         // D-323: Discover version via source-specific probe (package.json / --version / VERSION file).
-        $installedVer = $source->discoverVersion($agentId, $agent);
+        // #35: if the probe can't read a version off disk but the install was for an
+        // EXPLICIT target, that target is what npm installed — record it rather than the
+        // useless literal 'installed' (which is what left the UI showing a stale version
+        // after a successful upgrade). Always log what got recorded so a future
+        // "still shows old version" is diagnosable from the log alone.
+        $probed = $source->discoverVersion($agentId, $agent);
+        $installedVer = self::versionToRecord($probed, $targetVersion);
         if ($installedVer) {
             AgentRegistry::saveVersion($agentId, $installedVer);
+            LogService::log(
+                "Recorded installed version for $agentId: $installedVer (probed=" . ($probed ?? 'none') . ", target=$targetVersion)",
+                LogService::LOG_INFO, "InstallerService"
+            );
         } else {
-            LogService::log("Warning: Could not discover version for $agentId after install.", LogService::LOG_WARN, "InstallerService");
+            LogService::log("Warning: Could not discover version for $agentId after install (no explicit target either).", LogService::LOG_WARN, "InstallerService");
             AgentRegistry::saveVersion($agentId, 'installed');
         }
 
         PermissionService::enforcePluginPermissions();
-        @exec("chmod -R 755 " . escapeshellarg($agentDir));
+        // The tree that was just installed — the staging mount during a
+        // side-by-side install, the live mount otherwise. chmod'ing the live
+        // mount here would both miss the new files and touch a version that is
+        // running.
+        @exec("chmod -R 755 " . escapeshellarg(AgentRegistry::agentInstallPath($agentId)));
 
         setInstallStatus("Baking SquashFS delta...", 90, $agentId);
 
@@ -139,7 +223,16 @@ class InstallerService {
         // Bug #512: previously a sync StorageMigrationService::consolidateEntity
         // call ran here (D-332 phase 6), redundant with the post-bake trigger
         // and a source of install-time mount races.
-        $res = FileStorage::persist("agent/$agentId")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
+        if ($stagedRoot !== null) {
+            // Capture what the install wrote into its own layer as the agent's
+            // new layer, then release the staging mount. The mount refresh that
+            // op_bake runs afterwards is what binds the new version beside the
+            // running one and moves the stable name onto it.
+            $res = StorageMountService::bakeStagedInstall($agentId);
+            self::endStagedInstall($agentId, $stagedRoot);
+        } else {
+            $res = FileStorage::persist("agent/$agentId")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
+        }
         if ($res === 1) {
             LogService::log("Installer: Critical error during persistence bake for $agentId.", LogService::LOG_ERROR, "InstallerService");
             setInstallStatus("Install Failed (Bake Error)", 0, $agentId);
@@ -183,6 +276,26 @@ class InstallerService {
                 LogService::LOG_WARN, "InstallerService");
         }
 
+        // Seed manifest-declared `default_settings` into the agent's OWN JSON
+        // config file, for a setting with no env var or CLI flag equivalent
+        // (gemini-cli / qwen-code turn their self-updater off only through
+        // settings.json). Same additive, sidecar-tracked contract as above.
+        // AGENT_SELF_UPDATE_SUPPRESSION.md.
+        try {
+            $seedSettings = AgentSettingsSeedService::seedAgent($agentId);
+            if (!empty($seedSettings['seeded'])) {
+                LogService::log("Installer: seeded default_settings for $agentId — " . implode(',', $seedSettings['seeded']),
+                    LogService::LOG_INFO, "InstallerService");
+            }
+            foreach ($seedSettings['errors'] as $err) {
+                LogService::log("Installer: default_settings seed for $agentId reported '$err' — the plugin-upgrade sweep will retry",
+                    LogService::LOG_WARN, "InstallerService");
+            }
+        } catch (\Throwable $e) {
+            LogService::log("Installer: default_settings seed failed for $agentId: " . $e->getMessage(),
+                LogService::LOG_WARN, "InstallerService");
+        }
+
         // File-path-convention policy block (docs/specs/AGENT_FILE_PATH_CONVENTION.md):
         // best-effort, immediate injection so a freshly installed/upgraded agent has
         // the block without waiting for a full hub "Apply to agents" pass. Never
@@ -221,7 +334,7 @@ class InstallerService {
         }
 
         $package = $agent['npm_package'];
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir = AgentRegistry::agentPath($agentId);
         $pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
         $flagFile = "/tmp/unraid-aicliagents/.emergency_agent_$agentId";
 
@@ -294,7 +407,7 @@ class InstallerService {
 
         $config = ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
-        $mnt = AgentRegistry::AGENT_BASE . "/$agentId";
+        $mnt = AgentRegistry::agentPath($agentId);
 
         $oldSize = 0;
         foreach (glob("$persistPath/agent_{$agentId}_*.sqsh") as $f) $oldSize += filesize($f);
@@ -306,9 +419,7 @@ class InstallerService {
         $safeId = escapeshellarg($agentId);
         // Non-root audit: iterate every per-uid tmux server so non-root
         // user sessions for this agent get killed too.
-        foreach (glob('/tmp/unraid-aicliagents/tmux/tmux-*', GLOB_ONLYDIR) ?: [] as $perUserDir) {
-            $sock = $perUserDir . '/default';
-            if (!file_exists($sock)) continue;
+        foreach (\AICliAgents\Services\ProcessManager::tmuxSocketPaths() as $sock) {
             $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
             exec("$tmuxBin ls -F '#S' 2>/dev/null | grep 'aicli-agent-.*$agentId' | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
         }
@@ -342,6 +453,10 @@ class InstallerService {
         // 7. Remove workspace sessions that used this agent (keep home data intact)
         try {
             $ws = ConfigService::getWorkspaces();
+            $removedIds = array_values(array_map(
+                static fn($s) => (string)($s['id'] ?? ''),
+                array_filter($ws['sessions'] ?? [], static fn($s) => ($s['agentId'] ?? '') === $agentId)
+            ));
             $before = count($ws['sessions'] ?? []);
             $ws['sessions'] = array_values(array_filter($ws['sessions'] ?? [], function($s) use ($agentId) {
                 return ($s['agentId'] ?? '') !== $agentId;
@@ -356,7 +471,7 @@ class InstallerService {
                     }
                     if (!$activeStillExists) $ws['activeId'] = !empty($ws['sessions']) ? $ws['sessions'][0]['id'] : null;
                 }
-                ConfigService::saveWorkspaces($ws);
+                ConfigService::saveWorkspaces($ws, $removedIds);
                 LogService::log("Removed $removed workspace session(s) for $agentId.", LogService::LOG_INFO, "InstallerService");
             }
         } catch (\Throwable $e) {
@@ -397,6 +512,66 @@ class InstallerService {
         return is_dir($path) ? $path : '/';
     }
 
+    /** Inspect either storage backend without assuming every agent uses SquashFS. */
+    public static function inspectUpgradeBackupSource(string $agentId, string $persistPath): array {
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '', $agentId);
+        $layers = glob(rtrim($persistPath, '/') . "/agent_{$safe}_*.sqsh") ?: [];
+        if ($layers !== []) {
+            $bytes = 0;
+            foreach ($layers as $layer) $bytes += (int)@filesize($layer);
+            return ['format' => 'squashfs', 'bytes' => $bytes, 'layers' => $layers, 'path' => null];
+        }
+
+        $path = rtrim($persistPath, '/') . "/passthrough/agents/$safe";
+        if (!is_dir($path)) {
+            return ['format' => 'unavailable', 'bytes' => 0, 'layers' => [], 'path' => null];
+        }
+        return ['format' => 'passthrough', 'bytes' => self::directorySize($path), 'layers' => [], 'path' => $path];
+    }
+
+    private static function directorySize(string $dir): int {
+        if (!is_dir($dir)) return 0;
+        $bytes = 0;
+        try {
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($it as $item) {
+                if ($item->isFile() && !$item->isLink()) $bytes += (int)$item->getSize();
+            }
+        } catch (\UnexpectedValueException $e) {
+            return 0;
+        }
+        return $bytes;
+    }
+
+    private static function copyDirectory(string $source, string $dest): bool {
+        if (!is_dir($source)) return false;
+        $sourceReal = realpath($source);
+        $destAncestor = realpath(self::resolveExistingAncestor($dest));
+        if ($sourceReal !== false && $destAncestor !== false
+            && ($destAncestor === $sourceReal || strpos($destAncestor, $sourceReal . DIRECTORY_SEPARATOR) === 0)) {
+            return false; // Never recursively copy a directory into itself.
+        }
+        if (!is_dir($dest) && !@mkdir($dest, 0755, true) && !is_dir($dest)) return false;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($source, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($it as $item) {
+            $relative = substr($item->getPathname(), strlen(rtrim($source, '/')) + 1);
+            $target = rtrim($dest, '/') . '/' . $relative;
+            if ($item->isLink()) {
+                if (!@symlink((string)readlink($item->getPathname()), $target)) return false;
+            } elseif ($item->isDir()) {
+                if (!is_dir($target) && !@mkdir($target, $item->getPerms() & 0777, true) && !is_dir($target)) return false;
+            } elseif (!@copy($item->getPathname(), $target)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * WP #964 (slice): estimate the disk cost of backing up an agent's current
      * version before an upgrade, and check the destination has room.
@@ -412,9 +587,9 @@ class InstallerService {
         $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
         $destPath = trim($destPath) !== '' ? trim($destPath) : $persistPath;
 
-        $layers = glob("$persistPath/agent_{$agentId}_*.sqsh") ?: [];
-        $currentSize = 0;
-        foreach ($layers as $l) $currentSize += (int)@filesize($l);
+        $source = self::inspectUpgradeBackupSource($agentId, $persistPath);
+        $layers = $source['layers'];
+        $currentSize = (int)$source['bytes'];
 
         // Guesstimate the new version's footprint as ~the current version's.
         $estimatedNewSize = $currentSize;
@@ -435,6 +610,7 @@ class InstallerService {
             'free'               => $free,
             'sufficient'         => ($currentSize > 0 && $free >= $required),
             'layer_count'        => count($layers),
+            'storage_format'     => $source['format'],
         ];
     }
 
@@ -453,9 +629,10 @@ class InstallerService {
         $config = ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
 
-        $layers = glob("$persistPath/agent_{$agentId}_*.sqsh") ?: [];
-        if (empty($layers)) {
-            return ['status' => 'error', 'message' => "No SquashFS layers found for $agentId — nothing to back up"];
+        $source = self::inspectUpgradeBackupSource($agentId, $persistPath);
+        $layers = $source['layers'];
+        if ($source['format'] === 'unavailable' || (int)$source['bytes'] <= 0) {
+            return ['status' => 'error', 'message' => "No persisted agent installation found for $agentId — nothing to back up"];
         }
 
         $version = AgentRegistry::getInstalledVersion($agentId);
@@ -485,16 +662,24 @@ class InstallerService {
         }
 
         $copied = [];
-        foreach ($layers as $layer) {
-            $base = basename($layer);
-            if (!@copy($layer, "$backupDir/$base")) {
-                // Roll back the partial backup so a failed attempt leaves nothing.
-                foreach ($copied as $c) @unlink("$backupDir/$c");
-                @unlink("$backupDir/meta.json");
+        $payload = null;
+        if ($source['format'] === 'passthrough') {
+            $payload = 'passthrough';
+            if (!self::copyDirectory((string)$source['path'], "$backupDir/$payload")) {
+                self::rmdirContents($backupDir);
                 @rmdir($backupDir);
-                return ['status' => 'error', 'message' => "Failed to copy layer $base to $backupDir"];
+                return ['status' => 'error', 'message' => "Failed to copy the passthrough installation to $backupDir"];
             }
-            $copied[] = $base;
+        } else {
+            foreach ($layers as $layer) {
+                $base = basename($layer);
+                if (!@copy($layer, "$backupDir/$base")) {
+                    self::rmdirContents($backupDir);
+                    @rmdir($backupDir);
+                    return ['status' => 'error', 'message' => "Failed to copy layer $base to $backupDir"];
+                }
+                $copied[] = $base;
+            }
         }
 
         @file_put_contents("$backupDir/meta.json", json_encode([
@@ -502,10 +687,13 @@ class InstallerService {
             'version'    => $version,
             'created_at' => $dt,
             'layers'     => $copied,
+            'storage_format' => $source['format'],
+            'payload'    => $payload,
         ], JSON_PRETTY_PRINT));
 
         $bytes = 0;
         foreach ($copied as $c) $bytes += (int)@filesize("$backupDir/$c");
+        if ($payload !== null) $bytes = self::directorySize("$backupDir/$payload");
         LogService::log("Backed up $agentId v$version (" . count($copied) . " layer(s), "
             . round($bytes / 1048576, 1) . " MB) to $backupDir", LogService::LOG_INFO, "InstallerService");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_version_backed_up',
@@ -537,12 +725,16 @@ class InstallerService {
             if (!is_array($meta) || empty($meta['version'])) continue;
             $bytes = 0;
             foreach ((array)($meta['layers'] ?? []) as $l) $bytes += (int)@filesize("$dir/$l");
+            if (($meta['storage_format'] ?? '') === 'passthrough' && !empty($meta['payload'])) {
+                $bytes = self::directorySize("$dir/" . basename((string)$meta['payload']));
+            }
             $out[] = [
                 'version'     => (string)$meta['version'],
                 'created_at'  => (string)($meta['created_at'] ?? ''),
                 'dir'         => $dir,
                 'bytes'       => $bytes,
                 'layer_count' => count((array)($meta['layers'] ?? [])),
+                'storage_format' => (string)($meta['storage_format'] ?? 'squashfs'),
             ];
         }
         // Newest first — the meta created_at is the YYYYMMDDTHHMMSSZ stamp.
@@ -650,7 +842,11 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Not a retained backup for this agent'];
         }
         $meta = json_decode((string)@file_get_contents("$realBackup/meta.json"), true);
-        if (!is_array($meta) || empty($meta['version']) || empty($meta['layers'])) {
+        $storageFormat = (string)($meta['storage_format'] ?? 'squashfs');
+        $hasLayerPayload = !empty($meta['layers']);
+        $hasDirectoryPayload = $storageFormat === 'passthrough' && !empty($meta['payload'])
+            && is_dir("$realBackup/" . basename((string)$meta['payload']));
+        if (!is_array($meta) || empty($meta['version']) || (!$hasLayerPayload && !$hasDirectoryPayload)) {
             return ['status' => 'error', 'message' => 'Retained backup is missing or has no meta.json'];
         }
         $restoreVersion = (string)$meta['version'];
@@ -669,8 +865,52 @@ class InstallerService {
             // 1. Snapshot the current version so the user can roll forward.
             $cur = self::backupAgentVersion($agentId, $persistPath);
             if (($cur['status'] ?? '') !== 'ok'
-                && strpos((string)($cur['message'] ?? ''), 'No SquashFS layers') === false) {
+                && strpos((string)($cur['message'] ?? ''), 'nothing to back up') === false) {
                 return ['status' => 'error', 'message' => 'Could not snapshot the current version before restore: ' . ($cur['message'] ?? '?')];
+            }
+
+            // Passthrough backends have no SquashFS layers. Restore their
+            // retained directory snapshot with an off-to-the-side copy and a
+            // same-filesystem rename, then let FileStorage remount the bind.
+            if ($storageFormat === 'passthrough') {
+                $payload = "$realBackup/" . basename((string)$meta['payload']);
+                $current = rtrim($persistPath, '/') . "/passthrough/agents/$agentId";
+                $parent = dirname($current);
+                $stamp = gmdate('Ymd\THis\Z') . '-' . getmypid();
+                $staged = "$parent/.{$agentId}.restore-new-$stamp";
+                $retired = "$parent/.{$agentId}.restore-old-$stamp";
+
+                if (!self::copyDirectory($payload, $staged)) {
+                    self::rmdirContents($staged); @rmdir($staged);
+                    return ['status' => 'error', 'message' => 'Could not stage the retained passthrough installation'];
+                }
+                $released = FileStorage::release("agent/$agentId");
+                if (!$released->ok || $released->deferred) {
+                    self::rmdirContents($staged); @rmdir($staged);
+                    return ['status' => 'error', 'message' => 'Agent storage is still in use — close its sessions and retry'];
+                }
+
+                if (is_dir($current) && !@rename($current, $retired)) {
+                    self::rmdirContents($staged); @rmdir($staged);
+                    return ['status' => 'error', 'message' => 'Could not retire the current passthrough installation'];
+                }
+                if (!@rename($staged, $current)) {
+                    if (is_dir($retired)) @rename($retired, $current);
+                    self::rmdirContents($staged); @rmdir($staged);
+                    FileStorage::ensureReady("agent/$agentId");
+                    return ['status' => 'error', 'message' => 'Could not activate the retained passthrough installation'];
+                }
+                self::rmdirContents($retired); @rmdir($retired);
+
+                $remounted = FileStorage::ensureReady("agent/$agentId")->ok;
+                if (!$remounted) {
+                    return ['status' => 'error', 'message' => 'Retained installation restored, but the agent mount could not be reactivated'];
+                }
+                AgentRegistry::saveVersion($agentId, $restoreVersion);
+                VersionCheckService::invalidateAgent($agentId);
+                LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_version_restored',
+                    ['agent' => $agentId, 'version' => $restoreVersion, 'from' => $realBackup, 'storage_format' => 'passthrough']);
+                return ['status' => 'ok', 'version' => $restoreVersion];
             }
 
             // 2. Copy the retained layer(s) into the persistence directory.
@@ -707,7 +947,7 @@ class InstallerService {
             self::rmdirContents("/tmp/unraid-aicliagents/zram_upper/agents/$agentId/upper");
 
             // 6. Remount the agent stack to pick up the restored lower layer.
-            $mnt = AgentRegistry::AGENT_BASE . "/$agentId";
+            $mnt = AgentRegistry::agentPath($agentId);
             if (StorageMountService::isMounted($mnt)) {
                 StorageMountService::unmount($mnt);
             }
@@ -755,7 +995,25 @@ class InstallerService {
     public static function liveAgentLowerdir(string $agentId, string $mountsText): ?string
     {
         $safe   = preg_replace('/[^A-Za-z0-9._-]/', '', $agentId);
-        $needle = '/usr/local/emhttp/plugins/unraid-aicliagents/agents/' . $safe . ' ';
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): the needle must be
+        // the REAL current mount target, not always agentBase()/$safe — once an
+        // agent is migrated, /proc/mounts records the version-qualified directory
+        // agentPath()'s stable symlink points at, never the symlink's own name.
+        // agentLiveMountTarget() resolves that (falling back to the stable path
+        // itself for a not-yet-migrated agent, byte-identical to Phase 1 there).
+        //
+        // It uses agentPath()'s STRICT id validator internally, which this
+        // function's own $safe deliberately does not (Phase 1's permissive
+        // matcher design, kept below) — so a malformed id that
+        // agentLiveMountTarget() would reject falls back to the old permissive
+        // concatenation, which can never match a real mount line anyway (no
+        // real agent id looks like that).
+        try {
+            $target = AgentRegistry::agentLiveMountTarget($agentId);
+        } catch (\InvalidArgumentException $e) {
+            $target = AgentRegistry::agentBase() . '/' . $safe;
+        }
+        $needle = $target . ' ';
         foreach (explode("\n", $mountsText) as $line) {
             if (strpos($line, $needle) === false) continue;
             if (preg_match('/lowerdir=([^,\s]+)/', $line, $m)) return $m[1];

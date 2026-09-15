@@ -44,7 +44,10 @@ function refreshStats() {
             return;
         } else {
             $('#migration-overlay').hide();
-            if (statsInterval !== 5000) { statsInterval = 5000; resetStatsTimer(); }
+            // EVENT_FIRST_RECONCILIATION.md fact table: "Storage figures after any
+            // job … 30s". The aicli_storage_status push (NchanSubscribers.php)
+            // patches the figures between reads; this poll is the reconcile.
+            if (statsInterval !== 30000) { statsInterval = 30000; resetStatsTimer(); }
         }
         if (data.rootfs) {
             $('#rootfs-bar').css('width', data.rootfs.percent + '%');
@@ -57,8 +60,57 @@ function refreshStats() {
         // consumed by av2RefreshStoreCardSizes() driven by the Store-tab poll.
         renderHomeStats(data.homes);
         renderCleanupCard(data.artifacts);
+        // HOME_BACKUP.md R12: same source as renderHomeStats() above — "every
+        // user with a home" is exactly Object.keys(data.homes).
+        if (typeof renderBackupUsers === 'function') renderBackupUsers(data.homes);
     });
 }
+
+// REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E2: a dedicated 60s get_storage_status
+// reconcile while the Storage tab is actually visible. The live 'storage_status'
+// Nchan push (NchanSubscribers.php) already patches renderHomeStats/
+// renderCleanupCard between reads, but a push can be missed (a dropped
+// websocket, a publish that failed) — this reconcile is the backstop that
+// self-corrects within one minute, the same "poll behind the push" shape
+// refreshStats()'s own 30s global poll already gives every OTHER tab. Armed
+// only while the Storage tab is the active one — never a timer ticking into a
+// backgrounded tab — and reads the SAME renderHomeStats/renderCleanupCard
+// functions refreshStats() drives, so there is exactly one rendering path.
+(function() {
+    var _reconcileTimer = null;
+
+    function storageReconcileTick() {
+        aicliAjax('get_storage_status', {}, function(data) {
+            if (!data) return;
+            if (data.homes) renderHomeStats(data.homes);
+            if (data.artifacts) renderCleanupCard(data.artifacts);
+        });
+    }
+
+    function startStorageReconcile() {
+        if (_reconcileTimer) return;
+        _reconcileTimer = setInterval(storageReconcileTick, 60000);
+    }
+
+    function stopStorageReconcile() {
+        if (_reconcileTimer) { clearInterval(_reconcileTimer); _reconcileTimer = null; }
+    }
+
+    $(document).on('click', '.aicli-tab-btn', function() {
+        var onclick = $(this).attr('onclick') || '';
+        if (onclick.indexOf("'storage'") !== -1) {
+            startStorageReconcile();
+        } else {
+            stopStorageReconcile();
+        }
+    });
+
+    // Storage tab already active on page load (e.g. ManagerScripts.php's own
+    // localStorage restore of the last-viewed tab).
+    if ($('#tab-storage').hasClass('active') || $('#tab-storage').is(':visible')) {
+        startStorageReconcile();
+    }
+})();
 
 function formatSize(bytes) {
     if (typeof bytes !== 'number' || bytes === 0) return '0 KB';
@@ -262,6 +314,7 @@ function persistEntity(type, id) {
 
 
 function repairStorage(type, id) {
+    if (aicliBlockedByConsolidate('repairing storage')) return false;
     swal({ title: "Repair " + type + " storage?", text: "Unmount and remount the OverlayFS stack for " + id + ". This may briefly interrupt active sessions.", type: "warning", showCancelButton: true, confirmButtonText: "Repair", showLoaderOnConfirm: true, closeOnConfirm: false }, function() {
         const action = (type === 'agent') ? 'repair_agent_storage' : 'repair_home_storage';
         aicliAjax(action, { id: id }, function(r) {
@@ -273,6 +326,7 @@ function repairStorage(type, id) {
 }
 
 function consolidateStorage(type, id) {
+    if (aicliBlockedByConsolidate('starting another consolidation')) return false;
     // Runs the consolidate AJAX + reports the result. No confirm of its own — the
     // caller is responsible for confirming first (a plain confirm for agents/empty
     // homes via doConsolidate, or the calm action-card for homes with open sessions).
@@ -427,6 +481,7 @@ function consolidateStorage(type, id) {
 // gate uses), then drives the proven relocation (execute_migrate: verified
 // per-file copy + config + manifest re-point under a crash-safe marker).
 function graduateStorage(type, id, physicalMb) {
+    if (aicliBlockedByConsolidate('moving storage off the USB flash drive')) return false;
     const mb = parseFloat(physicalMb) || 0;
     function fmtBytes(b) {
         b = parseFloat(b) || 0;
@@ -1474,6 +1529,396 @@ function purgeArtifacts() {
             }
             else swal("Purge Failed", r.message, "error");
             refreshStats();
+        });
+    });
+}
+
+// #131: poll the home consolidation state so the Storage tab shows a live
+// "tidy-up in progress" banner and pauses storage actions while it runs (the
+// drawer shows the same banner; the interactive start is already gated). Uses
+// the same get_force_reclaim_state endpoint, extended with `consolidating`.
+window.aicli_home_consolidating = false;
+function aicliBlockedByConsolidate(actionLabel) {
+    if (!window.aicli_home_consolidating) return false;
+    swal('Storage tidy-up in progress',
+        'A home consolidation is running — ' + (actionLabel || 'this action') +
+        ' is paused until it finishes to avoid interrupting the reclaim. It usually takes a few minutes.',
+        'info');
+    return true;
+}
+(function () {
+    // EVENT_FIRST_RECONCILIATION.md fact table: "Maintenance / force-reclaim
+    // state … 30s". The aicli_storage_status push's `maintenance` field
+    // (NchanSubscribers.php) patches window.aicli_home_consolidating and the
+    // banner between reads via applyConsolidateState() below.
+    window.applyConsolidateState = function (d) {
+        var on = !!(d && d.consolidating);
+        window.aicli_home_consolidating = on;
+        $('#aicli-consolidate-banner').css('display', on ? 'flex' : 'none');
+    };
+    function pollConsolidate() {
+        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_force_reclaim_state&csrf_token=' + csrf, window.applyConsolidateState);
+    }
+    pollConsolidate();
+    setInterval(pollConsolidate, 30000);
+})();
+
+/* ---------------------------------------------------------------------------
+ * HOME_BACKUP.md R1/R12 — Home backup card. Settings (target/quiesce/keep/
+ * schedule/excludes/nudge) are plugin-wide and save through the SAME generic
+ * settings form every other Storage/Config field uses (autoSaveConfig() /
+ * saveAICliAgentsManager()); the per-user rows below reuse renderHomeStats()'s
+ * own data source (data.homes from get_storage_status, wired in refreshStats()
+ * above) so "every user with a home" never drifts from the Persistence cards.
+ * ------------------------------------------------------------------------- */
+
+// Schedule select/day/time -> the single backup_schedule cfg string.
+function aicliBackupScheduleChanged() {
+    var mode = $('#backup_schedule_mode').val();
+    var day = $('#backup_schedule_day').val();
+    var time = $('#backup_schedule_time').val() || '02:00';
+    var value = 'off';
+    if (mode === 'daily') value = 'daily:' + time;
+    else if (mode === 'weekly') value = 'weekly:' + day + ':' + time;
+    $('#backup_schedule').val(value);
+    $('#backup_schedule_day').toggle(mode === 'weekly');
+    $('#backup_schedule_at_label').toggle(mode !== 'off');
+    $('#backup_schedule_time').toggle(mode !== 'off');
+    autoSaveConfig();
+}
+
+// The checkbox has no name (an unchecked checkbox never serializes); it only
+// drives the hidden backup_nudge_working field the form actually submits.
+function aicliBackupNudgeChanged() {
+    $('#backup_nudge_working').val($('#backup_nudge_working_cb').is(':checked') ? '1' : '0');
+    autoSaveConfig();
+}
+
+function aicliToggleBackupPicker() {
+    var panel = $('#aicli-backup-picker');
+    if (panel.is(':visible')) { panel.hide().empty(); return; }
+    panel.show().html('<div style="padding:8px; font-size:11px; opacity:.6;"><i class="fa fa-spinner fa-spin"></i> Probing storage targets…</div>');
+    // kind=home: the SAME S-11 enumeration/refusal policy the Config tab's own
+    // picker uses (StorageTargetService) — refuses /mnt/user and network paths
+    // for exactly the reason HOME_BACKUP.md's target rule states.
+    aicliAjax('enumerate_storage_targets', { kind: 'home' }, function(data) {
+        if (!data || data.status !== 'ok') {
+            panel.html('<div style="color:#f87171; font-size:11px;">' + escapeHtml((data && data.message) || 'Enumeration failed') + '</div>');
+            return;
+        }
+        var html = '<div style="border:1px solid var(--border-color, rgba(128,128,128,0.25)); border-radius:5px; padding:6px; max-height:220px; overflow-y:auto;">';
+        $.each(data.targets || [], function(i, t) {
+            if (t.refuse) return;
+            html += '<div class="aicli-backup-target-row" data-path="' + escapeHtml(t.path) + '" style="padding:5px 8px; cursor:pointer; border-bottom:1px solid var(--border-color, rgba(128,128,128,0.12));">'
+                + '<div style="font-size:11px; font-weight:600;">' + escapeHtml(t.label) + (t.recommended ? ' <span style="color:#22c55e;">(recommended)</span>' : '') + '</div>'
+                + '<div style="font-family:monospace; font-size:10px; opacity:.7;">' + escapeHtml(t.path) + '</div>'
+                + '</div>';
+        });
+        html += '</div>';
+        panel.html(html);
+        panel.find('.aicli-backup-target-row').on('click', function() {
+            $('#backup_target').val($(this).attr('data-path'));
+            panel.hide().empty();
+            autoSaveConfig();
+            aicliCheckBackupTarget();
+        });
+    }).fail(function() { panel.html('<div style="color:#f87171; font-size:11px;">Server error during target enumeration</div>'); });
+}
+
+function aicliCheckBackupTarget() {
+    var path = ($('#backup_target').val() || '').trim();
+    var box = $('#aicli-backup-target-result');
+    if (!path) { box.empty(); return; }
+    box.html('<i class="fa fa-spinner fa-spin"></i> Checking…');
+    aicliAjax('backup_validate_target', { target: path }, function(r) {
+        if (!r || r.status !== 'ok' || !r.ok) {
+            box.html('<span style="color:#f87171;"><i class="fa fa-times-circle"></i> ' + escapeHtml((r && r.message) || 'This target cannot be used.') + '</span>');
+            return;
+        }
+        var free = (typeof r.free_bytes === 'number') ? (r.free_bytes / 1073741824).toFixed(1) + ' GB free' : '';
+        box.html('<span style="color:#22c55e;"><i class="fa fa-check-circle"></i> ' + escapeHtml(r.resolved || path) + (r.fs ? ' (' + escapeHtml(r.fs) + ')' : '') + (free ? ' — ' + free : '') + '</span>');
+    }).fail(function() { box.html('<span style="color:#f87171;">Server error checking target</span>'); });
+}
+
+function aicliBackupRowId(user) { return String(user).replace(/[^A-Za-z0-9_-]/g, '_'); }
+
+// R12: one row per user with a home — SAME set renderHomeStats() draws from.
+// Idempotent: an existing row is left alone (its own poll owns its status),
+// only a NEW or REMOVED user changes the DOM.
+function renderBackupUsers(homes) {
+    var users = Object.keys(homes || {});
+    var container = $('#backup-users-container');
+    if (users.length === 0) {
+        container.html('<div class="storage-empty-state" style="padding:16px; text-align:center; opacity:.6; font-size:11px;">No user has a home yet.</div>');
+        return;
+    }
+    container.find('[data-backup-user]').each(function() {
+        if (users.indexOf($(this).attr('data-backup-user')) === -1) $(this).remove();
+    });
+    if (container.children('.storage-empty-state').length) container.empty();
+    $.each(users, function(i, u) {
+        var rowId = aicliBackupRowId(u);
+        if ($('#backup-row-' + rowId).length) return;
+        var row = $(
+            '<div class="storage-entity-card" id="backup-row-' + rowId + '" data-backup-user="' + escapeHtml(u) + '" style="padding:8px 10px;">' +
+                '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">' +
+                    '<div style="font-size:12px; font-weight:700;"><i class="fa fa-user" style="opacity:.6; margin-right:6px;"></i>' + escapeHtml(u) + '</div>' +
+                    '<button type="button" class="aicli-btn-slim" id="backup-now-' + rowId + '"><i class="fa fa-life-ring"></i> Back up now</button>' +
+                '</div>' +
+                '<div id="backup-last-' + rowId + '" style="font-size:10px; opacity:.7; margin-top:4px;">Checking last backup…</div>' +
+                '<div id="backup-progress-' + rowId + '" style="display:none; font-size:10px; color:var(--orange, #ff8c00); margin-top:4px;"><i class="fa fa-spinner fa-spin"></i> <span></span></div>' +
+                '<div id="backup-snapshots-' + rowId + '" style="display:flex; flex-direction:column; gap:4px; margin-top:6px;">Loading snapshots…</div>' +
+                '<div id="restore-last-' + rowId + '" style="font-size:10px; opacity:.7; margin-top:4px;"></div>' +
+                '<div id="restore-progress-' + rowId + '" style="display:none; font-size:10px; color:var(--orange, #ff8c00); margin-top:4px;"><i class="fa fa-spinner fa-spin"></i> <span></span></div>' +
+            '</div>'
+        );
+        row.find('#backup-now-' + rowId).on('click', function() { aicliBackupNow(u); });
+        container.append(row);
+        aicliRefreshBackupStatus(u);
+        aicliRefreshSnapshots(u);
+        aicliRefreshRestoreStatus(u);
+    });
+}
+
+var _aicliBackupPollers = {};
+
+// HOME_RESTORE.md R1: keeps "Back up now" and every "Restore…" button in a
+// user's row disabled while EITHER a backup or a restore job is running for
+// that user — the supervisor's own entity lock already refuses one job while
+// the other runs (HOME_RESTORE.md R4), this only keeps the row's buttons from
+// inviting a click that would just be refused.
+var _aicliRowBusy = {};
+
+function aicliUpdateRowBusyUI(user) {
+    var rowId = aicliBackupRowId(user);
+    var state = _aicliRowBusy[user] || {};
+    var busy = !!(state.backup || state.restore);
+    $('#backup-now-' + rowId).prop('disabled', busy);
+    $('#backup-row-' + rowId).find('.aicli-restore-btn').prop('disabled', busy);
+}
+
+function aicliRefreshBackupStatus(user) {
+    var rowId = aicliBackupRowId(user);
+    aicliAjax('backup_status', { user: user }, function(r) {
+        var lastEl = $('#backup-last-' + rowId);
+        if (!r || r.status !== 'ok') { lastEl.text('Backup status unavailable.'); return; }
+        if (r.last_backup) {
+            // StorageHandler::backupStatusFor(): {at (ISO 8601 UTC string),
+            // path, bytes, files, warm, ok}.
+            var lb = r.last_backup;
+            var when = lb.at ? new Date(lb.at).toLocaleString() : 'unknown time';
+            var size = (typeof lb.bytes === 'number') ? (lb.bytes / 1048576).toFixed(1) + ' MB' : '';
+            var files = (typeof lb.files === 'number') ? (lb.files + ' files') : '';
+            var mode = lb.warm ? 'warm' : 'cold';
+            lastEl.text('Last backup: ' + when + (size ? ' — ' + size : '') + (files ? ', ' + files : '') + ' (' + mode + ')');
+        } else {
+            lastEl.text('No backup yet.');
+        }
+        var prog = $('#backup-progress-' + rowId);
+        // r.running is {jobId, step} while a job is active, else null.
+        _aicliRowBusy[user] = _aicliRowBusy[user] || {};
+        _aicliRowBusy[user].backup = !!r.running;
+        aicliUpdateRowBusyUI(user);
+        if (r.running) {
+            prog.show().find('span').text(r.running.step || 'Running…');
+            aicliPollBackupStatus(user);
+        } else {
+            prog.hide();
+        }
+    }).fail(function() { $('#backup-last-' + rowId).text('Backup status unavailable.'); });
+}
+
+// 5s poll while running — same cadence startInstallPolling() uses for an
+// install/upgrade progress bar (ManagerStoreScripts.php).
+function aicliPollBackupStatus(user) {
+    if (_aicliBackupPollers[user]) return;
+    _aicliBackupPollers[user] = setInterval(function() {
+        var rowId = aicliBackupRowId(user);
+        aicliAjax('backup_status', { user: user }, function(r) {
+            if (!r || r.status !== 'ok' || !r.running) {
+                clearInterval(_aicliBackupPollers[user]);
+                delete _aicliBackupPollers[user];
+                aicliRefreshBackupStatus(user);
+                // A finished backup does not change the snapshot list on its
+                // own... except it does (a new snapshot just landed) — refresh
+                // it so the new snapshot's Restore button appears without a
+                // manual page reload.
+                aicliRefreshSnapshots(user);
+                return;
+            }
+            $('#backup-progress-' + rowId).show().find('span').text(r.running.step || 'Running…');
+        });
+    }, 5000);
+}
+
+function aicliBackupNow(user) {
+    if (aicliBlockedByConsolidate('starting a home backup')) return false;
+    var warm = $('input[name="backup_quiesce"]:checked').val() === 'warm';
+    swal({
+        title: 'Back up ' + user + '’s home now?',
+        text: warm
+            ? 'Warm mode: sessions stay running while the copy is made, best effort.'
+            : 'Cold mode: ' + user + '’s running sessions close first, then relaunch once the copy finishes.',
+        type: 'info', showCancelButton: true, confirmButtonText: 'Back up now', showLoaderOnConfirm: true, closeOnConfirm: false
+    }, function(confirmed) {
+        if (!confirmed) return;
+        aicliAjax('backup_home', { user: user }, function(r) {
+            if (r && r.status === 'ok') {
+                swal({ title: 'Queued', text: 'Watch the activity tray for progress.', type: 'info', timer: 2500, showConfirmButton: false });
+                clearChanged();
+            } else {
+                swal('Could not start', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+            }
+            aicliRefreshBackupStatus(user);
+        });
+    });
+}
+
+/* ---------------------------------------------------------------------------
+ * HOME_RESTORE.md R1 — Home restore. Each snapshot row (from `list_backups`)
+ * gets a Restore… button; the confirm states the snapshot facts, the mode
+ * (replace/merge), and the safety-snapshot choice, then queues `restore_home`
+ * and polls `restore_status` every 5s while running — the same cadence and
+ * shape aicliPollBackupStatus() already uses above.
+ * ------------------------------------------------------------------------- */
+
+// One user's backup snapshots, each with a Restore… button. Called on row
+// creation and again after any backup or restore finishes, so a brand-new
+// snapshot (or a fresh 'pre-restore' safety snapshot) shows up without a
+// manual page reload.
+function aicliRefreshSnapshots(user) {
+    var rowId = aicliBackupRowId(user);
+    var box = $('#backup-snapshots-' + rowId);
+    aicliAjax('list_backups', { user: user }, function(r) {
+        if (!r || r.status !== 'ok') { box.html('<div style="font-size:10px; opacity:.6;">Snapshot list unavailable.</div>'); return; }
+        var snaps = r.snapshots || [];
+        if (snaps.length === 0) { box.html('<div style="font-size:10px; opacity:.6;">No snapshots yet.</div>'); return; }
+        var html = '';
+        $.each(snaps, function(i, s) {
+            var when = s.at ? new Date(s.at).toLocaleString() : 'unknown time';
+            var size = (typeof s.bytes === 'number') ? (s.bytes / 1048576).toFixed(1) + ' MB' : '';
+            var files = (typeof s.files === 'number') ? (s.files + ' files') : '';
+            var mode = s.warm ? 'warm' : 'cold';
+            var label = s.label === 'pre-restore' ? ' <span style="color:#f59e0b;">(pre-restore safety snapshot)</span>' : '';
+            var bad = (s.ok === false) ? ' <span style="color:#f87171;">(incomplete)</span>' : '';
+            html += '<div class="aicli-snapshot-row" style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:10px; padding:3px 6px; border:1px solid var(--border-color, rgba(128,128,128,0.15)); border-radius:4px;">' +
+                '<span>' + escapeHtml(when) + (size ? ' — ' + size : '') + (files ? ', ' + files : '') + ' (' + mode + ')' + label + bad + '</span>' +
+                '<button type="button" class="aicli-btn-slim aicli-restore-btn" style="font-size:10px; padding:1px 6px;" ' +
+                    'data-path="' + escapeHtml(s.path) + '" data-at="' + escapeHtml(when) + '" data-warm="' + (s.warm ? '1' : '0') +
+                    '" data-files="' + escapeHtml(String(files || '')) + '" data-size="' + escapeHtml(String(size || '')) + '">Restore…</button>' +
+            '</div>';
+        });
+        box.html(html);
+        box.find('.aicli-restore-btn').on('click', function() {
+            var btn = $(this);
+            aicliRestoreHome(user, {
+                path: btn.attr('data-path'),
+                at: btn.attr('data-at'),
+                warm: btn.attr('data-warm') === '1',
+                files: btn.attr('data-files'),
+                size: btn.attr('data-size')
+            });
+        });
+        aicliUpdateRowBusyUI(user); // a just-added button must respect an already-running job
+    }).fail(function() { box.html('<div style="font-size:10px; opacity:.6;">Snapshot list unavailable.</div>'); });
+}
+
+// One user's last restore record and, while a restore job runs, its progress.
+function aicliRefreshRestoreStatus(user) {
+    var rowId = aicliBackupRowId(user);
+    aicliAjax('restore_status', { user: user }, function(r) {
+        var lastEl = $('#restore-last-' + rowId);
+        if (!r || r.status !== 'ok') { lastEl.text('Restore status unavailable.'); return; }
+        if (r.last_restore) {
+            // StorageHandler::restoreStatusFor(): {ok, at, snapshot, mode,
+            // safety_snapshot_path, cause}.
+            var lr = r.last_restore;
+            var when = lr.at ? new Date(lr.at).toLocaleString() : 'unknown time';
+            var from = lr.snapshot ? (' from ' + escapeHtml(lr.snapshot)) : '';
+            var mode = lr.mode ? (' (' + escapeHtml(lr.mode) + ')') : '';
+            if (lr.ok) {
+                lastEl.text('Last restore: ' + when + from + mode + (lr.safety_snapshot_path ? ' — safety snapshot kept' : ''));
+            } else {
+                lastEl.html('<span style="color:#f87171;">Last restore: ' + when + from + mode + ' — failed' +
+                    (lr.cause ? ' (' + escapeHtml(lr.cause) + ')' : '') +
+                    (lr.safety_snapshot_path ? '. Safety snapshot kept at ' + escapeHtml(lr.safety_snapshot_path) : '') +
+                    '</span>');
+            }
+        } else {
+            lastEl.text('No restore yet.');
+        }
+        var prog = $('#restore-progress-' + rowId);
+        _aicliRowBusy[user] = _aicliRowBusy[user] || {};
+        _aicliRowBusy[user].restore = !!r.running;
+        aicliUpdateRowBusyUI(user);
+        if (r.running) {
+            prog.show().find('span').text(r.running.step || 'Restoring…');
+            aicliPollRestoreStatus(user);
+        } else {
+            prog.hide();
+        }
+    }).fail(function() { $('#restore-last-' + rowId).text('Restore status unavailable.'); });
+}
+
+var _aicliRestorePollers = {};
+
+// 5s poll while running — same cadence aicliPollBackupStatus() uses.
+function aicliPollRestoreStatus(user) {
+    if (_aicliRestorePollers[user]) return;
+    _aicliRestorePollers[user] = setInterval(function() {
+        var rowId = aicliBackupRowId(user);
+        aicliAjax('restore_status', { user: user }, function(r) {
+            if (!r || r.status !== 'ok' || !r.running) {
+                clearInterval(_aicliRestorePollers[user]);
+                delete _aicliRestorePollers[user];
+                aicliRefreshRestoreStatus(user);
+                // R1: refresh the snapshot list after a run — a safety
+                // snapshot may have just been added, and the restored
+                // snapshot's own row facts (e.g. 'ok') may have changed.
+                aicliRefreshSnapshots(user);
+                return;
+            }
+            $('#restore-progress-' + rowId).show().find('span').text(r.running.step || 'Restoring…');
+        });
+    }, 5000);
+}
+
+// Confirm and queue a restore of one snapshot. `snap` is
+// {path, at, warm, files, size} — `at`/`files`/`size` are already the
+// human-readable strings aicliRefreshSnapshots() built for display.
+function aicliRestoreHome(user, snap) {
+    if (aicliBlockedByConsolidate('restoring a home')) return false;
+    var html =
+        '<div style="text-align:left; font-size:12px; line-height:1.6;">' +
+            '<p>Snapshot from ' + escapeHtml(snap.at || 'an unknown time') + (snap.warm ? ' (warm — taken while sessions were running)' : ' (cold)') +
+                (snap.files ? ', ' + escapeHtml(snap.files) : '') + (snap.size ? ', ' + escapeHtml(snap.size) : '') + '.</p>' +
+            (snap.warm ? '<p style="color:#f59e0b;">This snapshot was taken while sessions were running — it may not be perfectly consistent.</p>' : '') +
+            '<label style="display:block; margin:6px 0 2px; cursor:pointer;"><input type="radio" name="aicli-restore-mode" value="replace" checked> Replace — the home ends up identical to the snapshot; anything else in the home is removed.</label>' +
+            '<label style="display:block; margin:2px 0 8px; cursor:pointer;"><input type="radio" name="aicli-restore-mode" value="merge"> Merge — the snapshot\'s files are copied over the home; nothing else is removed.</label>' +
+            '<label style="display:block; margin-bottom:8px; cursor:pointer;"><input type="checkbox" id="aicli-restore-safety" checked> Take a safety snapshot of the current home first (labelled "pre-restore")</label>' +
+            '<p style="font-size:11px; opacity:.75;">Every session of ' + escapeHtml(user) + ' closes first and relaunches once the restore finishes; a session that was working is told to continue.</p>' +
+        '</div>';
+    swal({
+        title: 'Restore ' + user + '’s home?',
+        text: html,
+        html: true,
+        type: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Restore',
+        showLoaderOnConfirm: true,
+        closeOnConfirm: false
+    }, function(confirmed) {
+        if (!confirmed) return;
+        var mode = $('input[name="aicli-restore-mode"]:checked').val() || 'replace';
+        var safety = $('#aicli-restore-safety').is(':checked');
+        aicliAjax('restore_home', { user: user, snapshot: snap.path, mode: mode, safety_snapshot: safety ? 1 : 0 }, function(r) {
+            if (r && r.status === 'ok') {
+                swal({ title: 'Queued', text: 'Watch the activity tray for progress.', type: 'info', timer: 2500, showConfirmButton: false });
+                clearChanged();
+            } else {
+                swal('Could not start', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+            }
+            aicliRefreshRestoreStatus(user);
         });
     });
 }

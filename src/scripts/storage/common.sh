@@ -95,6 +95,12 @@ guard_path() {
             /mnt/rootshare|/mnt/rootshare/*) : ;; # Unraid root export — not a user data path
             /mnt/*/*)                       allowed=1 ;;  # any pool: /mnt/<name>/<sub>
             /mnt/disk[0-9]*)                allowed=1 ;;  # array disks: /mnt/disk1, /mnt/disk2, ...
+            /mnt/*)                         allowed=1 ;;  # GitHub #15: bare pool root, e.g. /mnt/storage —
+                                                           # StorageTargetService offers this shape at picker
+                                                           # rank 2. Every deny arm above (disks/addons/remotes/
+                                                           # rootshare, bare or with a sub-path) already matched
+                                                           # and returned before reaching this catch-all, so it
+                                                           # only ever accepts a genuine custom pool name.
         esac
     fi
 
@@ -449,7 +455,7 @@ _consolidate_max_layers() {
     printf '%d' "$raw"
 }
 
-# _entity_paths <type> <id> <persist> — single source of the upper/work derivation +
+# _entity_paths <type> <id> <persist> [generation] — single source of the upper/work derivation +
 # mount-point template shared by the trio (now storage_ops.sh) and storagectl. Sets
 # globals: UPPER_DIR, WORK_DIR, MNT_POINT, ENTITY_UPPER_MODE.
 # #1322: the zram-vs-disk upper-mode is now the GENUINE device test
@@ -459,7 +465,24 @@ _consolidate_max_layers() {
 # unavailable. PURE path computation — no dir creation, no zram init (callers do those
 # side-effects). Must keep bake/consolidate writing from the same upper a mount reads.
 _entity_paths() {
-    local _ep_type="$1" _ep_id="$2" _ep_persist="$3" _ep_mode
+    local _ep_type="$1" _ep_id="$2" _ep_persist="$3" _ep_gen="${4:-}" _ep_mode _ep_key
+    # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): an optional 4th arg
+    # keys the writable layer on ONE generation of the agent instead of on the
+    # agent as a whole, so two versions can be live at once without sharing an
+    # upper (two live overlays over one upper is the copy-up poison WP #1309
+    # already paid for). It is deliberately expressed as a different ENTITY KEY
+    # rather than a second path grammar: everything below is untouched, zram
+    # mode gets versioned uppers for free, and there is no second derivation to
+    # keep in sync. MNT_POINT is NOT version-qualified here — op_mount owns that
+    # (it is the only caller that knows whether the mount has been arbitrated).
+    _ep_key="$_ep_id"
+    if [ "$_ep_type" = "agent" ] && [ -n "$_ep_gen" ]; then
+        if declare -f agent_generation_entity_key >/dev/null 2>&1; then
+            _ep_key="$(agent_generation_entity_key "$_ep_id" "$_ep_gen")"
+        else
+            _ep_key="$_ep_id@$_ep_gen"
+        fi
+    fi
     if declare -f entity_upper_mode >/dev/null 2>&1; then
         _ep_mode="$(entity_upper_mode "$_ep_persist")"
     else
@@ -468,18 +491,57 @@ _entity_paths() {
     fi
     if [ "$_ep_mode" = "zram" ]; then
         ENTITY_UPPER_MODE="zram"
-        UPPER_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_id/upper"
-        WORK_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_id/work"
+        UPPER_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_key/upper"
+        WORK_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_key/work"
     else
         ENTITY_UPPER_MODE="disk"
-        UPPER_DIR="$_ep_persist/_upper/${_ep_type}s/$_ep_id"
-        WORK_DIR="$_ep_persist/_work/${_ep_type}s/$_ep_id"
+        UPPER_DIR="$_ep_persist/_upper/${_ep_type}s/$_ep_key"
+        WORK_DIR="$_ep_persist/_work/${_ep_type}s/$_ep_key"
     fi
     if [ "$_ep_type" = "home" ]; then
         MNT_POINT="/tmp/unraid-aicliagents/work/$_ep_id/home"
+    elif declare -f agent_mount >/dev/null 2>&1; then
+        # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
+        # resolve_paths.sh's agent_mount() when it's been sourced — same
+        # optional-dependency shape as the entity_upper_mode check above,
+        # since this file (common.sh) may be sourced WITHOUT resolve_paths.sh.
+        MNT_POINT="$(agent_mount "$_ep_id")"
     else
         MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$_ep_id"
     fi
+}
+
+# _entity_paths_live <type> <id> <persist> — _entity_paths, resolved to the
+# generation that is ACTUALLY LIVE right now.
+#
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15). Every caller that reads or
+# writes an agent's writable layer for the version currently in service — the
+# bake, the consolidate, storagectl's reporting — must use this rather than
+# _entity_paths, because once an agent is on the versioned layout its upper is no
+# longer at the id-keyed path. Baking the id-keyed path on a Phase 3 agent would
+# silently bake an empty directory and report success: the exact "did nothing and
+# said it worked" failure this codebase has paid for most often.
+#
+# Falls back to _entity_paths' own answer whenever the agent is not on the
+# versioned layout, has no recorded generation, or resolve_paths.sh was not
+# sourced — so home mounts and pre-Phase-3 agents are byte-identical to before.
+# Additionally sets ENTITY_GENERATION (empty when not applicable) so a caller can
+# tell whether the layer it just operated on belongs to a specific generation.
+_entity_paths_live() {
+    local _epl_type="$1" _epl_id="$2" _epl_persist="$3" _epl_gen _epl_up _epl_wk
+    _entity_paths "$_epl_type" "$_epl_id" "$_epl_persist"
+    ENTITY_GENERATION=""
+    [ "$_epl_type" = "agent" ] || return 0
+    declare -f agent_live_generation >/dev/null 2>&1 || return 0
+    _epl_gen="$(agent_live_generation "$_epl_id" 2>/dev/null || true)"
+    [ -n "$_epl_gen" ] || return 0
+    _epl_up="$(agent_generation_state_get "$_epl_id" "$_epl_gen" upper 2>/dev/null || true)"
+    _epl_wk="$(agent_generation_state_get "$_epl_id" "$_epl_gen" work 2>/dev/null || true)"
+    if [ -n "$_epl_up" ] && [ -n "$_epl_wk" ]; then
+        UPPER_DIR="$_epl_up"
+        WORK_DIR="$_epl_wk"
+    fi
+    ENTITY_GENERATION="$_epl_gen"
 }
 
 # home_mount_in_use <mount_point>
@@ -539,6 +601,13 @@ home_mount_in_use() {
             return 0
         fi
     done
+    # GitHub #15: an unmounted home path is not a mountpoint, so `fuser -m`
+    # walks up to the filesystem that CONTAINS it (often the rootfs) and
+    # reports every process on that whole filesystem as a "holder" — a mass
+    # false positive. The ttyd scan above is already the authoritative live-
+    # session signal and ran regardless of mount state; only run fuser when
+    # an overlay is actually mounted at $mnt.
+    _overlay_present_at "$mnt" || return 1
     # Open fd / cwd / exe / mmap holders, EXCLUDING the plugin's own infra
     # daemons (keyring.json lives in the upper dir; a lower-only consolidation
     # remount keeps their fds valid). If a non-infra holder remains -> busy.

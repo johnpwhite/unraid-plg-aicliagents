@@ -195,6 +195,113 @@ class StorageTargetService {
     }
 
     /**
+     * HOME_BACKUP.md R2: resolve and validate a home-backup TARGET path — the
+     * directory the snapshot tree is rsynced into. Never a `/mnt/user` FUSE
+     * path (a home has tens of thousands of small files; rsync over shfs can
+     * freeze the host), never inside a home mount or the plugin's own
+     * persistence directory, and it must be writable.
+     *
+     * A `/mnt/user/<share>` path is first resolved onto its pool/disk path via
+     * the SAME probe the target picker uses (validateTarget's realpath
+     * resolution) — a share that cannot be resolved to a single backing path
+     * stays FUSE and is refused.
+     *
+     * Test hook: AICLI_ITEST_FSTYPE_MAP="/path:fstype,/path2:fstype2" overrides
+     * the findmnt fstype lookup (mirrors the AICLI_ITEST_MOUNTED_PATHS pattern
+     * used elsewhere in this class) so PHPUnit can simulate a FUSE mount
+     * without a real shfs.
+     *
+     * @return array{ok:bool, resolved:string, fs:string, free_bytes:int, message:string}
+     */
+    public static function resolveBackupTarget(string $path, ?array $config = null): array {
+        $path = rtrim(trim($path), '/');
+        if ($path === '' || $path[0] !== '/') {
+            return self::backupTargetResult(false, $path, '', 0, 'The backup target must be an absolute path.');
+        }
+        if ($config === null) {
+            $config = \function_exists('getAICliConfig') ? getAICliConfig() : [];
+        }
+
+        // Resolve an exclusive /mnt/user share path onto its pool/disk path —
+        // never rsync a home across the FUSE share.
+        $resolved = $path;
+        if (preg_match('#^/mnt/user0?(/.*)?$#', $path)) {
+            $verdict = self::validateTarget('home', $path, $config);
+            if (!empty($verdict['resolved_path'])) {
+                $resolved = (string)$verdict['resolved_path'];
+            }
+        }
+
+        $fstype = self::findmntFstype($resolved);
+        if ($fstype !== '' && (strcasecmp($fstype, 'fuse.shfs') === 0 || stripos($fstype, 'fuse') === 0)) {
+            return self::backupTargetResult(false, $resolved, $fstype, 0,
+                "Target '$resolved' is a FUSE share mount — pick the pool or disk path directly, not a /mnt/user share.");
+        }
+
+        require_once __DIR__ . '/StoragePathResolver.php';
+        $workRoot = StoragePathResolver::MOUNT_ROOT . '/work';
+        if (self::isUnderPath($resolved, $workRoot)) {
+            return self::backupTargetResult(false, $resolved, $fstype, 0,
+                'The backup target cannot be inside a home mount.');
+        }
+        $persist = StoragePathResolver::homePersistPath('');
+        if ($persist !== '' && self::isUnderPath($resolved, $persist)) {
+            return self::backupTargetResult(false, $resolved, $fstype, 0,
+                'The backup target cannot be inside the plugin persistence directory.');
+        }
+
+        $writableCheck = is_dir($resolved) ? $resolved : self::existingAncestor($resolved)[0];
+        if ($writableCheck === '' || !is_dir($writableCheck) || !is_writable($writableCheck)) {
+            return self::backupTargetResult(false, $resolved, $fstype, 0,
+                "Target '$resolved' is not writable.");
+        }
+
+        return self::backupTargetResult(true, $resolved, $fstype, self::freeBytes($resolved), '');
+    }
+
+    /** @return array{ok:bool, resolved:string, fs:string, free_bytes:int, message:string} */
+    private static function backupTargetResult(bool $ok, string $resolved, string $fs, int $freeBytes, string $message): array {
+        return ['ok' => $ok, 'resolved' => $resolved, 'fs' => $fs, 'free_bytes' => $freeBytes, 'message' => $message];
+    }
+
+    /** $path === $root or a path strictly below it (both compared literally, no realpath). */
+    private static function isUnderPath(string $path, string $root): bool {
+        $root = rtrim($root, '/');
+        return $root !== '' && ($path === $root || strncmp($path, $root . '/', strlen($root) + 1) === 0);
+    }
+
+    /**
+     * The filesystem type at the deepest existing ancestor of $path, via
+     * `findmnt -T`. AICLI_ITEST_FSTYPE_MAP is a test-only override: a
+     * comma-separated list of "<path-or-ancestor>:<fstype>" pairs, first match
+     * (by exact path or the path being under it) wins.
+     */
+    private static function findmntFstype(string $path): string {
+        $hook = getenv('AICLI_ITEST_FSTYPE_MAP');
+        if ($hook !== false) {
+            foreach (array_filter(explode(',', $hook)) as $pair) {
+                $parts = explode(':', $pair, 2);
+                $p = $parts[0] ?? '';
+                $fs = $parts[1] ?? '';
+                if ($p !== '' && ($path === $p || self::isUnderPath($path, $p))) {
+                    return $fs;
+                }
+            }
+            return '';
+        }
+        [$probePath] = self::existingAncestor($path);
+        if ($probePath === '') return '';
+        $proc = @proc_open( // nosemgrep: php.lang.security.tainted-exec.tainted-exec — array-form proc_open, no shell interpolation
+            ['findmnt', '-T', $probePath, '-no', 'FSTYPE'],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes
+        );
+        if (!is_resource($proc)) return '';
+        $out = trim((string)stream_get_contents($pipes[1]));
+        fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+        return $out;
+    }
+
+    /**
      * Shared per-kind target validation — the preflight_migrate policy seam
      * (S-06/S-11). Routes through FileStorage::probeTarget; falls back to the
      * legacy #341 findmnt fstype check when the probe itself is unavailable.

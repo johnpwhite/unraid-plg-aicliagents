@@ -16,7 +16,10 @@
 namespace AICliAgents\Services;
 
 class StorageMountService {
-    const AGENT_MNT_BASE = "/usr/local/emhttp/plugins/unraid-aicliagents/agents";
+    // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): AGENT_MNT_BASE used to
+    // duplicate AgentRegistry::AGENT_BASE's literal value under a different name.
+    // Removed in favour of AgentRegistry::agentPath() at both call sites below —
+    // one fewer place that would have needed updating for a version-aware path.
     const MIGRATION_LOCK = "/tmp/unraid-aicliagents/migration.lock";
     const EMERGENCY_FLAG = "/tmp/unraid-aicliagents/.emergency_mode";
     const EMERGENCY_HOME = "/tmp/unraid-aicliagents/emergency_home";
@@ -163,7 +166,8 @@ class StorageMountService {
      * after reboot — not just to terminals opened through the plugin's UI.
      *
      * Without this, the forum-reported failure is:
-     *   bash: /usr/local/emhttp/plugins/unraid-aicliagents/agents/<id>/node_modules/.bin/<cli>: No such file or directory
+     *   bash: <agentBase>/<id>/node_modules/.bin/<cli>: No such file or directory
+     *   (<agentBase> is AgentRegistry::agentBase() — see that method for the literal it returns)
      * because agent overlays were previously lazy-mounted only from
      * TerminalService::startTerminal — the Unraid host terminal never
      * triggered a mount, so the agent appeared "gone" until the user
@@ -210,7 +214,7 @@ class StorageMountService {
         $exit = 1;
         if (self::isMigrationInProgress()) return false;
 
-        $mnt = self::AGENT_MNT_BASE . "/$agentId";
+        $mnt = AgentRegistry::agentPath($agentId);
 
         if (self::isMounted($mnt)) {
             if (self::isAgentMountHealthy($agentId)) { $exit = 0; return true; }
@@ -294,8 +298,15 @@ class StorageMountService {
         // Emergency mode: home is a symlink to the temp RAM dir — treat as mounted
         if (is_link($mnt) && self::isEmergencyMode()) { $exit = 0; return true; }
 
-        // Fast path: already a healthy overlay mount
-        if (!$forcedUnmount && self::isMounted($mnt) && self::isHomeMountHealthy($user)) { $exit = 0; return true; }
+        // A state write may have observed ESTALE while this mount still looked
+        // healthy in /proc. Do not keep such an overlay on the fast path: route
+        // it through op_mount's busy arbiter. Busy homes are deliberately kept
+        // live (no unsafe remount); the next idle request repairs them.
+        $writeFault = self::hasHomeWriteFault($user);
+        if (!$forcedUnmount && self::isMounted($mnt) && self::isHomeMountHealthy($user) && !$writeFault) { $exit = 0; return true; }
+        if ($writeFault) {
+            LogService::log("Home $user has a queued write-fault repair; requesting a safe overlay refresh.", LogService::LOG_WARN, "StorageMountService");
+        }
 
         // Serialize concurrent mounts for the same user with an advisory lock.
         // Losers block until the winner finishes, then re-check before mounting.
@@ -320,7 +331,7 @@ class StorageMountService {
                 }
                 usleep(100000); // 100ms
             }
-            if (self::isMounted($mnt) && self::isHomeMountHealthy($user)) {
+            if (!$writeFault && self::isMounted($mnt) && self::isHomeMountHealthy($user)) {
                 flock($lock, LOCK_UN);
                 fclose($lock);
                 $exit = 0;
@@ -375,6 +386,9 @@ class StorageMountService {
             LogService::log("Mount script FAILED for home $user: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
         } elseif ((int)$res === 2) {
             LogService::log("Home mount for $user deferred (busy) — live mount kept; lower refresh deferred to idle.", LogService::LOG_INFO, "StorageMountService");
+        } elseif ($writeFault) {
+            self::clearHomeWriteFault($user);
+            LogService::log("Home $user write-fault repair completed after a safe overlay refresh.", LogService::LOG_INFO, "StorageMountService");
         }
 
         if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
@@ -453,6 +467,35 @@ class StorageMountService {
         return (bool)preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts);
     }
 
+    /** Stable per-home marker path; public for diagnostics and unit coverage. */
+    public static function homeWriteFaultMarkerPath(string $user): string {
+        $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
+        return "/tmp/unraid-aicliagents/home_write_fault_{$safeUser}.json";
+    }
+
+    public static function hasHomeWriteFault(string $user): bool {
+        return is_file(self::homeWriteFaultMarkerPath($user));
+    }
+
+    /**
+     * Queue (do not perform) a repair after a confirmed OverlayFS write fault.
+     * Mounting code consumes this marker through its existing busy-safe arbiter.
+     */
+    public static function markHomeWriteFault(string $user, array $failure = []): void {
+        $marker = self::homeWriteFaultMarkerPath($user);
+        @mkdir(dirname($marker), 0755, true);
+        $payload = json_encode(['user' => $user, 'at' => gmdate('c'), 'failure' => $failure]);
+        if (@file_put_contents($marker, $payload === false ? '{}' : $payload, LOCK_EX) === false) {
+            LogService::log("Could not queue home write-fault repair for $user.", LogService::LOG_ERROR, "StorageMountService");
+            return;
+        }
+        LogService::log("Queued safe home write-fault repair for $user.", LogService::LOG_WARN, "StorageMountService");
+    }
+
+    private static function clearHomeWriteFault(string $user): void {
+        @unlink(self::homeWriteFaultMarkerPath($user));
+    }
+
     /**
      * Forcefully unmounts a path.
      */
@@ -472,6 +515,20 @@ class StorageMountService {
     public static function isMounted($path) {
         if (empty($path)) return false;
         $path = rtrim($path, '/');
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): a caller may pass a
+        // path that is now a symlink (agents/<id> once that agent is migrated to
+        // the versioned layout) — /proc/mounts records the kernel's literal mount
+        // target, which is the REAL directory a symlink points at, never the
+        // symlink's own name. Resolve first so this stays a byte-identical no-op
+        // for every existing non-symlink caller (home paths, a not-yet-migrated
+        // agent — realpath() of a real directory returns itself) and starts
+        // matching correctly for a migrated one. realpath() returns false for a
+        // dangling/absent path — keep the original $path then, matching today's
+        // "not mounted" outcome.
+        $resolved = @realpath($path);
+        if ($resolved !== false) {
+            $path = $resolved;
+        }
         $mounts = file_exists('/proc/mounts') ? file_get_contents('/proc/mounts') : '';
         // D-324: Exact path match to prevent matching /agents when checking /agents/gh-copilot
         return (preg_match("#\s" . preg_quote($path) . "\s#", $mounts) === 1);
@@ -519,7 +576,7 @@ class StorageMountService {
         $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
         // nosemgrep: php.lang.security.exec-use.exec-use
         exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " mount --type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
-        $mnt = self::AGENT_MNT_BASE . "/$agentId";
+        $mnt = AgentRegistry::agentPath($agentId);
         $usable = self::mountResultIsUsable((int)$res);
         if ($usable && (int)$res === 2 && !self::isMounted($mnt)) {
             $usable = false;
@@ -529,6 +586,121 @@ class StorageMountService {
             LogService::log("remountAgent($agentId): storagectl mount failed (exit $res): " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
         }
         return $usable;
+    }
+
+    // ---- Side-by-side install staging ---------------------------------------
+    // docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15).
+    //
+    // Three calls, used in this order by InstallerService::installAgent:
+    //   stageAgentInstall()  -> bind an install-only overlay, get its path
+    //   bakeStagedInstall()  -> capture what the install wrote as a new layer
+    //   unstageAgentInstall()-> tear the overlay (and its layer) down
+    //
+    // The last one is unconditional: the failure path calls it too, and calling
+    // it with nothing staged is a clean no-op by design.
+
+    /**
+     * Bind an install-only overlay for this agent and return the path to write
+     * into, or null when staging is unavailable.
+     *
+     * The mount stacks a fresh writable layer over the SAME read-only layers the
+     * running version is serving from, so the install sees exactly what a normal
+     * install would see and writes somewhere nothing is reading. A null return
+     * is not an error the caller has to handle specially — it means "install the
+     * old way", and installAgent treats it as such.
+     */
+    public static function stageAgentInstall(string $agentId): ?string
+    {
+        $persistPath = StoragePathResolver::agentPersistPath();
+        if (!self::isPathAvailable($persistPath)) {
+            LogService::log("stageAgentInstall($agentId): storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            return null;
+        }
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $out = [];
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
+            . " stage --type agent --id " . escapeshellarg($agentId)
+            . " --persist " . escapeshellarg($persistPath) . " 2>/dev/null", $out, $res);
+        if ((int)$res !== 0) {
+            LogService::log("stageAgentInstall($agentId): staging failed (exit $res)", LogService::LOG_WARN, "StorageMountService");
+            return null;
+        }
+        $mount = self::stagedMountFromJson(implode("\n", $out));
+        if ($mount === null || !is_dir($mount)) {
+            LogService::log("stageAgentInstall($agentId): storagectl reported success but no usable staging mount.", LogService::LOG_WARN, "StorageMountService");
+            return null;
+        }
+        LogService::log("Staged install for $agentId at $mount", LogService::LOG_INFO, "StorageMountService");
+        return $mount;
+    }
+
+    /**
+     * Pull the staging mount path out of a storagectl `stage` response.
+     *
+     * Pure (no I/O) so the contract between the two languages is unit-testable
+     * rather than only observable on a live box. storagectl prints one JSON
+     * object; anything else — an empty body, a shell error, a response without
+     * the payload — must return null rather than a half-path the installer would
+     * then write into.
+     */
+    public static function stagedMountFromJson(string $json): ?string
+    {
+        $data = json_decode(trim($json), true);
+        if (!is_array($data)) return null;
+        if ((int)($data['exit'] ?? 1) !== 0) return null;
+        $mount = $data['payload']['mount'] ?? null;
+        if (!is_string($mount) || $mount === '') return null;
+        // A staging mount is always under the agents root. Refusing anything else
+        // keeps a malformed or hostile response from steering an install — and an
+        // install writes hundreds of megabytes wherever it is pointed.
+        $expected = AgentRegistry::agentBase() . '/.staging/';
+        return strncmp($mount, $expected, strlen($expected)) === 0 ? $mount : null;
+    }
+
+    /**
+     * Capture what the install wrote into the staging layer as a new agent layer.
+     *
+     * Returns the storagectl exit code: 0 captured, 2 captured but the follow-on
+     * refresh deferred (both mean the bytes reached durable storage), anything
+     * else a real failure.
+     */
+    public static function bakeStagedInstall(string $agentId): int
+    {
+        $persistPath = StoragePathResolver::agentPersistPath();
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $out = [];
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
+            . " bake --type agent --id " . escapeshellarg($agentId)
+            . " --persist " . escapeshellarg($persistPath)
+            . " --staged 2>&1", $out, $res);
+        if ((int)$res !== 0 && (int)$res !== 2) {
+            LogService::log("bakeStagedInstall($agentId): failed (exit $res): " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
+        }
+        return (int)$res;
+    }
+
+    /**
+     * Tear down the staging overlay. Safe to call when nothing is staged.
+     *
+     * $keepUpper leaves the writable layer on disk — used only between a failed
+     * bake and a diagnostic, never on the success path, where the layer has
+     * already been captured and is pure duplication on a flash device.
+     */
+    public static function unstageAgentInstall(string $agentId, bool $keepUpper = false): void
+    {
+        $persistPath = StoragePathResolver::agentPersistPath();
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $out = [];
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
+            . " unstage --type agent --id " . escapeshellarg($agentId)
+            . " --persist " . escapeshellarg($persistPath)
+            . ($keepUpper ? " --keep-upper" : "") . " 2>&1", $out, $res);
+        if ((int)$res !== 0) {
+            LogService::log("unstageAgentInstall($agentId): exit $res: " . implode("\n", $out), LogService::LOG_WARN, "StorageMountService");
+        }
     }
 
     /**
@@ -574,6 +746,24 @@ class StorageMountService {
     // asserts the agent fallback in FileStorage::persist) + unit-tested
     // (AgentCommitResultTest::mapAgentCommitResult).
 
+
+    /**
+     * #129: does storagectl recommend consolidating this user's home right now?
+     * Mirrors the supervisor's own signal (`_check_consolidate_policy`): run the
+     * status verb and test for the homes-only `"recommended":true` verdict, which
+     * appears nowhere else in the JSON so the substring test is unambiguous. Used
+     * by the boot sweep to decide which homes to consolidate while guaranteed idle,
+     * before their sessions relaunch. Returns false on any error (never blocks boot).
+     */
+    public static function homeConsolidationRecommended(string $user): bool {
+        if ($user === '') return false;
+        $persistPath = StoragePathResolver::homePersistPath($user);
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        if (!is_file($script)) return false;
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        $json = @shell_exec("bash " . escapeshellarg($script) . " status --type home --id " . escapeshellarg($user) . " --persist " . escapeshellarg($persistPath) . " 2>/dev/null");
+        return is_string($json) && strpos($json, '"recommended":true') !== false;
+    }
 
     /**
      * Consolidates layers into a single base volume.

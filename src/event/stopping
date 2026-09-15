@@ -87,20 +87,27 @@ needs_array() {
     esac
 }
 
-# Publish storage status change to Nchan so the React UI updates in real-time
+# Publish the storage_status snapshot so the React UI updates in real time.
+# REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E2: this used to curl a hand-built
+# three-field guess straight to Nchan (no `ts`) and tee a second, separate
+# ledger line. Both are now ONE call into event-publish.php, which builds the
+# FULL snapshot (StorageMetricsService::getStatus() + the maintenance key) via
+# NchanService::publish() — the exact object a browser's own reconcile read
+# sees, with `ts` stamped and the ledger tee handled inside that one publish.
+# Best-effort — never blocks the shutdown sequence. The former $1/$2/$3 guess
+# (home/agents/emergency) is no longer needed: the snapshot computes those
+# itself from live state, more accurately than a caller's own assumption.
 nchan_notify() {
-    local home_avail="${1:-true}"
-    local agents_avail="${2:-true}"
-    local emergency="${3:-false}"
-    # Unraid's Nchan publisher lives on the internal Unix socket server
-    curl -s -X POST --unix-socket /var/run/nginx.socket \
-        "http://localhost/pub/aicli_storage_status?buffer_length=1" \
-        -H "Content-Type: application/json" \
-        -d "{\"home_available\":$home_avail,\"agents_available\":$agents_avail,\"emergency_mode\":$emergency}" \
-        --max-time 2 >/dev/null 2>&1 || true
+    php "$EMHTTP_DEST/src/scripts/event-publish.php" storage_status storage_status >/dev/null 2>&1 || true
 }
 
 log "Shutdown/Array stop detected."
+
+# docs/specs/VOICE_MAIL.md: voice mail lives on tmpfs between heartbeats, so flush
+# it to Flash before anything else in shutdown runs — this is the moment a reboot
+# would otherwise lose whatever was spoken since the last supervisor tick. Bounded
+# by timeout and best-effort, so it can never hold up the stop.
+timeout 10 php -r 'require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php"; \AICliAgents\Services\VoiceMailService::flush();' >/dev/null 2>&1 || true
 
 # Bake-only shutdown: the shutdown path ONLY ever bakes (delta, append-only) —
 # it never consolidates. The supervisor is the only thing that can start a
@@ -188,7 +195,7 @@ fi
 if needs_array "$STORAGE_CLASS"; then
     # ── Scenario 1: Storage on array/pool — full stop ──
     log "Storage depends on array/pool. Running full stop + persist..."
-    nchan_notify false false false
+    nchan_notify
     run_full_stop
 
     if [ "$IS_SHUTDOWN" = false ]; then
@@ -202,7 +209,7 @@ if needs_array "$STORAGE_CLASS"; then
         fi
         log "Emergency mode flag set (array stopped, server still running)."
         # Notify UI: home gone, agents gone (both on array), emergency mode active
-        nchan_notify false false true
+        nchan_notify
     fi
 
 elif [ "$IS_SHUTDOWN" = true ]; then
@@ -214,7 +221,7 @@ else
     # ── Scenario 3: Flash storage, array stopping — selective session kill ──
     log "Storage on Flash. Selectively stopping sessions with array/pool workspace paths..."
     # Storage remains available (on Flash), just notify UI to refresh session state
-    nchan_notify true true false
+    nchan_notify
 
     KILLED=0
 
@@ -246,6 +253,13 @@ else
                     tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
                     pkill -9 -f "ttyd.*aicliterm-${SESS_ID}" >/dev/null 2>&1
                     KILLED=$((KILLED + 1))
+                    # REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E2: this selective
+                    # kill used to leave no `stopped` event behind — the drawer's
+                    # own reconcile is the only thing that ever noticed. One
+                    # 'workspaces' publish per killed id, best-effort.
+                    php "$EMHTTP_DEST/src/scripts/event-publish.php" workspaces \
+                        "{\"type\":\"stopped\",\"id\":\"${SESS_ID}\",\"reason\":\"array_stopped\"}" \
+                        >/dev/null 2>&1 || true
                 else
                     log "  Keeping session $sess (not on array/pool)"
                 fi

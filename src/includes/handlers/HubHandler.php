@@ -428,7 +428,14 @@ class HubHandler
         $key  = (string)($_REQUEST['key'] ?? '');
         $mode = (string)($_REQUEST['mode'] ?? '');
         if ($file === '' || $key === '') return ['status' => 'error', 'message' => 'file and key required'];
-        if (!preg_match('#^~/[A-Za-z0-9_./-]{1,128}$#', $file) || strpos($file, '..') !== false) {
+        // Relay ledger keys carry a '#<surface>' suffix (e.g.
+        // ~/.claude/CLAUDE.md#aicli-relay-guidance). Without '#' in the class this
+        // rejected every Relay drift resolution as 'invalid file', so Adopt,
+        // Overwrite and Release all silently did nothing for Relay keys.
+        // The '#' must stay escaped: it is also the delimiter, so an unescaped one
+        // closes the pattern early and preg_match returns false for *every* input,
+        // which broke Adopt/Overwrite/Release for all agents, not just Relay keys.
+        if (!preg_match('#^~/[A-Za-z0-9_./\#-]{1,160}$#', $file) || strpos($file, '..') !== false) {
             return ['status' => 'error', 'message' => 'invalid file'];
         }
         // Tree keys (H-03) are relative file paths (e.g. 'my-skill/SKILL.md') —

@@ -3,9 +3,15 @@
  * <module_context>
  * Description: Shared JavaScript logging + AJAX helpers for AICliAgents.
  * Dependencies: AICliAjax.php?action=log.
- * Constraints: Atomic UI fragment (< 110 lines). aicliAjax() is the canonical
+ * Constraints: Atomic UI fragment (< 130 lines). aicliAjax() is the canonical
  * jQuery AJAX wrapper (R-06): it stamps every call with an X-Aicli-Trace id so
- * server/shell log lines are grep-joinable per request.
+ * server/shell log lines are grep-joinable per request. PLUGIN_EVENT_LEDGER_
+ * AND_SUBSCRIPTIONS.md (2026-09-11) R2: it also sends X-AICli-Client (a
+ * per-tab id, sessionStorage) and X-AICli-Device (an optional per-browser
+ * label, localStorage — set from Settings > Session) on every call, so a
+ * Manager click is attributed the same way a browser AJAX call from the SPA
+ * is (ui-build/src/lib/clientIdentity.ts — same storage keys, a fetch-based
+ * wrapper there instead of jQuery).
  * </module_context>
  */
 ?>
@@ -21,10 +27,29 @@ function aicliTraceId() {
         ('0000' + Math.floor(Math.random() * 0xffff).toString(16)).slice(-4);
 }
 
+// PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11) R2: same storage keys
+// as ui-build/src/lib/clientIdentity.ts, so a Manager click and an SPA click
+// are attributed the same way. Never throws — a browser that blocks storage
+// still gets a usable (if unstable) id.
+function aicliClientId() {
+    try {
+        var id = sessionStorage.getItem('aicli_client_id');
+        if (!id) {
+            id = (Math.random().toString(16) + Math.random().toString(16)).replace(/[^a-f0-9]/g, '').slice(0, 8);
+            sessionStorage.setItem('aicli_client_id', id);
+        }
+        return id;
+    } catch (e) { return ''; }
+}
+function aicliDeviceLabel() {
+    try { return localStorage.getItem('aicli_device_label') || ''; } catch (e) { return ''; }
+}
+
 /**
- * Canonical AJAX helper (R-06): GET to AICliAjax.php with the csrf token and a
- * fresh X-Aicli-Trace header. Returns the jqXHR (use .done/.fail), so existing
- * `$.getJSON(url, cb)` call sites convert as `aicliAjax(action, params, cb)`.
+ * Canonical AJAX helper (R-06): GET to AICliAjax.php with the csrf token and
+ * fresh X-Aicli-Trace/X-AICli-Client/X-AICli-Device headers. Returns the
+ * jqXHR (use .done/.fail), so existing `$.getJSON(url, cb)` call sites
+ * convert as `aicliAjax(action, params, cb)`.
  * @param {string} action  AJAX action name.
  * @param {Object} [params] Extra query params (values URL-encoded here).
  * @param {Function} [done] Optional success callback (parsed JSON).
@@ -32,10 +57,13 @@ function aicliTraceId() {
 function aicliAjax(action, params, done) {
     const token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
     const qs = $.param(Object.assign({ action: action, csrf_token: token }, params || {}));
+    const headers = { 'X-Aicli-Trace': aicliTraceId(), 'X-AICli-Client': aicliClientId() };
+    const label = aicliDeviceLabel();
+    if (label) headers['X-AICli-Device'] = label;
     const xhr = $.ajax({
         url: '/plugins/unraid-aicliagents/AICliAjax.php?' + qs,
         dataType: 'json',
-        headers: { 'X-Aicli-Trace': aicliTraceId() }
+        headers: headers
     });
     if (done) xhr.done(done);
     return xhr;

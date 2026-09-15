@@ -64,7 +64,7 @@ class FilePathConventionProjector extends InstructionProjector {
     }
 
     /**
-     * The constant guidance body (single-sourced here; FilePathConventionKiloProjector
+     * The constant guidance body (single-sourced here; RulesFileFilePathProjector
      * reuses it verbatim for its fence-free dedicated file).
      */
     const BODY = <<<'MD'

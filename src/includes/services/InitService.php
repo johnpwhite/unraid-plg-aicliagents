@@ -147,7 +147,26 @@ class InitService {
             // Run after the marker write so a partial failure doesn't loop. The
             // service is idempotent — already-running sessions are filtered.
             try {
+                // Relay is always-on by default, but the default is inert until
+                // the server is actually registered in the Config Hub. Do that
+                // first, then project, and only then launch — workspaces read
+                // their MCP server list once at startup, so a projection running
+                // after the sweep would not reach this boot's sessions at all.
+                AgentRelayService::ensureMcpRegistered();
+                // Same ordering rule for the plugin-management server: a workspace
+                // reads its MCP server list once at startup. This is a no-op unless
+                // the stored registration disagrees with admin_tools_enabled, so the
+                // common case (feature off, nothing registered) costs one array read.
+                \AICliAgents\Services\AdminMcpTools::ensureMcpRegistered();
+                // #137: reboot closed local workspaces without a UI close — sweep
+                // their orphaned Relay subscriptions so they stop ghosting contacts.
+                AgentRelayService::sweepOrphanedSubscriptions();
+                \AICliAgents\Services\Hub\HubProjector::projectAll();
                 AutoLaunchService::launchAllPending(null, 'init_boot');
+                AgentRelayService::ensureBootActors();
+                // #113: the Relay HTTP listener is a plugin-owned process, so
+                // nothing else restores it after a boot or a plugin restart.
+                AgentRelayService::ensureHttpListener();
             } catch (\Throwable $e) {
                 LogService::log("AutoLaunch boot sweep failed: " . $e->getMessage(), LogService::LOG_WARN);
             }
@@ -213,7 +232,13 @@ class InitService {
                 // Remove emergency-installed agents from RAM (real sqsh agents will be mounted on demand)
                 foreach (glob("/tmp/unraid-aicliagents/.emergency_agent_*") as $flag) {
                     $eAgentId = str_replace('/tmp/unraid-aicliagents/.emergency_agent_', '', $flag);
-                    $eAgentDir = AgentRegistry::AGENT_BASE . "/$eAgentId";
+                    // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: agentBase(), not agentPath() —
+                    // this runs unguarded on the boot init path (InitService::initPlugin,
+                    // no surrounding try/catch), and $eAgentId comes from a flag-file
+                    // name rather than a freshly-validated request param, so this call
+                    // site keeps the non-throwing accessor to avoid a new failure mode
+                    // on every page load if a stray flag file ever exists.
+                    $eAgentDir = AgentRegistry::agentBase() . "/$eAgentId";
                     if (is_dir($eAgentDir) && !StorageMountService::isMounted($eAgentDir)) {
                         exec("rm -rf " . escapeshellarg($eAgentDir));
                         LogService::log("Removed emergency RAM agent: $eAgentId", LogService::LOG_INFO, "InitService");

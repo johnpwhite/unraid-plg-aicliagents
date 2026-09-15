@@ -14,6 +14,7 @@ use AICliAgents\Services\ConfigService;
 use AICliAgents\Services\ValidationService;
 use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\ProcessManager;
+use AICliAgents\Services\AutoLaunchSuppression;
 
 class AutoLaunchHandler
 {
@@ -80,7 +81,12 @@ class AutoLaunchHandler
      *      uninstalled — startTerminal would just fail)
      *   4. Session is not already running (skip no-op starts to prevent UX
      *      spinner flashes and log noise on simple page reloads)
-     *   5. Resume rule: has resume OR freshIfNoResume=true
+     *   5. Not suppressed: an operator or a tool closed this workspace on
+     *      purpose (graceful_close, stop, evict) since its last explicit
+     *      start — Fix 2026-09-12, see
+     *      docs/specs/2026-04-27-auto-launch-workspaces-design.md,
+     *      "Fix 2026-09-12: a close suppresses auto-launch".
+     *   6. Resume rule: has resume OR freshIfNoResume=true
      *
      * Cross-agent scope is intentional — same as get_workspaces, CSRF-gated.
      *
@@ -117,7 +123,13 @@ class AutoLaunchHandler
                 // calls on every page reload that would just no-op server-side.
                 if (ProcessManager::isRunning($sid)) continue;
 
-                $resumeId = ConfigService::getResumeId($path, $agentId);
+                // Fix 2026-09-12: skip a workspace an operator or a tool closed
+                // on purpose (graceful_close, stop, evict). Auto-launch is for
+                // boot and first page load, not for undoing a deliberate close.
+                // An explicit start of this workspace clears the marker.
+                if (AutoLaunchSuppression::isSuppressed((string)$sid)) continue;
+
+                $resumeId = ConfigService::getResumeId($path, $agentId, (string)$sid);
                 if ($resumeId === null && !$config['freshIfNoResume']) continue;
 
                 $pending[] = [

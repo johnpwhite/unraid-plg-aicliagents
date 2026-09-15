@@ -27,12 +27,17 @@ class Transpiler {
         $blocks = [];
         foreach ($servers as $name => $def) {
             $lines = ['[mcp_servers.' . $name . ']'];
+            // Per-server tool-approval default (Codex `default_tools_approval_mode`).
+            // It is a TOP-LEVEL key of [mcp_servers.NAME], so it MUST be emitted before
+            // the [mcp_servers.NAME.env] sub-table opens, or TOML would bind it to env.
+            $ta = (string)($def['toolsApprovalMode'] ?? '');
             if (($def['transport'] ?? 'stdio') === 'stdio') {
                 $lines[] = 'command = ' . self::tomlString((string)($def['command'] ?? ''));
                 $args = $def['args'] ?? [];
                 if (!empty($args)) {
                     $lines[] = 'args = [' . implode(', ', array_map([self::class, 'tomlString'], $args)) . ']';
                 }
+                if ($ta !== '') $lines[] = 'default_tools_approval_mode = ' . self::tomlString($ta);
                 $env = $def['env'] ?? [];
                 if (!empty($env)) {
                     ksort($env);
@@ -44,6 +49,7 @@ class Transpiler {
                 }
             } else {
                 $lines[] = 'url = ' . self::tomlString((string)($def['url'] ?? ''));
+                if ($ta !== '') $lines[] = 'default_tools_approval_mode = ' . self::tomlString($ta);
             }
             $blocks[] = implode("\n", $lines);
         }

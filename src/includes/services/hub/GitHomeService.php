@@ -39,6 +39,9 @@ class GitHomeService {
 
     /** Auto-commit debounce window (seconds). Env-overridable for tests. */
     const DEBOUNCE_S = 30;
+
+    /** R-14 (#211): cap on coalesced summaries in one commit body. */
+    const MAX_BODY_LINES = 200;
     /** Fixed branch — keeps push/pull refspecs deterministic. */
     const BRANCH = 'main';
     /** Vault key holding the remote PAT (SecretService agent vault). */
@@ -163,6 +166,11 @@ class GitHomeService {
             '-c', 'user.email=aicli@localhost',
             '-c', 'init.defaultBranch=' . self::BRANCH,
             '-c', 'core.fileMode=false',
+            // R-12 (#211): the home accumulates nested git repos that agents create for
+            // their own state (Codex's tmp plugins dir, Antigravity's brain/ dirs, Grok's
+            // marketplace caches). git recursing into one that is mid-init, has an unborn
+            // branch, or a malformed HEAD used to fail the whole backup. Never recurse.
+            '-c', 'submodule.recurse=false',
         ], $args);
 
         $env = null;
@@ -232,7 +240,14 @@ class GitHomeService {
      *    covers them — and so no future whitelist glob can accidentally
      *    out-rank them.
      */
-    public static function generateGitignore(): string {
+    /**
+     * R-11 (#211): the ONE derivation of the backup whitelist. `generateGitignore()`
+     * renders it as ignore rules; `backupPathspecs()` renders it as git pathspecs for
+     * staging. Both call this, so the file git is told to ignore and the paths git is
+     * told to stage can never drift apart.
+     * @return string[] gitignore-style patterns, relative to the home root
+     */
+    public static function backupWhitelist(): array {
         // DERIVE the whitelist from the projector registry so the backup can NEVER drift
         // from what is injected. THIS IS THE FIX for the audit-era bug where newly-wired
         // surfaces (~/.kilo/rules, ~/.agents/skills, OpenCode AGENTS.md, …) were silently
@@ -245,8 +260,13 @@ class GitHomeService {
         // .aicli/hub/** = canonical store; plugin-backup/** = snapshotted /boot settings;
         // workspaces.json = the (home-resident) workspace definitions. NOT .aicli/** wholesale
         // — that would sweep in ~/.aicli/.exported_keys_* (secrets) and other state.
+        // '.claude/CLAUDE.md' + '.claude/rules/**' are backed up as Claude config in their
+        // own right: the user's own global instructions live there, and since Claude's hub
+        // instruction moved from a CLAUDE.md fence to a dedicated ~/.claude/rules/ file
+        // (docs/specs/AGENT_RULES_INJECTION_STRATEGY.md), CLAUDE.md is no longer covered by
+        // the instructionVendors loop below — whitelist it explicitly so it stays in backup.
         $whitelist = ['.aicli/hub/**', '.aicli/plugin-backup/**', '.aicli/workspaces.json',
-                      '.claude/settings.json', '.claude/agents/**'];
+                      '.claude/settings.json', '.claude/agents/**', '.claude/CLAUDE.md', '.claude/rules/**'];
         foreach (HubProjector::supportedVendors() as $p)   $whitelist[] = $p->relPath();              // MCP files
         foreach (HubProjector::instructionVendors() as $p) $whitelist[] = $p->relPath();              // instruction files
         // File-path-convention policy files (docs/specs/AGENT_FILE_PATH_CONVENTION.md): the fence
@@ -258,7 +278,28 @@ class GitHomeService {
         // Drop anything that is OAuth-excluded (e.g. ~/.claude.json is also Claude's MCP path).
         $whitelist = array_values(array_filter(array_unique($whitelist), fn($x) => !in_array($x, $oauthDeny, true)));
         sort($whitelist);
+        return $whitelist;
+    }
 
+    /**
+     * R-11 (#211): the whitelist as git PATHSPECS for `git add -A -- …`.
+     * A trailing `/**` becomes the plain directory (git recurses a directory pathspec on
+     * its own); a file entry passes through unchanged. Staging only these means a nested
+     * git repository outside the whitelist — an agent's own `git init` under the home,
+     * which `git add -A` would otherwise record as a gitlink and then recurse into — is
+     * never even considered. `.gitignore` still governs what inside them is eligible.
+     * @return string[]
+     */
+    public static function backupPathspecs(): array {
+        $specs = ['.gitignore'];   // .gitattributes is not whitelisted, so git ignores it
+        foreach (self::backupWhitelist() as $w) {
+            $specs[] = (substr($w, -3) === '/**') ? substr($w, 0, -3) : $w;
+        }
+        return array_values(array_unique($specs));
+    }
+
+    public static function generateGitignore(): string {
+        $whitelist = self::backupWhitelist();
         $lines = [
             self::GI_FENCE_OPEN,
             '# Deny-by-default: only explicitly whitelisted paths ever enter git.',
@@ -531,15 +572,35 @@ class GitHomeService {
             'pending' => false,
             'remote' => '',
             'tokenSet' => false,
+            // R-14 (#211): the backup used to report enabled/ok while every commit
+            // failed. `healthy` false means the last commit attempt failed and nothing
+            // is being saved — the History card shows `lastError` verbatim.
+            'healthy' => true,
+            'lastError' => null,
         ];
+        $out['lastError'] = self::lastFailure();
+        if ($out['lastError'] !== null) $out['healthy'] = false;
         if (!$out['gitAvailable'] || !$out['homeAvailable'] || !self::initialized()) return $out;
         $out['initialized'] = true;
 
         // Flush a due pending auto-commit on the poll path (debounce consumer).
         self::flushPendingIfDue();
 
-        $st = self::git(['status', '--porcelain']);
-        if ($st['rc'] === 0) $out['dirty'] = $st['out'] === '' ? 0 : count(explode("\n", $st['out']));
+        // R-11 (#211): scope `dirty` to the paths the backup actually covers. A whole-tree
+        // read counts the nested repos and every other unbacked path, so the card would
+        // show a permanent uncommitted-change count that no commit can ever clear.
+        $home = self::home();
+        $dirtySpecs = $home !== null ? self::stageablePathspecs($home) : [];
+        $st = self::git(array_merge(['status', '--porcelain', '--ignore-submodules=all', '--'], $dirtySpecs));
+        if ($st['rc'] === 0) {
+            $out['dirty'] = $st['out'] === '' ? 0 : count(explode("\n", $st['out']));
+        } else {
+            // R-14: reading this as "clean" is exactly how the dead backup looked healthy.
+            $out['healthy'] = false;
+            if ($out['lastError'] === null) {
+                $out['lastError'] = ['message' => 'git status failed: ' . $st['err'], 'ts' => time()];
+            }
+        }
         $cnt = self::git(['rev-list', '--count', 'HEAD']);
         if ($cnt['rc'] === 0) $out['commits'] = (int)$cnt['out'];
         $last = self::git(['log', '-1', '--pretty=format:%H%x1f%h%x1f%ct%x1f%s']);
@@ -594,13 +655,25 @@ class GitHomeService {
         $lines = array_values(array_filter(array_map('trim', explode("\n", (string)@file_get_contents($marker)))));
         if (empty($lines)) { @unlink($marker); return; }
         $subject = count($lines) === 1 ? $lines[0] : ('hub: ' . count($lines) . ' coalesced changes');
-        $body = count($lines) === 1 ? '' : implode("\n", $lines);
+        // R-14 (#211): the marker now survives a failed commit, so cap the body. The
+        // append path de-duplicates by summary, but summaries embed file names, so a long
+        // outage across many files could otherwise build an unreadable commit message.
+        if (count($lines) === 1) {
+            $body = '';
+        } elseif (count($lines) <= self::MAX_BODY_LINES) {
+            $body = implode("\n", $lines);
+        } else {
+            $body = implode("\n", array_slice($lines, -self::MAX_BODY_LINES))
+                  . "\n… and " . (count($lines) - self::MAX_BODY_LINES) . ' earlier change(s)';
+        }
         $r = self::lockedCommit($subject, $body);
-        if (($r['status'] ?? '') !== 'busy') {
-            // committed or nothing-to-commit → marker consumed either way
+        // R-14 (#211): consume the marker ONLY on success. It used to be unlinked on
+        // error too, so a failing commit silently discarded the queued summaries as
+        // well as the commit. 'busy' (a bake in flight) already retried; an error now
+        // behaves the same way, so the work survives until the cause is fixed.
+        if (($r['status'] ?? '') === 'ok') {
             @unlink($marker);
         }
-        // busy (bake in flight): marker stays, a later call retries.
     }
 
     /**
@@ -620,6 +693,130 @@ class GitHomeService {
      * blocking with a short retry; a held lock returns busy rather than
      * stalling the web request behind a long bake.
      */
+    /**
+     * R-11 (#211): the whitelist pathspecs that git will accept right now.
+     *
+     * `git add -- <pathspec>` is fatal on a pathspec that matches nothing, and the
+     * whitelist covers every agent the hub knows about — most are not installed on any
+     * given box. Keep a spec when it exists on disk OR is already tracked: the second
+     * case is what stages the DELETION of a whitelisted file that has been removed, so
+     * filtering on existence alone would silently stop recording deletions.
+     *
+     * One `ls-files` call, matched in memory — not one git call per spec.
+     * @return string[]
+     */
+    private static function stageablePathspecs(string $home): array {
+        $tracked = [];
+        $ls = self::git(['ls-files']);
+        if ($ls['rc'] === 0 && $ls['out'] !== '') {
+            foreach (explode("\n", $ls['out']) as $f) {
+                $f = trim($f);
+                if ($f !== '') $tracked[$f] = true;
+            }
+        }
+        $specs = [];
+        foreach (self::backupPathspecs() as $s) {
+            if (file_exists($home . '/' . $s) || is_link($home . '/' . $s)) { $specs[] = $s; continue; }
+            if (isset($tracked[$s])) { $specs[] = $s; continue; }
+            $prefix = $s . '/';
+            foreach ($tracked as $f => $_) {
+                if (strncmp($f, $prefix, strlen($prefix)) === 0) { $specs[] = $s; break; }
+            }
+        }
+        return self::dropIgnored($home, $specs);
+    }
+
+    /**
+     * R-11 (#211): drop pathspecs git would refuse. `git add -- <spec>` is fatal on a
+     * spec the .gitignore excludes, where a bare `git add -A` silently skipped it. Real
+     * directories survive (the managed block re-includes directories) but a SYMLINK to a
+     * directory does not —
+     * `~/.claude/skills` and `~/.claude/agents` are bootstrap symlinks into
+     * ~/.claude-config, so git treats them as ignored files. They were never in the
+     * backup before either; dropping them keeps behaviour identical instead of
+     * force-adding (`-f`), which could pull in a path the deny-list exists to keep out.
+     * One `check-ignore --stdin` call for the whole list.
+     * @param string[] $specs
+     * @return string[]
+     */
+    private static function dropIgnored(string $home, array $specs): array {
+        if (empty($specs)) return $specs;
+        // rc 0 = at least one ignored, 1 = none ignored, >1 = a real error (keep all).
+        $r = self::git(['check-ignore', '--stdin'], null, 30, implode("\n", $specs) . "\n");
+        if ($r['rc'] > 1) return $specs;
+        $ignored = [];
+        foreach (explode("\n", $r['out']) as $line) {
+            $line = trim($line);
+            if ($line !== '') $ignored[$line] = true;
+        }
+        return array_values(array_filter($specs, fn($s) => !isset($ignored[$s])));
+    }
+
+    /**
+     * R-13 (#211): remove every gitlink (mode 160000) from the index. A gitlink is what
+     * `git add -A` records for a directory that happens to contain its own `.git`; it
+     * stores no content, and its only effect is to make `git status`/`git add` recurse
+     * into that repo — which fails the whole backup when the nested repo is mid-init, on
+     * an unborn branch, or has a malformed HEAD. Idempotent.
+     */
+    private static function purgeGitlinks(): void {
+        $ls = self::git(['ls-files', '-s']);
+        if ($ls['rc'] !== 0 || $ls['out'] === '') return;
+        $paths = [];
+        foreach (explode("\n", $ls['out']) as $line) {
+            // "<mode> <sha> <stage>\t<path>"
+            if (strncmp($line, '160000 ', 7) !== 0) continue;
+            $tab = strpos($line, "\t");
+            if ($tab === false) continue;
+            $paths[] = substr($line, $tab + 1);
+        }
+        if (empty($paths)) return;
+        // --cached: index only — the nested repo on disk is never touched (verified).
+        // -f is required, not optional: git refuses a plain --cached removal when the
+        // staged gitlink differs from both the worktree and HEAD ("use -f to force
+        // removal"), which is exactly the state a gitlink staged-but-not-yet-committed
+        // is in. -f overrides only that safety check; with --cached it cannot delete
+        // anything from disk.
+        $r = self::git(array_merge(['rm', '--cached', '-q', '-f', '--ignore-unmatch', '--'], $paths));
+        if ($r['rc'] === 0) {
+            LogService::log('hub git: dropped ' . count($paths) . ' nested-repo gitlink(s) from the backup index',
+                LogService::LOG_INFO, 'GitHomeService');
+        }
+    }
+
+    /** R-14 (#211): where the last commit failure is recorded for status() to surface. */
+    private static function failureMarker(): string {
+        $user = preg_replace('/[^a-zA-Z0-9_-]/', '_', self::user());
+        @mkdir('/tmp/unraid-aicliagents', 0755, true);
+        return "/tmp/unraid-aicliagents/hub_git_error_{$user}";
+    }
+
+    /**
+     * R-14 (#211): record a commit failure AND return it, so every failing path in
+     * lockedCommit() is one `return self::fail(...)`. Before this, a failure was returned
+     * to a caller that discarded it (commitIfEnabled() is void), so the backup could be
+     * dead for days while status() still reported enabled/healthy.
+     */
+    private static function fail(string $message): array {
+        @file_put_contents(self::failureMarker(), json_encode(['message' => $message, 'ts' => time()]));
+        LogService::log('hub git: commit FAILED — ' . $message, LogService::LOG_WARN, 'GitHomeService');
+        return ['status' => 'error', 'message' => $message];
+    }
+
+    /** R-14: clear the recorded failure once a commit (or a clean no-op) succeeds. */
+    private static function clearFailure(): void {
+        @unlink(self::failureMarker());
+    }
+
+    /** R-14: the recorded failure, or null. @return array{message:string,ts:int}|null */
+    public static function lastFailure(): ?array {
+        $raw = @file_get_contents(self::failureMarker());
+        if ($raw === false || $raw === '') return null;
+        $d = json_decode($raw, true);
+        if (!is_array($d) || !isset($d['message'])) return null;
+        return ['message' => (string)$d['message'], 'ts' => (int)($d['ts'] ?? 0)];
+    }
+
     private static function lockedCommit(string $subject, string $body = ''): array {
         $fp = @fopen(self::lockFile(), 'w+');
         if (!$fp) return ['status' => 'error', 'message' => 'cannot open interlock file'];
@@ -646,16 +843,37 @@ class GitHomeService {
                 self::configureSecretFilter();
                 self::writeGitAttributes($home);
             }
-            $add = self::git(['add', '-A']);
-            if ($add['rc'] !== 0) return ['status' => 'error', 'message' => 'git add failed: ' . $add['err']];
-            $st = self::git(['status', '--porcelain']);
-            if ($st['rc'] === 0 && $st['out'] === '') {
+            // R-13 (#211): drop any gitlink (mode 160000) a previous `add -A` recorded.
+            // They hold no content and exist only to make git recurse into a nested repo.
+            // Idempotent — a no-op once the index is clean.
+            self::purgeGitlinks();
+
+            // R-11 (#211): stage ONLY the whitelisted pathspecs. `git add -A` swept the
+            // whole home, recording every nested git repo as a gitlink and then failing
+            // when git could not read one of them.
+            $specs = self::stageablePathspecs($home);
+            if (!empty($specs)) {
+                $add = self::git(array_merge(['add', '-A', '--'], $specs));
+                if ($add['rc'] !== 0) return self::fail('git add failed: ' . $add['err']);
+            }
+            // R-11 (#211): ask whether anything is STAGED, not whether the whole tree is
+            // clean. Now that the nested-repo gitlinks are gone (R-13) those directories
+            // are untracked, and the managed ignore re-includes directories, so a
+            // whole-tree `status --porcelain` is permanently non-empty. Testing it would
+            // make every run attempt an empty commit and then report itself unhealthy.
+            // `diff --cached --quiet`: rc 0 = nothing staged, 1 = something staged.
+            $staged = self::git(['diff', '--cached', '--quiet', '--ignore-submodules=all']);
+            if ($staged['rc'] === 0) {
+                self::clearFailure();
                 return ['status' => 'ok', 'committed' => false, 'message' => 'nothing to commit'];
             }
+            // R-14: anything other than 0/1 is a real fault, not "nothing to do".
+            if ($staged['rc'] !== 1) return self::fail('git diff --cached failed: ' . $staged['err']);
             $msg = $subject . ($body !== '' ? "\n\n" . $body : '');
             $r = self::git(['commit', '-m', $msg]);
-            if ($r['rc'] !== 0) return ['status' => 'error', 'message' => 'git commit failed: ' . $r['err']];
+            if ($r['rc'] !== 0) return self::fail('git commit failed: ' . $r['err']);
             LogService::log("hub git: commit '" . $subject . "'", LogService::LOG_INFO, 'GitHomeService');
+            self::clearFailure();
             return ['status' => 'ok', 'committed' => true];
         } finally {
             flock($fp, LOCK_UN);

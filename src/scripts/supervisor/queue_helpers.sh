@@ -27,12 +27,17 @@ JOBS_DIR="${JOBS_DIR:-/tmp/unraid-aicliagents/supervisor/jobs}"
 # sandbox/test can point it at a non-existent path to disable the push.
 AICLI_SYNC_ACTIVITY_PHP="${AICLI_SYNC_ACTIVITY_PHP:-/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/sync-activity.php}"
 
-# _job_activity_push <reason> <state> — push a USER-initiated job's transition to
-# the activity tray in REAL TIME (Nchan via SupervisorService::syncJobActivities)
-# instead of waiting for the tray's next list_activities poll, which is why the
-# pill used to freeze at "queued". Heavily gated so it only fires in the live
-# deployed supervisor:
-#   - reason must be a user-click op (untracked jobs have no tray entry);
+# _job_activity_push <reason> <state> — push a job's transition to the activity
+# tray in REAL TIME (Nchan via SupervisorService::syncJobActivities) instead of
+# waiting for the tray's next list_activities poll, which is why the pill used
+# to freeze at "queued". docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.3 widened
+# this from user-click jobs only to EVERY tracked job: syncJobActivities()
+# itself already no-ops on a job with no matching tray entry (untracked jobs
+# stay silent), so there is nothing left for a reason allowlist to protect —
+# it only ever delayed the push for jobs that DO have a tray entry but were not
+# started by a user click (e.g. a scheduled/dirty-pressure bake the operator is
+# still watching a `storage_job_*` row for). Still heavily gated so it only
+# fires in the live deployed supervisor:
 #   - the initial 'queued' is skipped (the PHP handler already registered+published it);
 #   - skipped whenever AICLI_JOBS_DIR is set (sandbox/L3.5/unit isolation) so it
 #     never writes to the real Nchan/activity store during tests;
@@ -40,7 +45,6 @@ AICLI_SYNC_ACTIVITY_PHP="${AICLI_SYNC_ACTIVITY_PHP:-/usr/local/emhttp/plugins/un
 # Backgrounded with output discarded — never blocks or breaks the supervisor.
 _job_activity_push() {
     local reason="$1" state="$2"
-    case "$reason" in user_consolidate|user_persist|user_graduate) : ;; *) return 0 ;; esac
     [ "$state" = "queued" ] && return 0
     [ -z "${AICLI_JOBS_DIR:-}" ] || return 0
     [ -f "$AICLI_SYNC_ACTIVITY_PHP" ] || return 0
@@ -134,6 +138,34 @@ job_ledger_write() {
     # Real-time push so the activity tray reflects this transition immediately
     # instead of only on its next poll (gated — see _job_activity_push).
     _job_activity_push "$reason" "$state"
+    return 0
+}
+
+# job_ledger_set_phase <job_id> <phase> — HOME_BACKUP.md R10: patch the
+# ledger's additive "phase" field IN PLACE, without touching state/exit/attempt.
+# The field exists (always "null") in every ledger line job_ledger_write emits
+# but nothing ever set it until the backup job — a long-running op that wants
+# to report which of its own steps (pre-flight/closing/baking/copying/
+# verifying/relaunching) is current, read by
+# SupervisorService::syncJobActivities() into the activity tray's step label.
+# Safe to call repeatedly while the job stays in the SAME "running" ledger
+# entry: nothing else rewrites the line between _job_mark_running and
+# _job_finalize, so a phase set here is not raced or clobbered mid-job.
+# Best-effort: never aborts the caller.
+job_ledger_set_phase() {
+    local job_id="${1:-}" phase="${2:-}"
+    job_id_valid "$job_id" || return 1
+    case "$phase" in
+        ''|*[!a-z-]*) return 1 ;;
+    esac
+    local path; path="$(job_ledger_path "$job_id")"
+    [ -f "$path" ] || return 1
+    local tmp="${path}.tmp.$$"
+    sed -E 's/"phase":(null|"[a-z-]*")/"phase":"'"$phase"'"/' "$path" > "$tmp" 2>/dev/null \
+        || { rm -f "$tmp" 2>/dev/null; return 1; }
+    mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    # Real-time push so the tray reflects the new phase immediately.
+    _job_activity_push "" "running"
     return 0
 }
 

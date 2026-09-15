@@ -1,90 +1,114 @@
 #!/bin/bash
-# AICliAgents Uninstaller: Clean Removal of Assets & Processes
+# AICliAgents uninstaller residual process/runtime sweep.
+#
+# The primary uninstaller calls stop-plugin.sh first so live home data is baked
+# before storage is detached.  This script is the independent belt-and-braces
+# sweep: it stops a lost-pidfile supervisor and every remaining plugin runtime
+# process before the deployed PHP/source tree can be removed.
 
-# Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+EMHTTP_DEST="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}"
+RUNTIME_DIR="${AICLI_RUNTIME_DIR:-/tmp/unraid-aicliagents}"
+RUN_DIR="${AICLI_RUN_DIR:-/var/run}"
+TMP_DIR="${AICLI_TMP_DIR:-/tmp}"
+SUPERVISOR_SH="${AICLI_SUPERVISOR_SH:-$EMHTTP_DEST/src/scripts/supervisor/aicli-supervisor.sh}"
+SUPERVISOR_PIDFILE="${AICLI_SUPERVISOR_PIDFILE:-$RUN_DIR/aicli-supervisor.pid}"
+SUPERVISOR_PATTERN="$SUPERVISOR_SH start"
+export TMUX_TMPDIR="${AICLI_TMUX_TMPDIR:-$RUNTIME_DIR/tmux}"
 
-# Safe PID filter — drops any pid whose /proc/PID/exe resolves to a
-# hypervisor/init binary. Belt-and-braces guard against a kill pattern
-# ever accidentally matching a running VM or system service.
+if ! declare -F log_status >/dev/null 2>&1; then
+    log_status() { printf '%s\n' "$1"; }
+fi
+
+# Never signal hypervisors/init even if a future expression broadens.
 _safe_filter_pids() {
-    local out=""
+    local out="" pid exe
     for pid in $1; do
-        [ -z "$pid" ] && continue
-        local exe
-        exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+        [ -n "$pid" ] || continue
+        [ "$pid" = "$$" ] && continue
+        exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
         case "$exe" in
             */qemu*|*/libvirt*|*/virsh|*/kvm|*/systemd|*/init|/sbin/init) continue ;;
         esac
         out+="$pid "
     done
-    echo "$out"
+    printf '%s\n' "$out"
 }
-# Graceful process termination: SIGTERM first, wait, then SIGKILL if needed
+
+_matching_pids() {
+    local pattern="$1" pids
+    pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+    _safe_filter_pids "$pids"
+}
+
 graceful_kill() {
-    local pattern="$1"
-    local pids
-    pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
-    pids=$(_safe_filter_pids "$pids")
-    if [ -n "$pids" ]; then
-        echo "$pids" | xargs -r kill -15 > /dev/null 2>&1 || true
-        sleep 2
-        pids=$(pgrep -f "$pattern" 2>/dev/null | grep -v "$$" || true)
-        pids=$(_safe_filter_pids "$pids")
-        if [ -n "$pids" ]; then
-            echo "$pids" | xargs -r kill -9 > /dev/null 2>&1 || true
-        fi
-    fi
+    local pattern="$1" wait_secs="${2:-2}" pids waited=0
+    pids=$(_matching_pids "$pattern")
+    [ -n "$pids" ] || return 0
+    echo "$pids" | xargs -r kill -TERM >/dev/null 2>&1 || true
+    while [ "$waited" -lt "$wait_secs" ]; do
+        pids=$(_matching_pids "$pattern")
+        [ -z "$pids" ] && return 0
+        sleep 1
+        waited=$((waited + 1))
+    done
+    pids=$(_matching_pids "$pattern")
+    [ -z "$pids" ] || echo "$pids" | xargs -r kill -KILL >/dev/null 2>&1 || true
 }
 
-# R4 (CAPTURE_RESUME_ALL_CLOSE_PATHS): on uninstall/upgrade, capture resume ids
-# for every live session BEFORE the graceful_kill/tmux-kill sweep below. Resume
-# is moot for a true uninstall but matters for a PLUGIN UPGRADE with live
-# sessions (the new version relaunches + resumes from the saved id). HYBRID
-# entrypoint: disk fallback for all + best-effort full clean close within budget.
-# The kill sweep below is UNCHANGED. Hard-ceilinged + `|| true` — never blocks.
-source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
-if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
-    log_status "Capturing resume ids before process termination (budget 8s)..."
-    _capture_resume_before_stop 8
+log_status "Stopping the storage/workspace supervisor..."
+# Use the daemon's own bounded stop path first. It validates pidfile ownership,
+# stops heartbeat/work children, and releases the singleton lock cleanly.
+if [ -f "$SUPERVISOR_SH" ]; then
+    bash "$SUPERVISOR_SH" stop 10 >/dev/null 2>&1 || true
+fi
+# A missing/stale pidfile must not hide a resident daemon. The absolute script
+# path plus trailing `start` is deliberately narrow and VM-safe.
+graceful_kill "$SUPERVISOR_PATTERN" 3
+
+if [ "${AICLI_CLEANUP_TEST_MODE:-0}" != "1" ]; then
+    log_status "Terminating residual AI agent processes..."
+    # Retry wrappers first so they cannot respawn an agent during this sweep.
+    graceful_kill "$RUNTIME_DIR/.*/aicli-run-[^/]*\\.sh" 1
+    graceful_kill "$EMHTTP_DEST/src/scripts/aicli-shell.sh" 1
+    graceful_kill 'node .*(unraid-aicliagents|/\.aicli/)' 5
+    graceful_kill 'ttyd.*(aicliterm|temp-terminal|geminiterm)-' 2
+    graceful_kill 'secret-service-daemon' 2
+    graceful_kill 'dbus-daemon .*unraid-aicliagents/secret-service' 2
+    graceful_kill "$EMHTTP_DEST/src/scripts/(install-bg|emergency-install-bg|version-check-bg|healthcheck|agentcheck)" 2
+
+    if command -v tmux >/dev/null 2>&1; then
+        for sock in "$TMUX_TMPDIR"/tmux-*/default; do
+            [ -S "$sock" ] || continue
+            tmux -S "$sock" ls -F '#S' 2>/dev/null \
+                | grep -E '^aicli-agent-' \
+                | xargs -r -I {} tmux -S "$sock" kill-session -t "{}" >/dev/null 2>&1 || true
+        done
+    fi
 fi
 
-log_status "Terminating AI CLI Agents processes..."
-
-# 1. Terminate all ttyd processes managing aicli sockets
-log_status "Terminating ttyd listeners..."
-graceful_kill "ttyd.*(aicliterm|geminiterm)-"
-
-# 2. Terminate all AICli tmux sessions
-log_status "Terminating tmux agent sessions..."
-if command -v tmux >/dev/null 2>&1; then
-    # Non-root audit: iterate every per-uid tmux socket so non-root sessions
-    # get killed too.
-    for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
-        [ -S "$_sock" ] || continue
-        tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
-    done
+# A surviving supervisor would immediately resume PHP calls after source
+# deletion. Fail before the caller removes the deployed tree.
+if [ -n "$(_matching_pids "$SUPERVISOR_PATTERN")" ]; then
+    log_status "ERROR: storage/workspace supervisor is still running; refusing source removal."
+    exit 1
 fi
 
-# 3. Terminate orphaned agent node processes
-# Path-anchored pattern: requires a plugin-owned path in the cmdline. The old
-# agent-name-only regex (node.*(gemini|claude|...)) could theoretically match
-# unrelated host Node services or — in the wild — has correlated with VM
-# shutdowns where a cmdline contained "gemini" as a substring. See memory
-# feedback_tui_stderr_redirect and the safe_filter above.
-log_status "Terminating orphaned node binaries..."
-graceful_kill "node .*(unraid-aicliagents|/\\.aicli/)"
+log_status "Removing residual runtime files..."
+rm -f "$RUN_DIR"/aicliterm-*.sock
+rm -f "$RUN_DIR"/unraid-aicliagents-*.pid
+rm -f "$RUN_DIR"/unraid-aicliagents-*.lock
+rm -f "$RUN_DIR"/unraid-aicliagents-*.chatid
+rm -f "$RUN_DIR"/unraid-aicliagents-*.agentid
+rm -rf "$RUN_DIR/aicli-sessions"
+rm -f "$SUPERVISOR_PIDFILE"
+rm -f "$RUN_DIR/aicli-supervisor.tick" "$RUN_DIR/aicli-supervisor.work.json"
+rm -f "$TMP_DIR"/aicli-run-*.sh "$TMP_DIR/aicli-install-status" "$TMP_DIR"/ttyd-aicli-*.log
 
-log_status "Cleaning up runtime files and locks..."
-rm -f /var/run/aicliterm-*.sock
-rm -f /var/run/unraid-aicliagents-*.pid
-rm -f /var/run/unraid-aicliagents-*.lock
-rm -f /var/run/unraid-aicliagents-*.chatid
-rm -f /var/run/unraid-aicliagents-*.agentid
-rm -rf /var/run/aicli-sessions
-rm -f /tmp/aicli-run-*.sh
-rm -f /tmp/aicli-install-status
-rm -rf /tmp/unraid-aicliagents
-rm -f /tmp/ttyd-aicli-*.log
+# The engine normally removes this after its residual mount sweep. Standalone
+# callers retain it until then when AICLI_CLEANUP_KEEP_RUNTIME=1.
+if [ "${AICLI_CLEANUP_KEEP_RUNTIME:-0}" != "1" ]; then
+    rm -rf "$RUNTIME_DIR"
+fi
 
-log_status "Removal of runtime assets complete."
+log_status "Residual process/runtime sweep complete."
+exit 0

@@ -30,16 +30,50 @@ export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
 
 SESSION_PATTERN='^aicli-agent-[A-Za-z0-9_.-]+$'
 
+# Bug #141: each session now owns a private tmux server under
+# s-<sid>/tmux-<uid>/default, so a single `tmux list-sessions` against the
+# shared socket no longer sees them. Enumerate every socket instead — the
+# legacy shared path stays in the list so a pre-#141 session is still
+# attachable until it ends.
+_socket_paths() {
+    local _s
+    for _s in "$TMUX_TMPDIR"/s-*/tmux-*/default "$TMUX_TMPDIR"/tmux-*/default; do
+        [ -S "$_s" ] && printf '%s\n' "$_s"
+    done
+}
+
 _list_sessions() {
-    tmux list-sessions -F '#{session_name}' 2>/dev/null \
-        | grep -E '^aicli-agent-' \
-        | sort
+    local _s
+    while IFS= read -r _s; do
+        tmux -S "$_s" list-sessions -F '#{session_name}' 2>/dev/null
+    done < <(_socket_paths) | grep -E '^aicli-agent-' | sort -u
+}
+
+# Print the socket hosting $1, or nothing when no server has it.
+_socket_for_session() {
+    local session="$1" _s
+    while IFS= read -r _s; do
+        if tmux -S "$_s" has-session -t "$session" 2>/dev/null; then
+            printf '%s\n' "$_s"
+            return 0
+        fi
+    done < <(_socket_paths)
+    return 1
 }
 
 _attach_session() {
-    local session="$1"
-    exec tmux attach-session -t "$session" 2>/dev/null \
-        || exec tmux new-session -s "$session"
+    local session="$1" sock
+    sock="$(_socket_for_session "$session")" || sock=""
+    if [ -n "$sock" ]; then
+        exec tmux -S "$sock" attach-session -t "$session"
+    fi
+    # No live server owns it — create it on this session's own private socket
+    # so the new server is never shared with another workspace.
+    local sid="${session##*-}"
+    local newsock="$TMUX_TMPDIR/s-$sid"
+    mkdir -p "$newsock" 2>/dev/null
+    chmod 0700 "$newsock" 2>/dev/null
+    exec env TMUX_TMPDIR="$newsock" tmux new-session -s "$session"
 }
 
 # ── Forced-command path ──────────────────────────────────────────────────────

@@ -35,7 +35,7 @@ class TarballSource implements AgentSource {
         if (!UrlValidator::requireHttps($url, "TarballSource::fetch url ($agentId)")) {
             return false;
         }
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
         @mkdir("$agentDir/pkg", 0755, true);
 
         if (is_callable($progress)) $progress("Downloading {$version}...", 35);
@@ -62,7 +62,7 @@ class TarballSource implements AgentSource {
     }
 
     public function discoverVersion(string $agentId, array $agent): ?string {
-        $agentDir = AgentRegistry::AGENT_BASE . "/$agentId";
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
         $bin = $agent['binary'] ?? '';
         $probe = $agent['source']['version_probe'] ?? '{binary} --version';
         if ($bin !== '' && file_exists($bin)) {

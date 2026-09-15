@@ -74,27 +74,15 @@ function saveAICliAgentsManager(form, silent = false) {
                 // Saving first would update paths before migration, causing persist/consolidate
                 // to target the empty new path instead of the old path with actual data.
 
-                // Show migration overlay
+                // Show migration overlay. Progress updates arrive on the one
+                // page-lifetime `aicli_migrate_progress` subscriber that
+                // NchanSubscribers.php already opened on page load — it
+                // targets this overlay whenever it is present (D9: this used
+                // to open its own second subscription on a second channel).
                 showMigrateOverlay();
-
-                // Subscribe to Nchan for progress
-                var migrateSub = null;
-                if (typeof NchanSubscriber !== 'undefined') {
-                    try {
-                        migrateSub = new NchanSubscriber('/sub/aicli_migrate_progress', {subscriber: 'websocket', reconnectTimeout: 2000});
-                        migrateSub.on('message', function(m) {
-                            try {
-                                var d = JSON.parse(m);
-                                updateMigrateOverlay(d.step, d.progress, d.file);
-                            } catch(e) {}
-                        });
-                        migrateSub.start();
-                    } catch(e) {}
-                }
 
                 // Execute migration (pass both old and new paths — execute_migrate saves config AFTER copying)
                 $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=execute_migrate&agent_storage_path=' + encodeURIComponent(newAgentPath) + '&home_storage_path=' + encodeURIComponent(newHomePath) + '&old_agent_path=' + encodeURIComponent(curAgentPath) + '&old_home_path=' + encodeURIComponent(curHomePath) + '&csrf_token=' + csrf, function(r) {
-                    if (migrateSub) migrateSub.stop();
                     if (r.status === 'ok') {
                         // Now save all non-path form settings (migration already saved the paths)
                         var params = $(form).serialize();
@@ -106,7 +94,6 @@ function saveAICliAgentsManager(form, silent = false) {
                         swal("Migration Failed", r.message || "Check debug.log", "error");
                     }
                 }).fail(function() {
-                    if (migrateSub) migrateSub.stop();
                     hideMigrateOverlay();
                     swal("Migration Failed", "Server communication error", "error");
                 });
@@ -282,7 +269,7 @@ function openPathPicker(id) {
 
 $(function() {
     const lastTab = localStorage.getItem('aicli_manager_tab');
-    if (lastTab && ['config', 'store', 'storage', 'debug'].includes(lastTab)) {
+    if (lastTab && ['config', 'store', 'storage', 'hub', 'relay', 'debug'].includes(lastTab)) {
         const btn = $(`.aicli-tab-btn[onclick*="'${lastTab}'"]`);
         if (btn.length) switchMainTab(lastTab, btn[0]);
     }
@@ -295,6 +282,12 @@ $(function() {
     refreshLogContexts(); // R-07 (#1370): seed the Debug Console context filter dropdown
     refreshStats();
     resetStatsTimer();
-    setInterval(refreshLog, 5000);
+    // EVENT_FIRST_RECONCILIATION.md fact table: the debug log tail has no push
+    // behind it (low value to push) — poll only while the tab is actually
+    // visible AND the Debug Console tab is the one showing, never into a
+    // hidden/background tab.
+    setInterval(function() {
+        if (document.visibilityState === 'visible' && $('#tab-debug').hasClass('active')) refreshLog();
+    }, 5000);
 });
 </script>

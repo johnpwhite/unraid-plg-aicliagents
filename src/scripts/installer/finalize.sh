@@ -71,7 +71,7 @@ log_step "Initializing plugin services..."
 # version is saved below so it can read the OLD version. (Today migrateFormat is a
 # no-op beyond the gate; the slow btrfs→squashfs conversion stays BACKGROUNDED —
 # see D-308.)
-php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/format-migrate.php "$VERSION" > /dev/null 2>&1
+php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/format-migrate.php "$VERSION" 9>&- > /dev/null 2>&1
 
 php -r "
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
@@ -79,13 +79,16 @@ aicli_migrate_home_path();
 aicli_cleanup_legacy();
 aicli_boot_resurrection();
 saveAICliConfig(['version' => '$VERSION']);
-" > /dev/null 2>&1
+" 9>&- > /dev/null 2>&1
 
 # #74: cleanup intentionally stops the old supervisor before replacing source.
 # Do not report install success until the new daemon owns its pidfile and has a
 # fresh heartbeat. A later WebUI request remains a self-heal backstop, not the
 # primary restart mechanism for headless installs.
-if ! php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/supervisor-ready.php > /dev/null 2>&1; then
+# Close installer lock fd 9 in the child. SupervisorService starts a daemon
+# below PHP; without this redirection the daemon inherits the flock forever and
+# every subsequent plugin update reports "Another install is running".
+if ! php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/supervisor-ready.php 9>&- > /dev/null 2>&1; then
     log_error "Storage supervisor did not become ready after installation."
     exit 1
 fi
@@ -129,10 +132,21 @@ else
 fi
 /usr/local/sbin/update_cron 2>/dev/null || true
 
+# --- Home Backup Cron (HOME_BACKUP.md R1/R12) ---
+# One cron.d file, one line per user with a home, mirroring the health-check
+# cron above — but the schedule format (off|daily:HH:MM|weekly:D:HH:MM) and the
+# per-user line count mean this is computed in PHP (BackupCronService), not
+# grepped/templated here. Re-run on every install/upgrade so the cron always
+# matches the saved cfg, even after a plugin update changes which users have a
+# home.
+log_step "Registering home backup schedule..."
+php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/sync-backup-cron.php 9>&- > /dev/null 2>&1
+log_ok "Home backup schedule synced from config."
+
 # Verify UI entry points (D-186: Ensure entry points exist for emhttp)
 cd "$EMHTTP_DEST"
 MISSING_ENTRY=0
-for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php ArrayStopWarning.page; do
+for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliRelayMcp.page ArrayStopWarning.page; do
     if [ ! -f "$f" ]; then
         cp -f "src/$f" "$f"
         MISSING_ENTRY=$((MISSING_ENTRY + 1))

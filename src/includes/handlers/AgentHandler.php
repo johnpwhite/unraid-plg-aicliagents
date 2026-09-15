@@ -35,6 +35,7 @@ class AgentHandler {
             case 'list_active_installs': return self::listActiveInstalls();
             case 'get_upgrade_backup_estimate': return self::getUpgradeBackupEstimate();
             case 'restore_agent_backup': return self::restoreAgentBackup();
+            case 'cancel_agent_upgrade': return self::cancelAgentUpgrade();
             default:                    return null;
             // Note: get_install_status outputs raw JSON and is dispatched directly
         }
@@ -44,7 +45,8 @@ class AgentHandler {
     public static function actions() {
         return ['install_agent', 'emergency_install', 'get_install_status', 'uninstall_agent',
                 'check_updates', 'check_versions', 'get_version_cache', 'set_agent_channel',
-                'list_active_installs', 'get_upgrade_backup_estimate', 'restore_agent_backup'];
+                'list_active_installs', 'get_upgrade_backup_estimate', 'restore_agent_backup',
+                'cancel_agent_upgrade'];
     }
 
     /**
@@ -60,6 +62,32 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'Missing agentId or backup_dir'];
         }
         return \AICliAgents\Services\InstallerService::restoreAgentVersion($agentId, $backupDir);
+    }
+
+    /**
+     * #71 (cancel): abandon a QUEUED agent upgrade before it fires. When a user
+     * upgrades an agent with running sessions and does NOT force-close them, the
+     * upgrade is queued (a pending request + a "queued" status chip) and the
+     * supervisor auto-starts it once the sessions close. This lets the user back
+     * out of that queued upgrade. Queued-only: an upgrade whose binary swap has
+     * already begun is NOT interrupted (that could leave a half-installed agent).
+     */
+    private static function cancelAgentUpgrade() {
+        $agentId = (string)($_GET['agentId'] ?? $_POST['agentId'] ?? '');
+        if ($agentId === '' || !array_key_exists($agentId, \AICliAgents\Services\AgentRegistry::getDefaultAgents())) {
+            return ['status' => 'error', 'message' => 'Invalid agent id'];
+        }
+        // Queued-only guard: never cancel a running binary swap.
+        if (\AICliAgents\Services\PendingAgentUpgradeService::backgroundInstallRunning($agentId)) {
+            return ['status' => 'error', 'reason' => 'already_running',
+                    'message' => 'The upgrade has already started and can no longer be cancelled.'];
+        }
+        $wasQueued = \AICliAgents\Services\PendingAgentUpgradeService::read($agentId) !== [];
+        \AICliAgents\Services\PendingAgentUpgradeService::cancel($agentId);
+        \AICliAgents\Services\UtilityService::clearInstallStatus($agentId);
+        aicli_log("Agent upgrade cancelled by user for $agentId (was_queued=" . ($wasQueued ? '1' : '0') . ")", AICLI_LOG_INFO);
+        return ['status' => 'ok', 'cancelled' => $wasQueued,
+                'message' => $wasQueued ? 'Queued upgrade cancelled.' : 'No queued upgrade to cancel.'];
     }
 
     /**
@@ -82,6 +110,11 @@ class AgentHandler {
      * whose install is still in progress (progress > 0 and < 100). The UI
      * uses this to grey out icons in the New Workspace overlay + disable
      * launch buttons in the drawer.
+     *
+     * Read-only (docs/specs/EVENT_FIRST_RECONCILIATION.md R3): a stale marker
+     * is skipped here, never unlinked — the unlink moved to the supervisor-tick
+     * sweep (ActivityService::sweep() -> UpgradeRelaunchService::
+     * reapStaleInstallMarkers()), so it happens with no browser open too.
      */
     private static function listActiveInstalls() {
         $dir = '/tmp/unraid-aicliagents';
@@ -97,10 +130,10 @@ class AgentHandler {
             if (($status['phase'] ?? '') === 'queued') continue;
             $progress = (int)($status['progress'] ?? 0);
             if ($progress > 0 && $progress < 100) {
-                // Honour the same staleness guard as isInstallInProgress: if the
-                // marker is old and no install-bg process is running, skip it (and
-                // best-effort clear) so the UI does not grey-out agents forever
-                // after a crashed install.
+                // Honour the same staleness guard as isInstallInProgress: a marker
+                // that is old with no install-bg process running is a crash
+                // residue, so it is left out of the active list (never shown as
+                // "installing" forever) — but only the sweep unlinks the file.
                 $age = time() - (int)@filemtime($f);
                 if ($age > self::INSTALL_STALE_THRESHOLD_SECS) {
                     $agentId = $m[1];
@@ -116,7 +149,6 @@ class AgentHandler {
                     $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
                     exec($cmd, $ignored, $rc);
                     if ($rc !== 0) {
-                        @unlink($f);
                         continue;
                     }
                 }
@@ -205,8 +237,75 @@ class AgentHandler {
         return false;
     }
 
+    /**
+     * Why this agent's upgrade must still wait for its sessions to close, or
+     * null when it can be installed beside the version in service.
+     *
+     * docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15), Forgejo
+     * #216. ONE function owns this decision, and both the pre-lock and the
+     * post-lock check call it, because the spec is explicit that an install
+     * path which thinks it must close sessions and a side-by-side path that has
+     * made closing unnecessary must never half-run together.
+     *
+     * The three reasons to still wait:
+     *
+     *  1. The agent's source type is not one whose install output is entirely
+     *     reconstructible. In practice: `curl_install` agents, whose vendor
+     *     scripts land their binary inside a captive home directory inside the
+     *     agent's own tree. Versioning that path is real work with its own
+     *     phase; claiming side-by-side for them before it is done would be
+     *     claiming a guarantee that is not there.
+     *  2. The agent is not on the versioned layout yet — it has never been
+     *     mounted at a generation-qualified path, so there is no second place
+     *     to put a version. This resolves itself: the first upgrade after this
+     *     code ships converts the layout, and every later one qualifies.
+     *  3. The ceiling on concurrently-mounted generations is already reached.
+     *     Each one costs a live overlay plus a writable layer of a few hundred
+     *     megabytes on a write-endurance-limited stick, so past the ceiling the
+     *     honest answer is to wait rather than to keep stacking versions.
+     *
+     * The message is written to be read by a person: it is what the Store card
+     * shows underneath "Upgrade queued safely".
+     */
+    public static function sideBySideInstallBlocker(string $agentId): ?string {
+        $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
+        $agent = $registry[$agentId] ?? null;
+        if (!is_array($agent)) {
+            return 'this agent is not in the registry';
+        }
+        if (!\AICliAgents\Services\Sources\SourceResolver::supportsSideBySideInstall($agent)) {
+            return 'this agent keeps its sign-in inside its own install folder, so a new version cannot run beside the old one yet';
+        }
+
+        $mounted = \AICliAgents\Services\AgentRegistry::mountedGenerations($agentId);
+        if ($mounted === []) {
+            return 'this agent has not been moved onto the side-by-side layout yet; the next upgrade will do that';
+        }
+        if (!\AICliAgents\Services\AgentRegistry::canAddGeneration(count($mounted))) {
+            return 'two versions of this agent are already running; close a workspace before installing a third';
+        }
+        return null;
+    }
+
     private static function install() {
         $agentId = $_GET['agentId'] ?? '';
+        $version = (string)($_GET['version'] ?? '');
+        $backupDest = (($_GET['backup'] ?? '') === '1') ? trim((string)($_GET['backup_dest'] ?? '')) : '';
+        $force = (($_GET['force'] ?? '') === '1');
+        return self::installCore((string)$agentId, $version, $backupDest, $force);
+    }
+
+    /**
+     * The install/upgrade action itself, with no $_GET dependency — factored out
+     * of install() (Tier 3, PLUGIN_MANAGEMENT_TOOLS.md "Phase 3 as built") so
+     * AdminService::executeApprovedUpgradeAgent() can run the EXACT same code
+     * path a human's "Upgrade" click runs, after a Tier-3 proposal is approved,
+     * instead of a second copy of this logic. install() above is now a thin
+     * $_GET-reading wrapper; every line below is unchanged from before the refactor.
+     *
+     * @return array<string,mixed>
+     */
+    public static function installCore(string $agentId, string $version = '', string $backupDest = '', bool $force = false): array {
         if (empty($agentId)) {
             return ['status' => 'error', 'message' => 'No Agent ID provided'];
         }
@@ -218,16 +317,33 @@ class AgentHandler {
             return ['status' => 'error', 'message' => 'An installation is already in progress for this agent.'];
         }
 
-        $version = (string)($_GET['version'] ?? '');
-        $backupDest = (($_GET['backup'] ?? '') === '1') ? trim((string)($_GET['backup_dest'] ?? '')) : '';
-        $force = (($_GET['force'] ?? '') === '1');
         $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
 
         // #71: waiting is the default and is entirely non-destructive. This
         // backend check is authoritative even if a stale UI calls the endpoint.
+        //
+        // docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15), #216:
+        // the wait is no longer the only safe answer. When this agent can be
+        // installed beside the version in service, open sessions are not a
+        // reason to defer anything — they keep the version they launched with
+        // until their workspace is reloaded, and the install writes into a layer
+        // of its own. See sideBySideInstallBlocker() for the three conditions
+        // that still send an upgrade back to the queue.
         if (!$force && $sessions !== []) {
-            return \AICliAgents\Services\PendingAgentUpgradeService::queue(
-                $agentId, $version, $backupDest, count($sessions)
+            $blocker = self::sideBySideInstallBlocker($agentId);
+            if ($blocker !== null) {
+                \AICliAgents\Services\LogService::log(
+                    "Upgrade for $agentId queued behind " . count($sessions) . " session(s): $blocker",
+                    \AICliAgents\Services\LogService::LOG_INFO, "AgentHandler"
+                );
+                return \AICliAgents\Services\PendingAgentUpgradeService::queue(
+                    $agentId, $version, $backupDest, count($sessions), [], $blocker
+                );
+            }
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer',
+                'agent_upgrade_no_wait_required',
+                ['agent' => $agentId, 'open_sessions' => count($sessions)]
             );
         }
 
@@ -235,17 +351,24 @@ class AgentHandler {
         if (!$force) {
             $admission = \AICliAgents\Services\AgentUpgradeAdmissionService::acquire($agentId);
             if ($admission === null) {
+                // Another install of this agent holds the admission lock. That
+                // is a genuine conflict whatever the install strategy, so it
+                // queues either way.
                 return \AICliAgents\Services\PendingAgentUpgradeService::queue(
                     $agentId, $version, $backupDest, count($sessions)
                 );
             }
             // A terminal may have reached final registration after the first
-            // list but before this lock. Recheck while admission is exclusive.
+            // list but before this lock. Recheck while admission is exclusive —
+            // and apply the SAME side-by-side decision, or an upgrade that was
+            // just cleared to proceed would fall into the queue a moment later
+            // because one workspace opened in between.
             $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId);
-            if ($sessions !== []) {
+            $lateBlocker = $sessions !== [] ? self::sideBySideInstallBlocker($agentId) : null;
+            if ($lateBlocker !== null) {
                 \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
                 return \AICliAgents\Services\PendingAgentUpgradeService::queue(
-                    $agentId, $version, $backupDest, count($sessions)
+                    $agentId, $version, $backupDest, count($sessions), [], $lateBlocker
                 );
             }
         }
@@ -254,6 +377,33 @@ class AgentHandler {
         \AICliAgents\Services\PendingAgentUpgradeService::cancel($agentId);
 
         try {
+
+        // #158: refuse the upgrade up-front when the agent binary is held by a
+        // process that is NOT one of this agent's own workspaces (e.g. a Claude
+        // workspace running `opencode` as a tool). We must not force-kill someone
+        // else's agent, and swapping the binary while it is held wedges the
+        // remount. Tear down nothing — ask the operator to close the external
+        // holder and retry. Fail-open: detection miss returns no holders.
+        if ($force) {
+            $ourSids = array_values(array_filter(array_map(
+                static fn($s): string => (string)($s['id'] ?? ''),
+                \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId)
+            )));
+            $externalHolders = self::externalBinaryHolders($agentId, $ourSids);
+            if (!empty($externalHolders)) {
+                $n = count($externalHolders);
+                $name = \AICliAgents\Services\AgentRegistry::getDefaultAgents()[$agentId]['name'] ?? $agentId;
+                // #87: name the blockers (pid, command, cwd, tmux session, age) instead
+                // of a bare count, so the operator can find and close them.
+                $msg = "$name is still in use by $n process(es) outside its workspaces. Close those and retry the upgrade:\n"
+                    . self::describeHolders($externalHolders);
+                aicli_log("Upgrade deferred for $agentId: $n external binary holder(s) — " . implode(',', array_map(
+                    static fn($h): string => $h['pid'] . '@' . ($h['sid'] !== '' ? $h['sid'] : '?'), $externalHolders
+                )), AICLI_LOG_WARN);
+                \AICliAgents\Services\UtilityService::clearInstallStatus($agentId);
+                return ['status' => 'error', 'message' => $msg, 'reason' => 'binary_in_use_external', 'holders' => $externalHolders];
+            }
+        }
 
         // R2 (UPGRADE_RELAUNCH_ZOMBIE_SKIP): write the in-progress marker as the
         // FIRST mutating action — BEFORE _closeSessionsForUpgrade — so a racing
@@ -295,8 +445,26 @@ class AgentHandler {
         // unused) so install-bg.php can read argv[2]/argv[3] unambiguously.
         $versionArg = " " . escapeshellarg($version);
         $backupArg  = " " . escapeshellarg($backupDest);
-        aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg);
-            return ['status' => 'ok', 'message' => 'Installation started', 'pre_closed_sessions' => $preClosed];
+        // #176: strip AICLI_SESSION_ID so the detached install job is NEVER a
+        // "session descendant" the reaper (terminateSessionDescendants, matches
+        // AICLI_SESSION_ID in /proc/environ) can kill mid-install. Needed when an
+        // upgrade is triggered from inside an agent session; /proc/environ is
+        // fixed at exec, so this must happen at the spawn site.
+        aicli_exec_bg("env -u AICLI_SESSION_ID /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg);
+            // Tell the caller WHAT KIND of install this is. The Store hides every
+            // terminal for an agent while it installs, which is right only when
+            // the install will actually interrupt those sessions. A side-by-side
+            // install never touches them, so hiding them there is a roadblock
+            // that does nothing but misinform — it used to say "session will
+            // resume automatically" about a session that was never stopped.
+            // docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md
+            return [
+                'status'              => 'ok',
+                'message'             => 'Installation started',
+                'pre_closed_sessions' => $preClosed,
+                'side_by_side'        => (!$force && self::sideBySideInstallBlocker($agentId) === null),
+                'open_sessions'       => count($sessions),
+            ];
         } finally {
             \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
         }
@@ -411,6 +579,23 @@ class AgentHandler {
             }
         }
 
+        // #158/#159: reap by ENVIRONMENT, not just the pane tree. On Tower an
+        // OpenCode agent that exits rc=1 in <3s crash-loops; a child can detach
+        // from the pane and reparent to PID 1 (its argv is a bare binary path, so
+        // pgrep -f AICLI_SESSION_ID= never matches it). The pane-scoped kill above
+        // misses it, it keeps the agent binary mounted, and the post-install
+        // remount then wedges at 99% while the loop re-pins the stale layer — the
+        // operator sees "it force-closed but they immediately started again". The
+        // normal drawer close already reaps these via terminateSessionDescendants;
+        // the upgrade close did not. Mirror it here (env-scoped => safe, no broad
+        // name/path pkill).
+        $reaped = self::reapUpgradeSurvivors(array_map(
+            static fn($s): string => (string)($s['id'] ?? ''), $sessions
+        ));
+        if (!empty($reaped)) {
+            aicli_log("Upgrade: reaped " . count($reaped) . " env-scoped survivor(s) for $agentId after pane kill", AICLI_LOG_INFO);
+        }
+
         // R2: record the EXACT closed set so the post-install relaunch brings
         // back precisely these sessions (resumed), independent of the
         // per-workspace autoLaunch flag. Source of truth for relaunchClosedSet().
@@ -423,7 +608,7 @@ class AgentHandler {
                 'sessionId'     => (string)($s['id'] ?? ''),
                 'workspacePath' => $wp,
                 'user'          => $cfgUser,
-                'hadResume'     => $wp !== '' && \AICliAgents\Services\ConfigService::getResumeId($wp, $agentId) !== null,
+                'hadResume'     => $wp !== '' && \AICliAgents\Services\ConfigService::getResumeId($wp, $agentId, (string)($s['id'] ?? '')) !== null,
             ];
         }
         if (\AICliAgents\Services\UpgradeRelaunchService::writeManifest($agentId, $closedSet) === false) {
@@ -431,6 +616,179 @@ class AgentHandler {
         }
 
         return $sessions;
+    }
+
+    /**
+     * #158: reap every closed session's env-scoped descendants after the pane
+     * kill. Loops the reaper (default: the environ-based
+     * ProcessManager::terminateSessionDescendants, already used by the normal
+     * drawer close) once per session and returns the unique pids signalled.
+     * Injectable reaper => unit-testable without live processes.
+     *
+     * @param array<int,string> $sessionIds
+     * @param (callable(string):array<int,int>)|null $reaper
+     * @return array<int,int> unique pids reaped, in first-seen order
+     */
+    public static function reapUpgradeSurvivors(array $sessionIds, ?callable $reaper = null): array
+    {
+        $reaper = $reaper ?? static function (string $sid): array {
+            return \AICliAgents\Services\ProcessManager::terminateSessionDescendants($sid);
+        };
+        $seen = [];
+        foreach ($sessionIds as $sid) {
+            $sid = (string)$sid;
+            if ($sid === '') continue;
+            foreach ((array)$reaper($sid) as $pid) {
+                $pid = (int)$pid;
+                if ($pid > 1) $seen[$pid] = true;
+            }
+        }
+        return array_map('intval', array_keys($seen));
+    }
+
+    /**
+     * #158: PURE — of the processes running $binaryPath, return the ones whose
+     * session id is NOT among the sessions we are closing for this upgrade. These
+     * are EXTERNAL holders (e.g. a Claude workspace running `opencode` as a tool);
+     * they pin the agent binary but must NOT be force-killed. The upgrade defers
+     * with an actionable message when any exist, rather than swapping under a live
+     * process or wedging.
+     *
+     * @param array<int,array{pid:int,sid:string,cmd:string}> $procs
+     * @param string $binaryPath exact agent binary path (full path => safe match)
+     * @param array<int,string> $ourSessionIds sessions being closed for this upgrade
+     * @return array<int,array{pid:int,sid:string}>
+     */
+    public static function classifyExternalBinaryHolders(array $procs, string $binaryPath, array $ourSessionIds, string $fallbackPath = ''): array
+    {
+        if ($binaryPath === '') return [];
+        $ours = array_fill_keys(array_map('strval', $ourSessionIds), true);
+        $accept = [$binaryPath => true];
+        if ($fallbackPath !== '') $accept[$fallbackPath] = true;
+        $ext = [];
+        foreach ($procs as $p) {
+            // #164: a holder must be EXECUTING the binary, not merely mention its
+            // path. The binary is argv[0] (direct exec, e.g. `opencode.exe -s …`)
+            // or argv[1] (interpreter form, e.g. `node <cli.js>`). Matching the
+            // path ANYWHERE in the command line wrongly counted the session's own
+            // ttyd bridge — which carries `env BINARY=<path>` as an argument for
+            // the launched agent, but does not run the binary and has no
+            // AICLI_SESSION_ID in its own environ (sid ''), so it was flagged as
+            // an external holder and blocked a legitimate force-upgrade.
+            $argv = (isset($p['argv']) && is_array($p['argv']))
+                ? array_values(array_map('strval', $p['argv']))
+                : (preg_split('/\s+/', trim((string)($p['cmd'] ?? ''))) ?: []);
+            $isHolder = (isset($argv[0]) && isset($accept[$argv[0]]))
+                     || (isset($argv[1]) && isset($accept[$argv[1]]));
+            if (!$isHolder) continue;                             // not a holder of THIS binary
+            $sid = (string)($p['sid'] ?? '');
+            if ($sid !== '' && isset($ours[$sid])) continue;      // one of our closing sessions
+            $ext[] = [
+                'pid'   => (int)($p['pid'] ?? 0),
+                'sid'   => $sid,
+                // #87: carry the descriptive facts through so the UI can name the blocker.
+                'cmd'   => (string)($p['cmd'] ?? ''),
+                'cwd'   => (string)($p['cwd'] ?? ''),
+                'age_s' => (int)($p['age_s'] ?? 0),
+                'tmux'  => (string)($p['tmux'] ?? ''),
+            ];
+        }
+        return $ext;
+    }
+
+    /**
+     * #158: live wrapper — scan /proc for processes running $agentId's binary and
+     * classify external holders (session id not in $closedSids). Fail-open: an
+     * empty binary path or a scan miss returns [] (never blocks an upgrade on a
+     * detection failure).
+     *
+     * @param array<int,string> $closedSids
+     * @return array<int,array{pid:int,sid:string}>
+     */
+    public static function externalBinaryHolders(string $agentId, array $closedSids): array
+    {
+        $agents = \AICliAgents\Services\AgentRegistry::getDefaultAgents();
+        $bin = (string)($agents[$agentId]['binary'] ?? '');
+        $fallback = (string)($agents[$agentId]['binary_fallback'] ?? '');
+        if ($bin === '') return [];
+        $procs = [];
+        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+            $pid = (int)basename(dirname($file));
+            if ($pid <= 1) continue;
+            $raw = @file_get_contents($file);        // NUL-delimited argv
+            if ($raw === false || $raw === '') continue;
+            $argv = array_values(array_filter(explode("\0", $raw), static fn($t): bool => $t !== ''));
+            // #164: only a process EXECUTING the binary (argv[0] or the argv[1]
+            // interpreter form) is a candidate holder — a mere mention of the path
+            // elsewhere (ttyd's `BINARY=<path>` env-arg, a shell -c script) is not.
+            // Gate here so we read environ ONLY for real candidates.
+            $isCandidate = (isset($argv[0]) && ($argv[0] === $bin || ($fallback !== '' && $argv[0] === $fallback)))
+                        || (isset($argv[1]) && ($argv[1] === $bin || ($fallback !== '' && $argv[1] === $fallback)));
+            if (!$isCandidate) continue;
+            $env = (string)@file_get_contents("/proc/$pid/environ");
+            $sid = '';
+            foreach (explode("\0", $env) as $kv) {
+                if (strpos($kv, 'AICLI_SESSION_ID=') === 0) { $sid = substr($kv, 17); break; }
+            }
+            $procs[] = array_merge(
+                ['pid' => $pid, 'sid' => $sid, 'cmd' => str_replace("\0", ' ', $raw), 'argv' => $argv],
+                self::describeProcess($pid, $env)
+            );
+        }
+        return self::classifyExternalBinaryHolders($procs, $bin, $closedSids, $fallback);
+    }
+
+    /**
+     * #87: the concrete facts an operator needs to find and close a blocking
+     * process — where it runs (cwd), how long it has run (age), and which tmux
+     * session hosts it, if any — read from /proc without touching the process.
+     * Best-effort: every field degrades to '' / 0 when unreadable.
+     *
+     * @return array{cwd:string,age_s:int,tmux:string}
+     */
+    public static function describeProcess(int $pid, string $environ = ''): array
+    {
+        $cwd = (string)(@readlink("/proc/$pid/cwd") ?: '');
+        $started = @filectime("/proc/$pid");
+        $age = $started ? max(0, time() - (int)$started) : 0;
+        $tmux = '';
+        foreach (explode("\0", $environ) as $kv) {
+            // TMUX=<socket>,<server pid>,<session index>; the socket basename is
+            // the plugin's per-session dir or a user's own server ("default").
+            if (strpos($kv, 'TMUX=') === 0) {
+                $parts = explode(',', substr($kv, 5));
+                $tmux = basename(dirname((string)($parts[0] ?? ''))) . '/' . basename((string)($parts[0] ?? ''));
+                break;
+            }
+        }
+        return ['cwd' => $cwd, 'age_s' => $age, 'tmux' => $tmux];
+    }
+
+    /**
+     * #87: one human-readable line per blocking process, so the UI can show WHO
+     * is holding the binary instead of a bare count. Pure over the holder rows.
+     *
+     * @param array<int,array{pid:int,sid?:string,cmd?:string,cwd?:string,age_s?:int,tmux?:string}> $holders
+     */
+    public static function describeHolders(array $holders, int $max = 5): string
+    {
+        $lines = [];
+        foreach (array_slice($holders, 0, $max) as $h) {
+            $cmd = trim((string)($h['cmd'] ?? ''));
+            if (strlen($cmd) > 80) $cmd = substr($cmd, 0, 77) . '…';
+            $age = (int)($h['age_s'] ?? 0);
+            $ageText = $age >= 3600 ? sprintf('%dh %dm', intdiv($age, 3600), intdiv($age % 3600, 60)) : sprintf('%dm', intdiv($age, 60));
+            $bits = ["pid " . (int)($h['pid'] ?? 0)];
+            if ($cmd !== '') $bits[] = $cmd;
+            $sid = (string)($h['sid'] ?? '');
+            $bits[] = $sid !== '' ? "workspace $sid" : 'NOT a plugin workspace (external)';
+            if (($h['cwd'] ?? '') !== '') $bits[] = 'cwd ' . $h['cwd'];
+            if (($h['tmux'] ?? '') !== '') $bits[] = 'tmux ' . $h['tmux'];
+            $bits[] = 'running ' . $ageText;
+            $lines[] = implode(' · ', $bits);
+        }
+        if (count($holders) > $max) $lines[] = '… and ' . (count($holders) - $max) . ' more';
+        return implode("\n", $lines);
     }
 
     /**
@@ -456,7 +814,22 @@ class AgentHandler {
         // $agentId is restricted to [a-z0-9-] above, so no path-traversal surface
         // remains. File content is author-written JSON.
         if (file_exists($file)) {
-            echo file_get_contents($file); // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
+            $raw = (string)file_get_contents($file);
+            // #87: while an installed upgrade waits for running processes before it
+            // can activate (99%), enumerate the blockers on EVERY poll — pid,
+            // command, cwd, tmux session, age, and whether each is a plugin
+            // workspace or an external process — so the wait is explained and
+            // refreshable instead of an indefinite unexplained 99%.
+            $status = $agentId !== '' ? json_decode($raw, true) : null;
+            if (is_array($status) && (string)($status['phase'] ?? '') === 'awaiting_activation') {
+                $holders = self::externalBinaryHolders($agentId, []);
+                $status['holders'] = $holders;
+                $status['blockers'] = $holders === []
+                    ? 'No process is running the old version now; activation runs on the next supervisor pass.'
+                    : "Waiting for " . count($holders) . " process(es) still running the old version:\n" . self::describeHolders($holders);
+                $raw = (string)json_encode($status);
+            }
+            echo $raw; // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
         } else {
             echo json_encode(['status' => 'pending', 'progress' => -1]);
         }
@@ -477,7 +850,8 @@ class AgentHandler {
 
         \AICliAgents\Services\UtilityService::clearInstallStatus($agentId);
         setInstallStatus("Starting emergency install...", 5, $agentId);
-        aicli_exec_bg("/usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/emergency-install-bg.php " . escapeshellarg($agentId));
+        // #176: dissociate the detached install job from any session (see install()).
+        aicli_exec_bg("env -u AICLI_SESSION_ID /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/emergency-install-bg.php " . escapeshellarg($agentId));
         return ['status' => 'ok', 'message' => 'Emergency installation started'];
     }
 

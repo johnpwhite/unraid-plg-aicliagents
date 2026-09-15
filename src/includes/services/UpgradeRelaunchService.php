@@ -58,6 +58,91 @@ class UpgradeRelaunchService
     }
 
     /**
+     * 2026-09-03 wedge guard: true while the install that owns the closed-set
+     * manifest is still ALIVE, i.e. activation/relaunch must NOT run yet. The
+     * manifest is written at session-close time — before install-bg finishes —
+     * so "manifest exists" alone cannot distinguish a live install from a
+     * crashed one. Two signals, either blocks:
+     *   1. a live `install-bg.php <agentId>` process;
+     *   2. a FRESH in-flight install-status marker (0 < progress < 100, age
+     *      <= 180 s) whose phase is neither `queued` (sessions untouched, no
+     *      manifest yet) nor `awaiting_activation` (install-bg finished and
+     *      handed activation to the supervisor — the one in-flight state where
+     *      activation MUST proceed). The marker is written by
+     *      AgentHandler::install BEFORE sessions close, so it covers the gap
+     *      before the install-bg process exists.
+     * A stale marker with no process (SIGKILLed install) does not block, so
+     * the crash-window self-heal keeps working.
+     * Spec: docs/specs/AGENT_UPGRADE_SESSION_RELAUNCH.md (2026-09-03 correction).
+     *
+     * @param callable|null $installRunning fn(): bool — test seam; defaults to
+     *        PendingAgentUpgradeService::backgroundInstallRunning($agentId).
+     */
+    public static function activationBlocked(string $agentId, ?callable $installRunning = null): bool
+    {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if ($installRunning === null) {
+            require_once __DIR__ . '/PendingAgentUpgradeService.php';
+            $installRunning = static fn(): bool =>
+                PendingAgentUpgradeService::backgroundInstallRunning($agentId);
+        }
+        if ($installRunning()) return true;
+
+        $marker = self::baseDir() . "/install-status-$agentId";
+        if (!is_file($marker)) return false;
+        $status = json_decode((string)@file_get_contents($marker), true);
+        if (!is_array($status)) return false;
+        $phase = (string)($status['phase'] ?? '');
+        if ($phase === 'queued' || $phase === 'awaiting_activation') return false;
+        $progress = (int)($status['progress'] ?? 0);
+        if ($progress <= 0 || $progress >= 100) return false;
+        return (time() - (int)@filemtime($marker)) <= 180;
+    }
+
+    /**
+     * docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.2: unlink an install-status
+     * marker whose install crashed (SIGKILL/OOM) without ever writing
+     * progress=100 — moved OUT of AgentHandler::listActiveInstalls() (a read
+     * path) so a stale marker is cleared even with no browser open. Reads the
+     * SAME marker path activationBlocked() reads (self::baseDir(), which
+     * honours AICLI_TMP_BASE for tests), and applies the EXACT SAME staleness
+     * rule AgentHandler::isInstallInProgress() still applies on its own guard
+     * path: age > 180 s AND no live install-bg.php process AND no retained
+     * closed-set manifest (a manifest means the marker's `awaiting_activation`
+     * wait is real, not a crash — that marker must survive).
+     *
+     * Never throws. @return int number of markers unlinked.
+     */
+    public static function reapStaleInstallMarkers(): int
+    {
+        $reaped = 0;
+        foreach (glob(self::baseDir() . '/install-status-*') ?: [] as $file) {
+            $base = basename($file);
+            if (!preg_match('/^install-status-([a-z0-9][a-z0-9-]{0,63})$/', $base, $m)) continue;
+            $agentId = $m[1];
+            $status = @json_decode((string)@file_get_contents($file), true);
+            if (!is_array($status)) continue;
+            if (($status['phase'] ?? '') === 'queued') continue;
+            $progress = (int)($status['progress'] ?? 0);
+            if ($progress <= 0 || $progress >= 100) continue;
+
+            $age = time() - (int)@filemtime($file);
+            if ($age <= 180) continue; // fresh — still genuinely in progress
+
+            // A retained closed set means activation is still pending on
+            // purpose (awaiting_activation) — never reap that marker.
+            if (self::hasPendingAgentUpgrade($agentId)) continue;
+
+            $cmd = "timeout 2 ps aux | grep 'install-bg.php " . escapeshellarg($agentId) . "' | grep -v grep";
+            exec($cmd, $ignored, $rc);
+            if ($rc === 0) continue; // a live install-bg process is authoritative
+
+            if (@unlink($file)) $reaped++;
+        }
+        return $reaped;
+    }
+
+    /**
      * Agent ids with a durable closed set waiting for layer activation.
      * Invalid/malformed manifests are ignored; callers must never infer an id
      * from a filename alone.
@@ -189,6 +274,205 @@ class UpgradeRelaunchService
         @unlink(self::manifestPath($agentId));
     }
 
+    // --- Pending layer activation (docs/specs/UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md)
+    //
+    // The closed-set manifest above only exists when the upgrade CLOSED sessions.
+    // An upgrade with no session to close (or whose mount was pinned by something
+    // else at refresh time) also ends with a freshly baked layer that is not live,
+    // but had NO durable record of that: the supervisor's activation job found no
+    // manifest, logged `upgrade_activation_superseded` and dropped it, so the new
+    // consolidated layer was never activated until the next reboot and the tray
+    // eventually timed the wait out as a failure (opencode 1.18.27, 2026-09-06).
+    // This record is the manifest-independent activation barrier: it is written
+    // by install-bg at hand-off and cleared by completeActivation() after the
+    // layer is live (via the supervisor mount job) — or immediately, when the
+    // layer turns out to be live already.
+
+    public static function pendingActivationPath(string $agentId): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        $safe = preg_replace('/\.{2,}/', '_', $safe);
+        return self::baseDir() . "/pending-activation-$safe.json";
+    }
+
+    public static function markActivationPending(string $agentId, string $layer, bool $hasClosedSet): bool
+    {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        @mkdir(self::baseDir(), 0755, true);
+        $payload = [
+            'agentId'       => $agentId,
+            'layer'         => $layer,
+            'closed_set'    => $hasClosedSet,
+            'written_at'    => time(),
+        ];
+        return @file_put_contents(self::pendingActivationPath($agentId), json_encode($payload)) !== false;
+    }
+
+    public static function readPendingActivation(string $agentId): array
+    {
+        $f = self::pendingActivationPath($agentId);
+        if (!is_file($f)) return [];
+        $data = json_decode((string)@file_get_contents($f), true);
+        return (is_array($data) && (string)($data['agentId'] ?? '') === $agentId) ? $data : [];
+    }
+
+    public static function hasPendingActivation(string $agentId): bool
+    {
+        return self::readPendingActivation($agentId) !== [];
+    }
+
+    public static function clearPendingActivation(string $agentId): void
+    {
+        @unlink(self::pendingActivationPath($agentId));
+    }
+
+    /**
+     * True while ANY activation barrier exists for the agent: a closed set that
+     * still has to be relaunched, or a baked layer that still has to go live.
+     * This is what the supervisor's `upgrade_relaunch` mount job checks before
+     * declaring itself superseded.
+     */
+    public static function activationPending(string $agentId): bool
+    {
+        return self::hasPendingAgentUpgrade($agentId) || self::hasPendingActivation($agentId);
+    }
+
+    /**
+     * Agent ids with a pending-activation record and NO closed set (the closed-set
+     * path is owned by pendingAgentIds()). Ids are validated from file content.
+     *
+     * @return array<int,string>
+     */
+    public static function pendingActivationOnlyIds(): array
+    {
+        $ids = [];
+        foreach (glob(self::baseDir() . '/pending-activation-*.json') ?: [] as $file) {
+            $data = json_decode((string)@file_get_contents($file), true);
+            $agentId = is_array($data) ? (string)($data['agentId'] ?? '') : '';
+            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) continue;
+            // The content must name the agent the file is for (a foreign or
+            // mis-filed record is ignored, never acted on).
+            if (basename($file) !== basename(self::pendingActivationPath($agentId))) continue;
+            if (self::hasPendingAgentUpgrade($agentId)) continue;
+            $ids[$agentId] = true;
+        }
+        return array_keys($ids);
+    }
+
+    /**
+     * The activation is done: publish 100% (which also finishes the tray entry
+     * parked in `waiting`) and drop the record. Idempotent. The optional callable
+     * is a test seam for the status publisher.
+     */
+    public static function completeActivation(string $agentId, ?callable $publishComplete = null): void
+    {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return;
+        $record = self::readPendingActivation($agentId);
+        if ($publishComplete === null) {
+            $publishComplete = static function (string $id): void {
+                if (function_exists('setInstallStatus')) {
+                    setInstallStatus('Installation complete', 100, $id);
+                } elseif (class_exists('\AICliAgents\Services\UtilityService')) {
+                    UtilityService::setInstallStatus('Installation complete', 100, $id);
+                }
+            };
+        }
+        $publishComplete($agentId);
+        self::clearPendingActivation($agentId);
+        if ($record !== [] && class_exists('\AICliAgents\Services\LifecycleLogService')) {
+            LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer',
+                'upgrade_activation_complete',
+                ['agent' => $agentId, 'layer' => (string)($record['layer'] ?? ''), 'closed_set' => (bool)($record['closed_set'] ?? false)]);
+        }
+    }
+
+    /**
+     * Close-event hook (UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md §Event): a
+     * session of $agentId just closed. If an activation is pending, pull its
+     * parked supervisor retry forward to NOW (the backoff pen otherwise waits up
+     * to 60 s) — or enqueue the stable job when nothing is parked or queued —
+     * and wake the supervisor. The tick's idle probe + backoff remain the
+     * fallback. Returns true when something was nudged. Never throws.
+     *
+     * @param string|null   $retryDir test seam; default supervisor jobs-retry dir
+     * @param callable|null $wake     test seam; default SupervisorService::wake
+     * @param callable|null $schedule test seam; default schedulePendingActivation
+     */
+    public static function nudgeActivation(
+        string $agentId,
+        ?string $retryDir = null,
+        ?callable $wake = null,
+        ?callable $schedule = null
+    ): bool {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if (!self::activationPending($agentId)) return false;
+        $safe   = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        $jobId  = "upgrade-agent-$safe";
+        $retryDir = $retryDir ?? (SupervisorService::SUPERVISOR_DIR . '/jobs-retry');
+        $wake     = $wake ?? static fn(): bool => SupervisorService::wake();
+        $schedule = $schedule ?? static fn(string $id): bool => self::schedulePendingActivation($id);
+
+        $retry = "$retryDir/$jobId.retry";
+        if (is_file($retry)) {
+            $data = json_decode((string)@file_get_contents($retry), true);
+            if (is_array($data)) {
+                $data['retry_at'] = time();
+                $tmp = "$retry.tmp." . getmypid();
+                if (@file_put_contents($tmp, json_encode($data)) !== false && @rename($tmp, $retry)) {
+                    if (class_exists('\AICliAgents\Services\LifecycleLogService')) {
+                        LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer',
+                            'upgrade_activation_nudged', ['agent' => $agentId, 'via' => 'retry_pulled_forward']);
+                    }
+                    $wake();
+                    return true;
+                }
+                @unlink($tmp);
+            }
+        }
+        $queued = glob(SupervisorService::QUEUE_DIR . "/*_agent_{$safe}_mount.req") ?: [];
+        if ($queued !== []) { $wake(); return true; }   // already queued — just make the tick happen now
+        $ok = (bool)$schedule($agentId);                // enqueues with the stable job id + wakes
+        if ($ok && class_exists('\AICliAgents\Services\LifecycleLogService')) {
+            LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer',
+                'upgrade_activation_nudged', ['agent' => $agentId, 'via' => 'enqueued']);
+        }
+        return $ok;
+    }
+
+    /**
+     * Supervisor sweep helper for pending-activation-only agents: an agent whose
+     * newest layer is ALREADY live (someone remounted meanwhile) is completed on
+     * the spot — never enqueue a mount that a live session would make defer
+     * forever for nothing. The rest are returned for the activation mount job.
+     *
+     * @param callable|null $layerLive fn(string $agentId): bool — test seam;
+     *        defaults to InstallerService::isAgentLayerLive on the newest layer.
+     * @param callable|null $publishComplete forwarded to completeActivation().
+     * @return array<int,string> ids that still need the activation mount
+     */
+    public static function reconcilePendingActivations(?callable $layerLive = null, ?callable $publishComplete = null): array
+    {
+        if ($layerLive === null) {
+            $layerLive = static function (string $agentId): bool {
+                require_once __DIR__ . '/InstallerService.php';
+                $persistDir = '/boot/config/plugins/unraid-aicliagents/persistence';
+                $newest = InstallerService::newestAgentLayer($agentId, $persistDir);
+                if ($newest === null) return true; // nothing to activate
+                $mounts = (string)@file_get_contents('/proc/mounts');
+                return InstallerService::isAgentLayerLive($agentId, $newest, $mounts);
+            };
+        }
+        $needMount = [];
+        foreach (self::pendingActivationOnlyIds() as $agentId) {
+            if ($layerLive($agentId)) {
+                self::completeActivation($agentId, $publishComplete);
+                continue;
+            }
+            $needMount[] = $agentId;
+        }
+        return $needMount;
+    }
+
     // --- Per-USER home manifest (approach B) -----------------------------
     // A home is shared across all of a user's agents, so its closed-set is
     // keyed by user and each entry carries its OWN agentId (unlike the per-agent
@@ -224,6 +508,86 @@ class UpgradeRelaunchService
     public static function deleteHomeManifest(string $user): void
     {
         @unlink(self::homeManifestPath($user));
+    }
+
+    /**
+     * HOME_BACKUP.md R3/R4: close every open session of $user's home for a
+     * COLD backup, recording each session's readiness — "working" or
+     * "idle" — from the SAME pane classifier the Relay and Continue nudge use
+     * (TmuxService::paneAcceptsInput), taken IMMEDIATELY BEFORE the close.
+     * Writes the per-user relaunch manifest first (so a crash between the
+     * manifest write and the actual close still leaves a recoverable set),
+     * then closes the sessions. A session the classifier cannot read (no
+     * session, no live agent, or the pane could not be captured) is recorded
+     * `working: false` — the safe default is no Continue nudge.
+     *
+     * @param callable|null $listSessions fn(string $user): array<int,array<string,mixed>>
+     *        default TerminalService::listActiveSessionsForHome.
+     * @param callable|null $paneReady    fn(string $agentId, string $sessionId): array{ready:bool,reason:string}
+     *        default TmuxService::paneAcceptsInput.
+     * @param callable|null $closer       fn(string $user): int  default TerminalService::forceCloseHome.
+     * @return array<int,array<string,mixed>> the closed-set entries written to the manifest
+     *         ({sessionId, workspacePath, agentId, hadResume, working}), or []
+     *         when there was nothing to close or the manifest could not be written.
+     */
+    public static function closeHomeSet(
+        string $user,
+        ?callable $listSessions = null,
+        ?callable $paneReady = null,
+        ?callable $closer = null
+    ): array {
+        if ($listSessions === null) {
+            require_once __DIR__ . '/TerminalService.php';
+            $listSessions = ['\AICliAgents\Services\TerminalService', 'listActiveSessionsForHome'];
+        }
+        if ($paneReady === null) {
+            require_once __DIR__ . '/TmuxService.php';
+            $paneReady = ['\AICliAgents\Services\TmuxService', 'paneAcceptsInput'];
+        }
+        if ($closer === null) {
+            require_once __DIR__ . '/TerminalService.php';
+            $closer = ['\AICliAgents\Services\TerminalService', 'forceCloseHome'];
+        }
+
+        $sessions = $listSessions($user);
+        if (!is_array($sessions) || $sessions === []) {
+            return [];
+        }
+
+        $manifest = [];
+        foreach ($sessions as $s) {
+            if (!is_array($s)) continue;
+            $sid     = trim((string)($s['id']      ?? ''));
+            $path    = trim((string)($s['path']    ?? ''));
+            $agentId = trim((string)($s['agentId'] ?? ''));
+            if ($sid === '' || $path === '' || $agentId === '') continue;
+
+            // Readiness classifier BEFORE the close. "Cannot read" (no
+            // session/no live agent/capture failed) is the safe default:
+            // not working, no nudge. Any other not-ready reason (a live
+            // decision, an unrecognised busy shape) means the agent WAS
+            // doing something — record it working so the relaunch nudges it.
+            $ready       = $paneReady($agentId, $sid);
+            $readyReason = (string)($ready['reason'] ?? '');
+            $unreadable  = in_array($readyReason, ['no-session', 'no-live-agent', 'capture-failed'], true);
+            $working     = !$unreadable && (($ready['ready'] ?? true) === false);
+
+            $manifest[] = [
+                'sessionId'     => $sid,
+                'workspacePath' => $path,
+                'agentId'       => $agentId,
+                'hadResume'     => true,
+                'working'       => $working,
+            ];
+        }
+        if ($manifest === []) {
+            return [];
+        }
+        if (self::writeHomeManifest($user, $manifest) === false) {
+            return [];
+        }
+        $closer($user);
+        return $manifest;
     }
 
     /**
@@ -278,8 +642,10 @@ class UpgradeRelaunchService
         }
         if ($stopper === null) {
             $stopper = $pmAvailable
+                // WORKSPACE_LIFECYCLE_EVENTS.md: this close is part of an
+                // agent-version upgrade, not an operator stop or evict.
                 ? static function (string $sid): void {
-                    \AICliAgents\Services\ProcessManager::stopTerminal($sid, true);
+                    \AICliAgents\Services\ProcessManager::stopTerminal($sid, true, 'upgrade');
                 }
                 : static function (string $sid): void {};
         }
@@ -308,6 +674,8 @@ class UpgradeRelaunchService
      * `chatId='auto'` when the entry hadResume. Uses the entry's OWN agentId.
      *
      * @param array    $entry     {sessionId, workspacePath, agentId, hadResume}
+     * @param string   $origin    passed through to $starter as its 5th arg (the
+     *        `started` event's origin tag — see TerminalService::startTerminal).
      * @return string  'relaunched' | 'skipped'
      */
     private static function relaunchOne(
@@ -315,7 +683,8 @@ class UpgradeRelaunchService
         callable $starter,
         callable $isRunning,
         callable $isHealthy,
-        callable $stopper
+        callable $stopper,
+        string $origin = 'upgrade_relaunch'
     ): string {
         $sid  = (string)($entry['sessionId']     ?? '');
         $path = (string)($entry['workspacePath'] ?? '');
@@ -335,7 +704,7 @@ class UpgradeRelaunchService
         }
         $agentId = (string)($entry['agentId'] ?? '');
         $chatId  = !empty($entry['hadResume']) ? 'auto' : '';
-        $starter($sid, $path, $chatId, $agentId);
+        $starter($sid, $path, $chatId, $agentId, $origin);
         return 'relaunched';
     }
 
@@ -345,24 +714,41 @@ class UpgradeRelaunchService
      * self-healing skip logic via the shared relaunchOne. Deletes the per-user
      * manifest at the end, so a repeat supervisor tick is a no-op.
      *
-     * @param callable|null $starter   fn(string $sid, string $path, string $chatId, string $agentId): void
+     * HOME_BACKUP.md R6: an optional per-session Continue nudge for entries the
+     * close phase recorded `working: true`. Passing $nudger opts in — every
+     * existing caller (the consolidate relaunch bridge) passes none and keeps
+     * the old behaviour (relaunch/skip only, never nudges).
+     *
+     * @param callable|null $starter   fn(string $sid, string $path, string $chatId, string $agentId, string $origin): void
      * @param callable|null $isRunning fn(string $sid): bool
      * @param callable|null $isHealthy fn(string $sid): bool
      * @param callable|null $stopper   fn(string $sid): void
-     * @return array{relaunched:int,skipped:int}
+     * @param callable|null $nudger    fn(string $agentId, string $sessionId): array — e.g.
+     *        TmuxService::submitContinueNudge. Null (default) = never nudge.
+     * @param callable|null $paneReady fn(string $agentId, string $sessionId): array{ready:bool,reason:string} —
+     *        e.g. TmuxService::paneAcceptsInput. Required for a nudge to fire.
+     * @param callable|null $sleeper   fn(int $seconds): void — test seam for the
+     *        bounded wait between readiness probes (default real sleep()).
+     * @param string         $origin   the `started` event origin tag passed to
+     *        $starter for every relaunched entry (see TerminalService::startTerminal).
+     * @return array{relaunched:int,skipped:int,nudged:int}
      */
     public static function relaunchHomeSet(
         string $user,
         ?callable $starter = null,
         ?callable $isRunning = null,
         ?callable $isHealthy = null,
-        ?callable $stopper = null
+        ?callable $stopper = null,
+        ?callable $nudger = null,
+        ?callable $paneReady = null,
+        ?callable $sleeper = null,
+        string $origin = 'upgrade_relaunch'
     ): array {
         $m = self::readHomeManifest($user);
         $closed = $m['closed'] ?? [];
         if (empty($closed)) {
             self::deleteHomeManifest($user);
-            return ['relaunched' => 0, 'skipped' => 0];
+            return ['relaunched' => 0, 'skipped' => 0, 'nudged' => 0];
         }
 
         if ($starter === null) {
@@ -383,20 +769,53 @@ class UpgradeRelaunchService
         }
         if ($stopper === null) {
             $stopper = $pmAvailable
+                // WORKSPACE_LIFECYCLE_EVENTS.md: this close is part of an
+                // agent-version upgrade, not an operator stop or evict.
                 ? static function (string $sid): void {
-                    \AICliAgents\Services\ProcessManager::stopTerminal($sid, true);
+                    \AICliAgents\Services\ProcessManager::stopTerminal($sid, true, 'upgrade');
                 }
                 : static function (string $sid): void {};
+        }
+        if ($sleeper === null) {
+            $sleeper = static function (int $seconds): void { sleep($seconds); };
         }
 
         $relaunched = 0;
         $skipped    = 0;
+        $nudged     = 0;
         foreach ($closed as $s) {
             $entry = is_array($s) ? $s : [];
-            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper);
+            $r = self::relaunchOne($entry, $starter, $isRunning, $isHealthy, $stopper, $origin);
             if ($r === 'relaunched') $relaunched++; else $skipped++;
+
+            if ($r === 'relaunched' && $nudger !== null && !empty($entry['working'])) {
+                $agentId = (string)($entry['agentId']   ?? '');
+                $sid     = (string)($entry['sessionId'] ?? '');
+                if ($agentId !== '' && $sid !== '' && self::waitPaneReady($agentId, $sid, $paneReady, $sleeper)) {
+                    $nudger($agentId, $sid);
+                    $nudged++;
+                }
+            }
         }
         self::deleteHomeManifest($user);
-        return ['relaunched' => $relaunched, 'skipped' => $skipped];
+        return ['relaunched' => $relaunched, 'skipped' => $skipped, 'nudged' => $nudged];
+    }
+
+    /**
+     * HOME_BACKUP.md R6: "readiness gate, bounded wait, one retry" before a
+     * post-relaunch Continue nudge — an initial settle wait, one probe, and
+     * (if not yet ready) exactly one more wait + probe before giving up.
+     * Never nudges a pane that never reported ready.
+     */
+    private static function waitPaneReady(string $agentId, string $sessionId, ?callable $paneReady, callable $sleeper): bool
+    {
+        if ($paneReady === null) return false;
+        $sleeper(2); // let the freshly-started agent settle before the first probe
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $gate = $paneReady($agentId, $sessionId);
+            if (!empty($gate['ready'])) return true;
+            $sleeper(3); // the one retry's bounded wait
+        }
+        return false;
     }
 }

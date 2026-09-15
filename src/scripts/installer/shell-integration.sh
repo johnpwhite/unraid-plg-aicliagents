@@ -36,6 +36,8 @@ alias copilot='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/bin/copil
 alias goose='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/goose/bin/goose'
 alias qwen='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/qwen-code/node_modules/.bin/qwen'
 alias agy='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/antigravity-cli/home/.local/bin/agy'
+alias grok='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/grok-build/home/.grok/bin/grok'
+alias kimi='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/kimi-code/home/.kimi-code/bin/kimi'
 
 # Note: Any commands run via these aliases will have their data automatically
 # backed up to Flash by the plugin's background sync daemon.

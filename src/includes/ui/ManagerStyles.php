@@ -40,14 +40,33 @@
 
     .aicli-layout { gap: 20px !important; width: 100% !important; }
     .aicli-cards { width: 100%; display: flex; flex-direction: column; }
+    /* Settings cards are laid out like the Unraid dashboard: a script
+       (ManagerConfigTab.php, aicliConfigColumns) puts each card into the
+       shortest of N equal columns, N from the page width, so every card is
+       only as tall as its content and the full width is used. Before the
+       script runs, and on a narrow screen, the cards stack in one column.
+       (Operator requests 2026-09-12 and 2026-09-13; CSS multi-column
+       balancing left half the page empty.) */
     .aicli-config-grid {
-        display: grid !important;
-        grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)) !important;
-        gap: 20px !important;
+        display: block !important;
         width: 100% !important;
         max-width: 100% !important;
     }
-
+    .aicli-config-grid > .aicli-card { margin: 0 0 20px 0; }
+    .aicli-config-grid.aicli-config-grid--cols {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: flex-start !important;
+        gap: 20px !important;
+    }
+    .aicli-config-col {
+        flex: 1 1 0;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+    }
+    .aicli-config-col > .aicli-card { margin: 0; }
     .aicli-card {
         background: var(--background-color, #1e1e1e);
         border-radius: 8px;
@@ -71,9 +90,14 @@
 
     .aicli-card-body dl {
         display: grid !important;
-        grid-template-columns: auto 1fr !important;
+        /* The label column takes at most 38% of the card, so a long label such
+           as "Voice (all devices)" wraps instead of pushing the field to the
+           right edge (2026-09-13). */
+        grid-template-columns: fit-content(38%) 1fr !important;
         gap: 10px 12px !important;
-        align-items: center !important;
+        /* The label lines up with the entry box on the first line of its
+           row, not with the middle of the box plus its help text. */
+        align-items: start !important;
         margin: 0 !important;
         padding: 5px 0 !important;
     }
@@ -83,10 +107,21 @@
         font-weight: 600 !important;
         font-size: 0.85em !important;
         text-align: right !important;
-        padding: 0 !important;
+        /* Centre the label on a 28 px entry box or button. */
+        padding: 7px 0 0 0 !important;
         margin: 0 !important;
         line-height: 1.2 !important;
-        white-space: nowrap !important;
+        white-space: normal !important;
+    }
+    /* Unraid 7.3 base CSS hides any EMPTY dt/dd inside .content (default-base.css,
+       "Force remove any small empty space elements"). In a grid list that drops a
+       cell and swaps every column after it (the Agent voice card, 2026-09-13).
+       A label-less row therefore keeps its cell: the markup uses a non-breaking
+       space, and this rule is the guard for any empty label that slips through. */
+    .aicli-card-body dl dt:empty {
+        display: block !important;
+        margin: 0 !important;
+        padding: 7px 0 0 0 !important;
     }
     .aicli-card-body dl dd {
         margin: 0 !important;
@@ -1146,17 +1181,37 @@
            overflow:hidden on desktop). Tighter padding + smaller letter-
            spacing keeps "TERMINAL" / "RESOURCES" readable instead of wrapping
            ARGS onto its own row like before. */
+        /* #166: the strip is a flex ITEM of the card's flex column. A flex item's
+           default min-width:auto floors its width at its content's min-content
+           (all 5 chips at natural width), which exceeds the card width — so the
+           strip stretched WIDER than the card and, with the card overflow:visible,
+           Terminal was clipped and Args poked off-card. `min-width: 0` on the strip
+           lets it shrink to the card width; only THEN do the chips' own
+           `flex:1 1 0; min-width:0` distribute the row evenly and the labels
+           ellipsize. flex-wrap:nowrap kept (single row; MOBILE_RESPONSIVE.md). */
         .av2-strip {
             padding: 0 10px 10px;
             gap: 2px;
             flex-wrap: nowrap;
+            min-width: 0;
+            box-sizing: border-box;
+            max-width: 100%;
         }
-        .av2-chip {
-            flex: 1 1 0; min-width: 0;
+        /* The chips are <button>s; Unraid's global theme forces a min-width on
+           buttons that beat a plain `min-width: 0`, so the chips would not shrink
+           and the row overflowed the card (Terminal clipped, Args off-card). The
+           extra `.av2-strip` scope (specificity 0,2,0) + !important defeats that
+           floor so `flex: 1 1 0` distributes the five chips evenly across the row. */
+        .av2-strip .av2-chip {
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
             padding: 7px 3px;
+            justify-content: center;
+            overflow: hidden;
         }
-        .av2-chip .av2-label {
+        .av2-strip .av2-chip .av2-label {
             font-size: 9.5px; letter-spacing: 0.04em;
+            min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
 
         /* Foot — stack the meta line over the action buttons. Buttons take the
@@ -1334,4 +1389,7 @@
         font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
         padding: 2px 6px; border-radius: 8px; background: rgba(128,128,128,0.25);
     }
+
+    /* #165 rev 2026-09-04: the all-cards bake pill styles were removed with the
+       pill itself (docs/specs/AGENT_CARD_BAKE_INDICATOR.md). */
 </style>

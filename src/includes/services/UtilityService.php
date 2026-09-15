@@ -12,6 +12,22 @@ namespace AICliAgents\Services;
 
 class UtilityService {
     /**
+     * Expand a leading `~` (agent home) in a user-supplied path, like the shell — so a
+     * `~/.claude/secrets/prod01.env` clicked in the terminal resolves even when the
+     * client didn't expand it (e.g. a stale page that never received window.aicli_home).
+     * The home is the agent shells' $HOME = dirname(ConfigService::getUserStatePath()).
+     * A non-`~` path is returned unchanged; validation/allowlisting happens downstream.
+     */
+    public static function expandAgentHome($path) {
+        if (!is_string($path)) return $path;
+        if ($path === '~' || strncmp($path, '~/', 2) === 0) {
+            $home = rtrim(dirname(ConfigService::getUserStatePath()), '/');
+            return $path === '~' ? $home : $home . substr($path, 1);
+        }
+        return $path;
+    }
+
+    /**
      * Executes a command in the background.
      */
     public static function execBg($cmd) {
@@ -36,6 +52,7 @@ class UtilityService {
         $msg = escapeshellarg($message);
         $sub = escapeshellarg($subject);
         exec("/usr/local/emhttp/plugins/dynamix/scripts/notify -e \"AICliAgents\" -s $sub -m $msg -i \"tasks\"");
+        try { AgentRelayService::publishUnraidNotification((string)$message, (string)$subject); } catch (\Throwable $e) { /* Relay must never block a UI notification. */ }
     }
 
     /**

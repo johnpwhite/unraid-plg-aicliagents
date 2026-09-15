@@ -10,7 +10,20 @@
 <script>
 window.csrf_token = <?= json_encode($csrf_token) ?> || (typeof csrf_token !== 'undefined' ? csrf_token : '');
 window.aicli_version = <?= json_encode($version) ?>;
-window._aicli_target_path = localStorage.getItem('aicli_last_path') || '/mnt/user';
+// Bundle fingerprint this page loaded with (max mtime of index.js/css). The app
+// polls get_asset_version and reloads when the server reports a newer bundle, so
+// a backend deploy (installer or dev overlay) refreshes open tabs on its own.
+window.aicli_asset_ver = <?= json_encode($asset_ver) ?>;
+// #143: the bundle fingerprint above only moves when the UI itself changes, so a
+// PHP- or shell-only deploy refreshed nothing. The active generation changes on
+// EVERY deploy whatever the payload touched; the app reloads when either moves.
+window.aicli_generation = <?= json_encode(\AICliAgents\Services\ProcessManager::activeGeneration()) ?>;
+// Agent home ($HOME of the terminal shells), so a `~/…` path clicked in the terminal
+// resolves to a real absolute path (resolveCandidatePath) — see TMUX_PATH_LINKS.md.
+window.aicli_home = <?= json_encode($aicli_home ?? '') ?>;
+// #178: the ACTIVE workspace path, kept in sync by the React app (AICliAgentsTerminal).
+// Empty until a workspace is open — the upload overlay refuses rather than guessing /mnt/user.
+window._aicli_target_path = '';
 document.documentElement.classList.add('aicli-terminal-page');
 // D-400: Permanently suppress Unraid's "unsaved changes" dialog on the terminal page.
 // The React UI manages its own persistence — Unraid's form tracker is not applicable.

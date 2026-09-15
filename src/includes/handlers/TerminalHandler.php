@@ -21,9 +21,16 @@ class TerminalHandler {
             case 'stop':             return self::stop($id);
             case 'graceful_close':   return self::gracefulClose($id);
             case 'restart':          return self::restart($id);
+            case 'restart_fresh':    return self::restartFresh($id);
+            case 'reload_onto_current': return self::reloadOntoCurrent($id);
             case 'agent_signal_reload': return self::agentSignalReload($id);
             case 'get_chat_session': return self::getChatSession();
             case 'get_session_status': return self::getSessionStatus($id);
+            case 'get_sessions_running': return self::getSessionsRunning();
+            case 'get_asset_version': return self::getAssetVersion();
+            case 'refresh_bridge':   return self::refreshBridge($id);
+            case 'reconnect_stale_bridges': return self::reconnectStaleBridges();
+            case 'continue_session': return self::continueSession($id);
             case 'get_resume_id':    return self::getResumeId();
             case 'log':              return self::log();
             case 'get_log':          return self::getLog();
@@ -36,7 +43,252 @@ class TerminalHandler {
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent'];
+        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'restart_fresh', 'reload_onto_current', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_sessions_running', 'get_asset_version', 'refresh_bridge', 'reconnect_stale_bridges', 'continue_session', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent'];
+    }
+
+    /**
+     * #34: type a fixed "continue" nudge into a resumed workspace so it picks its
+     * work back up. Operator-initiated (a drawer button); gated by the same pane
+     * readiness check as relay delivery so it never answers a question/menu.
+     */
+    private static function continueSession($id): array {
+        $id = (string)$id;
+        // WHO asked. The row-menu click and the auto-continue poll call this SAME
+        // action with the same id, so the log could not tell an operator's click
+        // from the plugin acting by itself — the exact question an operator asks
+        // when a continue arrives that they did not expect (2026-09-11: a new
+        // workspace was auto-continued seconds after launch, and nothing on record
+        // could show it was not a click). Allow-listed; anything else is recorded
+        // as 'unstated' rather than trusted. Spec: docs/specs/CONTINUE_ON_RESTART.md
+        $trigger = self::continueTrigger((string)($_REQUEST['trigger'] ?? ''));
+        $agentId = '';
+        foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            if ((string)($w['id'] ?? '') === $id) { $agentId = (string)($w['agentId'] ?? ''); break; }
+        }
+        if ($agentId === '') {
+            $result = ['status' => 'error', 'message' => 'Unknown workspace session'];
+        } elseif (!\AICliAgents\Services\ProcessManager::isRunning($id)) {
+            $result = ['status' => 'error', 'message' => 'That workspace is not running.'];
+        } elseif (self::continueOnCooldown($id)) {
+            // REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E3: the push guard (an
+            // event handler) and the poll guard (DrawerPanel's own timer) can
+            // both decide, within the same few seconds, that this session just
+            // came back and needs a nudge — with no shared key between the two
+            // call sites, both fired a real nudge. This per-session tmpfs
+            // marker IS the shared key: a caller inside the window is told the
+            // nudge already went out, and never gets a second one sent.
+            $result = ['status' => 'ok', 'delivered' => false, 'deferred' => true, 'reason' => 'cooldown'];
+        } else {
+            $result = \AICliAgents\Services\TmuxService::submitContinueNudge($agentId, $id);
+            // Only a REAL delivery arms the cooldown — a 'busy' (agent still
+            // booting) must not block the auto-restart ladder's own retries
+            // (recordContinue()'s doc comment: up to 8 tries, 4s apart).
+            if (($result['status'] ?? '') === 'ok') {
+                self::markContinueDelivered($id);
+            }
+        }
+        self::recordContinue($id, $agentId, $trigger, $result);
+        return $result;
+    }
+
+    /** tmpfs directory holding one per-session cooldown marker file. */
+    private const CONTINUE_COOLDOWN_DIR = '/tmp/unraid-aicliagents/continue';
+
+    /** How long a delivered continue nudge blocks a second one for the SAME session. */
+    private const CONTINUE_COOLDOWN_SECONDS = 30;
+
+    /** Test seam: overrides CONTINUE_COOLDOWN_DIR. Null uses the real path. */
+    public static ?string $continueCooldownDir = null;
+
+    private static function continueCooldownDir(): string {
+        return self::$continueCooldownDir ?? self::CONTINUE_COOLDOWN_DIR;
+    }
+
+    private static function continueCooldownMarker(string $id): string {
+        return self::continueCooldownDir() . '/.last-' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $id);
+    }
+
+    /**
+     * True when a continue nudge was delivered to this session within the
+     * last CONTINUE_COOLDOWN_SECONDS. Public: pinned directly by
+     * ContinueCooldownTest without needing a live tmux session (this box's
+     * unit container has none — the same documented constraint
+     * TerminalHandlerTest's own class doc gives for getSessionsRunning()).
+     */
+    public static function continueOnCooldown(string $id): bool {
+        $mtime = @filemtime(self::continueCooldownMarker($id));
+        return $mtime !== false && (time() - $mtime) < self::CONTINUE_COOLDOWN_SECONDS;
+    }
+
+    /** Arms the cooldown after a nudge was actually delivered (status 'ok'). */
+    public static function markContinueDelivered(string $id): void {
+        $dir = self::continueCooldownDir();
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0777, true);
+        }
+        @touch(self::continueCooldownMarker($id));
+    }
+
+    /** Allow-listed origin of a continue request — never a free-form string in a log. */
+    private static function continueTrigger(string $raw): string {
+        return in_array($raw, ['menu', 'auto_restart'], true) ? $raw : 'unstated';
+    }
+
+    /**
+     * Put a continue request on record, in words: always in the debug log, and in
+     * the durable lifecycle log (which survives a reboot) for every outcome EXCEPT
+     * an automatic retry that found the agent still booting. The lifecycle log
+     * lives on the boot device — a USB stick on most servers — and the auto path
+     * retries up to 8 times, 4 s apart; recording each 'busy' would write the stick
+     * eight times per restart to say nothing new. The ladder's final outcome is
+     * still recorded, and a user's click is recorded every time.
+     */
+    private static function recordContinue(string $id, string $agentId, string $trigger, array $result): void {
+        $status = (string)($result['status'] ?? '');
+        $who = [
+            'menu'         => 'requested from the workspace menu (a user click)',
+            'auto_restart' => 'sent automatically after the workspace restarted',
+            'unstated'     => 'origin not stated (an older page, or not the workspace drawer)',
+        ][$trigger];
+        \AICliAgents\Services\LogService::log("Continue for $id ($agentId): $who — result: $status",
+            \AICliAgents\Services\LogService::LOG_INFO, 'TerminalHandler');
+        if ($trigger === 'auto_restart' && $status === 'busy') return;
+        if (class_exists('\AICliAgents\Services\LifecycleLogService')) {
+            \AICliAgents\Services\LifecycleLogService::log('info', 'workspace', 'continue_requested', [
+                'session' => $id,
+                'agent'   => $agentId,
+                'trigger' => $trigger,
+                'status'  => $status,
+                'reason'  => (string)($result['reason'] ?? ''),
+            ]);
+        }
+    }
+
+    /**
+     * Bulk running state for the drawer's live "running" dot: a map of every saved
+     * workspace's session id -> whether its agent process is currently alive.
+     *
+     * Read-only (docs/specs/EVENT_FIRST_RECONCILIATION.md R3): this used to
+     * also re-attempt any deferred Relay notice for each running session
+     * (#148) — that drain now runs from the supervisor's own tick
+     * (`_relay_drain_tick`, EVENT_FIRST_RECONCILIATION.md 1b.7), so delivery
+     * no longer depends on the drawer being open or polling.
+     */
+    private static function getSessionsRunning(): array {
+        $running = [];
+        // #142: a running terminal executes the shell script from the generation
+        // it LAUNCHED with, so a shipped fix does not reach an already-open
+        // workspace. Report which sessions are on superseded code so the drawer
+        // can say so and offer a bridge refresh.
+        $stale = [];
+        $active = \AICliAgents\Services\ProcessManager::activeGeneration();
+        foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            $id = (string)($w['id'] ?? '');
+            if ($id === '') continue;
+            $running[$id] = \AICliAgents\Services\ProcessManager::isRunning($id);
+            if (!$running[$id]) continue; // a stopped session picks up current code when it starts
+            $launched = \AICliAgents\Services\ProcessManager::sessionLaunchGeneration($id);
+            if (\AICliAgents\Services\ProcessManager::generationIsStale($launched, $active)) {
+                $stale[$id] = true;
+            }
+        }
+        // Reconcile against ACTUAL live sessions so nothing runs invisibly: a live
+        // terminal (ttyd socket) with no drawer entry is an orphan the UI must surface
+        // + let the user close/adopt. Read-only (no reap side effects on this poll).
+        // See DRAWER_ACTIVE_STATE_RECONCILE.md.
+        $orphans = \AICliAgents\Services\TerminalService::reconcileOrphans(
+            \AICliAgents\Services\TerminalService::listLiveSessions(),
+            \AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? []
+        );
+        // #34 relocation, CONTINUE_ON_RESTART.md relocation (2026-09-09): the
+        // auto-continue-on-restart preference is a server-side plugin config setting
+        // (moved off the Relay's settings.json — this is session-restart behaviour,
+        // not Relay messaging); surface it here so the drawer's restart-transition
+        // logic reads the server value instead of a per-browser localStorage flag.
+        // Never fatal.
+        $autoContinue = false;
+        if (class_exists('\AICliAgents\Services\ConfigService')) {
+            try { $autoContinue = \AICliAgents\Services\ConfigService::autoContinueOnRestart(); }
+            catch (\Throwable $e) { /* poll must not break on a settings read */ }
+        }
+        // WORKSPACE_APPLY_AGENT_VERSION.md: which workspaces are running an agent
+        // version other than the installed one, and what that installed version
+        // is called. Two separate facts because they answer different questions:
+        // the map says WHICH workspaces can be switched, the versions say WHAT
+        // they would be switched to. The UI names the target version rather than
+        // calling it newer or older, because switching a release channel back to
+        // Stable installs an OLDER version and makes it the current one.
+        $otherVersion = [];
+        $agentVersions = [];
+        try {
+            $otherVersion = \AICliAgents\Services\TerminalService::sessionsOnOtherAgentVersion();
+            foreach (array_keys($otherVersion) as $sid) {
+                $aFile = \AICliAgents\Services\UtilityService::getAgentIdPath((string)$sid);
+                $aId = is_file($aFile) ? trim((string)@file_get_contents($aFile)) : '';
+                if ($aId !== '' && !isset($agentVersions[$aId])) {
+                    $agentVersions[$aId] = (string)\AICliAgents\Services\AgentRegistry::getInstalledVersion($aId);
+                }
+            }
+        } catch (\Throwable $e) { /* a poll must never break on this */ }
+        return ['status' => 'ok', 'running' => $running, 'stale' => $stale, 'generation' => $active,
+                'orphans' => $orphans, 'auto_continue' => $autoContinue,
+                'agent_version_differs' => $otherVersion, 'agent_installed_versions' => $agentVersions];
+    }
+
+    /**
+     * #142: restart only the web bridge for one session so it picks up the
+     * current generation. The agent keeps running in its detached tmux session;
+     * the browser's next `start` respawns ttyd against the live `src` symlink.
+     */
+    private static function refreshBridge($id): array {
+        $ok = \AICliAgents\Services\ProcessManager::restartTerminalBridge((string)$id);
+        return $ok
+            ? ['status' => 'ok']
+            : ['status' => 'error', 'message' => 'No live terminal bridge found for this workspace.'];
+    }
+
+    /**
+     * AUTO_RECONNECT_ALL_ON_DEPLOY.md: reconnect EVERY terminal running
+     * superseded code after a deploy, so the whole fleet moves onto the new
+     * generation without the user clicking "Reconnect terminal" per tile. The
+     * client calls this, then reloads; each terminal's next `start` respawns
+     * ttyd against the live `src` symlink. Non-destructive — agents and their
+     * tmux sessions keep running.
+     */
+    private static function reconnectStaleBridges(): array {
+        $running = [];
+        foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            $id = (string)($w['id'] ?? '');
+            if ($id === '') continue;
+            if (\AICliAgents\Services\ProcessManager::isRunning($id)) {
+                $running[] = $id;
+            }
+        }
+        $result = \AICliAgents\Services\ProcessManager::restartAllStaleBridges($running);
+        return ['status' => 'ok', 'reconnected' => $result['reconnected'], 'ids' => $result['ids']];
+    }
+
+    /**
+     * Live bundle fingerprint for the client's auto-reload check: the max mtime of
+     * the deployed index.js/index.css (the same value AICliAgents.page cache-busts
+     * with). When a deploy — installer OR dev overlay — refreshes the bundle in
+     * place, this rises above the value the open tab loaded with, and the app
+     * reloads itself. Kept deliberately cheap (two filemtime stats).
+     */
+    private static function getAssetVersion(): array {
+        $dir = '/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui';
+        $ver = (string) max((int)@filemtime("$dir/index.js"), (int)@filemtime("$dir/index.css"));
+        // #143: the bundle mtime only moves when the UI changes, so a PHP- or
+        // shell-only deploy produced NO reload prompt — the auto-reload covered
+        // one class of fix while looking like it covered all of them. The active
+        // generation changes on every promote whatever the payload touched, so
+        // the client reloads when EITHER moves. One read of a ~40-byte file.
+        return [
+            'status' => 'ok',
+            'asset_ver' => $ver,
+            'generation' => \AICliAgents\Services\ProcessManager::activeGeneration(),
+            'plugin_version' => \AICliAgents\Services\ConfigService::getVersion(),
+        ];
     }
 
     /**
@@ -55,17 +307,50 @@ class TerminalHandler {
         if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/i', $agentId)) {
             return ['status' => 'error', 'message' => 'invalid agentId'];
         }
+        // The Store calls this immediately before it asks the operator anything
+        // about their open sessions, so it is the right place to say whether
+        // those sessions are relevant at all. For a side-by-side agent they are
+        // not: the install cannot touch them, so there is no question to ask and
+        // nothing to warn about. docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md
+        // AgentHandler is NOT loaded by AICliAgentsManager — the AJAX entry point
+        // loads handlers on demand, so this class may genuinely be absent here.
+        // Calling it unguarded fataled the whole endpoint and returned an empty
+        // body, which the Store read as "no sessions" (smoke [22], caught 2026-09-15).
+        //
+        // On any doubt the answer is the CAUTIOUS one: no side_by_side, so the
+        // dialog warns about sessions and offers to close them exactly as it
+        // always did. Safety is never inferred from a failure to answer.
+        $waitReason = 'this agent\'s install strategy could not be determined';
+        try {
+            $handlerFile = __DIR__ . '/AgentHandler.php';
+            if (!class_exists('\AICliAgents\Handlers\AgentHandler', false) && is_file($handlerFile)) {
+                require_once $handlerFile;
+            }
+            if (class_exists('\AICliAgents\Handlers\AgentHandler', false)) {
+                $waitReason = \AICliAgents\Handlers\AgentHandler::sideBySideInstallBlocker($agentId);
+            }
+        } catch (\Throwable $e) {
+            \AICliAgents\Services\LogService::log(
+                "listSessionsForAgent: could not determine the install strategy for $agentId — "
+                . "falling back to the cautious flow: " . $e->getMessage(),
+                \AICliAgents\Services\LogService::LOG_WARN, "TerminalHandler");
+        }
         return [
-            'status'   => 'ok',
-            'agentId'  => $agentId,
-            'sessions' => \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId),
+            'status'       => 'ok',
+            'agentId'      => $agentId,
+            'sessions'     => \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId),
+            'side_by_side' => ($waitReason === null),
+            'wait_reason'  => $waitReason,
         ];
     }
 
     private static function start($id) {
         $config = getAICliConfig();
         $persistPath = $config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
+        // Never default the agent: starting the WRONG agent in a user's
+        // workspace is worse than refusing to start at all.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
+        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('start', (string)$id, (string)($_GET['path'] ?? ''));
         $workspacePath = $_GET['path'] ?? null;
 
         // R2 (UPGRADE_RELAUNCH_ZOMBIE_SKIP): never spawn a session while this
@@ -108,12 +393,29 @@ class TerminalHandler {
             $agentAvailable = \AICliAgents\Services\StorageMountService::isPathAvailable($persistPath)
                 && count(glob("$persistPath/agent_{$agentId}_*.sqsh")) > 0;
 
+            // 2026-09-10: split a GLOBAL storage failure from an AGENT-specific one.
+            // The browser turns 'storage_unavailable'/'home_unavailable' into a GLOBAL
+            // storageError, which rewrites the drawer's "+ New Workspace" button into
+            // "Emergency Session" for the whole UI. That is right when the shared home or
+            // the persistence root is down — every workspace is affected. It is WRONG when
+            // only THIS agent's .sqsh is missing (the glob above is per-agent): clicking one
+            // broken workspace then put the entire console into emergency mode.
+            //
+            // So: persistence root unreachable => 'storage_unavailable' (global, unchanged).
+            // Root fine but no layer for THIS agent => 'agent_unavailable', which the UI
+            // reports against the workspace that failed and nothing else.
+            $persistAvailable = \AICliAgents\Services\StorageMountService::isPathAvailable($persistPath);
+            $reason = $agentAvailable
+                ? 'home_unavailable'
+                : ($persistAvailable ? 'agent_unavailable' : 'storage_unavailable');
             return [
                 'status' => 'error',
-                'reason' => $agentAvailable ? 'home_unavailable' : 'storage_unavailable',
+                'reason' => $reason,
                 'message' => $agentAvailable
                     ? 'Home storage is not available. An emergency session with a temporary home is available.'
-                    : 'Storage path is not currently accessible. Start the array or check your storage configuration.',
+                    : ($persistAvailable
+                        ? 'This agent has no installed storage layer yet. Install or repair ' . $agentId . ' from the Agents tab; other workspaces are unaffected.'
+                        : 'Storage path is not currently accessible. Start the array or check your storage configuration.'),
                 'path' => $homePath,
                 'classification' => $classification,
                 'emergency_possible' => $agentAvailable,
@@ -210,7 +512,7 @@ class TerminalHandler {
                 ];
             }
             startAICliTerminal($id, $workspacePath, $chatId, $agentId);
-            return ['status' => 'ok', 'sock' => "/webterminal/aicliterm-$id/"];
+            return self::startedResponse($id);
         } finally {
             \AICliAgents\Services\AgentUpgradeAdmissionService::release($admission);
         }
@@ -222,7 +524,10 @@ class TerminalHandler {
      */
     private static function emergencyStart($id) {
         $config = getAICliConfig();
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
+        // Never default the agent: starting the WRONG agent in a user's
+        // workspace is worse than refusing to start at all.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
+        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('emergency_start', (string)$id, (string)($_GET['path'] ?? ''));
         $path = $_GET['path'] ?? '/mnt';
 
         // Clean up any previous emergency state (allow starting fresh)
@@ -292,7 +597,7 @@ class TerminalHandler {
         // Start terminal (home is now symlinked to emergency dir, ensureHomeMounted sees the flag)
         startAICliTerminal($id, $path, null, $agentId);
 
-        return ['status' => 'ok', 'sock' => "/webterminal/aicliterm-$id/", 'emergency' => true];
+        return self::startedResponse($id, ['emergency' => true]);
     }
 
     private static function stop($id) {
@@ -306,13 +611,18 @@ class TerminalHandler {
         $agentId = $_GET['agentId'] ?? '';
         if ($path !== '' && $agentId !== '') {
             $diskId = self::discoverLatestSessionId($agentId, $path);
-            if ($diskId !== null && $diskId !== '') {
-                \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $diskId);
+            // Disk-only (newest on disk): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+            if ($diskId !== null && $diskId !== '' && \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($path, $agentId, $diskId, (string)$id)) {
             }
         } else {
             \AICliAgents\Services\ProcessManager::captureFallbackBeforeKill((string)$id);
         }
         stopAICliTerminal($id, isset($_GET['hard']));
+        // Fix 2026-09-12: the `stop` action is an operator/tool-driven close
+        // (the drawer's hard-stop path, the CLI). Auto-launch must not bring it
+        // straight back on the next page load. See
+        // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
+        \AICliAgents\Services\AutoLaunchSuppression::suppress((string)$id);
         // Closing a session frees the home overlay — wake the supervisor so any
         // deferred consolidate/bake for that home resumes immediately (#1381).
         \AICliAgents\Services\SupervisorService::wake();
@@ -329,6 +639,19 @@ class TerminalHandler {
      * session id is preg_replace'd to alnum+_- only, so no unsafe data can
      * reach any command line.
      */
+    /**
+     * The session id inside a canonical tmux name `aicli-agent-<agentId>-<sessionId>`,
+     * or '' when the name is not that shape. The resume record is per WORKSPACE
+     * (RESUME_IDENTITY_PER_WORKSPACE.md), and captureResumeForClose() is handed only
+     * the session NAME.
+     */
+    public static function sessionIdFromSessionName(string $sessName, string $agentId): string {
+        $prefix = "aicli-agent-$agentId-";
+        if ($agentId === '' || strncmp($sessName, $prefix, strlen($prefix)) !== 0) return '';
+        $sid = substr($sessName, strlen($prefix));
+        return preg_match('/^[A-Za-z0-9_-]{1,128}$/', $sid) ? $sid : '';
+    }
+
     /**
      * Derive the agentId from a tmux session name of the form
      * `aicli-agent-<agentId>-<safeId>`. agentId may itself contain dashes
@@ -365,6 +688,10 @@ class TerminalHandler {
             $agentId !== '' ? $agentId : 'unknown',
             $path !== '' ? $path : 'unknown'
         );
+        // #218: record that this close is deliberate BEFORE anything slow runs,
+        // so the drawer never reports the workspace as an untracked orphan
+        // during the ~9 seconds the close actually takes.
+        \AICliAgents\Services\TerminalService::markClosing((string)$id);
         aicli_log("gracefulClose: START $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
         // Non-root audit: shared multi-user lookup helper. Stays in lock-step
@@ -452,18 +779,35 @@ class TerminalHandler {
                 $capturedId = $diskId;
                 aicli_log("gracefulClose: no live tmux pane to scrape -- discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
                 if (!empty($path) && !empty($agentId)) {
-                    \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $capturedId);
-                    aicli_log("gracefulClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                    // Disk-only (no pane to scrape): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+                    $resumeSaved = \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($path, $agentId, $capturedId, (string)$id);
+                    if ($resumeSaved) aicli_log("gracefulClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
                 }
             }
         }
 
-        // Whether the tmux session exited cleanly or not, run the standard stop
-        // path to tear down ttyd + sockets + pid files.
-        stopAICliTerminal($id, true);
+        // Whether the tmux session exited cleanly or not, reap every process
+        // that inherited this workspace's exact environment before tearing down
+        // ttyd + sockets + pid files. This catches an agent plugin that detached
+        // from tmux and would otherwise outlive a user-closed workspace.
+        $reapedPids = \AICliAgents\Services\ProcessManager::terminateSessionDescendants($safeId);
+        if ($reapedPids !== []) {
+            aicli_log("gracefulClose: reaped detached session descendants=" . implode(',', $reapedPids) . " | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+        }
+        // WORKSPACE_LIFECYCLE_EVENTS.md: this is the graceful-close path, so
+        // the `stopped` event this teardown emits carries that reason (not
+        // the generic 'stop' default) even when the quiesce above fell back
+        // to a hard kill.
+        stopAICliTerminal($id, true, 'graceful_close');
+        // Fix 2026-09-12: an operator closed this workspace on purpose (the
+        // drawer's Close button, a delete, or the CLI's graceful_close action).
+        // Auto-launch must not bring it straight back on the next page load.
+        // See docs/specs/2026-04-27-auto-launch-workspaces-design.md.
+        \AICliAgents\Services\AutoLaunchSuppression::suppress($safeId);
         @unlink("/tmp/unraid-aicliagents/close-$safeId.flag");
 
         $resumeStr = $capturedId ? "resume_id=$capturedId" : "resume_id=none";
+        \AICliAgents\Services\TerminalService::clearClosing((string)$id);
         aicli_log("gracefulClose: DONE $resumeStr | $ctx", AICLI_LOG_INFO, "TerminalHandler");
 
         // Quiescent-lifecycle (2026-05-31): workspace close NO LONGER forces a
@@ -553,7 +897,9 @@ class TerminalHandler {
         if (empty($path) || empty($agentId)) {
             return ['status' => 'ok', 'chatId' => null];
         }
-        $chatId = \AICliAgents\Services\ConfigService::getResumeId($path, $agentId);
+        // No workspace exists yet in the new-workspace dialog, so no session id: the folder
+        // pointer answers, and withholds a conversation an open workspace owns.
+        $chatId = \AICliAgents\Services\ConfigService::getResumeId($path, $agentId, isset($_GET['id']) ? (string)$_GET['id'] : null);
         return ['status' => 'ok', 'chatId' => $chatId];
     }
 
@@ -575,7 +921,16 @@ class TerminalHandler {
      */
     public static function captureResumeForClose(string $sessName, string $tmuxSock, string $tmuxBin, string $agentId, string $path, string $ctx = ''): ?string {
         if ($sessName === '') return null;
+        // Where the saved id came from decides how it may be saved: a screen-scraped id is
+        // this workspace's own; a disk id is the folder's newest (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+        $fromDisk = false;
         $escSess = escapeshellarg($sessName);
+
+        // #91: capture the agent's authoritative disk metadata BEFORE sending
+        // exit keys. aicli-shell's retry loop can launch a fresh blank session
+        // immediately after Ctrl-C; a post-exit "newest session" scan would
+        // then save that blank id instead of the conversation being closed.
+        $diskFallbackBeforeQuiesce = self::discoverLatestSessionId($agentId, $path);
 
         // Force the tmux window to 220 cols BEFORE Ctrl-C. After ttyd
         // disconnects, the window can shrink to the last negotiated size
@@ -657,7 +1012,9 @@ class TerminalHandler {
             // Agent-specific disk-based fallback for CLIs that don't print
             // a resume hint on exit (opencode). Looks up the most recent
             // session id from the agent's own metadata store.
-            $capturedId = self::discoverLatestSessionId($agentId, $path);
+            $capturedId = $diskFallbackBeforeQuiesce
+                ?? self::discoverLatestSessionId($agentId, $path);
+            $fromDisk = true;
             if ($capturedId) {
                 aicli_log("captureResumeForClose: exit screen had no resume hint — discovered id=$capturedId from agent metadata | $ctx", AICLI_LOG_INFO, "TerminalHandler");
             }
@@ -665,8 +1022,11 @@ class TerminalHandler {
 
         if (!empty($capturedId)) {
             if (!empty($path) && !empty($agentId)) {
-                \AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $capturedId);
-                aicli_log("captureResumeForClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                $sidForResume = self::sessionIdFromSessionName($sessName, $agentId);
+                $resumeSaved = $fromDisk
+                    ? \AICliAgents\Services\ConfigService::saveDiskFallbackResumeId($path, $agentId, $capturedId, $sidForResume)
+                    : (bool)\AICliAgents\Services\ConfigService::saveResumeId($path, $agentId, $capturedId, $sidForResume);
+                if ($resumeSaved) aicli_log("captureResumeForClose: saved resume_id=$capturedId for (workspace=$path, agent=$agentId) | $ctx", AICLI_LOG_INFO, "TerminalHandler");
             } else {
                 aicli_log("captureResumeForClose: captured resume_id=$capturedId but could not save (missing workspace or agent) | $ctx", AICLI_LOG_WARN, "TerminalHandler");
             }
@@ -684,20 +1044,25 @@ class TerminalHandler {
      *
      * Returns null if unavailable or unsupported for the agent.
      */
-    public static function discoverLatestSessionId(string $agentId, string $workspacePath = ''): ?string {
+    public static function discoverLatestSessionId(string $agentId, string $workspacePath = '', ?string $homeDirOverride = null): ?string {
         $config = getAICliConfig();
         $username = $config['user'] ?? 'root';
         if (empty($username)) $username = 'root';
-        $homeDir = \AICliAgents\Services\UtilityService::getWorkDir($username) . "/home";
+        $homeDir = $homeDirOverride
+            ?? (\AICliAgents\Services\UtilityService::getWorkDir($username) . "/home");
 
         if ($agentId === 'opencode') {
-            // OpenCode stores sessions in a SQLite DB. Query the most recent one.
-            $db = "$homeDir/.local/share/opencode/opencode.db";
-            if (!is_file($db)) return null;
-            $query = "SELECT id FROM session ORDER BY time_updated DESC LIMIT 1;";
-            $out = trim((string) shell_exec("sqlite3 " . escapeshellarg($db) . " " . escapeshellarg($query) . " 2>/dev/null"));
-            if (preg_match('/^ses_[A-Za-z0-9_-]+$/', $out)) return $out;
-            return null;
+            // #146: newest session FOR THIS WORKSPACE (directory-filtered across the
+            // legacy + per-session isolated dbs) — NOT the globally-newest session,
+            // which belongs to whichever workspace ran last and opened the wrong chat.
+            return \AICliAgents\Services\TerminalService::opencodeResumeId($homeDir, $workspacePath);
+        }
+
+        if ($agentId === 'kilocode') {
+            // #147: Kilo (an OpenCode fork) had NO branch here, so resume fell back to
+            // --continue with no chat id and started fresh. Same directory-filtered
+            // discovery over its single kilo.db.
+            return \AICliAgents\Services\TerminalService::kilocodeResumeId($homeDir, $workspacePath);
         }
 
         if ($agentId === 'antigravity-cli') {
@@ -725,6 +1090,14 @@ class TerminalHandler {
             }
             if ($newestId !== null && preg_match('/^[A-Za-z0-9-]{20,}$/', $newestId)) return $newestId;
             return null;
+        }
+
+        if ($agentId === 'kimi-code') {
+            return \AICliAgents\Services\TerminalService::kimiCodeResumeId($homeDir, $workspacePath);
+        }
+
+        if ($agentId === 'grok-build') {
+            return \AICliAgents\Services\TerminalService::grokBuildResumeId($homeDir, $workspacePath);
         }
 
         if ($agentId === 'claude-code') {
@@ -782,6 +1155,45 @@ class TerminalHandler {
             return null;
         }
 
+        if ($agentId === 'codex-cli') {
+            // #91: Codex stores each resumable conversation as JSONL under a
+            // date tree. The filename is not sufficient for workspace routing;
+            // the first session_meta record carries both the authoritative id
+            // and cwd. Restrict to the closing workspace so a newer Codex chat
+            // elsewhere cannot be resumed into this drawer workspace.
+            $dir = "$homeDir/.codex/sessions";
+            if (!is_dir($dir)) return null;
+            $wantedCwd = rtrim(str_replace('\\', '/', $workspacePath), '/');
+            if ($wantedCwd === '') return null;
+            $newestMtime = 0;
+            $newestId = null;
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($it as $file) {
+                if ($file->getExtension() !== 'jsonl') continue;
+                $fh = @fopen($file->getPathname(), 'rb');
+                if ($fh === false) continue;
+                $line = fgets($fh);
+                fclose($fh);
+                if ($line === false) continue;
+                $meta = json_decode($line, true);
+                if (!is_array($meta) || ($meta['type'] ?? '') !== 'session_meta') continue;
+                $payload = $meta['payload'] ?? null;
+                if (!is_array($payload)) continue;
+                $id = (string)($payload['id'] ?? '');
+                $cwd = rtrim(str_replace('\\', '/', (string)($payload['cwd'] ?? '')), '/');
+                if (!preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $id)) continue;
+                if ($cwd !== $wantedCwd) continue;
+                $mtime = $file->getMTime();
+                if ($mtime > $newestMtime) {
+                    $newestMtime = $mtime;
+                    $newestId = $id;
+                }
+            }
+            return $newestId;
+        }
+
         return null;
     }
 
@@ -796,8 +1208,253 @@ class TerminalHandler {
         // workspace. Resolve it through ConfigService at launch rather than
         // trusting a browser-held id that may predate an in-TUI /resume switch.
         $chatId = self::restartChatId($_GET['chatId'] ?? null);
-        startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $_GET['agentId'] ?? 'gemini-cli');
-        return ['status' => 'ok'];
+        // Never default the agent: relaunching a workspace as a different agent
+        // than it was created with is a silent, destructive surprise.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
+        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('restart', (string)$id, (string)($_GET['path'] ?? ''));
+        startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $agentId);
+        return self::startedResponse($id);
+    }
+
+    /**
+     * WORKSPACE_RELOAD_ONTO_CURRENT.md (2026-09-09): move ONE running workspace
+     * onto the current plugin generation and resume its conversation, without
+     * the operator having to close it, find its folder again, and click Resume.
+     *
+     * A running workspace runs the shell script generated at ITS launch time —
+     * `PLUGIN_SRC` inside that script names a concrete `.generations/<id>/src`
+     * directory, so a shipped fix never reaches an already-open workspace
+     * (ProcessManager::generationIsStale). `refresh_bridge` reattaches the
+     * browser only; the agent process itself stays on the old generation. This
+     * action is the heavier, correct fix: quiesce, relaunch on the CURRENT
+     * generation, resume the same conversation, nudge it back to work.
+     *
+     * ORDER OF OPERATIONS IS THE SAFETY PROPERTY. Every refusal below must run
+     * BEFORE anything is closed — a refusal that fires after the close has
+     * already destroyed the thing it was protecting. In particular the pane
+     * READINESS GATE (step 4) must run before gracefulClose/restart are ever
+     * reached; WorkspaceReloadTest::testGateRunsBeforeAnyCloseOrRestart pins
+     * this with a source-text guard, the same technique
+     * RelayReadinessGateTest::testGateRunsBeforeAnyPasteOrEnter uses for the
+     * #148 relay gate.
+     *
+     * @return array<string,mixed>
+     */
+    private static function reloadOntoCurrent($id): array {
+        // `continue=0` suppresses the post-reload nudge. Moving a workspace onto
+        // a different agent version is a deliberate, self-contained action the
+        // operator chose — it is NOT the plugin recovering a workspace after an
+        // upgrade it did to them. Their work may well be finished, and the next
+        // thing they want to type is a new instruction, not a machine-sent
+        // "continue" racing them to the prompt. Reported 2026-09-15: "I wouldn't
+        // want you to continue, I'd want to give you the next instruction."
+        //
+        // Default stays ON so the automatic post-upgrade reload path, which the
+        // operator did not ask for, still picks the work back up as before.
+        $sendContinue = ($_GET['continue'] ?? '1') !== '0';
+        $id = (string)$id;
+
+        // 1. Resolve the workspace's agent + path from the saved registry — this
+        // action is called with only a session id, and restart() reads
+        // $_GET['agentId'] (it was built as a browser AJAX endpoint), so the
+        // agent has to be supplied explicitly or the restart refuses. The old
+        // 'gemini-cli' default that used to fill that gap is gone: it silently
+        // targeted the wrong agent's tmux session and binary. See
+        // ConfigService::resolveAgentId().
+        $agentId = '';
+        $path = '';
+        foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            if ((string)($w['id'] ?? '') === $id) {
+                $agentId = (string)($w['agentId'] ?? '');
+                $path = (string)($w['path'] ?? '');
+                break;
+            }
+        }
+        if ($agentId === '') {
+            return ['status' => 'error', 'reason' => 'unknown_workspace', 'message' => 'Unknown workspace session.'];
+        }
+
+        // Refuse if not running — reloading requires a live agent to quiesce
+        // and a live pane to nudge; there is nothing here to move.
+        if (!\AICliAgents\Services\ProcessManager::isRunning($id)) {
+            return ['status' => 'error', 'reason' => 'not_running', 'message' => 'That workspace is not running.'];
+        }
+
+        // 2. Refuse only when there is genuinely nothing to move onto. There are
+        // now TWO independent reasons a workspace can be behind, and checking
+        // only the first refused exactly the case the Switch-to-version menu item
+        // exists for (reported 2026-09-15: "it said you are already on this new
+        // version, which I don't think is true" — the PLUGIN was current, the
+        // AGENT was a version behind):
+        //
+        //   a) the PLUGIN generation it launched under has been superseded, or
+        //   b) the AGENT version it is running is not the installed one
+        //      (docs/specs/WORKSPACE_APPLY_AGENT_VERSION.md).
+        //
+        // Either is a real reason to close and relaunch. Both being current is
+        // the only case where the reload is pure cost for zero benefit.
+        $launched = \AICliAgents\Services\ProcessManager::sessionLaunchGeneration($id);
+        $active = \AICliAgents\Services\ProcessManager::activeGeneration();
+        $pluginStale = \AICliAgents\Services\ProcessManager::generationIsStale($launched, $active);
+        $agentStale = false;
+        try {
+            $agentStale = array_key_exists($id, \AICliAgents\Services\TerminalService::sessionsOnOtherAgentVersion());
+        } catch (\Throwable $e) { /* never let this check refuse a legitimate reload */ }
+        if (!$pluginStale && !$agentStale) {
+            return ['status' => 'error', 'reason' => 'not_stale',
+                    'message' => 'This workspace is already on the current plugin and agent version — nothing to move it onto.'];
+        }
+
+        // 3. Refuse if an agent upgrade is queued or active for this agent.
+        // Two relaunch pipelines must never race over the same binary/session:
+        // an upgrade's own close-and-relaunch (AgentHandler::isInstallInProgress
+        // — covers a live install-bg.php process, a fresh in-progress marker,
+        // AND a completed install still waiting on UpgradeRelaunchService's
+        // closed-set manifest to activate) would collide with this action
+        // closing and relaunching the SAME session at the SAME time. That
+        // check deliberately does NOT cover the #71 non-destructive PRE-install
+        // queue (PendingAgentUpgradeService) — a request that is waiting for
+        // every active session of this agent to close naturally BEFORE the
+        // install begins — because elsewhere (TerminalHandler::start) a queued
+        // upgrade must not block new sessions. Here it must: if we close this
+        // session while the queue is watching for zero active sessions, the
+        // supervisor can start the binary swap mid-relaunch. So both signals
+        // are checked, reusing the existing predicates verbatim — no new
+        // detection invented.
+        require_once __DIR__ . '/AgentHandler.php';
+        $upgradeQueuedOrActive = \AICliAgents\Handlers\AgentHandler::isInstallInProgress($agentId)
+            || \AICliAgents\Services\PendingAgentUpgradeService::read($agentId) !== [];
+        if ($upgradeQueuedOrActive) {
+            return ['status' => 'error', 'reason' => 'upgrade_in_progress',
+                'message' => 'An upgrade is queued or in progress for this agent — check the Activity tray and retry once it finishes.'];
+        }
+
+        // 4. READINESS GATE — BEFORE ANYTHING IS CLOSED. Reuses the #148 pane
+        // classifier (the same one relay delivery and the Continue nudge use):
+        // a pane mid-decision (question/menu/pager/parked) must never have a
+        // close signalled into it — the trailing keys of a graceful close would
+        // land on whatever is highlighted, not on the agent. Return 'busy' and
+        // do nothing else; the operator can see the pane and retry.
+        $gate = \AICliAgents\Services\TmuxService::paneAcceptsInput($agentId, $id);
+        if (($gate['ready'] ?? false) !== true) {
+            return ['status' => 'busy', 'reason' => (string)($gate['reason'] ?? 'not-ready'),
+                'message' => 'The agent is busy or mid-prompt — try Reload again once it is idle.'];
+        }
+
+        // 5. Confirm a resume target exists BEFORE closing anything. restart()
+        // always launches with the 'auto' resume sentinel, which
+        // TerminalService resolves through ConfigService::getResumeId($path,
+        // $agentId) — the persisted chat id from this workspace's last close.
+        // Better a stale workspace than a lost conversation (R6): if nothing
+        // is on record to resume, refuse rather than gamble that the
+        // close-time pane scrape/disk-fallback in captureResumeForClose finds
+        // something new.
+        $resumeId = \AICliAgents\Services\ConfigService::getResumeId($path, $agentId, (string)$id);
+        if (empty($resumeId)) {
+            return ['status' => 'error', 'reason' => 'no_resume_target',
+                'message' => 'No saved conversation to resume for this workspace — reload was refused to avoid losing it.'];
+        }
+
+        // 6. Only now: perform the restart. Reuse restart()'s existing
+        // quiesce -> relaunch-on-current -> resume path rather than
+        // reimplementing close+start. restart()/gracefulClose() read
+        // $_GET['path'] and $_GET['agentId'] (they were built as browser AJAX
+        // endpoints), so this server-initiated call supplies both explicitly
+        // from the workspace record resolved in step 1. Without them the agent
+        // id is unresolvable and the restart refuses with a clear error rather
+        // than guessing an agent (ConfigService::agentIdUnresolvedError()).
+        $_GET['path'] = $path;
+        $_GET['agentId'] = $agentId;
+        $result = self::restart($id);
+
+        // 7. Nudge it back to work once it reaches idle. Mirrors DrawerPanel's
+        // auto-continue retry ladder (CONTINUE_ON_RESTART.md): up to 8 attempts
+        // spaced 4s apart, retried only while the gate reports 'busy' (still
+        // booting). A reload that succeeds with a nudge that never lands is
+        // reported as a SUCCESS with a note, not a failure — the workspace IS
+        // on the current generation and IS resumed; Continue is one click away.
+        if (!$sendContinue) {
+            aicli_log("reloadOntoCurrent: continue nudge suppressed by request (operator-chosen switch) | session=$id agent=$agentId",
+                AICLI_LOG_INFO, "TerminalHandler");
+            return array_merge($result, ['reloaded' => true, 'nudge' => ['status' => 'skipped', 'reason' => 'not_requested']]);
+        }
+        $nudge = self::nudgeWithRetryLadder($agentId, $id);
+
+        return array_merge($result, ['reloaded' => true, 'nudge' => $nudge]);
+    }
+
+    /**
+     * Retry ladder for the post-reload continue nudge, mirroring
+     * DrawerPanel's auto-continue-on-restart cadence (retriesLeft: 8, 4s
+     * between attempts) so a just-relaunched agent that is still booting gets
+     * nudged once it reaches idle, without retrying forever. Stops the moment
+     * the nudge is delivered ('ok') or genuinely errors — only a 'busy' pane
+     * (still mid-boot) is worth waiting out.
+     *
+     * @return array<string,mixed>
+     */
+    private static function nudgeWithRetryLadder(string $agentId, string $sessionId): array {
+        $maxAttempts = 8;
+        $delayUs = 4_000_000; // 4s — same cadence as DrawerPanel's setTimeout(...,4000)
+        $result = ['status' => 'error', 'message' => 'Continue nudge was never attempted.'];
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $result = \AICliAgents\Services\TmuxService::submitContinueNudge($agentId, $sessionId);
+            if (($result['status'] ?? '') !== 'busy') break;
+            if ($attempt < $maxAttempts) usleep($delayUs);
+        }
+        return $result;
+    }
+
+    /**
+     * Return the identity of the ttyd endpoint created by a successful launch.
+     * The browser seeds its iframe key from this response before first render;
+     * otherwise the first status poll changes `unknown` to the already-running
+     * generation and needlessly replaces a healthy, newly attached terminal.
+     */
+    private static function startedResponse($id, array $extra = []): array {
+        return array_merge([
+            'status' => 'ok',
+            'sock' => "/webterminal/aicliterm-$id/",
+            'terminalGeneration' => \AICliAgents\Services\TerminalGenerationService::current((string)$id),
+        ], $extra);
+    }
+
+    /**
+     * DRAWER_RESTART_AS_NEW.md: close the running session cleanly (the same
+     * quiesce + resume-capture path as Close, so the old conversation stays in the
+     * agent's own history), drop the workspace's saved resume point, and start the
+     * agent fresh (`_fresh_` — the launcher skips every resume fallback). The
+     * session keeps its id, so its Relay identity (actor ownership, inbox, DM
+     * history) is untouched; peers learn about the reset passively, in the
+     * response to their next send (AgentRelayService::freshContextNote).
+     */
+    private static function restartFresh($id) {
+        $safeId  = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$id);
+        $path    = (string)($_GET['path'] ?? '');
+        // Never default the agent: starting the WRONG agent in a user's
+        // workspace is worse than refusing to start at all.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
+        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('restart_fresh', (string)$id, (string)($_GET['path'] ?? ''));
+        // Refuse BEFORE closing anything: a start would be blocked anyway and the
+        // user would be left with a closed session (R6).
+        if (\AICliAgents\Handlers\AgentHandler::isInstallInProgress($agentId)) {
+            return ['status' => 'error', 'reason' => 'upgrade_in_progress',
+                    'message' => 'Upgrade in progress — this workspace cannot be restarted until it finishes.'];
+        }
+        aicli_log("restartFresh: START session=$safeId agent=$agentId workspace=" . ($path !== '' ? $path : 'unknown'), AICLI_LOG_INFO, "TerminalHandler");
+        self::gracefulClose($id);
+        if ($path !== '') {
+            \AICliAgents\Services\ConfigService::clearResumeId($path, $agentId, (string)$id);
+            aicli_log("restartFresh: cleared saved resume id for (workspace=$path, agent=$agentId)", AICLI_LOG_INFO, "TerminalHandler");
+        }
+        $relay = [];
+        if (class_exists('\AICliAgents\Services\AgentRelayService')) {
+            try { $relay = \AICliAgents\Services\AgentRelayService::markConversationRestart($safeId, $agentId, $path); }
+            catch (\Throwable $e) { $relay = ['status' => 'error', 'message' => $e->getMessage()]; }
+        }
+        startAICliTerminal($id, $path !== '' ? $path : null, '_fresh_', $agentId);
+        aicli_log("restartFresh: DONE session=$safeId started fresh (relay=" . (string)($relay['status'] ?? 'n/a') . ")", AICLI_LOG_INFO, "TerminalHandler");
+        return self::startedResponse($id, ['fresh' => true, 'relay' => $relay]);
     }
 
     /** Resolve the resume selector for an explicit Restart request. */
@@ -807,20 +1464,39 @@ class TerminalHandler {
 
     private static function getChatSession() {
         $path = $_GET['path'] ?? '';
-        $agentId = $_GET['agentId'] ?? 'gemini-cli';
-        $chatId = \AICliAgents\Services\TerminalService::findSession($path, $agentId);
+        // Never default the agent: reporting another agent's state is a lie.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)($_GET['id'] ?? ''), (string)($_GET['path'] ?? ''));
+        // Degrade, do not refuse — see getSessionStatus. A null chatId is an honest
+        // "unknown"; another agent's chatId would be a confident wrong answer.
+        $chatId = $agentId === '' ? null : \AICliAgents\Services\TerminalService::findSession($path, $agentId);
         return ['status' => 'ok', 'chatId' => $chatId];
     }
 
     /** Cheap active-session probe used to replace stale ttyd iframes. */
     private static function getSessionStatus($id) {
         $path = (string)($_GET['path'] ?? '');
-        $agentId = (string)($_GET['agentId'] ?? 'gemini-cli');
+        // Never default the agent: reporting another agent's state is a lie.
+        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
+        // This endpoint is POLLED, and legitimately for ids that have no workspace
+        // record yet. So an unresolved agent DEGRADES rather than refuses: report the
+        // generation (which needs no agent) and return a null chatId instead of a
+        // chatId belonging to some other agent. Refusing here broke the polling
+        // contract asserted by TerminalGenerationServiceTest (2026-09-09).
         return [
             'status' => 'ok',
             // Preserve the status endpoint's original conversation-sync
             // contract while adding the ttyd identity used for reconnects.
-            'chatId' => \AICliAgents\Services\TerminalService::findSession($path, $agentId),
+            // Two separate reasons to answer "unknown", each its own branch. An
+            // unresolved agent must never reach a lookup (AgentIdResolutionTest pins
+            // this exact short-circuit). RESUME_IDENTITY_PER_WORKSPACE.md (V4):
+            // findSession() is keyed by FOLDER, so on a folder another open workspace
+            // shares it cannot say whose conversation it found — report none rather
+            // than hand the drawer the sibling's id as this one's.
+            'chatId' => $agentId === '' ? null : (
+                ($path !== '' && \AICliAgents\Services\ConfigService::isSharedFolder($path, $agentId, (string)$id))
+                    ? null
+                    : \AICliAgents\Services\TerminalService::findSession($path, $agentId)
+            ),
             'terminalGeneration' => \AICliAgents\Services\TerminalGenerationService::current((string)$id),
         ];
     }

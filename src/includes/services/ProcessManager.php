@@ -44,6 +44,33 @@ class ProcessManager {
      */
     public static $paneLivenessProbe = null;
 
+    /** @var (callable(string):array<int,int>)|null Test seam for exact session-environment process discovery. */
+    public static $sessionPidProbe = null;
+
+    /** @var (callable(int,int):bool)|null Test seam for process signalling. */
+    public static $sessionSignalProbe = null;
+
+    /** @var (callable(int):bool)|null Bug #141 test seam — is this pid a tmux SERVER? */
+    public static $tmuxServerProbe = null;
+
+    /** @var (callable(int):?array{ppid:int,cmdline:string})|null Bug #141 test seam — /proc reader. */
+    public static $processInfoProbe = null;
+
+    /** @var (callable(int):?string)|null Bug #141 test seam — overrides resolveOwningSessionId. */
+    public static $owningSessionProbe = null;
+
+    /** @var (callable(string):string)|null #142 test seam — overrides sessionLaunchGeneration. */
+    public static $sessionGenerationProbe = null;
+
+    /** @var (callable(string):bool)|null test seam — stubs restartTerminalBridge's ttyd kill (AUTO_RECONNECT_ALL_ON_DEPLOY). */
+    public static $bridgeRestartProbe = null;
+
+    /** Plugin root holding the `src` symlink and the .active-generation marker. */
+    public const PLUGIN_ROOT = '/usr/local/emhttp/plugins/unraid-aicliagents';
+
+    /** Root holding every tmux server socket the plugin owns. */
+    public const TMUX_ROOT = '/tmp/unraid-aicliagents/tmux';
+
     /**
      * Reset all test seams to their live-probe defaults. Call in tearDown.
      */
@@ -52,6 +79,353 @@ class ProcessManager {
         self::$ttydPidProbe = null;
         self::$ttydChildrenProbe = null;
         self::$paneLivenessProbe = null;
+        self::$sessionPidProbe = null;
+        self::$sessionSignalProbe = null;
+        self::$tmuxServerProbe = null;
+        self::$processInfoProbe = null;
+        self::$owningSessionProbe = null;
+        self::$sessionGenerationProbe = null;
+        self::$bridgeRestartProbe = null;
+    }
+
+    // ---------- Generation drift (#142) ----------
+    //
+    // A running ttyd holds its generation path in argv, so every reconnect
+    // re-executes the shell script from the generation that workspace launched
+    // with. Publishing a fix to aicli-shell.sh therefore does nothing for an
+    // already-open workspace — on 2026-08-11 a verified fix was reported as
+    // shipped while every live workspace kept running the old code, because
+    // nothing anywhere compared the two. These three helpers make that
+    // difference visible so the UI can offer to close it.
+
+    /** The generation embedded in a process command line, or '' if there is none. */
+    public static function parseGenerationFromCommandLine(string $cmdline): string {
+        if ($cmdline === '') return '';
+        return preg_match('#/\.generations/([^/\0]+)/#', $cmdline, $m) === 1 ? $m[1] : '';
+    }
+
+    /** The generation the plugin's `src` symlink currently resolves to ('' if unknown). */
+    public static function activeGeneration(string $root = self::PLUGIN_ROOT): string {
+        $marker = @file_get_contents($root . '/.active-generation');
+        return is_string($marker) ? trim($marker) : '';
+    }
+
+    /**
+     * The generation a live session's ttyd was launched from ('' if unknown —
+     * no live ttyd, or a pre-generation layout).
+     */
+    public static function sessionLaunchGeneration(string $id): string {
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+        if ($safeId === '') return '';
+        if (is_callable(self::$sessionGenerationProbe)) {
+            return (string) call_user_func(self::$sessionGenerationProbe, $safeId);
+        }
+        $needle = "aicliterm-$safeId.sock";
+        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+            $cmdline = @file_get_contents($file);
+            if (!is_string($cmdline) || strpos($cmdline, $needle) === false) continue;
+            if (strpos($cmdline, 'ttyd') === false) continue;
+            $gen = self::parseGenerationFromCommandLine($cmdline);
+            if ($gen !== '') return $gen;
+        }
+        return '';
+    }
+
+    /**
+     * Is a session running superseded code?
+     *
+     * UNKNOWN IS NEVER STALE. A session we cannot attribute — or an unreadable
+     * marker — would otherwise wear a permanent "update me" badge that no
+     * action can clear, which trains the user to ignore the badge entirely.
+     */
+    public static function generationIsStale(string $launched, string $active): bool {
+        if ($launched === '' || $active === '') return false;
+        return $launched !== $active;
+    }
+
+    /**
+     * Restart ONLY the web bridge for a session: kill its ttyd, leave the
+     * detached tmux session and the agent inside it running.
+     *
+     * This is how a workspace moves onto the current generation without
+     * restarting its agent — the page re-fires `start`, and TerminalService
+     * resolves the shell path from the live `src` symlink at launch, so the new
+     * ttyd runs current code. Safe against the orphan sweep: a socket with no
+     * ttyd classifies as `no_ttyd`, which only unlinks artefacts and never
+     * touches the tmux session (sweepOrphanSessions).
+     *
+     * @return bool whether a ttyd was found and signalled.
+     */
+    public static function restartTerminalBridge(string $id): bool {
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
+        if ($safeId === '') return false;
+        if (is_callable(self::$bridgeRestartProbe)) {
+            return (bool) call_user_func(self::$bridgeRestartProbe, $safeId);
+        }
+        $sock = "/var/run/aicliterm-$safeId.sock";
+        $pid = self::findTtydPidForSock($sock);
+        if (!$pid) return false;
+        LogService::log("Bridge refresh (#142): terminating ttyd pid=$pid for $safeId; agent + tmux session left running", LogService::LOG_INFO, 'ProcessManager');
+        @posix_kill($pid, defined('SIGTERM') ? SIGTERM : 15);
+        self::publishBridgeEvent($safeId);
+        return true;
+    }
+
+    /**
+     * WORKSPACE_LIFECYCLE_EVENTS.md: tell every open tab a session's web
+     * bridge identity may have changed, so a device that missed the change
+     * does not wait out the 30 s status poll before it replaces a dead
+     * iframe. Reads the exact value `get_session_status` already reports
+     * (TerminalGenerationService::current()), so the push and the poll can
+     * never disagree. Best-effort: a bridge mid-restart with no live
+     * identity yet publishes nothing — the next poll (or the session's next
+     * start) reports the real one once it exists.
+     */
+    private static function publishBridgeEvent(string $safeId): void {
+        if ($safeId === '' || !class_exists('\\AICliAgents\\Services\\TerminalGenerationService')) return;
+        $generation = TerminalGenerationService::current($safeId);
+        if ($generation === null || $generation === '') return;
+        if (!class_exists('\\AICliAgents\\Services\\NchanService')) return;
+        NchanService::publish('workspaces', ['event' => 'bridge', 'id' => $safeId, 'generation' => $generation]);
+    }
+
+    /**
+     * AUTO_RECONNECT_ALL_ON_DEPLOY.md: restart the web bridge of every session
+     * running superseded code, so a deploy moves the WHOLE fleet onto the new
+     * generation in one shot instead of the user clicking "Reconnect terminal"
+     * per tile. Non-destructive — each restart is a ttyd SIGTERM only; agents
+     * and their tmux sessions keep running.
+     *
+     * Restarts EXACTLY the stale sessions: a session on the current generation,
+     * or one we cannot attribute (unknown generation is never stale), is left
+     * untouched. Idempotent — a bridge already gone returns false and is not
+     * counted, so a second pass or a second open tab firing the same reconnect
+     * never double-restarts.
+     *
+     * @param string[]     $sessionIds ids to consider (typically the running ones).
+     * @param string|null  $active     active generation; defaults to activeGeneration().
+     * @return array{reconnected:int,ids:string[]}
+     */
+    public static function restartAllStaleBridges(array $sessionIds, ?string $active = null): array {
+        $active = $active ?? self::activeGeneration();
+        $ids = [];
+        foreach ($sessionIds as $id) {
+            $id = (string) $id;
+            if ($id === '') continue;
+            $launched = self::sessionLaunchGeneration($id);
+            if (!self::generationIsStale($launched, $active)) continue;
+            if (self::restartTerminalBridge($id)) {
+                $ids[] = $id;
+            }
+        }
+        return ['reconnected' => count($ids), 'ids' => $ids];
+    }
+
+    /**
+     * Bug #141: the session a process ACTUALLY belongs to, or null if unknown.
+     *
+     * AICLI_SESSION_ID cannot be trusted for this on its own. The shared tmux
+     * server exported the id of whichever session forked it, and tmux copies
+     * that environment into every session created afterwards — so on a legacy
+     * shared socket, `aicli-run-sn3ic0.sh` reports AICLI_SESSION_ID=sw3w1s.
+     * Reaping on the env alone therefore killed live sibling workspaces.
+     *
+     * Launch identity is trustworthy: TerminalService writes each session a
+     * uniquely-named `aicli-run-<sid>.sh`, and every process in that session
+     * has it in its ancestry. Walk up from $pid and take the first one found.
+     *
+     * Returns null when no run script appears in the ancestry (a ttyd wrapper,
+     * or a genuinely detached child) — callers then fall back to the env match,
+     * preserving the original reap behaviour for those.
+     */
+    public static function resolveOwningSessionId(int $pid): ?string {
+        if (is_callable(self::$owningSessionProbe)) {
+            $v = call_user_func(self::$owningSessionProbe, $pid);
+            return is_string($v) && $v !== '' ? $v : null;
+        }
+        $seen = [];
+        // Bounded: deep enough for agent → shell → wrapper chains, cheap enough
+        // to run per candidate, and immune to a malformed /proc parent cycle.
+        for ($i = 0; $i < 12 && $pid > 1 && !isset($seen[$pid]); $i++) {
+            $seen[$pid] = true;
+            $info = self::processInfo($pid);
+            if ($info === null) return null;
+            if (preg_match('#/aicli-run-([A-Za-z0-9_-]+)\.sh#', $info['cmdline'], $m) === 1) {
+                return $m[1];
+            }
+            $pid = $info['ppid'];
+        }
+        return null;
+    }
+
+    /**
+     * Read one process's parent pid + cmdline from /proc.
+     *
+     * @return array{ppid:int,cmdline:string}|null
+     */
+    private static function processInfo(int $pid): ?array {
+        if (is_callable(self::$processInfoProbe)) {
+            $v = call_user_func(self::$processInfoProbe, $pid);
+            return is_array($v) ? $v : null;
+        }
+        $stat = @file_get_contents("/proc/$pid/stat");
+        if (!is_string($stat) || $stat === '') return null;
+        $close = strrpos($stat, ')');
+        if ($close === false) return null;
+        $fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+        $ppid = isset($fields[1]) ? (int) $fields[1] : 0;
+        $cmdline = (string) @file_get_contents("/proc/$pid/cmdline");
+        return ['ppid' => $ppid, 'cmdline' => $cmdline];
+    }
+
+    /**
+     * Bug #141: the private TMUX_TMPDIR for ONE session.
+     *
+     * Every session used to share a single tmux server, which meant a single
+     * point of failure the reap could reach: the server inherits the
+     * AICLI_SESSION_ID of whichever session forked it, tmux copies that
+     * environment into every session created later, and closing the owning
+     * workspace therefore SIGKILLed the server out from under every other
+     * workspace. Giving each session its own TMUX_TMPDIR gives it its own
+     * server, so a close can only ever reach its own processes.
+     *
+     * The id is sanitised to the session-id alphabet, so a hostile value can
+     * never escape TMUX_ROOT.
+     */
+    public static function sessionTmuxTmpdir(string $sessionId): string {
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $sessionId);
+        if ($safeId === '') $safeId = 'unknown';
+        return self::TMUX_ROOT . '/s-' . $safeId;
+    }
+
+    /**
+     * Every tmux server socket the plugin can talk to, newest layout first.
+     *
+     * Two layouts coexist during migration:
+     *   - per-session (Bug #141): <root>/s-<sid>/tmux-<uid>/default
+     *   - legacy shared:          <root>/tmux-<uid>/default
+     * Sessions launched before the upgrade keep running on the legacy socket,
+     * so discovery must cover both or a live workspace becomes unreachable.
+     *
+     * @return array<int,string>
+     */
+    public static function tmuxSocketPaths(string $root = self::TMUX_ROOT): array {
+        $socks = [];
+        foreach (glob($root . '/s-*/tmux-*', GLOB_ONLYDIR) ?: [] as $dir) {
+            if (file_exists($dir . '/default')) $socks[] = $dir . '/default';
+        }
+        foreach (glob($root . '/tmux-*', GLOB_ONLYDIR) ?: [] as $dir) {
+            if (file_exists($dir . '/default')) $socks[] = $dir . '/default';
+        }
+        return $socks;
+    }
+
+    /**
+     * Bug #141 guard: is this pid a tmux SERVER?
+     *
+     * A tmux server must never be signalled by a workspace close. Sessions are
+     * torn down with `kill-session`; killing the server itself is never
+     * required and, on the legacy shared socket, drops every other workspace.
+     * The server keeps its original `tmux …` argv and is reparented to init
+     * once it daemonises, which is what we match on.
+     */
+    public static function isTmuxServerProcess(int $pid): bool {
+        if (is_callable(self::$tmuxServerProbe)) {
+            return (bool) call_user_func(self::$tmuxServerProbe, $pid);
+        }
+        $cmdline = @file_get_contents("/proc/$pid/cmdline");
+        if (!is_string($cmdline) || $cmdline === '') return false;
+        $argv0 = strtok($cmdline, "\0");
+        if (!is_string($argv0) || basename($argv0) !== 'tmux') return false;
+        // Only the daemonised server survives reparented to init; a transient
+        // client still owned by its caller is safe (and pointless) to signal.
+        $stat = @file_get_contents("/proc/$pid/stat");
+        if (!is_string($stat) || $stat === '') return true; // argv says tmux — stay safe
+        $tail = substr($stat, (int) strrpos($stat, ')'));
+        $fields = preg_split('/\s+/', trim($tail));
+        return isset($fields[2]) && (int) $fields[2] === 1;
+    }
+
+    /** Exact NUL-delimited environment match; never a command-line substring match. */
+    public static function environmentBelongsToSession(string $environment, string $sessionId): bool
+    {
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $sessionId);
+        if ($safeId === '') return false;
+        return strpos("\0" . $environment . "\0", "\0AICLI_SESSION_ID={$safeId}\0") !== false;
+    }
+
+    /**
+     * Reap every remaining process that inherited this workspace's exact session
+     * environment. Agent extensions can detach a child from tmux, in which case
+     * killing the pane or matching argv alone leaves it reparented to PID 1.
+     *
+     * The narrow environment key is injected only by TerminalService for a
+     * workspace process tree. This is therefore safe for normal close, unlike a
+     * broad agent-name or workspace-path pkill.
+     *
+     * @return array<int,int> PIDs signalled (unique, in discovery order).
+     */
+    public static function terminateSessionDescendants(string $sessionId): array
+    {
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $sessionId);
+        if ($safeId === '') return [];
+        $discover = static function () use ($safeId): array {
+            if (is_callable(self::$sessionPidProbe)) {
+                return array_values(array_filter(call_user_func(self::$sessionPidProbe, $safeId), 'is_int'));
+            }
+            $pids = [];
+            foreach (glob('/proc/[0-9]*/environ') ?: [] as $file) {
+                $pid = (int)basename(dirname($file));
+                if ($pid <= 1 || $pid === getmypid()) continue;
+                $environment = @file_get_contents($file);
+                if (is_string($environment) && self::environmentBelongsToSession($environment, $safeId)) {
+                    $pids[] = $pid;
+                }
+            }
+            return $pids;
+        };
+        $signal = static function (int $pid, int $signal): bool {
+            if (is_callable(self::$sessionSignalProbe)) {
+                return (bool)call_user_func(self::$sessionSignalProbe, $pid, $signal);
+            }
+            return function_exists('posix_kill') ? @posix_kill($pid, $signal) : @shell_exec('kill -' . (int)$signal . ' ' . (int)$pid . ' 2>/dev/null') === null;
+        };
+
+        // Bug #141: never signal a tmux SERVER, even when its environment
+        // matches. On the legacy shared socket the server carries the
+        // AICLI_SESSION_ID of whichever session forked it, so signalling it
+        // took down every OTHER workspace too. The session's own pane is
+        // already gone by here (kill-session), so skipping the server costs
+        // nothing and removes the cross-workspace blast radius.
+        // A second, wider leak from the same shared server: every sibling
+        // session's `aicli-run-<sid>.sh` (and its agent) also inherited this
+        // id, so the env match alone killed live sibling workspaces too. Trust
+        // launch identity over the inherited variable — when a process's
+        // ancestry names a DIFFERENT session's run script, it is not ours.
+        $victims = static function () use ($discover, $safeId): array {
+            return array_values(array_filter(
+                $discover(),
+                static function (int $pid) use ($safeId): bool {
+                    if (self::isTmuxServerProcess($pid)) return false;
+                    $owner = self::resolveOwningSessionId($pid);
+                    return $owner === null || $owner === $safeId;
+                }
+            ));
+        };
+
+        $seen = [];
+        foreach ($victims() as $pid) {
+            $seen[$pid] = true;
+            $signal($pid, defined('SIGTERM') ? SIGTERM : 15);
+        }
+        // Give cooperative agent/plugin children a short chance to flush, then
+        // re-discover so a child that detached during close is also reaped.
+        usleep(250000);
+        foreach ($victims() as $pid) {
+            $seen[$pid] = true;
+            $signal($pid, defined('SIGKILL') ? SIGKILL : 9);
+        }
+        return array_map('intval', array_keys($seen));
     }
 
     /**
@@ -249,8 +623,12 @@ class ProcessManager {
      * Stops a terminal session and cleans up its artifacts.
      * @param string $id The session ID.
      * @param bool $killTmux Whether to also kill the associated tmux session.
+     * @param string $reason WORKSPACE_LIFECYCLE_EVENTS.md `stopped` reason:
+     *   graceful_close|stop|evict|upgrade. Every stop/evict/orphan-reap path
+     *   funnels through this one method, so the publish lives here once
+     *   rather than at every call site.
      */
-    public static function stopTerminal($id = 'default', $killTmux = false) {
+    public static function stopTerminal($id = 'default', $killTmux = false, string $reason = 'stop') {
         $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $id);
         LogService::log("Initiating termination sequence for session: $id...", LogService::LOG_INFO, "ProcessManager");
         
@@ -277,7 +655,17 @@ class ProcessManager {
                 exec("kill -15 $np > /dev/null 2>&1; sleep 0.2; kill -9 $np > /dev/null 2>&1");
             }
         }
-        
+
+        // #159: the pgrep -f above matches the ARGV, which only the runuser/ttyd/
+        // tmux wrappers carry (they name AICLI_SESSION_ID=<id> on their command
+        // line). A detached agent binary that reparented to PID 1 has a bare
+        // binary path for argv, so it slips through — and this teardown is the
+        // periodic orphan sweep's reaper (sweepOrphanSessions), so such a process
+        // would never be reaped. terminateSessionDescendants reads the actual
+        // ENVIRONMENT (/proc/<pid>/environ), reaping the reparented binary too.
+        // Env-scoped => safe (it skips tmux servers and respects launch identity).
+        self::terminateSessionDescendants($id);
+
         // D-319: Introduce brief delay before socket removal to allow processes to finish writes
         usleep(500000); // 0.5s
 
@@ -288,6 +676,10 @@ class ProcessManager {
         if (file_exists($pidFile)) {
             @unlink($pidFile);
         }
+        // UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md §Event: remember which agent this
+        // session ran BEFORE the runfile goes, so the close can nudge a pending
+        // layer activation for it (below) instead of waiting out the retry backoff.
+        $closedAgentId = trim((string)@file_get_contents("/var/run/unraid-aicliagents-$id.agentid"));
         @unlink("/var/run/unraid-aicliagents-$id.chatid");
         @unlink("/var/run/unraid-aicliagents-$id.agentid");
         @unlink("/var/run/unraid-aicliagents-$id.user");
@@ -304,7 +696,37 @@ class ProcessManager {
             }
         }
         
+        // #218: the close is over — drop the intent mark on every path that
+        // ends one, not only the graceful handler, so a mark can never outlive
+        // the close that set it.
+        \AICliAgents\Services\TerminalService::clearClosing((string)$id);
         LogService::log("Successfully closed terminal session and purged associated runfiles for $id.", LogService::LOG_INFO, "ProcessManager");
+
+        // WORKSPACE_LIFECYCLE_EVENTS.md: the session is actually down now —
+        // announce it once, from the one place every stop/evict/orphan-reap
+        // path funnels through.
+        self::publishStoppedEvent($id, $reason);
+
+        // DRAWER_RESTART_AS_NEW.md: a closed session's "fresh context" marker no
+        // longer describes anything — the next launch resumes (or restart-fresh
+        // re-marks it after this close). Best-effort.
+        if (class_exists('\AICliAgents\Services\AgentRelayService')) {
+            try { AgentRelayService::clearConversationRestart($id); } catch (\Throwable $e) { /* never break the close */ }
+        }
+
+        // Close event → immediate activation attempt (the supervisor tick's idle
+        // probe and the backoff pen stay as the fallback). Best-effort, never
+        // lets a nudge failure break the close.
+        if ($closedAgentId !== '' && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $closedAgentId)) {
+            try {
+                require_once __DIR__ . '/UpgradeRelaunchService.php';
+                if (UpgradeRelaunchService::nudgeActivation($closedAgentId)) {
+                    LogService::log("Session $id closed — nudged pending layer activation for $closedAgentId.", LogService::LOG_INFO, "ProcessManager");
+                }
+            } catch (\Throwable $e) {
+                LogService::log("Activation nudge for $closedAgentId skipped: " . $e->getMessage(), LogService::LOG_WARN, "ProcessManager");
+            }
+        }
     }
 
     /**
@@ -312,7 +734,30 @@ class ProcessManager {
      */
     public static function evictAll() {
         LogService::log("EVICTOR: Terminating ALL AI sessions...", LogService::LOG_WARN, "ProcessManager");
+        // WORKSPACE_LIFECYCLE_EVENTS.md: a global evict has no per-id capture
+        // path like evictTargeted's stopTerminal loop, so read the ids about
+        // to die from the registry BEFORE the raw kill, then announce each
+        // as stopped once the kill has actually run. Best-effort — a
+        // registry read failure must not block the evict itself.
+        $ids = [];
+        if (class_exists('\\AICliAgents\\Services\\ConfigService')) {
+            try {
+                foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $s) {
+                    if (is_array($s) && !empty($s['id'])) $ids[] = (string)$s['id'];
+                }
+            } catch (\Throwable $e) {
+                // Best-effort — proceed with the evict even with no ids to announce.
+            }
+        }
         exec("pgrep -f '(ttyd|aicliterm|geminiterm|tmux.*aicli-agent-)' | xargs kill -9 > /dev/null 2>&1");
+        foreach ($ids as $id) {
+            self::publishStoppedEvent($id, 'evict');
+            // Fix 2026-09-12: a global evict is an operator/tool decision to
+            // close everything. Auto-launch must not bring these workspaces
+            // straight back on the next page load. See
+            // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
+            AutoLaunchSuppression::suppress($id);
+        }
     }
 
     /**
@@ -334,8 +779,24 @@ class ProcessManager {
             // BEFORE the destructive stopTerminal. Best-effort, never throws.
             self::captureFallbackBeforeKill($id);
             LogService::log("EVICTOR: Terminating specific session: $id", LogService::LOG_INFO, "ProcessManager");
-            self::stopTerminal($id, true);
+            self::stopTerminal($id, true, 'evict');
+            // Fix 2026-09-12: a targeted evict is an operator/tool decision to
+            // close this workspace. Auto-launch must not bring it straight back
+            // on the next page load. See
+            // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
+            AutoLaunchSuppression::suppress($id);
         }
+    }
+
+    /**
+     * WORKSPACE_LIFECYCLE_EVENTS.md: announce a workspace going down. Shared
+     * by stopTerminal() (every stop/evict/orphan-reap path) and evictAll()
+     * (which has no single id to hand stopTerminal). Best-effort — never
+     * blocks or throws.
+     */
+    private static function publishStoppedEvent(string $id, string $reason): void {
+        if ($id === '' || !class_exists('\\AICliAgents\\Services\\NchanService')) return;
+        NchanService::publish('workspaces', ['event' => 'stopped', 'id' => $id, 'reason' => $reason]);
     }
 
     /**
@@ -358,8 +819,8 @@ class ProcessManager {
                 require_once __DIR__ . '/../handlers/TerminalHandler.php';
             }
             $diskId = \AICliAgents\Handlers\TerminalHandler::discoverLatestSessionId($agentId, $path);
-            if ($diskId !== null && $diskId !== '') {
-                ConfigService::saveResumeId($path, $agentId, $diskId);
+            // Disk-only (newest on disk): guarded on a shared folder (RESUME_IDENTITY_PER_WORKSPACE.md V3).
+            if ($diskId !== null && $diskId !== '' && ConfigService::saveDiskFallbackResumeId($path, $agentId, $diskId, $safeId)) {
                 LogService::log(
                     "captureFallbackBeforeKill: saved resume_id=$diskId for (workspace=$path, agent=$agentId) before evict (R5)",
                     LogService::LOG_INFO, "ProcessManager"
@@ -387,9 +848,7 @@ class ProcessManager {
     public static function findTmuxSessionForId(string $safeId): array {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $safeId);
         if ($safeId === '') return ['', '', 'tmux'];
-        foreach (glob('/tmp/unraid-aicliagents/tmux/tmux-*', GLOB_ONLYDIR) ?: [] as $perUserDir) {
-            $sock = $perUserDir . '/default';
-            if (!file_exists($sock)) continue;
+        foreach (self::tmuxSocketPaths() as $sock) {
             $cmd = 'tmux -S ' . escapeshellarg($sock) . " ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
             // nosemgrep: php.lang.security.exec-use.exec-use
             $name = trim((string) @shell_exec($cmd));
@@ -408,9 +867,7 @@ class ProcessManager {
      * sessions.
      */
     public static function killAllAgentSessions(): void {
-        foreach (glob('/tmp/unraid-aicliagents/tmux/tmux-*', GLOB_ONLYDIR) ?: [] as $perUserDir) {
-            $sock = $perUserDir . '/default';
-            if (!file_exists($sock)) continue;
+        foreach (self::tmuxSocketPaths() as $sock) {
             $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
             $cmd = "$tmuxBin ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -r -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1";
             // nosemgrep: php.lang.security.exec-use.exec-use
@@ -450,6 +907,12 @@ class ProcessManager {
             if ($reason === 'no_ttyd') {
                 LogService::log("Bug #1067: sock without live ttyd (sid=$id) -- unlinking artefacts", LogService::LOG_INFO, 'ProcessManager');
                 self::cleanupArtifacts($id);
+                // WORKSPACE_LIFECYCLE_EVENTS.md: this unlinks the session's web
+                // bridge artefacts with no relaunch pending. Best-effort — the
+                // bridge is already gone by this point, so this ordinarily
+                // publishes nothing (see publishBridgeEvent); it exists so a
+                // future artefact ordering change still gets the announcement.
+                self::publishBridgeEvent($id);
             } elseif ($reason === 'tmux_zombie') {
                 // CRITICAL-1: detached tmux session whose pane is parked on the
                 // dead-agent run-loop shell. stopTerminal(killTmux=true) kills the

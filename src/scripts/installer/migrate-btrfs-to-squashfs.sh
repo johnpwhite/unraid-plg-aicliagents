@@ -36,12 +36,19 @@ log() {
     echo "$msg" >> "$DEBUG_LOG"
 }
 
-# D-402: Publish migration progress via Nchan (fire-and-forget via curl)
+# D-402/D2/D9/D7 (EVENT_PUBLISH_OBSERVABILITY.md R7): publish migration progress
+# via Nchan, fire-and-forget. The /pub/ endpoint lives on the internal Unix
+# socket server, not the main HTTP server (D2 published over TCP to an
+# endpoint that does not exist). This now shares the single
+# `aicli_migrate_progress` channel with the PHP-side storage-path migration
+# (StorageHandler::migrateProgress) instead of its own dead `aicli_migration`
+# channel (D9), so the Manager needs only one subscriber.
 publish_progress() {
     local step="$1"
     local progress="${2:-0}"
-    local json="{\"step\":\"$step\",\"progress\":$progress,\"timestamp\":$(date +%s)}"
-    curl -s -X POST "http://localhost/pub/aicli_migration?buffer_length=1" \
+    local json="{\"step\":\"$step\",\"progress\":$progress,\"ts\":$(date +%s%3N)}"
+    curl -s --unix-socket /var/run/nginx.socket -X POST \
+        "http://localhost/pub/aicli_migrate_progress?buffer_length=1" \
         -H "Content-Type: application/json" -d "$json" --connect-timeout 1 --max-time 2 > /dev/null 2>&1 || true
 }
 
@@ -93,7 +100,14 @@ for img in "$PLUGIN_BASE"/*.img "$PLUGIN_BASE"/persistence/*.img "$PERSIST_PATH"
 done
 
 # Check for raw agent folders with actual files (empty mount-point dirs are not legacy)
-RAW_AGENTS="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
+# SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): resolve_paths.sh is
+# already sourced above — route through its agent_base(), falling back to the
+# literal only if sourcing ever failed.
+if declare -f agent_base >/dev/null 2>&1; then
+    RAW_AGENTS="$(agent_base)"
+else
+    RAW_AGENTS="/usr/local/emhttp/plugins/unraid-aicliagents/agents"
+fi
 if [ "$has_legacy" = false ] && [ -d "$RAW_AGENTS" ]; then
     for agent_dir in "$RAW_AGENTS"/*; do
         [ -d "$agent_dir" ] || continue
