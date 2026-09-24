@@ -633,7 +633,8 @@ home_mount_in_use() {
 _proc_mounts_path() { printf '%s' "${AICLI_PROC_MOUNTS:-/proc/mounts}"; }
 
 # _overlay_present_at <mnt> -> 0 (true) IFF /proc/mounts shows an overlay mounted
-# at exactly <mnt>. Mirrors PHP isHomeMountHealthy's "^overlay <mnt> overlay" probe.
+# at exactly <mnt>. Mirrors the overlay half of PHP isHomeMountHealthy (which also
+# accepts a passthrough bind; this arbiter only runs on the layering path).
 _overlay_present_at() {
     local mnt="${1:-}"
     [ -n "$mnt" ] || return 1

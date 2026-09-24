@@ -458,13 +458,30 @@ class StorageMountService {
     }
 
     /**
-     * Verifies the home overlay mount is genuinely an OverlayFS, not a phantom
-     * proc entry. A healthy home mount reads "overlay <mnt> overlay ..." in /proc/mounts.
+     * Verifies the home mount is genuinely live, not a phantom proc entry.
+     * Layering backend: a healthy home mount reads "overlay <mnt> overlay ..." in
+     * /proc/mounts. Passthrough backend: <mnt> is a bind of the plain persist dir.
      */
     public static function isHomeMountHealthy(string $user): bool {
         $mnt = rtrim(UtilityService::getWorkDir($user) . "/home", '/');
         $mounts = file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '';
-        return (bool)preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts);
+        if (preg_match("#^overlay\s+" . preg_quote($mnt, '#') . "\s+overlay\b#m", $mounts)) {
+            return true;
+        }
+
+        // Passthrough backend (detect_backend.sh engine=passthrough, e.g. Unraid 7.3
+        // Internal Boot: /boot on a ZFS pool backed by NVMe). storagectl's _pt_mount
+        // bind-mounts the plain dir at <mnt>, so there is no overlay line to match —
+        // without this, the fast path in ensureHomeMounted never fires and every
+        // supervisor tick re-logs "Mounting Home Stack" and re-shells storagectl.
+        // A live bind makes <mnt> and the _pt_dir the same (dev, ino) pair. Pure
+        // stat, no subprocess: this is the hot path.
+        $pt = rtrim(StoragePathResolver::homePersistPath($user), '/') . "/passthrough/homes/$user";
+        $a = @stat($mnt);
+        $b = @stat($pt);
+        return is_array($a) && is_array($b)
+            && (int)$a['dev'] === (int)$b['dev']
+            && (int)$a['ino'] === (int)$b['ino'];
     }
 
     /** Stable per-home marker path; public for diagnostics and unit coverage. */
