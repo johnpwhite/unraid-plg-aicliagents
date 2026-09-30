@@ -28,6 +28,9 @@ source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/manifes
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
 # R2 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the shutdown-capture bridge.
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/capture_resume.sh" 2>/dev/null || true
+# GH #10 / #228: the reserved squashfs loop-unmount pass (so a long bake can't
+# starve the unmount that frees /mnt/cache for a clean reboot).
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/shutdown_unmount.sh" 2>/dev/null || true
 
 # Budget (secs) for the pre-kill resume capture. Small slice of the shutdown
 # window — pass 1 (disk fallback) is fast + guaranteed; pass 2 (full clean
@@ -169,14 +172,39 @@ if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
 fi
 
 # Helper: run the full stop script, bounded by the Unraid-derived budget.
+# GH #10 / #228: reserve a slice of that budget for the squashfs loop-mount
+# teardown. The full stop bakes dirty home layers before it reaches its own
+# unmount step (stop-plugin.sh Step 8); a shutdown with many dirty layers could
+# spend the whole budget baking and never free the loop mounts, which then hold
+# /mnt/cache open and force an unclean shutdown — the original report. So cap the
+# main stop at (budget - reserve), then GUARANTEE the idempotent loop-unmount pass
+# runs within the reserve. The pass is a no-op when the main stop already tore the
+# mounts down, so nothing is done twice in the common case.
 run_full_stop() {
-    timeout "$SHUTDOWN_BUDGET" bash -c '
+    local reserve=$(( SHUTDOWN_BUDGET / 4 ))
+    [ "$reserve" -lt 10 ] && reserve=10
+    [ "$reserve" -gt 25 ] && reserve=25
+    local main_budget=$(( SHUTDOWN_BUDGET - reserve ))
+    # A very small configured budget must not be cannibalised — give the whole of
+    # it to the stop and skip the reserve pass (Step 8 still runs inside the stop).
+    if [ "$main_budget" -lt 15 ]; then
+        main_budget="$SHUTDOWN_BUDGET"
+        reserve=0
+    fi
+
+    timeout "$main_budget" bash -c '
         EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
         STOP_SCRIPT="$EMHTTP_DEST/scripts/user/stop-plugin.sh"
         [ ! -f "$STOP_SCRIPT" ] && STOP_SCRIPT="$EMHTTP_DEST/src/scripts/user/stop-plugin.sh"
         [ -f "$STOP_SCRIPT" ] && bash "$STOP_SCRIPT"
     ' 2>/dev/null
-    [ $? -eq 124 ] && warn "Stop sequence timed out after ${SHUTDOWN_BUDGET}s."
+    local rc=$?
+    [ "$rc" -eq 124 ] && warn "Stop sequence hit its ${main_budget}s cap; running the reserved loop-unmount pass (#228)."
+
+    if [ "$reserve" -gt 0 ] && declare -f _reserve_unmount_squashfs_loops >/dev/null 2>&1; then
+        # Bounded and idempotent — lazy unmounts + loop detach only.
+        timeout "$reserve" bash -c "$(declare -f _reserve_unmount_squashfs_loops); _reserve_unmount_squashfs_loops" 2>/dev/null || true
+    fi
 }
 
 # R2: capture resume ids for ALL live sessions BEFORE any kill/unmount sweep
@@ -311,37 +339,48 @@ else
             fi
         fi
         ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
-        if [ -d "$ZRAM_UPPER/homes" ]; then
-            for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
-                [ -d "$upper_dir" ] || continue
-                [ -z "$(ls -A "$upper_dir" 2>/dev/null)" ] && continue
-                user=$(basename "$(dirname "$upper_dir")")
-                HOME_PERSIST=$(home_persist_path "$user" 2>/dev/null || echo "")
-                [ -z "$HOME_PERSIST" ] && HOME_PERSIST="$PERSIST_PATH"
-                [ -d "$HOME_PERSIST" ] || continue
-                log "  Baking home delta for $user..."
-                lifecycle_log "info" "event_stopping" "shutdown_bake_attempted" "{\"user\":\"$user\"}" 2>/dev/null || true
-                DELTA_NAME=$(atomic_write_layer "home" "$user" "$HOME_PERSIST" "$upper_dir" "delta" 2>/dev/null)
-                if [ -n "$DELTA_NAME" ]; then
-                    log "  Saved $DELTA_NAME for $user."
-                    # Follow-on 3: record the manifest entry for the shutdown delta
-                    # IMMEDIATELY (mirror op_bake Step 7a) so the layer is TRACKED, not
-                    # untracked-until-reconcile. This is the LEAN variant — bake +
-                    # manifest record ONLY; it deliberately does NOT run op_bake's
-                    # refresh/reclaim (wrong under the shutdown time budget). addLayer is
-                    # idempotent + upserts by filename, so the next boot/reconcile sweep
-                    # re-recording the same layer is harmless.
-                    # F6 (WP#1331): the SINGLE manifest writer; lifecycle event gated on success.
-                    if manifest_record_layer "home" "$user" "$HOME_PERSIST" "$DELTA_NAME"; then
-                        lifecycle_log "info" "event_stopping" "shutdown_manifest_recorded" "{\"user\":\"$user\",\"sqsh\":\"$DELTA_NAME\"}" 2>/dev/null || true
-                    else
-                        lifecycle_log "warn" "event_stopping" "shutdown_manifest_record_failed" "{\"user\":\"$user\",\"sqsh\":\"$DELTA_NAME\"}" 2>/dev/null || true
-                    fi
-                else
-                    warn "  Home delta bake failed for $user."
-                fi
+        # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"):
+        # bake the upper each home's mount REALLY uses (zram first, then disk),
+        # not only the zram folders. Without resolve_paths.sh: the zram folders.
+        _stopping_home_uppers() {
+            if declare -f home_uppers_shutdown_order >/dev/null 2>&1; then
+                home_uppers_shutdown_order
+                return 0
+            fi
+            local _d _u
+            for _d in "$ZRAM_UPPER/homes"/*/upper; do
+                [ -d "$_d" ] || continue
+                _u="${_d%/upper}"; printf '%s\t%s\n' "${_u##*/}" "$_d"
             done
-        fi
+        }
+        while IFS=$'\t' read -r user upper_dir; do
+            [ -n "$user" ] && [ -d "$upper_dir" ] || continue
+            [ -z "$(ls -A "$upper_dir" 2>/dev/null)" ] && continue
+            HOME_PERSIST=$(home_persist_path "$user" 2>/dev/null || echo "")
+            [ -z "$HOME_PERSIST" ] && HOME_PERSIST="$PERSIST_PATH"
+            [ -d "$HOME_PERSIST" ] || continue
+            log "  Baking home delta for $user..."
+            lifecycle_log "info" "event_stopping" "shutdown_bake_attempted" "{\"user\":\"$user\"}" 2>/dev/null || true
+            DELTA_NAME=$(atomic_write_layer "home" "$user" "$HOME_PERSIST" "$upper_dir" "delta" 2>/dev/null)
+            if [ -n "$DELTA_NAME" ]; then
+                log "  Saved $DELTA_NAME for $user."
+                # Follow-on 3: record the manifest entry for the shutdown delta
+                # IMMEDIATELY (mirror op_bake Step 7a) so the layer is TRACKED, not
+                # untracked-until-reconcile. This is the LEAN variant — bake +
+                # manifest record ONLY; it deliberately does NOT run op_bake's
+                # refresh/reclaim (wrong under the shutdown time budget). addLayer is
+                # idempotent + upserts by filename, so the next boot/reconcile sweep
+                # re-recording the same layer is harmless.
+                # F6 (WP#1331): the SINGLE manifest writer; lifecycle event gated on success.
+                if manifest_record_layer "home" "$user" "$HOME_PERSIST" "$DELTA_NAME"; then
+                    lifecycle_log "info" "event_stopping" "shutdown_manifest_recorded" "{\"user\":\"$user\",\"sqsh\":\"$DELTA_NAME\"}" 2>/dev/null || true
+                else
+                    lifecycle_log "warn" "event_stopping" "shutdown_manifest_record_failed" "{\"user\":\"$user\",\"sqsh\":\"$DELTA_NAME\"}" 2>/dev/null || true
+                fi
+            else
+                warn "  Home delta bake failed for $user."
+            fi
+        done < <(_stopping_home_uppers)
 
         log "Selectively stopped $KILLED tmux session(s); swept $SWEPT array-cwd process(es)."
     else

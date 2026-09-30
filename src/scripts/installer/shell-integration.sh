@@ -5,6 +5,29 @@
 # 1. Update PATH to include plugin binaries (Node, fd, rg)
 export PATH="/usr/local/emhttp/plugins/unraid-aicliagents/bin:$PATH"
 
+# 1b. GitHub #12: restore the AICliAgents-managed session environment.
+# Unraid's /etc/profile always sources every /etc/profile.d/*.sh script LAST,
+# after it has already reset HOME, PATH and cwd to host login defaults
+# (export HOME=/root; cd $HOME; PATH=/usr/local/bin:...). A Bash LOGIN shell
+# started inside an agent session — an agent's own shell tool running
+# `bash -lc`, or ssh-attach.sh's `bash --login` fallback — re-runs
+# /etc/profile and loses the session's managed HOME/PATH/working directory.
+# HOME_DIR, AICLI_MANAGED_PATH, AICLI_CWD and AICLI_WORKSPACE_PATH are
+# exported by the session's own RUN_SCRIPT (aicli-shell.sh) and are never
+# touched by /etc/profile, so this restores from them. Guarded on HOME_DIR
+# so a normal admin login (no such session) is completely unaffected.
+if [ -n "$HOME_DIR" ]; then
+    export HOME="$HOME_DIR"
+    if [ -n "$AICLI_MANAGED_PATH" ]; then
+        export PATH="/usr/local/emhttp/plugins/unraid-aicliagents/bin:$AICLI_MANAGED_PATH"
+    fi
+    if [ -n "$AICLI_CWD" ] && [ -d "$AICLI_CWD" ]; then
+        cd "$AICLI_CWD" 2>/dev/null || true
+    elif [ -n "$AICLI_WORKSPACE_PATH" ] && [ -d "$AICLI_WORKSPACE_PATH" ]; then
+        cd "$AICLI_WORKSPACE_PATH" 2>/dev/null || true
+    fi
+fi
+
 # 2. Helper for agents to use the plugin's persistent home redirect
 # This ensures history and config are saved to the persistent store on Flash.
 _aicli_run() {

@@ -11,8 +11,7 @@
 error_reporting(E_ALL);
 ini_set('display_errors', '0');
 
-$pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
-require_once "$pluginDir/src/includes/AICliAgentsManager.php";
+require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php'; // #367: this generation
 
 try {
     $result = \AICliAgents\Services\HealthService::checkAndNotify();

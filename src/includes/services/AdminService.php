@@ -172,6 +172,9 @@ class AdminService {
                     // VOICE_SWITCHES.md R5: default true when the record has no
                     // 'voice' field at all (an older registry, or never muted).
                     'voice'      => self::workspaceVoiceEnabled($w),
+                    // VOICE_MAIL.md R14 / AGENT_VOICE.md R14: '' = not set.
+                    'spokenName' => (string)($w['spoken_name'] ?? ''),
+                    'voiceId'    => VoiceService::workspaceVoiceFor($w),
                 ];
             }
             // Single-wrapper rule (see class doc): return the list directly.
@@ -254,6 +257,9 @@ class AdminService {
                 // VOICE_SWITCHES.md R5: default true when the record has no
                 // 'voice' field at all (an older registry, or never muted).
                 'voice'       => self::workspaceVoiceEnabled($record),
+                // VOICE_MAIL.md R14 / AGENT_VOICE.md R14: '' = not set.
+                'spokenName'  => (string)($record['spoken_name'] ?? ''),
+                'voiceId'     => VoiceService::workspaceVoiceFor($record),
             ];
         } catch (\Throwable $e) {
             return self::failure('getWorkspace', $e);
@@ -904,6 +910,10 @@ class AdminService {
         'voicemail_max_per_workspace' => ['min' => 1, 'max' => 500],
         'voicemail_max_age_days'      => ['min' => 1, 'max' => 90],
 
+        // HOME_BACKUP.md #287: since the per-home redesign these six global keys
+        // are only the SEED a home with no settings file of its own inherits
+        // once (HomeBackupSettingsService); they never overwrite a home's own
+        // settings.
         // HOME_BACKUP.md "Settings (cfg keys)": these six are lower-risk than the
         // EXCLUDED home_storage_path/agent_storage_path above — a backup target is
         // a DESTINATION for a copy, never where live data lives, so a bad value
@@ -914,7 +924,7 @@ class AdminService {
         // accepts only 'off'/'daily:HH:MM'/'weekly:D:HH:MM', which
         // BackupCronService::parseScheduleToCron() then turns into the real cron
         // expression server-side, so there is no cron-injection surface here.
-        'backup_target'       => ['regex' => '#^/\S+$#', 'allowEmpty' => true, 'hint' => "empty, or an absolute path with no whitespace to a non-FUSE backup target (use 'Check' on the Home backup card first)"],
+        'backup_target'       => ['regex' => '#^/\S+$#', 'allowEmpty' => true, 'hint' => "empty, or an absolute path with no whitespace to a non-FUSE backup target (the default a home without backup settings of its own inherits once; each home's own folder is set with Backup on its Home card)"],
         'backup_quiesce'      => ['cold', 'warm'],
         'backup_keep'         => ['min' => 1, 'max' => 50],
         'backup_schedule'     => ['regex' => '#^(off|daily:([01]\d|2[0-3]):([0-5]\d)|weekly:[0-6]:([01]\d|2[0-3]):([0-5]\d))$#', 'hint' => "'off', 'daily:HH:MM', or 'weekly:D:HH:MM' (D is 0-6, Sunday=0)"],
@@ -1103,9 +1113,15 @@ class AdminService {
      * convention aicli_set_auto_launch's autoLaunch/freshIfNoResume already
      * use). null leaves the field untouched, same as every other parameter.
      *
+     * VOICE_MAIL.md R14: $spokenName sets the name the workspace is announced by
+     * before each spoken message; '' clears it (the display name is used).
+     *
+     * AGENT_VOICE.md R14: $voiceId sets the workspace's own engine voice; '' clears
+     * it (the Settings default is used). A value with the wrong shape is refused.
+     *
      * @return array<string,mixed>
      */
-    public static function updateWorkspace(string $id, ?string $name = null, ?string $path = null, ?string $agentId = null, ?int $order = null, ?bool $voice = null): array {
+    public static function updateWorkspace(string $id, ?string $name = null, ?string $path = null, ?string $agentId = null, ?int $order = null, ?bool $voice = null, ?string $spokenName = null, ?string $voiceId = null): array {
         try {
             $sessions = ConfigService::getWorkspaces()['sessions'] ?? [];
             $index = null;
@@ -1142,6 +1158,20 @@ class AdminService {
                 // a workspace set to Speak still speaking after "voice off". Move
                 // the mode with it: off is Off, on is Speak.
                 $record['voice_mode'] = $voice ? 'speak' : 'off';
+            }
+            if ($spokenName !== null) {
+                // VOICE_MAIL.md R14 (Forgejo #376): the name the workspace is
+                // announced by ("<spoken name> says:"). '' clears it.
+                $record['spoken_name'] = VoiceMailService::normaliseSpokenName($spokenName);
+            }
+            if ($voiceId !== null) {
+                // AGENT_VOICE.md R14 (Forgejo #377): the workspace's own engine
+                // voice, the same id rule as the Settings field. '' clears it.
+                $voiceId = trim($voiceId);
+                if ($voiceId !== '' && !VoiceService::isValidVoiceId($voiceId)) {
+                    return ['error' => "'$voiceId' is not a valid voice id. Use lowercase letters, digits and underscores, starting with a letter (for example af_heart)."];
+                }
+                $record['tts_voice'] = $voiceId;
             }
 
             // Remove the (unmodified-position) old entry, then reinsert the updated
@@ -1285,6 +1315,123 @@ class AdminService {
     }
 
     /**
+     * SCHEDULED_CONTINUE.md (#234) Tier 2. Schedule a Continue for a workspace at
+     * a wall-clock time, one-shot or recurring. `at` is a unix epoch (the caller
+     * resolves "3pm" etc.); `repeat` is none|daily|weekly. The supervisor tick
+     * fires it through the readiness-gated Continue path. Stored in a sidecar so a
+     * browser workspaces.json save can never drop it.
+     *
+     * @param string $source `user` for an operator schedule or `quota-detect`
+     *                       for a terminal quota detector.
+     * @return array<string,mixed>
+     */
+    public static function setScheduledContinue(string $sessionId, int $at, string $repeat = 'none', string $message = '', string $source = 'user'): array {
+        try {
+            $sessionId = trim($sessionId);
+            if ($sessionId === '') return ['error' => 'A workspace id is required.'];
+            if (self::findSession($sessionId) === null) {
+                return ['error' => "No workspace '$sessionId'. Ask aicli_list_workspaces for valid ids."];
+            }
+            if ($at <= time()) return ['error' => 'The scheduled time must be in the future (pass a unix epoch).'];
+            if (!in_array($repeat, ['none', 'daily', 'weekly'], true)) {
+                return ['error' => "'$repeat' is not a valid repeat. Use none, daily or weekly."];
+            }
+            if (!in_array($source, ['user', 'quota-detect'], true)) {
+                return ['error' => "'$source' is not a valid schedule source."];
+            }
+            $entry = ['at' => $at, 'repeat' => $repeat, 'source' => $source, 'created_at' => time(), 'last_fired_at' => 0];
+            if ($message !== '') $entry['message'] = $message;
+            if (!ConfigService::setScheduledContinue($sessionId, $entry)) return ['error' => 'Write failed.'];
+            self::emitEvent('workspace.scheduled_continue', ['id' => $sessionId], "Scheduled continue set for '$sessionId'", ['at' => $at, 'repeat' => $repeat]);
+            return ['workspaceId' => $sessionId, 'at' => $at, 'repeat' => $repeat, 'scheduled' => true];
+        } catch (\Throwable $e) {
+            return self::failure('setScheduledContinue', $e);
+        }
+    }
+
+    /**
+     * SCHEDULED_CONTINUE.md (#234) Tier 2. Remove a workspace's scheduled Continue.
+     *
+     * @return array<string,mixed>
+     */
+    public static function clearScheduledContinue(string $sessionId): array {
+        try {
+            $sessionId = trim($sessionId);
+            if ($sessionId === '') return ['error' => 'A workspace id is required.'];
+            ConfigService::clearScheduledContinue($sessionId);
+            self::emitEvent('workspace.scheduled_continue', ['id' => $sessionId], "Scheduled continue cleared for '$sessionId'", ['cleared' => true]);
+            return ['workspaceId' => $sessionId, 'cleared' => true];
+        } catch (\Throwable $e) {
+            return self::failure('clearScheduledContinue', $e);
+        }
+    }
+
+    /**
+     * HOME_PERSIST_CONSOLIDATE_TOOLS.md Tier 2 (2026-09-17). Queue a persist
+     * (bake) of one user's home: the unsaved changes are written to a new
+     * layer on the persistence target now and, once no session holds the home,
+     * the RAM/upper copy is reclaimed. Closes NO session — which is exactly why
+     * this is a change tool and aicli_consolidate_home is not. Hands off to
+     * StorageHandler::persistHome(), the SAME entry point the Storage tab's
+     * Persist button uses, so the job and its tray pill are identical.
+     *
+     * @return array<string,mixed>
+     */
+    public static function persistHome(string $user = ''): array {
+        try {
+            $resolved = self::resolveHomeUser($user);
+            if (isset($resolved['error'])) return $resolved;
+            $u = (string)$resolved['user'];
+            if (!class_exists('\\AICliAgents\\Services\\ConsolidateState')) { require_once __DIR__ . '/ConsolidateState.php'; }
+            if (ConsolidateState::isHomeConsolidating($u)) {
+                return ['error' => "$u's home is being consolidated right now; a persist would only queue behind it. Wait for the consolidate to finish (aicli_list_activities shows it)."];
+            }
+            if (!class_exists('\\AICliAgents\\Handlers\\StorageHandler')) { require_once __DIR__ . '/../handlers/StorageHandler.php'; }
+            $result = \AICliAgents\Handlers\StorageHandler::persistHome($u);
+            if (($result['status'] ?? '') !== 'ok') {
+                return ['error' => (string)($result['message'] ?? 'The persist could not be queued.')];
+            }
+            return [
+                'user'    => $u,
+                'jobId'   => (string)($result['job_id'] ?? ''),
+                'queued'  => true,
+                'message' => 'Persist queued. The supervisor saves the home to its storage layers shortly. If a session still holds the home, the data is saved but the RAM copy is only reclaimed once every session on it closes — do not call this again in a loop; watch the Activity tray.',
+            ];
+        } catch (\Throwable $e) {
+            return self::failure('persistHome', $e);
+        }
+    }
+
+    /**
+     * Resolve '' / '0' to the configured home user and confirm that home
+     * exists in the storage status (the same `homes` map the Storage tab
+     * draws its cards from). Shared by the persist and consolidate tools.
+     *
+     * @return array{user:string,home:array<string,mixed>}|array{error:string}
+     */
+    private static function resolveHomeUser(string $user): array {
+        $user = trim($user);
+        if ($user === '' || $user === '0') {
+            $cfg = ConfigService::getConfig();
+            $user = (string)($cfg['user'] ?? 'root');
+            if ($user === '' || $user === '0') $user = 'root';
+        }
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $user)) {
+            return ['error' => "'$user' is not a valid user name."];
+        }
+        try {
+            $status = StorageMetricsService::getStatus();
+            $homes = is_array($status['homes'] ?? null) ? $status['homes'] : [];
+        } catch (\Throwable $e) {
+            return self::failure('resolveHomeUser', $e);
+        }
+        if (!array_key_exists($user, $homes)) {
+            return ['error' => "'$user' has no home to persist or consolidate."];
+        }
+        return ['user' => $user, 'home' => is_array($homes[$user]) ? $homes[$user] : []];
+    }
+
+    /**
      * Set an agent's release channel (and, for 'pinned', which version). Mirrors
      * AgentHandler::setAgentChannel() (the `set_agent_channel` AJAX action) step
      * for step, including its own channel-name validation and its
@@ -1313,7 +1460,13 @@ class AdminService {
                 $pinned = $installed;
             }
 
-            AgentRegistry::setChannel($agentId, $channel, $pinned);
+            if (!AgentRegistry::setChannel($agentId, $channel, $pinned)) {
+                return ['error' => 'Could not save the release channel.'];
+            }
+            if (AgentRegistry::getChannel($agentId) !== $channel
+                || ($channel === 'pinned' && AgentRegistry::getPinned($agentId) !== $pinned)) {
+                return ['error' => 'The release channel did not persist.'];
+            }
             VersionCheckService::clearNotification($agentId);
             LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'agent_registry', 'agent_channel_set', ['agent' => $agentId, 'channel' => $channel, 'pinned' => $pinned, 'via' => 'admin_tool']);
 
@@ -1536,7 +1689,29 @@ class AdminService {
     public static function speak(string $text, ?string $workspaceId = null, ?string $voice = null): array {
         try {
             $caller = self::callerIdentity();
-            $wsId = ($workspaceId !== null && $workspaceId !== '') ? $workspaceId : $caller['workspaceId'];
+            $wsId = ($workspaceId !== null && trim($workspaceId) !== '') ? trim($workspaceId) : $caller['workspaceId'];
+            // VOICE_MAIL.md R13 (Forgejo #375): an explicit workspaceId must name a
+            // real workspace. An agent once passed its DISPLAY NAME here; it was used
+            // as the id unchecked, so the workspace's own Voice mail mode never
+            // applied and its messages played aloud under a second, unknown id. A
+            // name that exactly one workspace has resolves to that id; anything
+            // else is refused, so nothing is spoken for a workspace we cannot find.
+            // VOICE_SWITCHES.md R6 keeps the global switch first: while it is off,
+            // VoiceService::speak() below refuses with `global_off` whatever the id.
+            $globalOn = (string)(ConfigService::getConfig()['voice_enabled'] ?? '0') === '1';
+            if ($globalOn && $workspaceId !== null && trim($workspaceId) !== '') {
+                $resolved = VoiceMailService::resolveWorkspace($wsId);
+                if ($resolved['record'] === null) {
+                    if ($resolved['matches'] !== []) {
+                        $ids = implode(', ', array_map(static fn(array $w): string => (string)($w['id'] ?? ''), $resolved['matches']));
+                        return ['error' => "More than one workspace is named '$wsId' ($ids). Pass the workspace id, not its name.",
+                                'mode' => 'refused', 'reason' => 'ambiguous_workspace'];
+                    }
+                    return ['error' => "No workspace with id or name '$wsId' was found. Pass the workspace id (aicli_list_workspaces), or leave workspaceId out to speak as your own workspace.",
+                            'mode' => 'refused', 'reason' => 'unknown_workspace'];
+                }
+                $wsId = (string)($resolved['record']['id'] ?? $wsId);
+            }
             $session = self::findSession($wsId);
             $actorContext = [
                 'workspaceId' => $wsId,
@@ -1764,6 +1939,9 @@ class AdminService {
         // HOME_RESTORE.md Tier row: same reason as backup, plus it overwrites
         // (or merges into) the home's contents — destructive-proposal, never Tier 2.
         'aicli_restore_home'     => 'executeApprovedRestoreHome',
+        // HOME_PERSIST_CONSOLIDATE_TOOLS.md Tier row (2026-09-17): closes every
+        // session of the user and relaunches them — destructive-proposal.
+        'aicli_consolidate_home' => 'executeApprovedConsolidateHome',
     ];
 
     /**
@@ -2010,8 +2188,11 @@ class AdminService {
             return ['error' => "'$user' has no home to back up."];
         }
 
-        $config = ConfigService::getConfig();
-        $quiesce = (string)($opts['quiesce'] ?? $config['backup_quiesce'] ?? 'cold');
+        // HOME_BACKUP.md #287: the home's OWN settings (inherits the old global
+        // backup_* values once when the home has none yet).
+        require_once __DIR__ . '/HomeBackupSettingsService.php';
+        $homeSettings = HomeBackupSettingsService::get($user);
+        $quiesce = (string)($opts['quiesce'] ?? $homeSettings['quiesce']);
         if (!in_array($quiesce, ['cold', 'warm'], true)) {
             return ['error' => "'$quiesce' is not a valid quiesce mode. Use 'cold' or 'warm'."];
         }
@@ -2020,9 +2201,9 @@ class AdminService {
         if ($target !== '' && $target[0] !== '/') {
             return ['error' => "'$target' is not an absolute path."];
         }
-        $effectiveTarget = $target !== '' ? $target : (string)($config['backup_target'] ?? '');
+        $effectiveTarget = $target !== '' ? $target : (string)$homeSettings['target'];
         if ($effectiveTarget === '') {
-            return ['error' => 'No backup target is configured. Set one on the Storage tab\'s Home backup card, or pass `target`.'];
+            return ['error' => "No backup target is set for $user's home. Set one with Backup on the home's card in Settings > Storage, or pass `target`."];
         }
 
         $mode = $quiesce === 'cold' ? 'cold (closes every running session first)' : 'warm (no close, best effort)';
@@ -2092,6 +2273,113 @@ class AdminService {
             return array_merge(['user' => $user], $result);
         } catch (\Throwable $e) {
             return self::failure('executeApprovedBackupHome', $e);
+        }
+    }
+
+    /**
+     * HOME_PERSIST_CONSOLIDATE_TOOLS.md Tier 3 (2026-09-17). Validate a home
+     * consolidate and describe its consequence in plain language, WITHOUT
+     * queuing anything, marking anything, or closing any session. The
+     * description names the sessions that WILL be closed on approval — the
+     * same list the Storage tab's own confirm dialog shows.
+     *
+     * @return array{error:string}|array{description:string,params:array<string,mixed>}
+     */
+    public static function validateConsolidateHome(string $user): array {
+        $resolved = self::resolveHomeUser($user);
+        if (isset($resolved['error'])) return $resolved;
+        $u = (string)$resolved['user'];
+        $home = $resolved['home'];
+        if (!class_exists('\\AICliAgents\\Services\\ConsolidateState')) { require_once __DIR__ . '/ConsolidateState.php'; }
+        if (ConsolidateState::isHomeConsolidating($u)) {
+            return ['error' => "$u's home is already being consolidated."];
+        }
+        $layers = (int)($home['layers'] ?? 0);
+        $mb     = (int)round((float)($home['physical_mb'] ?? 0));
+        $dirty  = (int)($home['dirty_mb'] ?? 0);
+        if (!class_exists('\\AICliAgents\\Handlers\\StorageHandler')) { require_once __DIR__ . '/../handlers/StorageHandler.php'; }
+        $sessions = \AICliAgents\Handlers\StorageHandler::listHomeSessions($u);
+        $n = count($sessions);
+        $named = array_map(function (array $s): string {
+            $agent = $s['name'] !== '' ? $s['name'] : $s['agentId'];
+            return $agent . ' in ' . ($s['path'] !== '' ? $s['path'] : '(no folder)');
+        }, array_slice($sessions, 0, 6));
+        $list = implode(', ', $named) . ($n > 6 ? ', …' : '');
+        // CONSOLIDATE_RELAUNCH_CLOSED_SET.md (2026-09-17): capture the sessions
+        // OPEN NOW, at propose time, into the params. The user often closes a
+        // session between proposal and approval — the plugin's own "Storage
+        // reclaim needed / Close now" banner asks them to — so by the time the
+        // approved consolidate runs, listActiveSessionsForHome is empty and the
+        // consolidate has nothing to relaunch. This captured set is what the
+        // approve path seeds the relaunch manifest from, so a session the user
+        // closed on the plugin's prompt still comes back, resumed.
+        $relaunchSet = [];
+        foreach ($sessions as $s) {
+            $sid = (string)($s['id'] ?? '');
+            $wp  = (string)($s['path'] ?? '');
+            $aid = (string)($s['agentId'] ?? '');
+            if ($sid === '') continue;
+            $relaunchSet[] = [
+                'sessionId'     => $sid,
+                'workspacePath' => $wp,
+                'agentId'       => $aid,
+                'hadResume'     => $wp !== '' && $aid !== '',
+                'working'       => true,
+            ];
+        }
+        $consequence = "Consolidate $u's home: merge its $layers saved layer(s) ($mb MB) and $dirty MB of unsaved changes into one layer. "
+            . ($n > 0
+                ? "This CLOSES EVERY RUNNING SESSION of $u first ($n: $list), then relaunches each one with its conversation resumed; a session that was working gets one Continue. "
+                : "No session is open on this home right now, so nothing is closed. ")
+            . 'Nothing happens until a human approves this in the Manager UI Activity tray.';
+        return ['description' => $consequence, 'params' => ['user' => $u, 'relaunchSet' => $relaunchSet]];
+    }
+
+    /**
+     * Tier 3. Validate, then propose — never executes.
+     *
+     * @return array<string,mixed>
+     */
+    public static function proposeConsolidateHome(string $user): array {
+        try {
+            $validated = self::validateConsolidateHome($user);
+            if (isset($validated['error'])) return $validated;
+            return self::proposePending('aicli_consolidate_home', $validated['description'], $validated['params']);
+        } catch (\Throwable $e) {
+            return self::failure('proposeConsolidateHome', $e);
+        }
+    }
+
+    /**
+     * The validated action itself, run ONLY by approvePending() after a human
+     * approves — never by proposeConsolidateHome() or any tool call. Re-checks
+     * that the home still exists and is not already consolidating, then hands
+     * off to StorageHandler::consolidate('home', …) — the SAME public
+     * entry point the `consolidate_storage` AJAX action uses — so approval
+     * never re-implements the manifest/mark/enqueue/wake sequence.
+     *
+     * @param array<string,mixed> $params From the pending item's own 'meta.params'.
+     * @return array<string,mixed>
+     */
+    public static function executeApprovedConsolidateHome(array $params): array {
+        try {
+            $u = (string)($params['user'] ?? '');
+            if ($u === '') return ['error' => 'This pending item has no user recorded.'];
+            $resolved = self::resolveHomeUser($u);
+            if (isset($resolved['error'])) return ['error' => "'$u' no longer has a home; nothing to consolidate."];
+            if (!class_exists('\\AICliAgents\\Services\\ConsolidateState')) { require_once __DIR__ . '/ConsolidateState.php'; }
+            if (ConsolidateState::isHomeConsolidating($u)) {
+                return ['error' => "$u's home is already being consolidated."];
+            }
+            if (!class_exists('\\AICliAgents\\Handlers\\StorageHandler')) { require_once __DIR__ . '/../handlers/StorageHandler.php'; }
+            $relaunchSet = isset($params['relaunchSet']) && is_array($params['relaunchSet']) ? $params['relaunchSet'] : [];
+            $result = \AICliAgents\Handlers\StorageHandler::consolidate('home', $u, $relaunchSet);
+            if (($result['status'] ?? '') === 'error') {
+                return ['error' => (string)($result['message'] ?? 'The consolidate could not be queued.')];
+            }
+            return array_merge(['user' => $u], $result);
+        } catch (\Throwable $e) {
+            return self::failure('executeApprovedConsolidateHome', $e);
         }
     }
 

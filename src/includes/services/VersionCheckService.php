@@ -180,7 +180,9 @@ class VersionCheckService {
      * @param string      $agentId
      * @param string|null $channel  'stable' (default) or 'beta'. Legacy 'latest' maps to stable.
      * @param int         $monthsBack  How far back to include untagged stable releases.
-     * @return array Sorted versions for the dropdown (max MAX_DROPDOWN_ENTRIES)
+     * @return array Sorted versions for the dropdown. Stable is capped at
+     * MAX_DROPDOWN_ENTRIES to keep its long history manageable; Beta returns
+     * every matching cached prerelease so the user can choose any beta build.
      */
     public static function getAvailableVersions(string $agentId, ?string $channel = null, int $monthsBack = 3): array {
         $cache = self::getCachedResults();
@@ -201,8 +203,14 @@ class VersionCheckService {
             if ($class === 'platform_variant') continue;
 
             if ($channel === 'beta') {
-                if ($class !== 'prerelease') continue;
-                $result[] = $entry;
+                // Some vendors, including Claude Code, publish a beta release
+                // train as ordinary semver builds and move `next` over it. The
+                // entries between the last explicit stable marker and that
+                // beta marker are part of the selectable beta catalogue too;
+                // otherwise only the one tagged endpoint is visible.
+                if ($class === 'prerelease' || self::isBetaReleaseTrainEntry($entry, $distTags)) {
+                    $result[] = $entry;
+                }
                 continue;
             }
 
@@ -222,7 +230,37 @@ class VersionCheckService {
             return ($b['timestamp'] ?? 0) - ($a['timestamp'] ?? 0);
         });
 
-        return array_slice($result, 0, self::MAX_DROPDOWN_ENTRIES);
+        // Stable history is intentionally bounded because many packages have
+        // hundreds of ordinary releases. Beta is the opt-in troubleshooting /
+        // preview channel, so silently dropping older matching builds makes a
+        // selected channel appear incomplete and can hide the exact build the
+        // user needs to install.
+        return $channel === 'beta'
+            ? $result
+            : array_slice($result, 0, self::MAX_DROPDOWN_ENTRIES);
+    }
+
+    /**
+     * Does a normal release belong to the currently published beta train?
+     *
+     * A vendor may hold its tested baseline at `stable`, then publish ordinary
+     * numeric releases before moving `beta` or `next` to the train's current
+     * endpoint. Include the open/closed range (stable, beta-target]. Tagged
+     * prereleases are handled separately by VersionClassifier.
+     */
+    private static function isBetaReleaseTrainEntry(array $entry, array $distTags): bool {
+        $stable = (string)($distTags['stable'] ?? '');
+        $version = (string)($entry['version'] ?? '');
+        if ($stable === '' || $version === '') return false;
+
+        foreach (['beta', 'next'] as $tag) {
+            $target = (string)($distTags[$tag] ?? '');
+            if ($target === '' || version_compare($target, $stable) <= 0) continue;
+            if (version_compare($version, $stable) > 0 && version_compare($version, $target) <= 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -422,14 +460,23 @@ class VersionCheckService {
 
     // --- Private helpers ---
 
+    /**
+     * Production always uses the shared tmpfs cache. Tests can supply an
+     * isolated path so their fixtures never overwrite the Manager's live data.
+     */
+    private static function cachePath(): string {
+        return getenv('AICLI_VERSION_CACHE_FILE') ?: self::CACHE_FILE;
+    }
+
     public static function getCachedResults(): array {
-        if (!file_exists(self::CACHE_FILE)) return [];
-        $data = @json_decode(@file_get_contents(self::CACHE_FILE), true);
+        $path = self::cachePath();
+        if (!file_exists($path)) return [];
+        $data = @json_decode(@file_get_contents($path), true);
         return is_array($data) ? $data : [];
     }
 
     public static function isCacheFresh(int $maxAge = 3600): bool {
-        if (!file_exists(self::CACHE_FILE)) return false;
+        if (!file_exists(self::cachePath())) return false;
         $cache = self::getCachedResults();
         if (empty($cache)) return false;
         // Fresh if ANY agent was checked within maxAge
@@ -442,11 +489,12 @@ class VersionCheckService {
     }
 
     private static function writeCacheAtomic(array $data): void {
-        $dir = dirname(self::CACHE_FILE);
+        $path = self::cachePath();
+        $dir = dirname($path);
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        $tmp = self::CACHE_FILE . '.tmp.' . getmypid();
+        $tmp = $path . '.tmp.' . getmypid();
         if (@file_put_contents($tmp, json_encode($data, JSON_PRETTY_PRINT)) !== false) {
-            @rename($tmp, self::CACHE_FILE);
+            @rename($tmp, $path);
         } else {
             @unlink($tmp);
             LogService::log("Failed to write version cache (disk full?)", LogService::LOG_WARN, "VersionCheck");

@@ -31,6 +31,9 @@
 #   agent_staging_entity_key <agent_id>            — echo the staging upper/work key
 #   zram_upper <type> <id>      — echo path
 #   zram_work  <type> <id>      — echo path
+#   home_live_upper <user>      — echo the upper the home mount REALLY uses (#372)
+#   home_uppers_live            — echo "<user>\t<upper>" per home to save (#372)
+#   home_uppers_shutdown_order  — the same list, zram uppers first (#372)
 #
 # Lifecycle log writer (pure-bash, same format as PHP LifecycleLogService):
 #   lifecycle_log <level> <component> <event> [json_payload]
@@ -476,6 +479,77 @@ zram_work() {
     _rp_normalize "$ZRAM_BASE/${type}s/$id/work"
 }
 
+# ---- #372: the upper a home REALLY uses --------------------------------------
+# docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins".
+# The supervisor and the shutdown bake do not source common.sh, so they read the
+# mount table here. A mounted home's upper is the overlay's own upperdir, in
+# whatever mode it was mounted (zram or disk); the policy mode applies only to a
+# new mount. AICLI_PROC_MOUNTS stubs the table for unit tests.
+
+# _rp_overlay_upper_at <mnt> -> the upperdir of the overlay mounted at exactly
+# <mnt> (the last row wins). Returns 1 when none is mounted there.
+_rp_overlay_upper_at() {
+    local mnt="${1:-}"
+    [ -n "$mnt" ] || return 1
+    awk -v m="$mnt" '
+        $2==m && $3=="overlay" {
+            v = ""; n = split($4, a, ",")
+            for (i = 1; i <= n; i++) if (index(a[i], "upperdir=") == 1) v = substr(a[i], 10)
+            last = v; found = 1
+        }
+        END { if (found && last != "") { print last; exit 0 } exit 1 }' "${AICLI_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null
+}
+
+# home_live_upper <user> -> the upper of the mounted home overlay; when the home
+# is not mounted, the zram upper (the only upper that exists without a mount and
+# is lost at a reboot).
+home_live_upper() {
+    local up
+    up="$(_rp_overlay_upper_at "$(home_mount "${1:-root}")")" && [ -n "$up" ] && { printf '%s\n' "$up"; return 0; }
+    zram_upper home "$(_rp_normalize_user "${1:-root}")"
+}
+
+# home_uppers_live -> one line "<user><TAB><upper>" for each home that has an
+# upper to save: every home overlay mounted at $MOUNT_ROOT/work/<user>/home
+# (its live upper, zram or disk), then every zram home upper whose home is not
+# mounted. Never lists one home twice.
+home_uppers_live() {
+    local seen=" " user up d
+    while IFS=$'\t' read -r user up; do
+        [ -n "$user" ] && [ -n "$up" ] || continue
+        case "$seen" in *" $user "*) continue ;; esac
+        seen="$seen$user "
+        printf '%s\t%s\n' "$user" "$up"
+    done < <(awk -v r="$MOUNT_ROOT/work/" '
+        $3=="overlay" && index($2, r) == 1 {
+            rest = substr($2, length(r) + 1)
+            if (rest !~ /^[^\/]+\/home$/) next
+            u = rest; sub(/\/home$/, "", u)
+            v = ""; n = split($4, a, ",")
+            for (i = 1; i <= n; i++) if (index(a[i], "upperdir=") == 1) v = substr(a[i], 10)
+            if (v != "") up[u] = v
+        }
+        END { for (u in up) printf "%s\t%s\n", u, up[u] }' "${AICLI_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null | sort)
+    for d in "$ZRAM_BASE/homes"/*/upper; do
+        [ -d "$d" ] || continue
+        user="${d%/upper}"; user="${user##*/}"
+        case "$seen" in *" $user "*) continue ;; esac
+        seen="$seen$user "
+        printf '%s\t%s\n' "$user" "$d"
+    done
+}
+
+# home_uppers_shutdown_order -> home_uppers_live, the uppers in RAM (zram) first:
+# they are lost at power-off, so they get the shutdown time budget first. A disk
+# upper survives the power-off, and the next mount adopts it, but it is baked too.
+home_uppers_shutdown_order() {
+    local all
+    all="$(home_uppers_live)"
+    [ -n "$all" ] || return 0
+    printf '%s\n' "$all" | awk -F'\t' -v z="$ZRAM_BASE/" 'NF>=2 && index($2, z) == 1'
+    printf '%s\n' "$all" | awk -F'\t' -v z="$ZRAM_BASE/" 'NF>=2 && index($2, z) != 1'
+}
+
 # ---- Lifecycle log writer ---------------------------------------------------
 
 # lifecycle_log <level> <component> <event> [json_payload]
@@ -495,7 +569,10 @@ lifecycle_log() {
     local level="${1:-info}"
     local component="${2:-shell}"
     local event="${3:-}"
-    local payload_json="${4:-{}}"
+    # "${4:-{}}" is NOT a default of {}: bash ends the expansion at the first
+    # "}", so every given payload got a stray "}" (HOME_BACKUP.md 2026-09-29).
+    local payload_json="${4-}"
+    [ -n "$payload_json" ] || payload_json='{}'
 
     local log_file
     log_file=$(lifecycle_log_path)

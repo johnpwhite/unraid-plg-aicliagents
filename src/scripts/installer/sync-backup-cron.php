@@ -11,7 +11,7 @@
  * No arguments: BackupCronService::sync() reads the config itself.
  */
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\BackupCronService;
 

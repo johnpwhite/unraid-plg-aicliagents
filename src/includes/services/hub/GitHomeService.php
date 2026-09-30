@@ -522,7 +522,9 @@ class GitHomeService {
             return ['status' => 'error', 'message' => 'failed to write .gitignore'];
         }
 
-        $fresh = !is_dir("$home/.git");
+        // R-15 (#211): a .git directory that exists but is unusable (missing HEAD/config
+        // after a crash) counts as "needs init" too — repoValid, not mere presence, decides.
+        $fresh = !self::repoValid($home);
         if ($fresh) {
             $r = self::git(['init', '-b', self::BRANCH]);
             if ($r['rc'] !== 0) {
@@ -784,6 +786,46 @@ class GitHomeService {
         }
     }
 
+    /**
+     * R-15 (#211): is ~/.git a usable git repository RIGHT NOW? A directory alone is not
+     * enough — a crash can leave the object store while HEAD/config/refs are lost, and git
+     * then refuses every command with "not a git repository", failing every backup forever.
+     * Cheap file check first (missing HEAD is the exact corruption seen on .4), then one
+     * authoritative `rev-parse --git-dir`.
+     */
+    private static function repoValid(string $home): bool {
+        if (!is_dir("$home/.git") || !is_file("$home/.git/HEAD")) return false;
+        $r = self::git(['rev-parse', '--git-dir']);
+        return $r['rc'] === 0;
+    }
+
+    /**
+     * R-15 (#211): guarantee a usable repository, repairing a corrupted one in place.
+     * `git init` on an existing ~/.git recreates the missing HEAD/config/refs and never
+     * touches the object store or the working tree, so the next commit re-establishes the
+     * backup from the current files. The lost commit history is unrecoverable, but no
+     * backed-up file is ever at risk. Returns false only if `git init` itself fails.
+     */
+    private static function ensureRepo(string $home): bool {
+        if (self::repoValid($home)) return true;
+        $broken = is_dir("$home/.git"); // a .git that exists but is unusable → repair, not first-init
+        $r = self::git(['init', '-b', self::BRANCH]);
+        if ($r['rc'] !== 0) $r = self::git(['init']); // older git without -b
+        if ($r['rc'] !== 0) {
+            LogService::log('hub git: could not (re)initialise the backup repository: ' . $r['err'],
+                LogService::LOG_ERROR, 'GitHomeService');
+            return false;
+        }
+        self::configureSecretFilter();
+        self::writeGitAttributes($home);
+        if ($broken) {
+            LogService::log('hub git: re-initialised a corrupted backup repository in place '
+                . '(HEAD/config were missing; history reset, backed-up files intact) — #211',
+                LogService::LOG_WARN, 'GitHomeService');
+        }
+        return self::repoValid($home);
+    }
+
     /** R-14 (#211): where the last commit failure is recorded for status() to surface. */
     private static function failureMarker(): string {
         $user = preg_replace('/[^a-zA-Z0-9_-]/', '_', self::user());
@@ -837,12 +879,18 @@ class GitHomeService {
             // Without this, an existing repo keeps a stale whitelist and silently never
             // backs up new agent surfaces (or leaves new MCP files unsanitized).
             $home = self::home();
-            if ($home !== null) {
-                self::snapshotPluginSettings($home); // curated /boot settings -> ~/.aicli/plugin-backup
-                self::writeGitignore($home);
-                self::configureSecretFilter();
-                self::writeGitAttributes($home);
+            if ($home === null) return self::fail('the agent home overlay is not mounted');
+            // R-15 (#211): self-heal a corrupted repository BEFORE any git work. A crash can
+            // leave ~/.git with its object store intact but HEAD/config/refs gone, so git
+            // reports "not a git repository" and every backup fails forever. Re-init in place
+            // recreates the plumbing without touching objects or the working tree.
+            if (!self::ensureRepo($home)) {
+                return self::fail('git backup repository is missing and could not be re-initialised');
             }
+            self::snapshotPluginSettings($home); // curated /boot settings -> ~/.aicli/plugin-backup
+            self::writeGitignore($home);
+            self::configureSecretFilter();
+            self::writeGitAttributes($home);
             // R-13 (#211): drop any gitlink (mode 160000) a previous `add -A` recorded.
             // They hold no content and exist only to make git recurse into a nested repo.
             // Idempotent — a no-op once the index is clean.

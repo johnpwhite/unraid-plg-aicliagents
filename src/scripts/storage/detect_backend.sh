@@ -144,7 +144,38 @@ entity_upper_mode() {
     if [ "$_forced" = "zram" ] || [ "$_forced" = "disk" ]; then
         printf '%s' "$_forced"; return 0
     fi
+    # The global policy deliberately wins over the device auto-detection once
+    # it has been persisted. Layering always gets the wear-safe zram upper;
+    # passthrough never needs an upper. During the first upgrade, an absent key
+    # keeps the legacy device-derived behaviour until the explicit migration has
+    # completed and saved the policy.
+    #
+    # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"): this
+    # is the mode for a NEW mount only. A mounted entity keeps the upper the
+    # kernel shows (common.sh _entity_paths_live). The policy is read the same
+    # way with or without resolve_paths.sh (_entity_upper_policy), so a caller
+    # that did not source it (PHP via `--upper-mode`) gets the same answer.
+    local _policy
+    _policy="$(_entity_upper_policy)"
+    if [ "$_policy" = "layering" ]; then printf 'zram'; return 0; fi
     if [ "$(backend_for "${1:-/}")" = "flash" ]; then printf 'zram'; else printf 'disk'; fi
+}
+
+# _entity_upper_policy -> the RAW storage_backend_mode ('' when the key is
+# absent). AICLI_STORAGE_BACKEND_POLICY wins (tests). Uses resolve_paths.sh's
+# _rp_read_cfg when it is loaded, else reads the same cfg file directly with
+# the same pattern. PHP AgentRegistry::rawStorageBackendPolicy reads the same key.
+_entity_upper_policy() {
+    if [ -n "${AICLI_STORAGE_BACKEND_POLICY:-}" ]; then
+        printf '%s' "$AICLI_STORAGE_BACKEND_POLICY"; return 0
+    fi
+    if declare -f _rp_read_cfg >/dev/null 2>&1; then
+        _rp_read_cfg storage_backend_mode 2>/dev/null || true
+        return 0
+    fi
+    local _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+    [ -f "$_cfg" ] || return 0
+    grep -oP '^storage_backend_mode="?\K[^"]*(?="?$)' "$_cfg" 2>/dev/null | head -1
 }
 
 # ---------------------------------------------------------------------------
@@ -260,6 +291,27 @@ _entity_manifest_expects_layers() {
 # regardless of the real device so the L3.5 passthrough case can run on any box).
 effective_backend() {
     local type="$1" id="$2" persist="$3" dev hl
+    local _explicit_policy="${AICLI_STORAGE_BACKEND_POLICY:-}"
+    local _policy="${_explicit_policy:-$(_rp_read_cfg storage_backend_mode 2>/dev/null || true)}"
+    # Test fixtures must be able to exercise either engine even when the live
+    # host has a persisted global policy. An explicit policy supplied by a test
+    # still wins, so policy-matrix tests remain independent of the shell runner's
+    # default AICLI_ITEST_BACKEND. Production never sets this hook.
+    if [ -z "$_explicit_policy" ] && [ -n "${AICLI_ITEST_BACKEND:-}" ]; then
+        _policy=""
+    fi
+    if [ "$_policy" = "layering" ]; then
+        # Forgejo #304 (2026-09-23): the layering policy converts entities; it
+        # must not hide one that was never converted. An entity with no layers
+        # but a non-empty plain directory stays on that directory until a
+        # migration converts it. Returning flash here mounted an EMPTY stack
+        # over a real install ("[Agent Binary Missing]").
+        if [ "$(_entity_has_layers "$persist" "$type" "$id")" != "1" ] \
+            && [ -n "$(find "$persist/passthrough/${type}s/$id/" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+            printf 'passthrough'; return 0
+        fi
+        printf 'flash'; return 0
+    fi
     # F9 (WP#1332): a layered entity is ALWAYS flash (the data lives in the layers) —
     # do the ZERO-subprocess on-disk glob FIRST and SHORT-CIRCUIT, so the expensive
     # device probe (findmnt/lsblk[/zpool] ≈ 7-9 spawns) is SKIPPED for every layered
@@ -267,6 +319,12 @@ effective_backend() {
     # reaches the device test.
     hl="$(_entity_has_layers "$persist" "$type" "$id")"
     if [ "$hl" = "1" ]; then printf 'flash'; return 0; fi
+
+    # A partially completed global migration must remain safe on either side of
+    # the config commit: direct entities can stay direct while an entity whose
+    # layers were not converted yet must remain on the layering engine. This is
+    # the same layers-first invariant as the legacy device path above.
+    if [ "$_policy" = "passthrough" ]; then printf 'passthrough'; return 0; fi
 
     dev="${AICLI_ITEST_BACKEND:-$(backend_for "$persist")}"
     # F2 (WP#1326): the on-disk glob reads 0 layers for a FLASH entity whose .sqsh
@@ -341,6 +399,20 @@ _ct_compute_axes() {
 #   warn    csv of: volatile_target, network_target (per-kind home-refusal applied
 #           by the caller at switch-over — see spec), facts_uncertain, posix_none,
 #           via_user_share (FUSE overhead), array_rotational (HDD bake writes).
+#
+# 2026-09-23 (Bug #297): `via_user_share` is NEVER a refusal — /mnt/user stays
+# an allowed target on purpose (some installs have no pool and no Unassigned
+# Device, so /mnt/user is their only option). This warn code is what the PHP
+# layer (StorageTargetService::validateTarget/candidate) turns into the
+# plain-English ADVICE the storage picker and the move-confirmation dialog
+# show: prefer a pool path, an Unassigned Device path, or a single-disk path
+# when one exists; /mnt/user is fine when none of those is available. This
+# function's refuse/engine/upper logic is UNCHANGED by that fix — only the
+# PHP/JS presentation of this warn code changed. Mount-class classification
+# (mount_class_for/_mc_classify below) already resolves an EXCLUSIVE share's
+# realpath off /mnt/user before this function ever sees it; StorageTargetService
+# adds its OWN separate fallback (shares.ini useCache="only") for a share that
+# stays on FUSE here but is still, per its own config, on a single pool.
 classify_target_from_facts() {
     local fst="${1:-}" rm="${2:-}" tr="${3:-}" rota="${4:-}" mclass="${5:-}"
     _ct_compute_axes "$fst" "$rm" "$tr"
@@ -658,6 +730,12 @@ probe_target() {
 if [ "${BASH_SOURCE[0]:-_x}" = "${0:-_y}" ]; then
     if [ "${1:-}" = "--json" ]; then
         probe_target "${2:-/}"
+    elif [ "${1:-}" = "--upper-mode" ]; then
+        # #372: the upper mode for a NEW mount (policy, then device test) —
+        # PHP StorageMountService::resolveHomeUpperPath reads it, so PHP and
+        # bash decide the mode in one place.
+        entity_upper_mode "${2:-/}"
+        printf '\n'
     else
         backend_for "${1:-/}"
         printf '\n'

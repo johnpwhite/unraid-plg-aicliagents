@@ -1,0 +1,30 @@
+Menu="Buttons"
+Link='nav-user'
+---
+<?php
+/**
+ * AI CLI Agents: the plugin's logo as its main-menu icon on Unraid's sidebar
+ * themes (docs/specs/SIDEBAR_THEME_LAYOUT.md, 2026-09-29).
+ *
+ * The main menu is on every page, so this is a Menu="Buttons" page: Unraid
+ * evaluates each Buttons page in the head of every page. Link='nav-user' is
+ * the stock way (CA_notices.page, PluginHelpers.page) to add no menu button of
+ * its own. The rules apply only under html.Theme--sidebar.
+ *
+ * This runs on EVERY Unraid page, so it must never fail: a missing file (for
+ * example during a plugin update) leaves the menu with the Code= glyph.
+ */
+// Forgejo #367: pin this request to ONE plugin generation (see AICliAjax.php).
+if (!defined('AICLI_GEN_SRC')) {
+    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+}
+$aicli_menu_icon_php = AICLI_GEN_SRC . '/includes/ui/SidebarMenuIcon.php';
+if (is_file($aicli_menu_icon_php)) {
+    include_once $aicli_menu_icon_php;
+}
+if (class_exists('SidebarMenuIcon', false)) {
+    echo SidebarMenuIcon::styleTag();
+}
+unset($aicli_menu_icon_php);
+?>

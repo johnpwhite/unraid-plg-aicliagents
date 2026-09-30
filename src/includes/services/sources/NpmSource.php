@@ -73,7 +73,7 @@ class NpmSource implements AgentSource {
         }
 
         // Legacy fallback: binary-relative package.json (matches old discoverVersion strategy 2)
-        $bin = $agent['binary'] ?? '';
+        $bin = AgentRegistry::installBinaryPath($agentId, (string)($agent['binary'] ?? ''));
         if ($bin !== '') {
             $pJson = dirname($bin) . "/../package.json";
             if (file_exists($pJson)) {

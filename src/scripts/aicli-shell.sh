@@ -541,15 +541,27 @@ FUNCOEF
     # node_modules/.bin/ into PATH so the user can run any agent ad-hoc.
     if [ -n "$frozen_binary" ]; then
         AGENT_BIN_DIR=$(dirname "$frozen_binary")
-        printf 'export PATH=%q\n' "$AGENT_BIN_DIR:$PATH" >> "$RUN_SCRIPT"
+        SESSION_PATH="$AGENT_BIN_DIR:$PATH"
     else
         AGENT_PATH_EXTRA=""
         for d in /usr/local/emhttp/plugins/unraid-aicliagents/agents/*/bin \
                  /usr/local/emhttp/plugins/unraid-aicliagents/agents/*/node_modules/.bin; do
             [ -d "$d" ] && AGENT_PATH_EXTRA="$AGENT_PATH_EXTRA:$d"
         done
-        printf 'export PATH=%q\n' "${AGENT_PATH_EXTRA:+${AGENT_PATH_EXTRA#:}:}$PATH" >> "$RUN_SCRIPT"
+        SESSION_PATH="${AGENT_PATH_EXTRA:+${AGENT_PATH_EXTRA#:}:}$PATH"
     fi
+    printf 'export PATH=%q\n' "$SESSION_PATH" >> "$RUN_SCRIPT"
+    # GitHub #12: a Bash LOGIN shell started inside this session (an agent's own
+    # shell tool running `bash -lc`, or ssh-attach.sh's `bash --login` fallback)
+    # makes Unraid's /etc/profile re-run, which unconditionally resets HOME and
+    # PATH back to host defaults (export HOME=/root; PATH=/usr/local/bin:...) and
+    # cd's to /root. AICLI_MANAGED_PATH survives that reset (/etc/profile never
+    # touches it), so the plugin's own /etc/profile.d/aicliagents.sh — which
+    # /etc/profile always sources LAST, after its own reset — can restore PATH
+    # from it. HOME_DIR (already exported below) and AICLI_CWD/AICLI_WORKSPACE_PATH
+    # (already exported above) do the same job for HOME and the working directory;
+    # see shell-integration.sh for the restore side.
+    printf 'export AICLI_MANAGED_PATH=%q\n' "$SESSION_PATH" >> "$RUN_SCRIPT"
     
     printf 'export frozen_binary=%q\n' "$frozen_binary" >> "$RUN_SCRIPT"
     # Fix A: export both raw paths so the run-loop can re-resolve frozen_binary
@@ -1243,8 +1255,24 @@ while true; do
     # then trips the fast-exit guard with "Press ENTER to reload" before the user
     # ever sees the Y/N card. Letting stderr flow to the pane's TTY keeps TUIs
     # alive and also makes genuine errors visible directly to the user.
+    # #276: the home bake/remount path can run between the early cache-parent
+    # guard above and this command. Re-assert only the parent immediately before
+    # every OpenCode exec so two workspaces starting together cannot hand Bun a
+    # missing `.cache/opencode` directory. Never create `bin`: OpenCode owns that
+    # leaf and treats it as its own initialization marker.
+    # AICLI_OPENCODE_CACHE_PARENT_BEGIN
+    _ensure_opencode_cache_parent() {
+        [ "$AGENT_ID" = "opencode" ] || return 0
+        mkdir -p "$HOME_DIR/.cache/opencode" 2>/dev/null || return 1
+        [ -d "$HOME_DIR/.cache/opencode" ]
+    }
+    # AICLI_OPENCODE_CACHE_PARENT_END
     safe_exec() {
         local cmd="$1"
+        if ! _ensure_opencode_cache_parent; then
+            log_aicli "ERROR" 1 "OpenCode #276: could not restore the cache parent before launch"
+            return 1
+        fi
         # Issue #71: log the effective NODE_OPTIONS alongside every launch so
         # heap-limit forensics never depend on reconstructing the environment.
         log_aicli "INFO" 2 "Executing: $cmd (NODE_OPTIONS=${NODE_OPTIONS:-<unset>})"
@@ -1519,6 +1547,39 @@ fi
 log_aicli "DEBUG" 3 "Attaching to tmux session $SESSION..."
 perf_log tmux.options.begin
 
+# #371 (docs/specs/PASTE_ENTER_CONFIRM.md): idempotent helpers for the SERVER array
+# options terminal-overrides / terminal-features. This block runs on every attach,
+# and `set-option -a` alone grows the list by one copy each time.
+# tmux_append_once <option> <",entry[,entry…]">: append each entry that is missing.
+tmux_append_once() {
+    local opt="$1" val="${2#,}" have entry
+    local -a entries
+    have=$(tmux show-options -sv "$opt" 2>/dev/null)
+    IFS=',' read -r -a entries <<< "$val"
+    for entry in "${entries[@]}"; do
+        [ -n "$entry" ] || continue
+        printf '%s\n' "$have" | grep -qxF -- "$entry" && continue
+        tmux set-option -a -t "$SESSION" "$opt" ",$entry" 2>/dev/null
+        have="$have"$'\n'"$entry"
+    done
+}
+# tmux_dedupe_array <option>: unset every later copy of an entry (by index), so a
+# server polluted by the old append keeps one copy of each, in the first order.
+tmux_dedupe_array() {
+    local opt="$1" line idx val
+    local -A seen=()
+    local -a drop=()
+    while IFS= read -r line; do
+        [[ "$line" =~ ^${opt}\[([0-9]+)\]\ (.*)$ ]] || continue
+        idx="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+        val="${val#\"}"; val="${val%\"}"
+        if [ -n "${seen[$val]+x}" ]; then drop+=("$idx"); else seen[$val]=1; fi
+    done < <(tmux show-options -s "$opt" 2>/dev/null)
+    for idx in "${drop[@]}"; do
+        tmux set-option -s -u "${opt}[${idx}]" 2>/dev/null
+    done
+}
+
 # ---------- Four-tier tmux configuration ----------
 # Tier 1 — Built-in defaults (safety net; also mirrored in TmuxService::BUILTIN).
 # T-01: every key in TmuxService::BUILTIN must have a matching line here — the
@@ -1554,12 +1615,18 @@ tmux set-option -t "$SESSION" window-size latest 2>/dev/null
 tmux set-option -t "$SESSION" default-terminal "$_AICLI_DEFTERM" 2>/dev/null
 tmux set-option -t "$SESSION" set-clipboard on 2>/dev/null
 tmux set-option -t "$SESSION" extended-keys off 2>/dev/null
-tmux set-option -a -t "$SESSION" terminal-overrides ",xterm-256color:Tc" 2>/dev/null
-tmux set-option -a -t "$SESSION" terminal-overrides ",xterm-256color:RGB" 2>/dev/null
+# #371: terminal-overrides and terminal-features are SERVER array options, and
+# this block runs on every terminal attach. A plain `set-option -a` added the
+# same entries again each time (233 copies of each on one server). Remove old
+# copies once, then append an entry only when it is not there yet.
+tmux_dedupe_array terminal-overrides
+tmux_dedupe_array terminal-features
+tmux_append_once terminal-overrides ",xterm-256color:Tc"
+tmux_append_once terminal-overrides ",xterm-256color:RGB"
 # tmux-256color (bundled terminfo, opt-in via default-terminal): same truecolor
 # pass-through, and propagate TERMINFO_DIRS into the server env so panes find it.
-tmux set-option -a -t "$SESSION" terminal-overrides ",tmux-256color:Tc" 2>/dev/null
-tmux set-option -a -t "$SESSION" terminal-overrides ",tmux-256color:RGB" 2>/dev/null
+tmux_append_once terminal-overrides ",tmux-256color:Tc"
+tmux_append_once terminal-overrides ",tmux-256color:RGB"
 [ -n "${TERMINFO_DIRS:-}" ] && tmux set-environment -g TERMINFO_DIRS "$TERMINFO_DIRS" 2>/dev/null
 
 # Helper: apply a JSON file of allow-listed tmux options via a single PHP pass.
@@ -1664,6 +1731,33 @@ fi
 # pruning oldest-first removes exactly the stale ones while letting genuine
 # concurrent viewers coexist. Set AICLI_MAX_TMUX_CLIENTS=1 to restore the old
 # evict-everyone behaviour.
+# #219: detach any tmux client whose backing ttyd is DEAD, so `window-size
+# latest` cannot size the window to a deploy leftover (the terminal renders
+# shrunk with xterm's background dots). A deploy SIGTERMs the old ttyd but its
+# tmux client lingers (setsid stops the SIGHUP). "Backing ttyd is dead" = no live
+# `ttyd` process anywhere in the client process's ancestry; a genuine second live
+# browser (its own live ttyd) is kept. If no live ttyd can be found at all
+# (pgrep unavailable / renamed) the whole pass is skipped, so we never detach
+# every client. Separate from prune_excess_tmux_clients (which caps by count) so
+# each stays independently testable.
+detach_dead_ttyd_clients() {
+    local session="$1" live_ttyds cpid ctty walk hops alive
+    live_ttyds="$(pgrep -x ttyd 2>/dev/null | tr '\n' ' ')"
+    [ -n "$live_ttyds" ] || return 0
+    while IFS= read -r line; do
+        cpid="${line%% *}"; ctty="${line#* }"
+        [ -n "$cpid" ] && [ -n "$ctty" ] && [ "$cpid" != "$ctty" ] || continue
+        walk="$cpid"; hops=0; alive=0
+        while [ -n "$walk" ] && [ "$walk" != "1" ] && [ "$hops" -lt 12 ]; do
+            case " $live_ttyds " in *" $walk "*) alive=1; break ;; esac
+            walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')"
+            hops=$(( hops + 1 ))
+        done
+        [ "$alive" -eq 1 ] || tmux detach-client -t "$ctty" 2>/dev/null
+    done <<< "$(tmux list-clients -t "$session" -F '#{client_pid} #{client_tty}' 2>/dev/null)"
+    return 0
+}
+
 prune_excess_tmux_clients() {
     local session="$1" limit="${2:-4}" keep list total drop client_tty
     # We are about to attach as one more client, so at most limit-1 may remain.
@@ -1683,6 +1777,7 @@ prune_excess_tmux_clients() {
     return 0
 }
 
+detach_dead_ttyd_clients "$SESSION"
 prune_excess_tmux_clients "$SESSION" "${AICLI_MAX_TMUX_CLIENTS:-4}"
 
 perf_log tmux.attach.exec

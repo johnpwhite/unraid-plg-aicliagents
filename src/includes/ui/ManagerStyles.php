@@ -18,14 +18,17 @@
     /* Tab Navigation */
     .aicli-tabs { display: flex; gap: 2px; margin-bottom: 0; border-bottom: 1px solid var(--border-color, #333); padding-left: 10px; }
     .aicli-tab-btn {
-        padding: 10px 25px; background: var(--title-header-background-color, #222); color: var(--text-color, #888); 
-        border-radius: 6px 6px 0 0; opacity: 0.7;
+        /* 2026-09-30 (NATIVE_BUTTON_STYLE.md "Contrast in every theme"): the AA
+           text token and 0.8 opacity. Unraid's text at 0.7 was 2.6:1 on azure
+           and 2.36:1 on gray; now 5.7:1 or more in every theme. */
+        padding: 10px 25px; background: var(--title-header-background-color, #222); color: var(--aicli-text, var(--text-color, #888));
+        border-radius: 6px 6px 0 0; opacity: 0.8;
         cursor: pointer; font-weight: 800; font-size: 11px; text-transform: uppercase;
         border: 1px solid var(--border-color, #333); border-bottom: none; 
         transition: all 0.2s; position: relative; bottom: -1px;
         letter-spacing: 0.05em;
     }
-    .aicli-tab-btn:hover { opacity: 1; color: var(--text-color, #eee); }
+    .aicli-tab-btn:hover { opacity: 1; color: var(--aicli-text, var(--text-color, #eee)); }
     /* WP #903 a11y: dark ink on the brand orange — white-on-#ff8c00 is 2.33:1
        (fails WCAG AA 4.5:1); #111 on #ff8c00 is ~8:1. Applies to every
        orange-filled control (active tab, slim buttons, active filter chip). */
@@ -154,43 +157,21 @@
         text-align: left !important;
     }
     
+    /* NATIVE_BUTTON_STYLE.md (2026-09-29): .aicli-btn and .aicli-btn-slim
+       only set their layout here. Unraid's own button look (colour, frame,
+       font, hover, disabled) comes from the "Native Unraid buttons" section
+       after the WP #903 touch-target section below. */
     .aicli-btn {
-        padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: 700; font-size: 0.95em;
-        transition: all 0.15s ease; background: var(--orange, #ff8c00) !important; border: none !important; color: #fff !important;
-        text-transform: uppercase; width: 100%; margin-top: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        display: block; text-align: center;
+        cursor: pointer; width: 100%;
+        display: flex; align-items: center; justify-content: center; gap: 6px;
+        text-align: center;
     }
-    .aicli-btn:hover { background: #e67e00 !important; transform: translateY(-1px); box-shadow: 0 6px 14px rgba(0,0,0,0.4); }
-    .aicli-btn:active { transform: translateY(0); box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
 
     .aicli-btn-slim {
-        height: 26px !important; padding: 0 10px !important; border-radius: 4px; cursor: pointer;
-        background-color: var(--orange, #ff8c00) !important; border: none !important; color: #111 !important;
-        display: inline-flex !important; align-items: center; justify-content: center;
-        font-size: 10px !important; font-weight: 800; text-transform: uppercase; gap: 5px;
-        flex-shrink: 0 !important; transition: all 0.15s ease; margin: 0 !important;
+        cursor: pointer;
+        display: inline-flex !important; align-items: center; justify-content: center; gap: 5px;
+        flex-shrink: 0 !important; margin: 0 !important;
     }
-    /* Use background-COLOR (not the `background` shorthand) in every hover/variant
-       rule: aicli-btn-slim has a 9px transparent-border 44px hit-box (see the
-       rule near the file end) kept visually 26px by `background-clip: padding-box`.
-       The `background` shorthand RESETS background-clip to border-box, and because
-       these rules carry !important + higher specificity than the hit-box rule, the
-       paint flooded the full 44px box on hover/variant — the button appeared to
-       double in height. background-color leaves background-clip untouched. */
-    .aicli-btn-slim:hover { background-color: #e67e00 !important; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.3); }
-    .aicli-btn-slim:active { transform: translateY(0); box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
-    /* Dark variants keep white ink (contrast on #600/#a60 is >4.5:1). */
-    .aicli-btn-slim.danger { background-color: #600 !important; color: #fff !important; }
-    .aicli-btn-slim.danger:hover { background-color: #800 !important; }
-    .aicli-btn-slim.warning { background-color: #a60 !important; color: #fff !important; }
-    .aicli-btn-slim.warning:hover { background-color: #c80 !important; }
-    .aicli-btn-slim.info { background-color: #007bff !important; color: #fff !important; }
-    
-    .aicli-pill-btn {
-        background: var(--mild-background-color, #333); border: 1px solid var(--border-color, #444); color: var(--text-color, #eee); padding: 2px 8px; border-radius: 10px;
-        font-size: 9px; cursor: pointer; font-weight: bold; transition: all 0.2s;
-    }
-    .aicli-pill-btn:hover { background: var(--border-color, #444); border-color: #ff8c00; color: #ff8c00; }
 
     .stat-icon-btn {
         color: var(--text-color, #888); font-size: 12px; cursor: pointer; transition: all 0.2s;
@@ -205,6 +186,19 @@
     .stat-bar-fill { height: 100%; width: 0%; transition: width 0.5s; }
     .stat-bar-base { height: 100%; background: #1e4976; transition: width 0.5s; position: relative; } /* Dark Blue: Flash */
     .stat-bar-dirty { height: 100%; background: var(--orange, #ff8c00); transition: width 0.5s; position: relative; } /* Orange: RAM Delta */
+    /* HOME_STORAGE_CARD_JOB_STATE.md (#247): a home with a queued/running/deferred
+       supervisor job — the bar carries a moving stripe and the label names the job;
+       the action icons are locked until the job ends. */
+    .stat-bar-wrap.stat-bar-busy .stat-bar-dirty, .stat-bar-wrap.stat-bar-busy .stat-bar-base { opacity: 0.25; }
+    .stat-bar-wrap.stat-bar-busy { opacity: 1 !important; } /* a job on an offline home must still read */
+    .stat-bar-wrap.stat-bar-busy::after { content: ""; position: absolute; inset: 0;
+        background: repeating-linear-gradient(45deg, rgba(255,140,0,0.8) 0 10px, rgba(255,140,0,0.25) 10px 20px);
+        background-size: 28px 28px; animation: aicli-bar-busy 0.9s linear infinite; pointer-events: none; }
+    .stat-bar-wrap.stat-bar-busy.stat-bar-deferred::after { animation-duration: 2.4s; opacity: 0.6; }
+    @keyframes aicli-bar-busy { from { background-position: 0 0; } to { background-position: 28px 0; } }
+    @media (prefers-reduced-motion: reduce) { .stat-bar-wrap.stat-bar-busy::after { animation: none; } }
+    .stat-icon-btn.aicli-locked { opacity: 0.3; cursor: default; pointer-events: none; }
+    .stat-bar-wrap.stat-bar-busy .stat-bar-text { position: relative; z-index: 1; }
     .stat-bar-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; color: #fff; text-shadow: 0 1px 2px #000; z-index: 5; pointer-events: none; }
     
     /* Install Progress Bar (Marketplace) */
@@ -298,15 +292,14 @@
     .agent-search i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); opacity: 0.5; }
     .agent-search input { width: 100%; padding-left: 35px !important; height: 34px !important; background: rgba(0,0,0,0.2) !important; }
     
+    /* The All / Installed / Updates filter is a group of toggle buttons
+       (aria-pressed). Its look is the "Native Unraid buttons" section below:
+       the Unraid tab style, the pressed one with an orange frame, no fill. */
     .agent-filters { display: flex; gap: 5px; }
-    .filter-btn { padding: 6px 15px; border-radius: 4px; font-size: 10px; font-weight: bold; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color, rgba(255,255,255,0.15)); transition: all 0.2s; text-transform: uppercase; color: var(--text-color, #ccc); }
-    .filter-btn:hover { background: rgba(255,255,255,0.15); border-color: var(--orange, #ff8c00); }
-    .filter-btn.active { background: var(--orange, #ff8c00); color: #111; border-color: var(--orange, #ff8c00); }
 
-    /* Sort toggle — a <button>, so reset the UA font/line-height to inherit
-       and match .filter-btn's box model exactly so it sits as a 4th chip. */
-    .agent-sort-btn { padding: 6px 15px; border-radius: 4px; font-size: 10px; font-weight: bold; font-family: inherit; line-height: inherit; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid var(--border-color, rgba(255,255,255,0.15)); transition: all 0.2s; text-transform: uppercase; color: var(--text-color, #ccc); white-space: nowrap; vertical-align: middle; margin: 0; }
-    .agent-sort-btn:hover { background: rgba(255,255,255,0.15); border-color: var(--orange, #ff8c00); }
+    /* Sort toggle — an action button with Unraid's own look (see the
+       "Native Unraid buttons" section below). */
+    .agent-sort-btn { white-space: nowrap; vertical-align: middle; margin: 0; }
     .agent-sort-btn i { margin-right: 6px; opacity: 0.85; }
 
     .config-toggle { padding: 8px 12px; font-size: 10px; font-weight: bold; cursor: pointer; opacity: 0.6; border-top: 1px solid rgba(255,255,255,0.03); display: flex; align-items: center; gap: 8px; transition: opacity 0.2s; }
@@ -326,7 +319,7 @@
        The v2026.05.29.02 theme audit themed these and broke it; keep them hardcoded
        dark so the console stays black regardless of the page theme. */
     .log-terminal { background: #000; border-radius: 4px; border: 1px solid #333; overflow: hidden; display: flex; flex-direction: column; }
-    .log-header { background: #1a1a1a; padding: 0 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; height: 32px; }
+    .log-header { background: #1a1a1a; padding: 4px 8px; display: flex; align-items: center; gap: 6px 12px; border-bottom: 1px solid #333; min-height: 36px; box-sizing: border-box; position: relative; }
     .log-body { height: 400px; overflow-y: auto !important; padding: 10px; font-family: 'Courier New', monospace; font-size: 11px; background: #000; color: #0f0; white-space: pre-wrap; position: relative; overscroll-behavior: contain; }
     .log-tab { padding: 0 12px; cursor: pointer; opacity: 0.7; color: #fff; font-size: 9px; font-weight: bold; text-transform: uppercase; line-height: 32px; border-right: 1px solid #333; transition: all 0.15s; letter-spacing: 0.03em; }
     .log-tab:hover { opacity: 1; background: #2a2a2a; }
@@ -359,6 +352,65 @@
     }
     #log-filter-row input::placeholder { color: #777; }
     .log-tab.active { opacity: 1; background: #333; color: #ff8c00; }
+    /* DEBUG CONSOLE HEADER (2026-09-29): one compact row on a desktop.
+       [Debug|Migration|Install|Uninstall]  Context [..] Level [..] Trace [..] Tail [..] (reset)
+       ... (paused) (copy) (clear) [Support v]. It was three rows, 146 px tall; now
+       36 px, and the log (#log-content) gets the height. The console stays dark:
+       every colour here is a fixed hex. Unraid paints each <button type="button">
+       (default-base.css: a 30 px frame, a 86 px minimum width, a 10px 12px margin);
+       these rules keep that native paint and only make it compact (1,1,0 beats
+       Unraid's button[type=button] 0,1,1). Phone rules: the PHONE (2026-09-29)
+       section at the end of this file. Spec: docs/specs/NATIVE_BUTTON_STYLE.md. */
+    #tab-debug .log-terminal { container: aicli-log / inline-size; }
+    #tab-debug .log-header { flex-wrap: wrap; }
+    #tab-debug .log-tabs { display: flex; align-items: stretch; border: 1px solid #333; border-radius: 4px; overflow: hidden; flex: 0 0 auto; }
+    #tab-debug .log-tab { line-height: 26px; padding: 0 10px; }
+    #tab-debug .log-tabs .log-tab:last-child { border-right: 0; }
+    #log-filter-row { display: flex; align-items: center; gap: 4px 10px; flex: 0 0 auto; }
+    #log-filter-row label { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 10px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.03em; color: #999; white-space: nowrap; }
+    #tab-debug #log-filter-row :is(select, input[type="text"]) {
+        height: 26px; min-height: 0; margin: 0; padding: 0 4px; font-size: 11px; font-weight: normal;
+        text-transform: none; letter-spacing: normal; line-height: 24px; box-sizing: border-box; min-width: 0;
+    }
+    #tab-debug #log-filter-ctx { width: 120px; }
+    #tab-debug #log-filter-level { width: 76px; }
+    #tab-debug #log-filter-trace { width: 72px; }
+    #tab-debug #log-filter-tail { width: 58px; }
+    #tab-debug .log-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: 0 0 auto; }
+    #tab-debug .log-paused { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: bold; text-transform: uppercase; color: #0f0; white-space: nowrap; margin-right: 2px; }
+    #tab-debug .log-paused-dot { width: 7px; height: 7px; border-radius: 50%; background: #0f0; }
+    #tab-debug .log-action-btn { margin: 0; min-width: 0; height: 26px; min-height: 0; padding: 0 10px; box-sizing: border-box; line-height: 1; }
+    #tab-debug .log-icon-btn { width: 28px; padding: 0; font-size: 12px; letter-spacing: 0; }
+    #tab-debug .log-action-btn:focus-visible { outline: 2px solid #ff8c00; outline-offset: 1px; }
+    #tab-debug .log-menu-wrap { position: relative; display: flex; }
+    #tab-debug .log-menu-btn .fa-caret-down { margin-left: 2px; }
+    #tab-debug .log-menu {
+        position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; min-width: 230px;
+        display: flex; flex-direction: column; padding: 4px 0; background: #1a1a1a;
+        border: 1px solid #444; border-radius: 4px; box-shadow: 0 6px 18px rgba(0,0,0,0.6);
+    }
+    #tab-debug .log-menu[hidden] { display: none; }
+    #tab-debug .log-menu .log-menu-item {
+        display: flex; justify-content: flex-start; gap: 8px; width: 100%; height: auto; min-height: 32px; padding: 0 12px;
+        background: none; border: 0; border-radius: 0; color: #ddd; font-family: inherit; font-size: 12px;
+        font-weight: normal; text-transform: none; letter-spacing: normal; text-align: left;
+    }
+    #tab-debug .log-menu .log-menu-item:is(:hover, :focus-visible) { background: #333; color: #fff; outline: none; }
+    #tab-debug .log-menu .log-menu-item i { width: 14px; text-align: center; color: #ff8c00; }
+    #tab-debug .log-menu-sep { height: 1px; margin: 4px 0; background: #333; }
+    #tab-debug .log-menu-check { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 12px; margin: 0; font-size: 12px; color: #ccc; cursor: pointer; white-space: nowrap; }
+    #tab-debug .log-menu-check input { margin: 0; }
+    #tab-debug .log-menu-check:has(input:focus-visible) { background: #333; }
+    /* Too narrow for one row (a console under 1100 px: a 1024 px window, or a
+       side-bar theme on a small screen): first the Support button shows only
+       its icon and the paused state only its dot (both keep their text for a
+       screen reader); then the actions wrap to a second row. */
+    @container aicli-log (min-width: 601px) and (max-width: 1100px) {
+        #tab-debug :is(.log-menu-btn .log-btn-text, .log-paused-text) {
+            position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+        }
+        #tab-debug .log-menu-btn { padding: 0 8px; }
+    }
 
     /* Upgrade "keep a copy" toggle. The backup now defaults OFF (opt-in), so when
        it's UNticked we pulse a soft orange glow in/out like a heartbeat to draw the
@@ -432,20 +484,25 @@
         background: var(--title-header-background-color, var(--mild-background-color, #ededed));
         border-top: 1px solid var(--border-color, #ccc);
     }
-    .pp-btn-cancel {
-        padding: 4px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase;
-        background: transparent; border: 1px solid var(--border-color, #ccc);
-        border-radius: 3px; color: inherit; cursor: pointer; opacity: 0.7; transition: all 0.15s;
+    /* Folder picker buttons: Unraid's own button look (the "Native Unraid
+       buttons" section below). NATIVE_BUTTON_STYLE.md. */
+    .pp-btn-cancel, .pp-btn-confirm { cursor: pointer; }
+    /* HOME_BACKUP.md 2026-09-24 follow-up: the folder browser's New folder row. */
+    .pp-footer { flex-wrap: wrap; align-items: center; }
+    .pp-footer .pp-new-folder { margin-right: auto; }
+    .pp-new-row { margin-bottom: 12px; }
+    .pp-new-row[hidden] { display: none !important; }
+    .pp-new-fields { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    /* input.pp-new-name inside .pp-modal: Unraid's input[type="text"] base rule is more specific than a bare class. */
+    .pp-modal input.pp-new-name {
+        flex: 1 1 160px; min-height: 28px; margin: 0; min-width: 0; box-sizing: border-box; padding: 4px 8px; font-size: 12px;
+        border: 1px solid var(--border-color, #ccc); border-radius: 3px;
+        background: var(--background-color, #fff); color: var(--text-color, inherit);
     }
-    .pp-btn-cancel:hover { opacity: 1; background: var(--mild-background-color, rgba(0,0,0,0.05)); }
-    .pp-btn-confirm {
-        padding: 4px 16px; font-size: 11px; font-weight: 900; text-transform: uppercase;
-        background: var(--orange, #ff8c00); border: none; border-radius: 3px;
-        color: #fff; cursor: pointer; transition: all 0.15s;
-        box-shadow: 0 2px 8px rgba(255, 140, 0, 0.4);
-    }
-    .pp-btn-confirm:hover { background: #e67e00; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(255, 140, 0, 0.5); }
-    .pp-btn-confirm:active { transform: translateY(0); box-shadow: 0 1px 4px rgba(255, 140, 0, 0.3); }
+    .pp-modal input.pp-new-name[aria-invalid="true"] { border-color: color-mix(in srgb, #dc2626 55%, var(--text-color, #1c1c1c)); }
+    .pp-new-error { font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; color: color-mix(in srgb, #dc2626 55%, var(--text-color, #1c1c1c)); }
+    .pp-new-error:empty { display: none; }
+    .pp-modal :focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
 
     /* =====================================================================
        Agent Card v2 — refined-technical aesthetic. Distinctive display serif
@@ -602,22 +659,13 @@
         cursor: default; opacity: 0.5; pointer-events: none;
     }
     .av2-chip.disabled:hover { background: transparent; color: inherit; }
-    /* Active chip fills Unraid brand orange so open state reads like the
-       "Check for Updates" button family — instantly obvious which panel
-       is in focus, same UX vocabulary across buttons and chips. */
+    /* NATIVE_BUTTON_STYLE.md (2026-09-29): the open chip no longer fills
+       with orange. The chip row uses Unraid's own tab style (a thin frame,
+       sentence case); the open chip has an orange frame, an orange bar at the
+       bottom and a bold label. Those rules are in the "Native Unraid buttons"
+       section after the WP #903 touch-target section. */
     .av2-chip[aria-expanded="true"] {
-        background: var(--orange, #ff8c00); color: #fff;
-        border-color: var(--orange, #ff8c00);
         border-top-left-radius: 6px; border-top-right-radius: 6px;
-        box-shadow: 0 2px 6px rgba(255,140,0,0.25);
-    }
-    .av2-chip[aria-expanded="true"] .av2-k,
-    .av2-chip[aria-expanded="true"] .av2-v { color: #fff; opacity: 1; }
-    .av2-chip[aria-expanded="true"] .av2-v.warn,
-    .av2-chip[aria-expanded="true"] .av2-v.ok,
-    .av2-chip[aria-expanded="true"] .av2-v.bad {
-        color: #fff; border-color: rgba(255,255,255,0.55);
-        background: rgba(255,255,255,0.12);
     }
     /* Icon dropped from chips. */
     .av2-chip svg { display: none; }
@@ -633,7 +681,6 @@
     .av2-chip {
         justify-content: center;
     }
-    .av2-chip[aria-expanded="true"] .av2-label { color: #fff; }
     /* State dot: anchored to the top-right corner of the chip. Doesn't consume
        horizontal space so labels stay centered. */
     .av2-chip.has-warn::after,
@@ -645,7 +692,6 @@
     .av2-chip.has-warn::after   { background: #f5b041; box-shadow: 0 0 6px rgba(245,176,65,0.6); }
     .av2-chip.has-ok::after     { background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
     .av2-chip.has-custom::after { background: #7cdfff; box-shadow: 0 0 6px rgba(124,223,255,0.6); }
-    .av2-chip[aria-expanded="true"]::after { background: #fff !important; box-shadow: none; }
     /* Ensure the chip can position the state dot */
     .av2-chip { position: relative; }
     /* State-coloured chip values get a subtle pill behind them so "NOT SET" etc
@@ -920,24 +966,15 @@
     }
     .av2-al-row.armed .av2-al-fresh { display: flex; }
     .av2-al-fresh input[type=checkbox] { margin: 0; cursor: pointer; }
-    .av2-al-fresh label { cursor: pointer; margin: 0; font-weight: normal; }
+    .av2-al-fresh label { cursor: pointer; margin: 0; font-weight: normal; display: inline-flex; align-items: center; gap: 6px; }
 
-    /* Buttons shared across panels */
+    /* Buttons shared across panels. NATIVE_BUTTON_STYLE.md (2026-09-29): the
+       colour, frame and font are Unraid's own (the "Native Unraid buttons"
+       section below). .primary (Install, Upgrade) and .warn (Repair) look
+       like every other button; .danger (Uninstall, Reset) has red text. */
     .av2-btn {
-        font-size: 11.5px; font-weight: 600; padding: 6px 12px; border-radius: 6px;
         cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-        border: 1px solid var(--border-color, #353a46);
-        background: var(--background-color, #16181d); color: var(--text-color, #e7e9ef);
-        transition: all .15s ease;
-        line-height: 1; /* kill inherited line-height so text centers vertically */
     }
-    .av2-btn:hover { border-color: var(--orange, #ff8c00); color: var(--orange, #ff8c00); }
-    .av2-btn.primary {
-        background: var(--orange, #ff8c00); color: #fff; border-color: transparent;
-    }
-    .av2-btn.primary:hover { background: #ffa433; color: #fff; }
-    .av2-btn.ghost { background: transparent; border-color: transparent; opacity: 0.7; }
-    .av2-btn.ghost:hover { opacity: 1; color: var(--text-color, #e7e9ef); }
 
     /* WP #736 — free-form Variables / Secrets sub-sections in the ENVS panel. */
     .av2-ff-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(128,128,128,0.18); }
@@ -961,32 +998,6 @@
     }
     .av2-ff-del:hover { opacity: 1; color: var(--bad, #d65b5b); }
     .av2-ff-empty { font-size: 11px; opacity: 0.5; padding: 4px 2px; }
-    /* Uninstall / Reset — bordered-red button. Idle state shows a clearly
-       defined red border and soft red-tinted background so the button reads
-       as a real interactive element, not a text link. Hover fills solid.
-       Works against both Unraid light and dark themes because --bad is a
-       brand token. The danger-ghost variant (transparent at idle) was too
-       ambiguous — removed. */
-    .av2-btn.danger {
-        background: rgba(239,68,68,0.08); color: #ef4444;
-        border-color: rgba(239,68,68,0.55); font-weight: 600;
-    }
-    .av2-btn.danger:hover {
-        background: #ef4444; color: #fff; border-color: #ef4444;
-        box-shadow: 0 2px 8px rgba(239,68,68,0.35);
-    }
-    /* WP #748 J / Phase B follow-up (b): contextual Repair button in the foot.
-       Amber so it's visually distinct from the orange Upgrade (primary) and the
-       red Uninstall (danger). Same outlined-on-rest, filled-on-hover treatment. */
-    .av2-btn.warn {
-        background: rgba(230,126,34,0.08); color: #e67e22;
-        border-color: rgba(230,126,34,0.55); font-weight: 600;
-    }
-    .av2-btn.warn:hover {
-        background: #e67e22; color: #fff; border-color: #e67e22;
-        box-shadow: 0 2px 8px rgba(230,126,34,0.35);
-    }
-
     /* Footer row: install progress + install/uninstall actions */
     .av2-foot {
         padding: 12px 18px; display: flex; justify-content: space-between; align-items: center;
@@ -1017,9 +1028,11 @@
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .av2-seg label:hover { opacity: 1; background: rgba(127,127,127,0.08); }
+    /* NATIVE_BUTTON_STYLE.md: the chosen channel has an orange frame, an
+       orange bar at the bottom and a bold label, not an orange fill. */
     .av2-seg input:checked + label {
-        background: var(--orange, #ff8c00); color: #fff; opacity: 1;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.25), inset 0 -1px 0 rgba(0,0,0,0.15);
+        opacity: 1; font-weight: 700; color: var(--text-color, #e7e9ef);
+        box-shadow: inset 0 0 0 1px var(--brand-orange, #ff8c2f), inset 0 -3px 0 var(--brand-orange, #ff8c2f);
     }
 
     /* Stacked section inside the Channel panel — label (h4) above the control,
@@ -1210,7 +1223,9 @@
             overflow: hidden;
         }
         .av2-strip .av2-chip .av2-label {
-            font-size: 9.5px; letter-spacing: 0.04em;
+            /* Sentence case (NATIVE_BUTTON_STYLE.md) is narrower than the old
+               capitals, so the label can be 11 px. */
+            font-size: 11px; letter-spacing: normal;
             min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
 
@@ -1230,8 +1245,7 @@
             width: 100%; flex-wrap: wrap !important;
         }
         .av2-foot .av2-buttons .av2-btn {
-            flex: 1 1 calc(50% - 4px); min-width: 0;
-            padding: 8px 6px; font-size: 11px;
+            flex: 1 1 calc(50% - 4px); min-width: 0 !important;
         }
     }
 
@@ -1263,78 +1277,230 @@
        expansions also win at phone/tablet widths.
        ======================================================================= */
 
-    /* Slim buttons (plugin-styled via !important, dynamix never applied):
-       26 px visual -> 44 px border box; negative block margins keep the
-       layout occupancy at the visual 26 px. */
-    .aicli-btn-slim {
-        height: 44px !important;
+    /* Action buttons (NATIVE_BUTTON_STYLE.md, 2026-09-29): the painted button
+       is 30 px tall, the height of Unraid's own buttons. 7 px transparent
+       borders above and below make the border box, and so the tap area, 44 px.
+       Negative block margins keep the layout at the painted 30 px. */
+    .aicli-btn-slim, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm, .filter-btn {
         box-sizing: border-box !important;
-        border-top: 9px solid transparent !important;
-        border-bottom: 9px solid transparent !important;
-        background-clip: padding-box !important;
-        border-radius: 4px / 13px !important;
-        margin-top: -9px !important;
-        margin-bottom: -9px !important;
-    }
-    /* Hover/active shadows must follow the painted pill, not the (invisible)
-       44 px border box — swap box-shadow for filter:drop-shadow. */
-    .aicli-btn-slim:hover  { box-shadow: none !important; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3)); }
-    .aicli-btn-slim:active { box-shadow: none !important; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.2)); }
-
-    /* Sort toggle (dynamix-styled today: 32 px = 8px padding + 16px text,
-       no border, block margins 10px): 7px transparent borders -> 46 px hit
-       box; block margins drop 10 -> 3 px so outer rhythm stays 52 px. */
-    .agent-sort-btn {
+        height: 44px !important;
+        min-height: 44px !important;
+        padding: 0 12px !important;
         border-top: 7px solid transparent !important;
         border-bottom: 7px solid transparent !important;
-        background-clip: padding-box !important;
-        border-radius: 4px / 11px !important;
-        margin-top: 3px !important;
-        margin-bottom: 3px !important;
+        border-radius: 4px / 11px !important; /* painted ry = 11 - 7 = 4 px, Unraid's radius */
+        margin-top: -7px !important;
+        margin-bottom: -7px !important;
+        display: inline-flex !important; align-items: center; justify-content: center;
+        vertical-align: middle;
     }
+    /* In a row of other controls, keep the painted button clear of its neighbours. */
+    .av2-foot .av2-btn, .agent-filter-bar .agent-sort-btn { margin-top: 0 !important; margin-bottom: 0 !important; }
+    /* The consolidate button in the Resources panel spans the panel. */
+    .aicli-btn {
+        box-sizing: border-box !important;
+        min-height: 44px !important;
+        padding: 0 12px !important;
+        border-top: 7px solid transparent !important;
+        border-bottom: 7px solid transparent !important;
+        border-radius: 4px / 11px !important;
+        margin: 4px 0 0 0 !important;
+        display: flex !important;
+    }
+    /* The filter buttons size to their label (Unraid gives every button an
+       86 px minimum width), but never below the 44 px tap width. */
+    .filter-btn { min-width: 44px !important; padding: 0 14px !important; margin-right: 0 !important; margin-left: 0 !important; }
 
-    /* Store-card spec chips (dynamix-styled today: 27 px = 8px padding +
-       11px label, no border, block margins 10px): 10px transparent borders
-       -> 47 px hit box; block margins 10 -> 0 keeps outer rhythm at 47 px.
-       Block padding pinned to today's effective 8px for cross-viewport
-       stability. */
+    /* Store-card spec chips (dynamix-styled before 2026-09-29: 27 px = 8px
+       padding + 11px label, no border, block margins 10px): 10px transparent
+       borders -> 47 px hit box; block margins 10 -> 0 keeps outer rhythm at
+       47 px. Block padding pinned to 8px for cross-viewport stability. */
     .av2-chip {
         border-top: 10px solid transparent !important;
         border-bottom: 10px solid transparent !important;
+        border-left: 0 !important;
+        border-right: 0 !important;
         padding-top: 8px !important;
         padding-bottom: 8px !important;
         background-clip: padding-box !important;
-        border-radius: 4px / 14px !important; /* painted ry = 14 - 10 = 4 = today's dynamix radius */
+        border-radius: 4px / 14px !important; /* painted ry = 14 - 10 = 4 = Unraid's radius */
         margin-top: 0 !important;
         margin-bottom: 0 !important;
     }
     .av2-chip[aria-expanded="true"] {
-        /* base rule paints border-color orange — keep the hit border invisible */
         border-color: transparent !important;
-        border-top-left-radius: 6px 16px !important;
-        border-top-right-radius: 6px 16px !important;
-        /* outer glow must hug the painted pill, not the 47 px hit box */
-        box-shadow: none !important;
-        filter: drop-shadow(0 2px 4px rgba(255,140,0,0.25));
+        border-top-left-radius: 4px 14px !important;
+        border-top-right-radius: 4px 14px !important;
     }
 
-    /* Panel/footer buttons (plain .av2-btn is dynamix-styled today; the
-       .primary/.danger/.warn variants override paint at (0,2,0) but keep
-       dynamix geometry): 8.5px transparent borders -> 44 px border box from
-       the natural 27 px; block margins 10 -> 1.5 px keeps outer rhythm. */
-    .av2-btn {
-        box-sizing: border-box !important;
-        min-height: 44px !important;
-        border-top: 8.5px solid transparent !important;
-        border-bottom: 8.5px solid transparent !important;
-        background-clip: padding-box !important;
-        border-radius: 4px / 12.5px !important;
-        margin-top: 1.5px !important;
-        margin-bottom: 1.5px !important;
+    /* =======================================================================
+       Native Unraid buttons — NATIVE_BUTTON_STYLE.md (2026-09-29).
+       The Manager's buttons look like Unraid's own buttons (Settings > Disk
+       Settings: Default, Apply, Done). Unraid paints every <button> from
+       theme variables in default-base.css: --button-text-color,
+       --button-background, --button-background-size, --button-border and
+       the --hover-button-* set. These rules use the same variables, so each
+       theme gives its own look without a change here:
+         - white and black (menu at the top): a thin red-to-orange frame,
+           orange bold capitals, a full orange fill on hover;
+         - azure and gray (.Theme--sidebar): a 1 px border, the theme's text,
+           normal weight, sentence case.
+       Two differences, both for the 44 px tap area above: the frame is
+       painted in the padding box (background-clip), and the sidebar themes'
+       1 px border is an inset box-shadow (a real border is the tap area).
+       Not changed: the tab bar (.aicli-tab-btn), the Debug Console buttons
+       (.log-action-btn, always dark like the console), the icon buttons.
+       ======================================================================= */
+    /* Contrast (2026-09-30, NATIVE_BUTTON_STYLE.md "Contrast in every
+       theme"): Unraid's own button and text colours are below WCAG AA 4.5:1
+       in some themes (azure button text #9f9180 on #edeaef 2.58:1, gray text
+       #606e7f on #121510 3.54:1, the white theme's orange text 2.07:1). The
+       owner decided "darken ours slightly": the look stays Unraid's, the text
+       colour is mixed toward black (light themes) or white (dark themes)
+       until it meets AA. The token block is the same as in
+       ui-build/src/index.css (the terminal page); contrastTokens.test.ts and
+       NativeButtonStyleTest keep the two copies equal. */
+    /* AICLI-CONTRAST-TOKENS:BEGIN */
+    :root {
+      --aicli-text: var(--text-color, #1c1b1b);
+      --aicli-btn-text: var(--button-text-color, #ff8c2f);
+      --aicli-btn-hover-fill: linear-gradient(90deg, color-mix(in srgb, var(--brand-red, #e22828) 65%, #000) 0, color-mix(in srgb, var(--brand-orange, #ff8c2f) 65%, #000));
+      --aicli-danger-text: color-mix(in srgb, #dc2626 70%, var(--aicli-text));
+      --aicli-accent-dim: color-mix(in srgb, var(--aicli-accent-text) 60%, #000);
     }
-    /* Variant hover glows painted via drop-shadow so they follow the pill. */
-    .av2-btn.danger:hover { box-shadow: none !important; filter: drop-shadow(0 2px 4px rgba(239,68,68,0.35)); }
-    .av2-btn.warn:hover   { box-shadow: none !important; filter: drop-shadow(0 2px 4px rgba(230,126,34,0.35)); }
+    html.Theme--white {
+      --aicli-btn-text: color-mix(in srgb, var(--button-text-color, #ff8c2f) 55%, #000);
+    }
+    html.Theme--black {
+      --aicli-accent-dim: color-mix(in srgb, var(--aicli-accent-text) 80%, #fff);
+      --aicli-danger-text: color-mix(in srgb, #dc2626 50%, var(--aicli-text));
+    }
+    html.Theme--azure {
+      --aicli-text: color-mix(in srgb, var(--text-color, #606e7f) 50%, #000);
+      --aicli-btn-text: color-mix(in srgb, var(--button-text-color, #9f9180) 65%, #000);
+      --aicli-accent-text: color-mix(in srgb, var(--orange, #e68a00) 40%, var(--aicli-text));
+    }
+    html.Theme--gray {
+      --aicli-accent-dim: color-mix(in srgb, var(--aicli-accent-text) 60%, #fff);
+      --aicli-text: color-mix(in srgb, var(--text-color, #606e7f) 45%, #fff);
+      --aicli-btn-text: color-mix(in srgb, var(--button-text-color, #606e7f) 70%, #fff);
+      --aicli-danger-text: color-mix(in srgb, #dc2626 50%, var(--aicli-text));
+    }
+    /* AICLI-CONTRAST-TOKENS:END */
+    .aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm {
+        font-family: clear-sans, sans-serif !important;
+        font-size: 1.1rem !important;
+        font-weight: bold !important;
+        letter-spacing: 1.8px !important;
+        text-transform: uppercase !important;
+        line-height: 1.2 !important;
+        white-space: nowrap;
+        color: var(--aicli-btn-text, var(--button-text-color, #ff8c2f)) !important;
+        background: var(--button-background, transparent) !important;
+        background-size: var(--button-background-size, auto) !important;
+        background-clip: padding-box !important;
+        background-origin: padding-box !important;
+        border-left: 0 !important;
+        border-right: 0 !important;
+        box-shadow: none !important;
+        filter: none !important;
+        transform: none !important;
+        opacity: 1;
+        transition: color .15s ease, background-color .15s ease, box-shadow .15s ease;
+    }
+    :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm):hover:not([disabled]) {
+        color: var(--hover-button-text-color, #fff) !important;
+        /* Unraid's red-to-orange fill, 35 % darker: white text on it is 5:1. */
+        background: var(--aicli-btn-hover-fill, var(--hover-button-background, #ff8c2f)) !important;
+        background-size: 100% 100% !important;
+        background-clip: padding-box !important;
+    }
+    .Theme--sidebar :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm) {
+        font-size: 1.2rem !important;
+        font-weight: normal !important;
+        letter-spacing: normal !important;
+        text-transform: none !important;
+        background: none !important;
+        background-color: var(--button-background, transparent) !important;
+        /* The "background" shorthand above resets the clip to the border box,
+           which painted the 7 px transparent tap borders as a light rectangle
+           around each button (azure, 2026-09-29). Keep the paint inside. */
+        background-clip: padding-box !important;
+        box-shadow: inset 0 0 0 1px var(--button-border, currentColor) !important;
+    }
+    .Theme--sidebar :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm):hover:not([disabled]) {
+        background: none !important;
+        background-color: var(--hover-button-background, transparent) !important;
+        background-clip: padding-box !important;
+        box-shadow: inset 0 0 0 1px var(--hover-button-border, #0099ff) !important;
+    }
+    /* Disabled: Unraid's grey frame (top menu) or grey fill (sidebar), half opacity. */
+    :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm)[disabled] {
+        opacity: 0.5 !important;
+        cursor: default !important;
+        color: var(--disabled-text-color, #808080) !important;
+        background:
+            linear-gradient(90deg, var(--gray-600, #404040) 0, var(--gray-500, #808080)) 0 0 no-repeat,
+            linear-gradient(90deg, var(--gray-600, #404040) 0, var(--gray-500, #808080)) 0 100% no-repeat,
+            linear-gradient(0deg, var(--gray-600, #404040) 0, var(--gray-600, #404040)) 0 100% no-repeat,
+            linear-gradient(0deg, var(--gray-500, #808080) 0, var(--gray-500, #808080)) 100% 100% no-repeat !important;
+        background-size: 100% 2px, 100% 2px, 2px 100%, 2px 100% !important;
+        background-clip: padding-box !important;
+    }
+    .Theme--sidebar :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm)[disabled] {
+        background: none !important;
+        background-color: var(--disabled-input-background-color, transparent) !important;
+        background-clip: padding-box !important;
+        box-shadow: inset 0 0 0 1px var(--disabled-input-border-color, #808080) !important;
+    }
+    /* Danger (Uninstall, Delete): Unraid marks a destructive action by its
+       confirmation dialog, not by a red button. The plugin keeps the
+       confirmation and adds red text, mixed with the theme text colour so it
+       stays readable on a light and on a dark theme. */
+    :is(.aicli-btn-slim, .av2-btn).danger:not([disabled]):not(:hover) {
+        color: var(--aicli-danger-text, color-mix(in srgb, #dc2626 70%, var(--text-color, #1c1b1b))) !important;
+    }
+
+    /* Toggle buttons (the All / Installed / Updates filter and the store card's
+       Channel / Envs / Resources / Terminal / Args row): Unraid's own tab style
+       (default-base.css .tabs button[role="tab"]): the theme text on no fill,
+       a thin grey frame; the chosen one has an orange frame, an orange bar
+       at the bottom and a bold label. No orange fill. */
+    .filter-btn, .av2-chip {
+        font-family: clear-sans, sans-serif !important;
+        font-size: 1.2rem !important;
+        font-weight: normal !important;
+        letter-spacing: normal !important;
+        text-transform: none !important;
+        line-height: 1.2 !important;
+        cursor: pointer;
+        color: var(--aicli-text, var(--text-color, #1c1b1b)) !important;
+        background: none !important;
+        background-color: transparent !important;
+        background-clip: padding-box !important;
+        box-shadow: inset 0 0 0 1px var(--disabled-input-border-color, #909090) !important;
+        filter: none !important;
+        opacity: 1;
+    }
+    .filter-btn:hover, .av2-chip:not(.disabled):hover {
+        background-color: var(--mild-background-color, rgba(127,127,127,0.08)) !important;
+        box-shadow: inset 0 0 0 1px var(--brand-orange, #ff8c2f) !important;
+    }
+    .filter-btn.active, .filter-btn[aria-pressed="true"], .av2-chip[aria-expanded="true"] {
+        font-weight: bold !important;
+        box-shadow: inset 0 0 0 1px var(--brand-orange, #ff8c2f), inset 0 -3px 0 var(--brand-orange, #ff8c2f) !important;
+    }
+    .av2-chip .av2-label {
+        text-transform: none; letter-spacing: normal; font-size: inherit; font-weight: inherit; color: inherit;
+    }
+    .av2-chip.disabled { opacity: 0.5; }
+
+    /* Keyboard focus: an inset ring on the painted button (an outline would
+       circle the larger, invisible tap area). */
+    :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm, .filter-btn, .av2-chip):focus-visible {
+        outline: none !important;
+        box-shadow: inset 0 0 0 2px var(--hover-button-border, #0099ff) !important;
+    }
 
     /* Release-notes link: inline element (dynamix button rule doesn't match
        bare <a>), so vertical borders expand its border box (and hit area)
@@ -1392,4 +1558,595 @@
 
     /* #165 rev 2026-09-04: the all-cards bake pill styles were removed with the
        pill itself (docs/specs/AGENT_CARD_BAKE_INDICATOR.md). */
+
+    /* =======================================================================
+       HOME_BACKUP.md "2026-09-24 redesign (#287)": the per-home backup line on
+       each Home card and the Backup dialog it opens. Error/ok text mixes the
+       hue toward the theme text colour (the .aicli-sp-chip pattern) so it
+       reads at 4.5:1 on the light and the dark theme. The dialog sits at
+       z-index 10004: above Unraid's header (10002) and the Activity tray pill
+       (10003, which covered the dialog's Close button on a phone), and below
+       the folder browser (.pp-backdrop, 2000000) and sweet-alert confirms
+       (99999), which open on top of it.
+       ======================================================================= */
+    .storage-entity-card .se-backup {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 4px 4px 4px 8px; border: 1px solid var(--border-color, rgba(128,128,128,0.25));
+        border-radius: 4px; font-size: 11px;
+    }
+    .storage-entity-card .se-backup-status { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+    .storage-entity-card .se-backup-unset .se-backup-status { opacity: 0.85; }
+    .storage-entity-card .se-backup-failed .se-backup-status,
+    .hb-state.hb-state-failed, .hb-err, .hb-error {
+        color: color-mix(in srgb, #dc2626 55%, var(--text-color, #1c1c1c));
+    }
+    .storage-entity-card .se-backup-ok .se-backup-status .fa,
+    .hb-ok { color: color-mix(in srgb, #16a34a 50%, var(--text-color, #1c1c1c)); }
+    .storage-entity-card .se-backup-running .se-backup-status { color: color-mix(in srgb, #ff8c00 45%, var(--text-color, #1c1c1c)); }
+
+    .hb-backdrop {
+        position: fixed; inset: 0; z-index: 10004;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(0,0,0,0.5);
+    }
+    .hb-dialog {
+        width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 48px);
+        display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden;
+        background: var(--background-color, #fff); color: var(--text-color, inherit);
+        border: 1px solid var(--border-color, #ccc); border-radius: 8px;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .hb-header {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 0 4px 0 14px; min-height: 44px;
+        background: var(--title-header-background-color, var(--mild-background-color, #ededed));
+        border-bottom: 1px solid var(--border-color, #ccc);
+    }
+    .hb-title {
+        margin: 0; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+        display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere;
+    }
+    .hb-title .fa { color: var(--orange, #e68a00); }
+    #aicli-home-backup-dialog .hb-close {
+        width: 44px !important; height: 44px !important; min-width: 44px !important; flex: 0 0 44px;
+        margin: 0 !important; padding: 0 !important; border: none !important; border-radius: 4px !important;
+        background: transparent !important; color: var(--text-color, inherit) !important;
+        font-size: 24px !important; line-height: 1 !important; font-weight: 400 !important;
+        text-transform: none !important; box-shadow: none !important; cursor: pointer;
+    }
+    #aicli-home-backup-dialog .hb-close:hover { background: var(--mild-background-color, rgba(0,0,0,0.06)) !important; }
+    #aicli-home-backup-dialog :focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    /* The heading takes focus when the dialog opens (tabindex=-1, HOME_BACKUP.md
+       2026-09-24 follow-up): it is not a control, so it never shows a ring. */
+    #aicli-home-backup-dialog #hb-title:focus { outline: none; }
+    /* A slim button is a 26 px pill inside a 44 px transparent hit box, so an
+       outline drew a large rounded ring around empty space. The keyboard ring
+       is drawn on the pill itself (an inset shadow sits inside the padding box). */
+    #aicli-home-backup-dialog .aicli-btn-slim:focus-visible {
+        outline: none;
+        box-shadow: inset 0 0 0 2px var(--text-color, #111), inset 0 0 0 4px var(--background-color, #fff) !important;
+    }
+    .hb-suggest {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px;
+        padding: 6px 8px; border-radius: 4px; font-size: 11px; overflow-wrap: anywhere;
+        border: 1px dashed var(--border-color, rgba(128,128,128,0.4));
+    }
+    .hb-suggest[hidden] { display: none !important; }
+    .hb-suggest code { font-size: 11px; overflow-wrap: anywhere; }
+    .hb-snapshots .aicli-snapshot-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+    .hb-body {
+        padding: 12px 14px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
+        display: flex; flex-direction: column; gap: 14px; font-size: 12px;
+    }
+    .hb-status { display: flex; flex-direction: column; gap: 4px; }
+    .hb-state { font-weight: 700; overflow-wrap: anywhere; }
+    .hb-muted, .hb-help { font-size: 11px; opacity: 0.85; overflow-wrap: anywhere; }
+    .hb-help { margin-top: 4px; }
+    .hb-progress { font-size: 11px; color: color-mix(in srgb, #ff8c00 45%, var(--text-color, #1c1c1c)); }
+    .hb-fields { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+    .hb-fields[disabled] { opacity: 0.6; }
+    .hb-field { border: 0; margin: 0; padding: 0; min-width: 0; }
+    .hb-label { font-size: 11px; font-weight: 700; padding: 0; }
+    .hb-label-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+    .hb-radios legend { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .hb-save { font-size: 11px; font-weight: 400; }
+    .hb-save.hb-saving { opacity: 0.85; }
+    .hb-target-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .hb-target {
+        flex: 1 1 200px; min-width: 0; box-sizing: border-box;
+        font-family: monospace; font-size: 11px; padding: 6px 8px; overflow-wrap: anywhere;
+        border: 1px solid var(--border-color, #ccc); border-radius: 4px;
+        background: var(--mild-background-color, rgba(0,0,0,0.03));
+    }
+    .hb-target.hb-empty { font-family: inherit; font-style: italic; }
+    .hb-check { font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; min-height: 14px; }
+    .hb-radios label, .hb-check-label {
+        display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; min-height: 28px;
+    }
+    .hb-radios input, .hb-check-label input { margin: 0 !important; flex: 0 0 auto; }
+    .hb-inline { display: flex; gap: 8px; align-items: center; }
+    .hb-wrap { flex-wrap: wrap; }
+    .hb-dialog select, .hb-dialog input[type="number"], .hb-dialog input[type="time"] {
+        margin: 0 !important; min-width: 0 !important; max-width: 100%;
+    }
+    #hb-keep { width: 72px; }
+    /* Own open/closed marker: a flex summary (phone rule) loses the native one. */
+    .hb-details summary { cursor: pointer; font-size: 11px; font-weight: 700; padding: 4px 0; list-style: none; }
+    .hb-details summary::-webkit-details-marker { display: none; }
+    .hb-details summary::before { content: '\25B8'; display: inline-block; width: 1em; }
+    .hb-details[open] summary::before { content: '\25BE'; }
+    .hb-details textarea {
+        display: block; width: 100%; box-sizing: border-box; margin: 4px 0 0;
+        font-family: monospace; font-size: 11px;
+    }
+    .hb-snapshots { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+    .hb-snapshots .aicli-snapshot-row span { overflow-wrap: anywhere; min-width: 0; }
+    .hb-footer {
+        display: flex; justify-content: flex-end; gap: 8px; padding: 8px 14px;
+        background: var(--title-header-background-color, var(--mild-background-color, #ededed));
+        border-top: 1px solid var(--border-color, #ccc);
+    }
+    /* .hb-secondary (Cancel, Close) looks like every other button now
+       (NATIVE_BUTTON_STYLE.md); the disabled look is in the native section. */
+
+    /* AUTO_CONTINUE_PATTERNS.md: Settings > Auto-continue patterns and its two
+       dialogs (they reuse the .hb-dialog shell of the Backup dialog). */
+    /* Own class, not .hb-details: the home backup dialog finds its one
+       summary by that class. The same open/closed marker. */
+    .acp-details summary { cursor: pointer; font-size: 11px; font-weight: 700; padding: 4px 0; list-style: none; }
+    .acp-details summary::-webkit-details-marker { display: none; }
+    .acp-details summary::before { content: '\25B8'; display: inline-block; width: 1em; }
+    .acp-details[open] summary::before { content: '\25BE'; }
+    /* .aicli-btn-slim sets display, which beats the hidden attribute. */
+    .acp-report-open[hidden] { display: none !important; }
+    /* A touch screen wider than a phone (a tablet) also needs 44 px targets. */
+    @media (pointer: coarse) {
+        .acp-toggle { min-height: 44px; min-width: 44px; box-sizing: border-box; padding: 0 6px; }
+        .acp-details summary { min-height: 44px; box-sizing: border-box; display: flex; align-items: center; }
+    }
+    .acp-help { font-size: 11px; opacity: 0.85; margin: 0 0 8px; }
+    .acp-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .acp-h { margin: 0; font-size: 12px; font-weight: 700; }
+    .acp-status { font-size: 11px; min-height: 14px; margin: 4px 0; overflow-wrap: anywhere; }
+    .acp-err { color: color-mix(in srgb, #dc2626 55%, var(--text-color, #1c1c1c)); }
+    .acp-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    .acp-empty { font-size: 11px; opacity: 0.8; }
+    .acp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 8px; border: 1px solid var(--border-color, #ccc); border-radius: 6px; }
+    .acp-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1 1 220px; min-width: 0; }
+    .acp-row-name { font-size: 12px; overflow-wrap: anywhere; }
+    .acp-row-meta { font-size: 11px; opacity: 0.8; }
+    .acp-row-re, .acp-bi-re, .acp-mono { font-family: monospace; font-size: 11px; overflow-wrap: anywhere; word-break: break-all; }
+    .acp-row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .acp-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; }
+    .acp-toggle input { margin: 0 !important; }
+    .acp-row-status { flex: 1 1 100%; font-size: 11px; min-height: 0; overflow-wrap: anywhere; }
+    .acp-row-status:empty { display: none; }
+    .acp-confirm { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; font-weight: 700; }
+    .acp-builtin-list { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+    .acp-bi-h { margin: 0 0 4px; font-size: 12px; font-weight: 700; }
+    .acp-bi-kind { margin: 0 0 6px 8px; }
+    .acp-bi-kind-h { font-size: 11px; font-weight: 700; opacity: 0.85; }
+    .acp-bi-rules { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+    .acp-bi-rules li { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .acp-bi-id { font-size: 11px; font-weight: 600; }
+    .acp-dialog { width: min(640px, calc(100vw - 32px)); }
+    .acp-dbody { padding: 12px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+    .acp-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .acp-field input, .acp-field select, .acp-field textarea { width: 100%; box-sizing: border-box; margin: 0 !important; }
+    .acp-two { display: flex; gap: 10px; flex-wrap: wrap; }
+    .acp-two > .acp-field { flex: 1 1 180px; }
+    .acp-testbox { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px dashed var(--border-color, #ccc); border-radius: 6px; }
+    .acp-test-out { font-size: 11px; overflow-wrap: anywhere; }
+    .acp-test-lines { margin: 4px 0 0; padding: 4px 4px 4px 34px; max-height: 220px; overflow: auto; font-family: monospace; font-size: 11px; background: var(--mild-background-color, rgba(0,0,0,0.04)); border-radius: 4px; }
+    .acp-test-lines li { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .acp-test-lines li.acp-hit { background: color-mix(in srgb, #16a34a 22%, transparent); font-weight: 700; }
+    .acp-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .acp-error:empty, .acp-saved:empty { display: none; }
+    .acp-dialog .acp-x {
+        width: 44px !important; height: 44px !important; min-width: 44px !important; flex: 0 0 44px;
+        margin: 0 !important; padding: 0 !important; border: none !important; border-radius: 4px !important;
+        background: transparent !important; color: var(--text-color, inherit) !important;
+        font-size: 24px !important; line-height: 1 !important; font-weight: 400 !important;
+        text-transform: none !important; box-shadow: none !important; cursor: pointer;
+    }
+    .acp-dialog :focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    .acp-dialog .hb-title:focus { outline: none; }
+    .acpr-fields { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 0; font-size: 11px; }
+    .acpr-fields dt { font-weight: 700; }
+    .acpr-fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .acpr-open[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
+    a.acpr-open { text-decoration: none !important; }
+
+    /* =======================================================================
+       Epic #307 — Manager overlays at phone size (docs/specs/MOBILE_RESPONSIVE.md).
+       Every rule is inside max-width: 600px, so the desktop page is unchanged.
+       Sweet-alert is Unraid's shared dialog: its rules are scoped to
+       body.aicli-mgr, a class ManagerLayout.php sets on this page only, so no
+       other plugin or Unraid page gets a restyled dialog.
+       ======================================================================= */
+    @media (max-width: 600px) {
+        /* Store card panels: the Resources panel's "Consolidate (N MB unsaved)"
+           button (shown only while an agent has unsaved data) was 32 px. */
+        .av2-panel .aicli-btn { min-height: 44px; box-sizing: border-box; }
+
+        /* Tab bar: each tab is a 44 px touch target (was 31 px). */
+        .aicli-tab-btn {
+            min-height: 44px; box-sizing: border-box;
+            display: inline-flex; align-items: center;
+        }
+
+        /* Sweet-alert on this page: 44 px buttons, and a label that wraps a
+           check box or radio is the touch target, so it is 44 px tall. */
+        body.aicli-mgr .sweet-alert .sa-button-container button,
+        body.aicli-mgr .sweet-alert .sa-confirm-button-container button {
+            min-height: 44px !important; min-width: 44px !important; box-sizing: border-box !important;
+        }
+        body.aicli-mgr .sweet-alert { padding: 1.25rem 1rem; }
+        body.aicli-mgr .sweet-alert label:has(input[type="checkbox"]),
+        body.aicli-mgr .sweet-alert label:has(input[type="radio"]) {
+            min-height: 44px; box-sizing: border-box; align-items: center;
+        }
+
+        /* Directory picker: full width with a margin, list fills the height. */
+        .pp-modal { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+        .pp-dir-list { height: auto; min-height: 160px; max-height: 50dvh; }
+        .pp-dir-item { min-height: 44px; box-sizing: border-box; }
+        .pp-btn-cancel, .pp-btn-confirm { min-height: 44px; min-width: 44px; padding-left: 16px; padding-right: 16px; }
+        .pp-path-bar input { min-height: 32px; font-size: 16px !important; }
+        .pp-modal input.pp-new-name { min-height: 44px; font-size: 16px !important; flex-basis: 100%; }
+        .pp-new-fields .pp-btn-confirm, .pp-new-fields .pp-btn-cancel { flex: 1 1 0; }
+
+        /* Store card panels: segmented channel control, the free-form
+           Envs rows' delete button, the auto-launch check box labels. */
+        .av2-seg label {
+            min-height: 44px; box-sizing: border-box;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .av2-ff-row .av2-ff-del { min-width: 44px !important; min-height: 44px !important; }
+        /* Form fields in the panels: 44 px tall, and 16 px text so iOS
+           Safari does not zoom the page when a field gets focus. */
+        .av2-panel input:not([type="checkbox"]):not([type="radio"]),
+        .av2-panel select {
+            min-height: 44px; box-sizing: border-box; font-size: 16px !important;
+        }
+        .av2-ff-row input { min-width: 0; }
+        .av2-al-toggle, .av2-al-fresh label { min-height: 44px; box-sizing: border-box; }
+
+        /* Config Hub and Relay forms: inline minimum widths (190-320 px) are
+           desktop sizes; on a phone each field takes the full row instead. */
+        #tab-relay label[style*="min-width"], #tab-hub div[style*="min-width"] {
+            min-width: 0 !important; flex-basis: 100% !important;
+        }
+        #tab-hub .hub-skill-file-path { flex: 1 1 auto; min-width: 0; width: auto !important; }
+        #tab-hub .hub-skill-file-row button { min-width: 44px !important; min-height: 44px !important; }
+        #tab-hub input[type="text"], #tab-hub input[type="password"],
+        #tab-relay input:not([type="checkbox"]):not([type="radio"]) {
+            max-width: 100%; box-sizing: border-box;
+        }
+
+        /* Config Hub editors: faded hint text and agent config paths were
+           3.2-3.7:1; raise them to readable contrast on a phone. */
+        #tab-hub span[style*="opacity:0.5"] { opacity: 0.8 !important; }
+        .hub-agent-tile-path { opacity: 0.85; font-size: 11px; }
+
+        /* Home Storage cards: the grid track was minmax(400px, 1fr), wider
+           than a phone, so each card and its action icons ran past the right
+           edge (clipped, not scrollable). One full-width column instead. */
+        .storage-entity-grid { grid-template-columns: minmax(0, 1fr) !important; }
+        /* Home Storage card actions (Persist, Consolidate, Repair, Delete)
+           open the home dialogs: 44 px icons instead of 20 px. */
+        .storage-entity-card .se-actions .stat-icon-btn { width: 44px; height: 44px; font-size: 16px; }
+
+        /* Boot-integrity banner (Home Storage) and migrate progress card:
+           orange-on-tint headings were 2.3:1 and faded notes 4.2-4.3:1.
+           The border keeps the warning colour; the text uses the theme's. */
+        #aicli-boot-integrity-banner [style*="color:#e67e22"],
+        #aicli-boot-integrity-banner [style*="color:#c0392b"] { color: var(--text-color, #222) !important; }
+        #aicli-boot-integrity-banner [style*="opacity:0.6"],
+        #aicli-boot-integrity-banner [style*="opacity:0.75"] { opacity: 0.9 !important; }
+        #migrate-file { opacity: 0.9 !important; }
+
+        /* Storage target pickers (Configuration and Home Storage backup). */
+        .aicli-storage-picker label { min-height: 44px; box-sizing: border-box; }
+        /* Status chips (recommended / pool / free space / warnings): the light
+           hues on tinted grounds were 1.7-3.1:1. Mixing the hue toward the
+           theme text colour keeps it recognisable and reaches 4.5:1 in light
+           and dark themes; 11 px instead of 9 px. */
+        .aicli-sp-chip {
+            color: color-mix(in srgb, var(--chip-fg, currentColor) 40%, var(--text-color, #1c1c1c)) !important;
+            font-size: 11px !important;
+        }
+        /* HOME_BACKUP.md #287: the per-home Backup dialog on a phone — full
+           width with a 12 px margin, 44 px targets, 16 px field text (no iOS
+           zoom), footer buttons share the row. */
+        .hb-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+        .hb-radios label, .hb-check-label, .hb-details summary { min-height: 44px; box-sizing: border-box; }
+        .hb-details summary { display: flex; align-items: center; }
+        .hb-dialog input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+        .hb-dialog select, .hb-dialog textarea {
+            min-height: 44px; box-sizing: border-box; font-size: 16px !important;
+        }
+        #hb-keep { width: 96px; }
+        .hb-footer .aicli-btn-slim { flex: 1 1 0 !important; }
+        .hb-target-row .aicli-btn-slim { flex: 1 1 auto !important; }
+        .hb-suggest .aicli-btn-slim { flex: 1 1 auto !important; }
+        .hb-snapshots .aicli-snapshot-row { flex-wrap: wrap; }
+        .hb-snapshots .aicli-snapshot-actions { flex: 1 1 100%; justify-content: flex-end; }
+        .storage-entity-card .se-backup { flex-wrap: wrap; }
+        .storage-entity-card .se-backup-btn { margin-left: auto !important; }
+        /* AUTO_CONTINUE_PATTERNS.md on a phone: full-width dialogs, 44 px
+           targets, 16 px field text (no iOS zoom), actions share the row. */
+        .acp-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+        .acp-dialog input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+        .acp-dialog select, .acp-dialog textarea { min-height: 44px; box-sizing: border-box; font-size: 16px !important; }
+        .acp-footer { flex-wrap: wrap; }
+        .acp-footer .aicli-btn-slim { flex: 1 1 auto !important; }
+        /* Full width lands on a sub-pixel row (43.99 px); 46 px keeps it a 44 px target. */
+        .acp-testbox .aicli-btn-slim { width: 100%; height: 46px !important; }
+        .acp-toggle { min-height: 44px; min-width: 44px; box-sizing: border-box; padding: 0 6px; }
+        .acp-row-actions { width: 100%; }
+        .acp-row-actions .aicli-btn-slim { flex: 1 1 auto !important; }
+        .acp-details summary { min-height: 44px; box-sizing: border-box; display: flex; align-items: center; }
+        .acpr-fields { grid-template-columns: 1fr; }
+        /* NATIVE_BUTTON_STYLE.md: the search box takes its own row, so the
+           filter buttons and the sort button fit the phone width (the sort
+           button was clipped at the right edge). */
+        .agent-filter-bar { flex-wrap: wrap; gap: 8px 10px; }
+        .agent-search { flex: 1 1 100%; }
+
+        /* PHONE (2026-09-29): Config Hub + Agent Relay (MOBILE_OVERLAYS.md,
+           "2026-09-29 — Config Hub and Agent Relay on a phone"). Owner
+           report from an iPhone: header buttons ran off the right edge, row
+           buttons sat as wide boxes beside the content, and the top-menu
+           capitals were too wide. Scoped to #tab-hub and #tab-relay (the
+           Relay Permissions dialog is inside #tab-relay). */
+
+        /* Buttons: Unraid has no phone rule of its own, so its capitals stay
+           (top-menu themes); only the letter spacing goes from 1.8 px to
+           0.5 px, as on the drawer buttons (NATIVE_BUTTON_STYLE.md). Unraid's
+           86 px minimum width becomes the 44 px tap width, so an icon-only
+           button is a 44 px square. */
+        html:not(.Theme--sidebar) :is(#tab-hub, #tab-relay) .aicli-btn-slim { letter-spacing: 0.5px !important; }
+        :is(#tab-hub, #tab-relay) .aicli-btn-slim { min-width: 44px !important; padding: 0 10px !important; }
+
+        /* Card headers: the title takes its own line; the buttons wrap and
+           share the next line. An icon-only button (Refresh) stays 44 px. */
+        #tab-hub .aicli-card-header { flex-wrap: wrap; row-gap: 12px; }
+        #tab-hub .aicli-card-header > span:first-child { flex: 1 1 100%; min-width: 0; }
+        #tab-hub .aicli-card-header > span:last-child:has(> .aicli-btn-slim) { flex: 1 1 100%; flex-wrap: wrap; row-gap: 8px; min-width: 0; }
+        #tab-hub .aicli-card-header > span:last-child:has(> .aicli-btn-slim) > .aicli-btn-slim { flex: 1 1 auto !important; }
+        #tab-hub .aicli-card-header > span:last-child:has(> .aicli-btn-slim) > .aicli-btn-slim[title="Refresh"] { flex: 0 0 44px !important; }
+
+        /* Rows with actions (MCP servers, skills, commands, drift keys, git
+           files): the content takes the full width, the actions go under it
+           and share one line. */
+        #tab-hub .hub-row, #tab-hub .hub-git-file, #tab-hub .hub-apply-session { flex-wrap: wrap; row-gap: 8px; }
+        #tab-hub .hub-row-info { flex: 1 1 100% !important; }
+        #tab-hub .hub-row-actions { display: flex !important; flex: 1 1 100%; gap: 8px; min-width: 0; }
+        #tab-hub .hub-row-actions > .aicli-btn-slim { flex: 1 1 0 !important; min-width: 0 !important; }
+        #tab-hub .hub-row-cmd { white-space: normal !important; word-break: break-all; }
+        #tab-hub .hub-drift-file, #tab-hub .hub-drift-key { flex: 1 1 100%; min-width: 0; word-break: break-all; }
+        #tab-hub .hub-git-file-path { flex: 1 1 100% !important; white-space: normal !important; word-break: break-all; }
+        #tab-hub .hub-apply-session-id { flex: 1 1 100%; min-width: 0; word-break: break-all; }
+        #tab-hub .hub-apply-session > .aicli-btn-slim { flex: 1 1 100% !important; }
+
+        /* Git history: a commit row is a 44 px tap target and wraps. */
+        #tab-hub .hub-git-sum { min-height: 44px; box-sizing: border-box; flex-wrap: wrap; row-gap: 2px; }
+        #tab-hub .hub-git-sum > span:last-child { flex: 1 1 100% !important; }
+        #tab-hub #hub-git-card .aicli-card-header > span:first-child > span { display: block; }
+        #tab-hub #hub-git-enabled-ui label { flex: 1 1 100%; min-width: 0; }
+        #tab-hub #hub-git-enabled-ui label input { width: 100% !important; }
+        #tab-hub #hub-git-enabled-ui .aicli-btn-slim { flex: 1 1 auto !important; }
+
+        /* Editors: environment rows wrap (key on its own line), the Save and
+           Cancel row shares the width. */
+        #tab-hub .hub-env-row { flex-wrap: wrap; }
+        #tab-hub .hub-env-row .hub-env-key { flex: 1 1 100%; width: auto !important; }
+        #tab-hub .hub-env-row .hub-env-val { flex: 1 1 0 !important; min-width: 0; max-width: none !important; }
+        :is(#hub-editor, #hub-skill-editor, #hub-command-editor) div[style*="display:flex; gap:8px"] > .aicli-btn-slim { flex: 1 1 0 !important; }
+        #tab-hub #hub-editor label { flex: 1 1 100%; }
+        #tab-hub #hub-f-name, #tab-hub #hub-skill-name, #tab-hub #hub-command-name { width: 100% !important; }
+
+        /* Summaries (details) are 44 px tap targets. A text-only summary
+           stays a list item (display:flex would drop its open/closed
+           triangle) and gets a 44 px line; the git commit rows are flex. */
+        #tab-hub .hub-drift-values, #tab-relay details > summary {
+            display: list-item !important; min-height: 44px; line-height: 22px; padding: 11px 0; box-sizing: border-box;
+        }
+
+        /* Form fields: 44 px tall, 16 px text so iOS Safari does not zoom
+           the page when a field gets focus. */
+        :is(#tab-hub, #tab-relay) select,
+        :is(#tab-hub, #tab-relay) input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]) {
+            min-height: 44px; box-sizing: border-box; font-size: 16px !important; max-width: 100%;
+        }
+        :is(#tab-hub, #tab-relay) textarea { font-size: 16px !important; box-sizing: border-box; max-width: 100%; }
+        #tab-relay label:has(> input[type="checkbox"]), #tab-relay label:has(> input[type="radio"]) { min-height: 44px; box-sizing: border-box; }
+
+        /* Small text: 9-11 px desktop sizes read at 12 px on a phone. */
+        #tab-hub :is([style*="font-size:9px"], [style*="font-size:10px"], [style*="font-size:11px"], [style*="font-size: 9px"], [style*="font-size: 10px"], [style*="font-size: 11px"]),
+        #tab-relay :is([style*="font-size:10px"], [style*="font-size:11px"], [style*="font-size: 10px"], [style*="font-size: 11px"]) { font-size: 12px !important; }
+
+        #tab-hub .hub-agent-tile-path, #tab-relay .relay-peer-label, #tab-relay .relay-peer-pill { font-size: 12px !important; }
+
+        /* Relay: topic rows get a divider; the restart notice rows wrap. */
+        #tab-relay .relay-topic-row { padding: 6px 0; border-bottom: 1px solid var(--border-color, rgba(128,128,128,.2)); }
+        #tab-relay .relay-topic-row code { overflow-wrap: anywhere; min-width: 0; flex-shrink: 1 !important; }
+        #tab-relay .relay-restart-row { flex-wrap: wrap; }
+        #tab-relay .relay-restart-row code { flex: 1 1 100%; word-break: break-all; }
+        #tab-relay .relay-restart-row .aicli-btn-slim, #relay-reload-all { flex: 1 1 100% !important; width: 100%; }
+
+        /* Topic owners: a stacked card per topic. The topic and the owner
+           select take the full width; "Start at boot" (its label is the tap
+           target) and Start now share the last line. */
+        #relay-owner-table { grid-template-columns: minmax(0, 1fr) auto !important; }
+        #relay-owner-table [role="columnheader"] { display: none !important; }
+        #relay-owner-table .relay-owner-topic-cell { grid-column: 1 / -1; padding-top: 10px !important; }
+        #relay-owner-table .relay-owner-select-cell { grid-column: 1 / -1; flex-wrap: wrap; }
+        #relay-owner-table .relay-owner-select-cell select { flex: 1 1 100%; width: 100%; }
+        #relay-owner-table .relay-owner-boot-cell { justify-content: flex-start !important; padding-bottom: 10px !important; }
+        #relay-owner-table .relay-owner-act-cell { padding-bottom: 10px !important; }
+        #relay-owner-table .relay-owner-boot { min-height: 44px; gap: 6px; }
+        #relay-owner-table .relay-owner-boot-text { display: inline !important; }
+        #relay-owner-table .relay-owner-boot input { width: 20px; height: 20px; }
+
+        /* Activity history: the header wraps; the time moves right, the
+           preview takes its own line. */
+        #tab-relay .relay-hist-head { flex-wrap: wrap; min-height: 44px; box-sizing: border-box; row-gap: 2px; }
+        #tab-relay .relay-hist-who { flex: 1 1 auto !important; max-width: calc(100% - 20px) !important; }
+        #tab-relay .relay-hist-when { margin-left: auto; }
+        #tab-relay .relay-hist-preview { flex: 1 1 100% !important; }
+
+        /* Relay forms: each field and button row fills the width. */
+        #tab-relay details label[style*="display:grid"] { flex: 1 1 100%; }
+        #tab-relay details label[style*="display:grid"] :is(input, select) { width: 100% !important; }
+        /* END PHONE (2026-09-29): Config Hub + Agent Relay */
+
+        /* PHONE (2026-09-29): Configuration, Store, Home Storage, Debug */
+        /* MOBILE_OVERLAYS.md, "Settings phone review — Configuration, Store,
+           Home Storage, Debug". Measured on the live page at 360, 375 and
+           390 px, white theme and azure (a side bar takes 80 px). Every rule
+           is scoped to these four tabs, the Manager tab bar and header, or a
+           dialog that they open. The Config Hub and Agent Relay tabs are not
+           changed here. */
+
+        /* Tab bar: a grid of whole labels instead of a strip that scrolls and
+           cuts "Home Storage" at the screen edge. The health chip goes to its
+           own line at the right. */
+        div:has(> .aicli-tabs) { flex-wrap: wrap; }
+        .aicli-tabs {
+            display: grid !important;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 4px; flex: 1 1 100%;
+            overflow: visible !important;
+            padding: 0 0 4px !important;
+        }
+        .aicli-tabs .aicli-tab-btn {
+            justify-content: center; text-align: center;
+            white-space: normal; line-height: 1.2;
+            padding: 4px 6px; margin: 0; bottom: 0;
+            font-size: 11px; letter-spacing: 0.02em;
+            border-radius: 4px; border-bottom: 1px solid var(--border-color, #333);
+        }
+        #aicli-health-chip { margin-left: auto; min-height: 44px; }
+
+        /* Native Unraid buttons on a phone. Unraid's own rule (default-base.css)
+           has no phone size: 1.8 px letter spacing, an 86 px minimum width and
+           a 12 px right margin. Here: 0.5 px spacing (as the drawer buttons),
+           a 44 px minimum, no side margin (each row has a gap), and a button
+           can shrink in a narrow row. */
+        :is(#tab-config, #tab-store, #tab-storage, #tab-debug, .hb-dialog, .pp-modal, #migration-overlay)
+            :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm, .filter-btn, .av2-chip, .log-action-btn) {
+            letter-spacing: 0.5px !important;
+            min-width: 44px !important;
+            max-width: 100%;
+            margin-left: 0 !important; margin-right: 0 !important;
+            flex-shrink: 1;
+        }
+        .Theme--sidebar :is(#tab-config, #tab-store, #tab-storage, #tab-debug, .hb-dialog, .pp-modal, #migration-overlay)
+            :is(.aicli-btn-slim, .aicli-btn, .av2-btn, .agent-sort-btn, .pp-btn-cancel, .pp-btn-confirm, .filter-btn, .av2-chip, .log-action-btn) {
+            letter-spacing: normal !important;
+        }
+
+        /* Card headers with buttons (AI Agent Marketplace, SSH Keys): the
+           title has its own line, the buttons share the next line. */
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-header:has(> button) {
+            flex-wrap: wrap; row-gap: 4px; padding: 8px 12px !important;
+        }
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-header:has(> button) > span:first-child { flex: 1 1 100%; }
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-header > button { flex: 1 1 auto; font-size: 1.1rem !important; }
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-body { padding: 12px; }
+
+        /* Settings lists: the label goes above its field. Side by side, the
+           label took up to 38 % of the card, so a field was 73 px wide
+           ("/boot/co") and a row of controls ran past the card edge. */
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-body dl {
+            grid-template-columns: minmax(0, 1fr) !important;
+            gap: 4px !important;
+        }
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-body dl dt {
+            text-align: left !important; padding: 10px 0 0 !important;
+        }
+        :is(#tab-config, #tab-store, #tab-storage) .aicli-card-body dl dt:empty { display: none !important; }
+        /* A row of controls wraps: a field keeps a usable width and its
+           buttons go to the next line, full width. */
+        :is(#tab-config, #tab-store, #tab-storage) .input-row { flex-wrap: wrap !important; row-gap: 8px !important; }
+        :is(#tab-config, #tab-store, #tab-storage) .input-row > :is(select, input[type="text"], input[type="password"]):not([style*="px !important"]) { flex: 1 1 160px !important; min-width: 0 !important; }
+        :is(#tab-config, #tab-store, #tab-storage) .input-row > input[readonly] { flex-basis: 100% !important; text-overflow: ellipsis; }
+        :is(#tab-config, #tab-store, #tab-storage) .input-row > .aicli-btn-slim { flex: 0 1 auto; }
+        :is(#tab-config, #tab-store, #tab-storage) .input-row > input[readonly] ~ .aicli-btn-slim { flex: 1 1 auto; }
+        /* Fields: 44 px tall and 16 px text, so iOS Safari does not zoom
+           the page when a field gets focus. */
+        :is(#tab-config, #tab-store, #tab-storage, #tab-debug) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), select) {
+            height: auto !important; min-height: 44px !important;
+            font-size: 16px !important; box-sizing: border-box;
+        }
+        :is(#tab-config, #tab-store, #tab-storage, #tab-debug) textarea { font-size: 16px !important; box-sizing: border-box; }
+        /* Small help text (9-11 px) is 12 px on a phone. */
+        :is(#tab-config, #tab-storage) :is([style*="font-size:9px"], [style*="font-size:10px"], [style*="font-size:11px"], [style*="font-size: 9px"], [style*="font-size: 10px"], [style*="font-size: 11px"]):not(.aicli-sp-chip):not(textarea):not(input):not(select) {
+            font-size: 12px !important;
+        }
+        #aicli-voice-setup .aicli-vs-note, .acp-help, .acp-row-meta, .acp-empty, .acp-status { font-size: 12px; }
+        /* Storage target chips wrap inside the card instead of running off it. */
+        .aicli-sp-chip { white-space: normal !important; max-width: 100%; overflow-wrap: anywhere; box-sizing: border-box; }
+        #tab-config .acp-toolbar .aicli-btn-slim { flex: 1 1 auto; }
+        #tab-config .acp-builtin-list, #tab-config .acp-bi-kind { margin-left: 0; }
+        #pane-input-rules-section > summary { min-height: 44px; display: flex; align-items: center; box-sizing: border-box; }
+
+        /* Agent Store. Unraid's 12 px button margin took 60 px from the five
+           chips, so "Resources" and "Terminal" were cut to "Reso..." and
+           "Termi...". With no margin they fit at 360 px. On a side-bar theme
+           the card is about 240 px wide, too narrow for five 44 px chips with
+           a label, so there the row wraps to three and two. */
+        #tab-store .av2-strip { gap: 4px; }
+        #tab-store .av2-strip .av2-chip { padding-left: 2px !important; padding-right: 2px !important; }
+        .Theme--sidebar #tab-store .av2-strip { flex-wrap: wrap !important; }
+        .Theme--sidebar #tab-store .av2-strip .av2-chip { flex: 1 1 30% !important; }
+        #tab-store .agent-filters { flex: 1 1 auto; }
+        #tab-store .agent-filters .filter-btn { flex: 1 1 auto; }
+        #tab-store .av2-foot .av2-buttons .av2-btn { flex: 1 1 calc(50% - 4px) !important; }
+        #tab-store .av2-panel { padding: 12px; }
+        /* Panel rows (Envs, Terminal): the label goes above the field, and
+           the (i) help sits beside the field as a 44 px target. Before, the
+           120 px label column pushed the field and the (i) past the card. */
+        #tab-store .av2-row { grid-template-columns: minmax(0, 1fr) 46px; row-gap: 2px; }
+        #tab-store .av2-row > label { grid-column: 1 / -1; align-self: end; padding-top: 6px; }
+        #tab-store .av2-row:has(> .av2-row-control) > label { padding-top: 6px; }
+        #tab-store .av2-row > :not(label):not(.av2-info) { min-width: 0; }
+        #tab-store .av2-row > .av2-info {
+            box-sizing: content-box; width: 18px; height: 18px; /* + 2 x 14 px = 46 px (44 px lands on 43.99) */
+            border: 14px solid transparent; background-clip: padding-box;
+            box-shadow: inset 0 0 0 1px rgba(127,127,127,0.5);
+        }
+        #tab-store .av2-info[data-tip]::after { max-width: min(280px, 70vw); }
+        #tab-store .av2-panel-footer { flex-wrap: wrap; align-items: center; }
+        #tab-store .av2-panel-footer .av2-btn { flex: 1 1 100%; }
+        #tab-store .av2-row input, #tab-store .av2-row select { height: auto; }
+        /* Envs variables and secrets: the name has its own line (it was cut
+           to "HUB_GI"), the value and the remove button share the next one. */
+        #tab-store .av2-ff-row { flex-wrap: wrap; }
+        #tab-store .av2-ff-row .av2-ff-name { flex: 1 1 100%; }
+        #tab-store .av2-ff-row .av2-ff-eq { display: none; }
+        #tab-store .av2-ff-row .av2-ff-val { flex: 1 1 0; min-width: 0; }
+        #tab-store .av2-ff-block h4 { flex-wrap: wrap; }
+
+        /* Debug Console: the one desktop row wraps. The log tabs, the filters
+           and the actions each take a full-width line (they ran 170 px past the
+           card before); 44 px targets. The Support menu opens under its button,
+           inside the console. */
+        #tab-debug .log-header { flex-wrap: wrap; height: auto; padding: 4px 6px; gap: 4px 6px; }
+        #tab-debug .log-tabs { flex: 1 1 100%; }
+        #tab-debug .log-tab { flex: 1 1 0; min-height: 44px; display: flex; align-items: center; justify-content: center; padding: 0 4px; font-size: 11px; line-height: 1.2; }
+        #tab-debug #log-filter-row { flex: 1 1 100%; flex-wrap: wrap; }
+        #tab-debug #log-filter-row label { min-height: 44px; flex: 1 1 40%; font-size: 11px; }
+        #tab-debug #log-filter-row :is(select, input[type="text"]) { flex: 1 1 auto; width: auto !important; min-width: 0 !important; }
+        #tab-debug .log-actions { flex: 1 1 100%; justify-content: flex-end; margin-left: 0; }
+        #tab-debug .log-action-btn { min-height: 44px; height: auto; box-sizing: border-box; }
+        #tab-debug .log-icon-btn { width: 44px !important; flex: 0 0 44px; }
+        #tab-debug .log-menu-btn { flex: 0 1 auto; }
+        #tab-debug .log-menu { min-width: min(260px, calc(100vw - 48px)); }
+        #tab-debug .log-menu .log-menu-item, #tab-debug .log-menu-check { min-height: 44px; font-size: 14px; }
+        #tab-debug #autoscroll-status { font-size: 11px; margin-right: auto; }
+        #tab-debug .log-body { font-size: 12px; height: min(710px, 75vh) !important; }
+    }
 </style>

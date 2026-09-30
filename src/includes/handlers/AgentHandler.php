@@ -85,6 +85,11 @@ class AgentHandler {
         $wasQueued = \AICliAgents\Services\PendingAgentUpgradeService::read($agentId) !== [];
         \AICliAgents\Services\PendingAgentUpgradeService::cancel($agentId);
         \AICliAgents\Services\UtilityService::clearInstallStatus($agentId);
+        // A queued upgrade owns a waiting activity entry, but has no worker to
+        // cancel. Dismiss that non-running entry as part of the same operation;
+        // otherwise the tray and Store card keep rendering WAIT forever after
+        // the pending marker has been removed.
+        \AICliAgents\Services\ActivityService::dismiss('install_' . $agentId);
         aicli_log("Agent upgrade cancelled by user for $agentId (was_queued=" . ($wasQueued ? '1' : '0') . ")", AICLI_LOG_INFO);
         return ['status' => 'ok', 'cancelled' => $wasQueued,
                 'message' => $wasQueued ? 'Queued upgrade cancelled.' : 'No queued upgrade to cancel.'];
@@ -105,11 +110,38 @@ class AgentHandler {
         return \AICliAgents\Services\InstallerService::estimateUpgradeBackup($agentId, $dest);
     }
 
+    /** #243: marker path — "the install now running for this agent is side by side". */
+    private static function sideBySideMarker(string $agentId): string {
+        return "/tmp/unraid-aicliagents/install-sidebyside-$agentId";
+    }
+
+    /**
+     * #243 (docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md): written at EVERY install
+     * admission — created for a side-by-side install, removed for any other —
+     * so a leftover from an earlier install can never mislabel this one. A
+     * separate file, not a key in install-status-<id>: install-bg.php rewrites
+     * that file whole on every step.
+     */
+    private static function markSideBySideInstall(string $agentId, bool $sideBySide): void {
+        $marker = self::sideBySideMarker($agentId);
+        if ($sideBySide) {
+            @file_put_contents($marker, (string) time());
+        } else {
+            @unlink($marker);
+        }
+    }
+
+    /** #243: false when the listed install never touches the agent's running sessions. */
+    private static function installInterrupts(string $agentId): bool {
+        return !is_file(self::sideBySideMarker($agentId));
+    }
+
     /**
      * Scan /tmp/unraid-aicliagents/install-status-* and return the agent ids
      * whose install is still in progress (progress > 0 and < 100). The UI
      * uses this to grey out icons in the New Workspace overlay + disable
-     * launch buttons in the drawer.
+     * launch buttons in the drawer. Each entry carries `interrupts` (#243):
+     * false for a side-by-side install, which the UI must not hold terminals for.
      *
      * Read-only (docs/specs/EVENT_FIRST_RECONCILIATION.md R3): a stale marker
      * is skipped here, never unlinked — the unlink moved to the supervisor-tick
@@ -142,6 +174,7 @@ class AgentHandler {
                             'agentId' => $agentId,
                             'progress' => 99,
                             'status' => 'Waiting for running processes before activating the upgraded version',
+                            'interrupts' => true, // #243: a parked activation does hold its sessions
                         ];
                         $seen[$agentId] = true;
                         continue;
@@ -156,6 +189,9 @@ class AgentHandler {
                     'agentId'  => $m[1],
                     'progress' => $progress,
                     'status'   => (string)($status['status_text'] ?? $status['status'] ?? ''),
+                    // #243: the terminal page hides an agent's terminals only
+                    // for an install that really interrupts them.
+                    'interrupts' => self::installInterrupts($m[1]),
                 ];
                 $seen[$m[1]] = true;
             }
@@ -166,6 +202,7 @@ class AgentHandler {
                 'agentId' => $agentId,
                 'progress' => 99,
                 'status' => 'Waiting for running processes before activating the upgraded version',
+                'interrupts' => true, // #243: a parked activation does hold its sessions
             ];
         }
         return ['status' => 'ok', 'active' => $active];
@@ -247,18 +284,27 @@ class AgentHandler {
      * path which thinks it must close sessions and a side-by-side path that has
      * made closing unnecessary must never half-run together.
      *
-     * The three reasons to still wait:
+     * The reasons to still wait:
      *
-     *  1. The agent's source type is not one whose install output is entirely
-     *     reconstructible. In practice: `curl_install` agents, whose vendor
-     *     scripts land their binary inside a captive home directory inside the
-     *     agent's own tree. Versioning that path is real work with its own
-     *     phase; claiming side-by-side for them before it is done would be
-     *     claiming a guarantee that is not there.
-     *  2. The agent is not on the versioned layout yet — it has never been
-     *     mounted at a generation-qualified path, so there is no second place
-     *     to put a version. This resolves itself: the first upgrade after this
-     *     code ships converts the layout, and every later one qualifies.
+     *  0. The source is not eligible (SourceResolver::supportsSideBySideInstall).
+     *     npm, tarball and github_release agents are. Since 2026-09-23 (#270) a
+     *     `curl_install` agent is eligible too, but ONLY with a checked
+     *     `source.captive_state` declaration (antigravity-cli, for example); a
+     *     curl_install agent without one waits. The old rule "curl_install never
+     *     goes side by side" (2026-09-15) no longer holds.
+     *     Note: op_mount logs "generation A is still in use — mounting
+     *     generation B beside it" for ANY layered agent whose newest layers form
+     *     a new generation while the old one runs. That is a mount decision, not
+     *     this install decision, so it can appear for an agent that this
+     *     function sends to the closed-set path (2026-09-29 forum report).
+     *  1. The source is eligible but the current storage backend cannot stage
+     *     and activate a versioned successor. Both layering and plain-directory
+     *     storage provide a stable-link activation path; a missing/failed
+     *     capability response is treated conservatively.
+     *  2. A previously staged successor is still awaiting activation. It is
+     *     already durable, but a second install cannot be admitted until the
+     *     first is active; otherwise a legacy mount could accumulate staged
+     *     successors while its sessions remain open.
      *  3. The ceiling on concurrently-mounted generations is already reached.
      *     Each one costs a live overlay plus a writable layer of a few hundred
      *     megabytes on a write-endurance-limited stick, so past the ceiling the
@@ -267,20 +313,28 @@ class AgentHandler {
      * The message is written to be read by a person: it is what the Store card
      * shows underneath "Upgrade queued safely".
      */
-    public static function sideBySideInstallBlocker(string $agentId): ?string {
+    public static function sideBySideInstallBlocker(string $agentId, ?array $mounted = null): ?string {
         $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
         $agent = $registry[$agentId] ?? null;
         if (!is_array($agent)) {
             return 'this agent is not in the registry';
         }
         if (!\AICliAgents\Services\Sources\SourceResolver::supportsSideBySideInstall($agent)) {
-            return 'this agent keeps its sign-in inside its own install folder, so a new version cannot run beside the old one yet';
+            return 'this agent has no checked list of the sign-in and settings files its installer writes, so a new version cannot run beside the old one yet';
+        }
+        if (!\AICliAgents\Services\FileStorage::agentStorageSupportsSideBySide($agentId)) {
+            return 'the current storage backend has no versioned activation path, so this upgrade waits for its sessions to close';
         }
 
-        $mounted = \AICliAgents\Services\AgentRegistry::mountedGenerations($agentId);
-        if ($mounted === []) {
-            return 'this agent has not been moved onto the side-by-side layout yet; the next upgrade will do that';
+        // A legacy fixed mount does NOT block staging. The new version is baked
+        // beside it while existing processes continue using the old mount; the
+        // activation job converts the stable path only after those holders exit.
+        // Treating an empty mounted-generation list as a queue condition made
+        // every first upgrade contradict the side-by-side promise in the Store.
+        if (\AICliAgents\Services\UpgradeRelaunchService::hasPendingActivation($agentId)) {
+            return 'a previously installed upgrade is waiting for its active sessions to close before activation';
         }
+        $mounted ??= \AICliAgents\Services\AgentRegistry::mountedGenerations($agentId);
         if (!\AICliAgents\Services\AgentRegistry::canAddGeneration(count($mounted))) {
             return 'two versions of this agent are already running; close a workspace before installing a third';
         }
@@ -386,7 +440,7 @@ class AgentHandler {
         // holder and retry. Fail-open: detection miss returns no holders.
         if ($force) {
             $ourSids = array_values(array_filter(array_map(
-                static fn($s): string => (string)($s['id'] ?? ''),
+                static fn($s): string => (string)$s['id'],
                 \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId)
             )));
             $externalHolders = self::externalBinaryHolders($agentId, $ourSids);
@@ -450,6 +504,11 @@ class AgentHandler {
         // AICLI_SESSION_ID in /proc/environ) can kill mid-install. Needed when an
         // upgrade is triggered from inside an agent session; /proc/environ is
         // fixed at exec, so this must happen at the spawn site.
+        // #243: say, where list_active_installs can read it, whether this
+        // install interrupts the agent's sessions. Decided ONCE, here, so the
+        // response below and every later read tell the same story.
+        $sideBySide = (!$force && self::sideBySideInstallBlocker($agentId) === null);
+        self::markSideBySideInstall($agentId, $sideBySide);
         aicli_exec_bg("env -u AICLI_SESSION_ID /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg);
             // Tell the caller WHAT KIND of install this is. The Store hides every
             // terminal for an agent while it installs, which is right only when
@@ -462,7 +521,7 @@ class AgentHandler {
                 'status'              => 'ok',
                 'message'             => 'Installation started',
                 'pre_closed_sessions' => $preClosed,
-                'side_by_side'        => (!$force && self::sideBySideInstallBlocker($agentId) === null),
+                'side_by_side'        => $sideBySide,
                 'open_sessions'       => count($sessions),
             ];
         } finally {
@@ -590,7 +649,7 @@ class AgentHandler {
         // the upgrade close did not. Mirror it here (env-scoped => safe, no broad
         // name/path pkill).
         $reaped = self::reapUpgradeSurvivors(array_map(
-            static fn($s): string => (string)($s['id'] ?? ''), $sessions
+            static fn($s): string => (string)$s['id'], $sessions
         ));
         if (!empty($reaped)) {
             aicli_log("Upgrade: reaped " . count($reaped) . " env-scoped survivor(s) for $agentId after pane kill", AICLI_LOG_INFO);
@@ -979,7 +1038,24 @@ class AgentHandler {
             $pinned = $installed;
         }
 
-        \AICliAgents\Services\AgentRegistry::setChannel($agentId, $channel, $pinned);
+        if (!\AICliAgents\Services\AgentRegistry::setChannel($agentId, $channel, $pinned)) {
+            return [
+                'status' => 'error',
+                'message' => 'Could not save the release channel. The displayed selection has been restored.',
+                'channel' => \AICliAgents\Services\AgentRegistry::getChannel($agentId),
+                'pinned' => \AICliAgents\Services\AgentRegistry::getPinned($agentId),
+            ];
+        }
+        $savedChannel = \AICliAgents\Services\AgentRegistry::getChannel($agentId);
+        $savedPinned = \AICliAgents\Services\AgentRegistry::getPinned($agentId);
+        if ($savedChannel !== $channel || ($channel === 'pinned' && $savedPinned !== $pinned)) {
+            return [
+                'status' => 'error',
+                'message' => 'The release channel did not persist. The displayed selection has been restored.',
+                'channel' => $savedChannel,
+                'pinned' => $savedPinned,
+            ];
+        }
         // Clear old notification for this agent since channel changed
         \AICliAgents\Services\VersionCheckService::clearNotification($agentId);
         \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'agent_registry', 'agent_channel_set', ['agent' => $agentId, 'channel' => $channel, 'pinned' => $pinned]);

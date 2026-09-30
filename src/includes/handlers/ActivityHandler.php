@@ -71,6 +71,14 @@ class ActivityHandler
         foreach (self::relayWaitingActivities() as $entry) {
             $activities[] = $entry;
         }
+        // RELAY_LINKED_BOXES.md (UI, Activity tray): one `relay_peer_queue`
+        // entry per linked box whose outbox has waited over 5 minutes. Also a
+        // live projection of the outbox, never stored in the registry.
+        try {
+            foreach (\AICliAgents\Services\RelayPeerService::queueActivities() as $entry) $activities[] = $entry;
+        } catch (\Throwable $e) {
+            // The tray must list even when the linked-box state cannot be read.
+        }
         return ['status' => 'ok', 'activities' => $activities];
     }
 
@@ -144,6 +152,20 @@ class ActivityHandler
                 return ['status' => 'ok', 'delivered' => true, 'senders' => $r['senders'] ?? 0];
             case 'empty':
                 return ['status' => 'ok', 'delivered' => false, 'message' => 'Nothing left to deliver'];
+            case 'unconfirmed':
+                // #320: the notice is in the input box and Enter was pressed, but the
+                // agent did not take it. Nothing was typed twice; it stays queued and
+                // the next drain presses Enter again.
+                // 2026-09-30: after the bounded retry gave up, nothing presses Enter
+                // again by itself, so do not promise that.
+                return [
+                    'status'    => 'ok',
+                    'delivered' => false,
+                    'message'   => ($r['reason'] ?? '') === 'own-notice-stuck'
+                        ? 'Enter was pressed, but the agent did not take the notice. It stays in the input box. Open the workspace, then send it or clear it.'
+                        : 'Enter was pressed, but the agent has not taken the notice yet. It stays in the input box and Enter is tried again soon.',
+                    'reason'    => $r['reason'] ?? '',
+                ];
             case 'deferred':
                 // Only liveness can refuse a forced delivery now: there is no live
                 // agent on that pane, so there is nothing to type into. Say that,

@@ -64,6 +64,11 @@ fi
 
 # --- PHP Post-Install Tasks ---
 log_step "Initializing plugin services..."
+# #337: each PHP step below runs with every inherited fd above 2 closed (the
+# installer's UI pipe fd 4, the install lock fd 9). A daemon that PHP starts
+# from here (the supervisor, a Relay listener) then cannot hold `plugin
+# install`'s output open after this script exits.
+AICLI_RUN_CLOSED=(bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/aicli-detach.sh --run --)
 # Follow-on #1: the plugin VERSION upgrade is the explicit format-migration
 # trigger. The version-gated FileStorage::migrateFormat call lives in a SCRIPT
 # FILE (not an inline php -r) so its namespaced facade calls aren't mangled by
@@ -71,15 +76,15 @@ log_step "Initializing plugin services..."
 # version is saved below so it can read the OLD version. (Today migrateFormat is a
 # no-op beyond the gate; the slow btrfs→squashfs conversion stays BACKGROUNDED —
 # see D-308.)
-php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/format-migrate.php "$VERSION" 9>&- > /dev/null 2>&1
+"${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/format-migrate.php "$VERSION" > /dev/null 2>&1
 
-php -r "
+"${AICLI_RUN_CLOSED[@]}" php -r "
 require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
 aicli_migrate_home_path();
 aicli_cleanup_legacy();
 aicli_boot_resurrection();
 saveAICliConfig(['version' => '$VERSION']);
-" 9>&- > /dev/null 2>&1
+" > /dev/null 2>&1
 
 # #74: cleanup intentionally stops the old supervisor before replacing source.
 # Do not report install success until the new daemon owns its pidfile and has a
@@ -88,7 +93,7 @@ saveAICliConfig(['version' => '$VERSION']);
 # Close installer lock fd 9 in the child. SupervisorService starts a daemon
 # below PHP; without this redirection the daemon inherits the flock forever and
 # every subsequent plugin update reports "Another install is running".
-if ! php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/supervisor-ready.php 9>&- > /dev/null 2>&1; then
+if ! "${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/supervisor-ready.php > /dev/null 2>&1; then
     log_error "Storage supervisor did not become ready after installation."
     exit 1
 fi
@@ -140,13 +145,13 @@ fi
 # matches the saved cfg, even after a plugin update changes which users have a
 # home.
 log_step "Registering home backup schedule..."
-php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/sync-backup-cron.php 9>&- > /dev/null 2>&1
+"${AICLI_RUN_CLOSED[@]}" php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/sync-backup-cron.php > /dev/null 2>&1
 log_ok "Home backup schedule synced from config."
 
 # Verify UI entry points (D-186: Ensure entry points exist for emhttp)
 cd "$EMHTTP_DEST"
 MISSING_ENTRY=0
-for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliRelayMcp.page ArrayStopWarning.page; do
+for f in AICliAgents.page AICliAgentsManager.page AICliAjax.php AICliMenuIcon.page AICliOpenFile.page AICliRelayMcp.page ArrayStopWarning.page; do
     if [ ! -f "$f" ]; then
         cp -f "src/$f" "$f"
         MISSING_ENTRY=$((MISSING_ENTRY + 1))

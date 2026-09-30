@@ -97,10 +97,12 @@ function av2_secrets_schema(array $agent): array {
                                onkeyup="filterAgents()"
                                oninput="filterAgents()">
                     </div>
-                    <div class="agent-filters">
-                        <div class="filter-btn active" onclick="setAgentFilter('all', this)">All</div>
-                        <div class="filter-btn" onclick="setAgentFilter('installed', this)">Installed</div>
-                        <div class="filter-btn" onclick="setAgentFilter('updates', this)">Updates</div>
+                    <?php /* NATIVE_BUTTON_STYLE.md (2026-09-29): real toggle buttons
+                             (keyboard, aria-pressed) with Unraid's tab look. */ ?>
+                    <div class="agent-filters" role="group" aria-label="Show agents">
+                        <button type="button" class="filter-btn active" aria-pressed="true" onclick="setAgentFilter('all', this)">All</button>
+                        <button type="button" class="filter-btn" aria-pressed="false" onclick="setAgentFilter('installed', this)">Installed</button>
+                        <button type="button" class="filter-btn" aria-pressed="false" onclick="setAgentFilter('updates', this)">Updates</button>
                     </div>
                     <button type="button" id="agent-sort-toggle" class="agent-sort-btn"
                             data-dir="asc" onclick="toggleAgentSort()"
@@ -368,7 +370,7 @@ function av2_secrets_schema(array $agent): array {
 
                                 <div class="av2-chan-section" id="av2-pin-row-<?=$id?>">
                                     <h4>Version</h4>
-                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
+                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" aria-label="Version to install" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
                                         <option value="">v<?=htmlspecialchars($installedVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
                                     <p class="av2-help" style="margin-top:6px;">Pick a version to install. The Upgrade button in the card footer installs the latest version on the selected channel.</p>
@@ -484,8 +486,8 @@ function av2_secrets_schema(array $agent): array {
                                      pointless and confusing there — hide it entirely. -->
                                 <h4>Process limits</h4>
                                 <div class="av2-row" data-builtin="4096">
-                                    <label>Max RAM (MB)</label>
-                                    <div><input type="number" name="node_memory_<?=$id?>" value="<?=intval($config["node_memory_$id"] ?? 4096)?>" min="512" max="65536" step="512" data-agent-setting="node_memory_<?=$id?>" oninput="av2DiffCheck(this)" onchange="av2SaveAgentSetting(this)"></div>
+                                    <label for="node_memory_<?=$id?>">Max RAM (MB)</label>
+                                    <div><input type="number" id="node_memory_<?=$id?>" name="node_memory_<?=$id?>" value="<?=intval($config["node_memory_$id"] ?? 4096)?>" min="512" max="65536" step="512" data-agent-setting="node_memory_<?=$id?>" oninput="av2DiffCheck(this)" onchange="av2SaveAgentSetting(this)"></div>
                                     <span class="av2-info" data-tip="Heap cap passed to Node via --max-old-space-size.  ·  Built-in: 4096" aria-label="Heap cap. Built-in 4096." tabindex="0">i</span>
                                 </div>
                                 <p class="av2-help">Passes <code>--max-old-space-size</code> to Node-based agents.</p>
@@ -558,7 +560,7 @@ function av2_secrets_schema(array $agent): array {
 
                                 <div class="av2-chan-section" id="av2-pin-row-<?=$id?>">
                                     <h4>Version</h4>
-                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
+                                    <select id="version-select-<?=$id?>" class="av2-chan-select version-picker" aria-label="Version to install" data-agent="<?=$id?>" data-backups="<?=$retainedJson?>" onchange="onVersionSelect(this)">
                                         <option value="">v<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
                                     <p class="av2-help" style="margin-top:6px;">Pick a version, then use the Install button below to install it.</p>

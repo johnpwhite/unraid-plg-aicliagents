@@ -158,6 +158,16 @@ class InstallerService {
                     'version' => $targetVersion,
                     'staged_at' => $stagedRoot,
                 ]);
+            } elseif (StorageMountService::lastStageRefusal() === 'no_space') {
+                // 2026-09-26: the drive that holds the agents has no room for the
+                // new version. Installing into the live tree instead would fill
+                // it half way (on .4 that failed the vendor's extraction and the
+                // settings saves too). Fail clearly; the version in use stays.
+                $reason = 'Not enough free space on the drive that holds the agents for the new version. '
+                    . 'The version in use is kept. Free some space (or let old versions be cleaned up), then try again.';
+                LogService::log("Install of $agentId not started: $reason", LogService::LOG_ERROR, "InstallerService");
+                setInstallStatus("Install failed", 0, $agentId, $reason);
+                return ['status' => 'error', 'message' => $reason];
             } else {
                 LogService::log(
                     "Side-by-side staging unavailable for $agentId — installing into the live layer (sessions of this agent must close before the new version is active).",
@@ -194,18 +204,13 @@ class InstallerService {
         // useless literal 'installed' (which is what left the UI showing a stale version
         // after a successful upgrade). Always log what got recorded so a future
         // "still shows old version" is diagnosable from the log alone.
+        // Probe NOW, while a staged install root is still in force (it names the
+        // tree that was just installed). The record is written only after the
+        // bake below succeeded (2026-09-24): a bake that failed or captured
+        // nothing must not leave versions.json naming a version that never
+        // reached a layer (.4: goose 1.51.0 recorded, 1.52.0 still running).
         $probed = $source->discoverVersion($agentId, $agent);
         $installedVer = self::versionToRecord($probed, $targetVersion);
-        if ($installedVer) {
-            AgentRegistry::saveVersion($agentId, $installedVer);
-            LogService::log(
-                "Recorded installed version for $agentId: $installedVer (probed=" . ($probed ?? 'none') . ", target=$targetVersion)",
-                LogService::LOG_INFO, "InstallerService"
-            );
-        } else {
-            LogService::log("Warning: Could not discover version for $agentId after install (no explicit target either).", LogService::LOG_WARN, "InstallerService");
-            AgentRegistry::saveVersion($agentId, 'installed');
-        }
 
         PermissionService::enforcePluginPermissions();
         // The tree that was just installed — the staging mount during a
@@ -231,7 +236,18 @@ class InstallerService {
             $res = StorageMountService::bakeStagedInstall($agentId);
             self::endStagedInstall($agentId, $stagedRoot);
         } else {
-            $res = FileStorage::persist("agent/$agentId")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
+            // Forgejo #296 (2026-09-23): the install wrote into the LIVE
+            // generation's writable layer. Tell the storage ops which file is
+            // the agent binary, so the consolidate can refuse a layer that
+            // would drop it. The consolidate also never switches generation
+            // here; it defers, and persist() then runs a delta bake.
+            $binary = (string)($agent['binary'] ?? '');
+            if ($binary !== '') putenv('AICLI_AGENT_BINARY=' . $binary);
+            try {
+                $res = FileStorage::persist("agent/$agentId")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
+            } finally {
+                if ($binary !== '') putenv('AICLI_AGENT_BINARY');
+            }
         }
         if ($res === 1) {
             LogService::log("Installer: Critical error during persistence bake for $agentId.", LogService::LOG_ERROR, "InstallerService");
@@ -242,6 +258,17 @@ class InstallerService {
             // Pre-install layer compaction was busy — not fatal. A delta bake preserved the
             // data to Flash; the next install will compact all layers back to one.
             LogService::log("Installer: Layer compaction busy for $agentId — install proceeded with delta bake fallback.", LogService::LOG_WARN, "InstallerService");
+        }
+
+        if ($installedVer) {
+            AgentRegistry::saveVersion($agentId, $installedVer);
+            LogService::log(
+                "Recorded installed version for $agentId: $installedVer (probed=" . ($probed ?? 'none') . ", target=$targetVersion)",
+                LogService::LOG_INFO, "InstallerService"
+            );
+        } else {
+            LogService::log("Warning: Could not discover version for $agentId after install (no explicit target either).", LogService::LOG_WARN, "InstallerService");
+            AgentRegistry::saveVersion($agentId, 'installed');
         }
 
         // install-bg owns agent-layer activation + closed-session relaunch. Do
@@ -516,6 +543,10 @@ class InstallerService {
     public static function inspectUpgradeBackupSource(string $agentId, string $persistPath): array {
         $safe = preg_replace('/[^A-Za-z0-9._-]/', '', $agentId);
         $layers = glob(rtrim($persistPath, '/') . "/agent_{$safe}_*.sqsh") ?: [];
+        // #338: the current version is the newest layer's STACK (down to its
+        // base), not every layer file on flash — a retained previous version
+        // below the base is not part of it, so the kept copy holds one version.
+        $layers = LayerManifestService::agentStack($layers);
         if ($layers !== []) {
             $bytes = 0;
             foreach ($layers as $layer) $bytes += (int)@filesize($layer);
@@ -811,6 +842,35 @@ class InstallerService {
     }
 
     /** PHP-native recursive delete of a directory's contents (leaves the dir). */
+    /**
+     * #317/#318 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-24 (#317,
+     * #318)"): make a staged restore copy the active version of a versioned
+     * plain-directory agent. Moves $staged to .versions/<id>/restore-<stamp>
+     * (same filesystem, one rename) and points the $stableLink symlink at it
+     * with a temporary link and one rename, so the name is never missing.
+     * Never deletes anything: the previous version stays for the sessions that
+     * use it and for the version cleanup to decide. Returns the new generation
+     * id, or null (nothing changed) on failure.
+     */
+    public static function activatePassthroughRestoreGeneration(string $agentId, string $stableLink, string $staged, string $stamp): ?string {
+        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/', $agentId)) return null;
+        if (!is_link($stableLink) || !is_dir($staged)) return null;
+        if (!preg_match('/^[A-Za-z0-9._-]+$/', $stamp)) return null;
+        $gen = "restore-$stamp";
+        $versions = dirname($stableLink) . "/.versions/$agentId";
+        if (!is_dir($versions) && !@mkdir($versions, 0755, true)) return null;
+        if (file_exists("$versions/$gen")) return null;
+        if (!@rename($staged, "$versions/$gen")) return null;
+        $tmp = "$stableLink.next." . getmypid();
+        @unlink($tmp);
+        if (!@symlink(".versions/$agentId/$gen", $tmp) || !@rename($tmp, $stableLink)) {
+            @unlink($tmp);
+            @rename("$versions/$gen", $staged);   // put the copy back: nothing changed
+            return null;
+        }
+        return $gen;
+    }
+
     private static function rmdirContents(string $dir): void {
         if (!is_dir($dir)) return;
         $it = new \RecursiveIteratorIterator(
@@ -883,6 +943,26 @@ class InstallerService {
                 if (!self::copyDirectory($payload, $staged)) {
                     self::rmdirContents($staged); @rmdir($staged);
                     return ['status' => 'error', 'message' => 'Could not stage the retained passthrough installation'];
+                }
+                // #317/#318: on the versioned layout the stable name is a symlink
+                // to .versions/<id>/<gen>. The rename-and-empty below would follow
+                // that symlink and delete the files of a version a running session
+                // may use. Add the restored copy as a new version instead; the
+                // remount binds it beside the one in service.
+                if (is_link($current)) {
+                    $activated = self::activatePassthroughRestoreGeneration($agentId, $current, $staged, $stamp);
+                    if ($activated === null) {
+                        self::rmdirContents($staged); @rmdir($staged);
+                        return ['status' => 'error', 'message' => 'Could not activate the retained passthrough installation'];
+                    }
+                    if (!FileStorage::ensureReady("agent/$agentId")->ok) {
+                        return ['status' => 'error', 'message' => 'Retained installation restored, but the agent mount could not be reactivated'];
+                    }
+                    AgentRegistry::saveVersion($agentId, $restoreVersion);
+                    VersionCheckService::invalidateAgent($agentId);
+                    LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer', 'agent_version_restored',
+                        ['agent' => $agentId, 'version' => $restoreVersion, 'from' => $realBackup, 'storage_format' => 'passthrough', 'generation' => $activated]);
+                    return ['status' => 'ok', 'version' => $restoreVersion];
                 }
                 $released = FileStorage::release("agent/$agentId");
                 if (!$released->ok || $released->deferred) {
@@ -1077,7 +1157,13 @@ class InstallerService {
         if (empty($globResults)) {
             return null;
         }
-        sort($globResults);
+        // #338: order by the sequence number, then the time stamp. A plain
+        // sort of names put an older "_delta_" after a newer "_consolidated_"
+        // base, so a fresh base was never seen as the newest layer.
+        usort($globResults, static fn($a, $b) => strcmp(
+            LayerManifestService::layerSortKey((string)$a),
+            LayerManifestService::layerSortKey((string)$b)
+        ));
         return basename(end($globResults));
     }
 

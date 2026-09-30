@@ -24,6 +24,17 @@
 .aicli-terminal-page div.title, .aicli-terminal-page .title, .aicli-terminal-page .title-row, .aicli-terminal-page .title-bar, .aicli-terminal-page .header-row { display: none !important; }
 .aicli-terminal-page #displaybox, .aicli-terminal-page #main-content { position: relative !important; left: 0 !important; right: 0 !important; }
 #aicliagents-root { width: 100% !important; display: flex; flex-direction: column; margin: 0 !important; padding: 0 !important; min-height: 400px; box-sizing: border-box !important; overflow: hidden !important; position: relative !important; }
+/* SIDEBAR_THEME_LAYOUT.md: the resets above take #displaybox edge to edge, which
+   also removes the sidebar themes' 8rem left padding. Start the terminal right of
+   Unraid's fixed side menu instead (--aicli-content-left, measured by
+   aicli-content-box.js; 0px on the top-menu themes, so nothing moves there). */
+#aicliagents-root { margin-left: var(--aicli-content-left, 0px) !important; margin-right: var(--aicli-content-right, 0px) !important; width: calc(100% - var(--aicli-content-left, 0px) - var(--aicli-content-right, 0px)) !important; }
+/* SIDEBAR_THEME_LAYOUT.md (2026-09-29): a hovered side menu entry widens into its
+   label bar over the page, but #menu is a stacking context at z-index 2000, below
+   the drawer (1000000) and its pull tab (1000001). Raise the menu ONLY while the
+   pointer is on it: a full-screen overlay (temporary terminal 1000002, dialogs,
+   editors, SweetAlerts) takes the pointer, so it still covers the menu. */
+.Theme--sidebar #menu:hover { z-index: 1000002 !important; }
 
 /* Enhanced Upload Overlay Styles */
 .aicli-upload-overlay {

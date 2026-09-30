@@ -21,8 +21,8 @@
 
 declare(strict_types=1);
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/StorageHandler.php';
+require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__, 2) . '/includes/handlers/StorageHandler.php';
 
 \AICliAgents\Services\EventActor::$override = ['type' => 'system'];
 
@@ -35,7 +35,7 @@ try {
     unset($maintenance['status'], $maintenance['now']);
     $snapshot['maintenance'] = $maintenance;
 
-    \AICliAgents\Services\NchanService::publish('storage_status', $snapshot);
+    \AICliAgents\Services\EventBus::publish('storage.status', [], $snapshot);
 } catch (\Throwable $e) {
     // Best-effort — never fail the supervisor tick that spawned this script.
 }

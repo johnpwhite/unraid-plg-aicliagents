@@ -19,7 +19,10 @@ class SecretService {
     // ---------- Paths ----------
 
     public static function getAgentSecretsPath(): string {
-        return self::VAULT_FILE;
+        // Test seam (RELAY_LINKED_BOXES.md, twin harness and unit tests): a
+        // second Relay instance needs its own vault. Unset in production.
+        $e = getenv('AICLI_SECRET_VAULT_FILE');
+        return ($e !== false && $e !== '') ? $e : self::VAULT_FILE;
     }
 
     public static function getWorkspaceSecretsDir(): string {
@@ -58,7 +61,7 @@ class SecretService {
     // ---------- Raw reads (server-side only — for launch-time env injection) ----------
 
     public static function getAgentSecrets(): array {
-        return self::readIni(self::VAULT_FILE);
+        return self::readIni(self::getAgentSecretsPath());
     }
 
     public static function getWorkspaceSecrets(string $path, string $agentId): array {
@@ -87,7 +90,7 @@ class SecretService {
      * shape are silently dropped — defence in depth against a corrupt POST.
      */
     public static function saveAgentSecrets(array $map): bool {
-        return self::writeVault(self::VAULT_FILE, $map);
+        return self::writeVault(self::getAgentSecretsPath(), $map);
     }
 
     /**

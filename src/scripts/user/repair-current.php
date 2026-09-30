@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $_SERVER['DOCUMENT_ROOT'] = '/usr/local/emhttp';
-$manager = getenv('AICLI_REPAIR_MANAGER') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+$manager = getenv('AICLI_REPAIR_MANAGER') ?: dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 require_once $manager;
 
 // A source-tree release candidate can be checked against the installed

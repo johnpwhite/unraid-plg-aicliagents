@@ -98,6 +98,10 @@ document.documentElement.classList.add('aicli-terminal-page');
     // Without this, iframes tell xterm.js the terminal is taller than visible,
     // causing CLI apps to render content off-screen or behind the Unraid footer.
     function sizeRoot() {
+        // TerminalScripts.php owns the height once loaded: it keeps a touch
+        // device's height steady and pins the root above the phone keyboard.
+        // Resizing here on every window resize undid both (2026-09-23).
+        if (window.aicliRootSizeOwner) return;
         var el = document.getElementById('aicliagents-root');
         if (!el) return;
         var top = Math.max(0, el.getBoundingClientRect().top);

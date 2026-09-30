@@ -63,7 +63,8 @@ class TarballSource implements AgentSource {
 
     public function discoverVersion(string $agentId, array $agent): ?string {
         $agentDir = AgentRegistry::agentInstallPath($agentId);
-        $bin = $agent['binary'] ?? '';
+        // The staged generation's binary, not the one in service (2026-09-24).
+        $bin = AgentRegistry::installBinaryPath($agentId, (string)($agent['binary'] ?? ''));
         $probe = $agent['source']['version_probe'] ?? '{binary} --version';
         if ($bin !== '' && file_exists($bin)) {
             $cmd = str_replace('{binary}', escapeshellarg($bin), $probe) . ' 2>&1';

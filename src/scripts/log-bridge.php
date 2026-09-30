@@ -17,7 +17,8 @@
  *                                        live session; see agent-exit-recorder.sh)
  */
 
-$MANAGER = '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+// #367: this generation's manager, never the src link an update repoints.
+$MANAGER = dirname(__DIR__) . '/includes/AICliAgentsManager.php';
 
 // Fallback to file logging if manager doesn't exist (e.g., during uninstall)
 function fallback_log($message) {
@@ -72,8 +73,8 @@ switch ($action) {
     case 'workspace_exited':
         $sessionId = $argv[2] ?? '';
         $exitCode = (int)($argv[3] ?? 0);
-        if ($sessionId !== '' && class_exists('\\AICliAgents\\Services\\NchanService')) {
-            \AICliAgents\Services\NchanService::publish('workspaces', [
+        if ($sessionId !== '' && class_exists('\\AICliAgents\\Services\\EventBus')) {
+            \AICliAgents\Services\EventBus::publish('workspace', [], [
                 'event' => 'exited',
                 'id'    => $sessionId,
                 'code'  => $exitCode,

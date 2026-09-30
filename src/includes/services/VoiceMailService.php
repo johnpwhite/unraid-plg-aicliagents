@@ -148,6 +148,118 @@ final class VoiceMailService {
     }
 
     // ------------------------------------------------------------------
+    // Workspace resolution (R13, Forgejo #375)
+    // ------------------------------------------------------------------
+
+    /**
+     * Find the workspace a speak call names. An exact registry id wins. Otherwise a
+     * value that equals the display name of exactly ONE workspace resolves to that
+     * workspace. An agent gave its display name as the id once (#375); the name
+     * matched no id, the default mode `speak` applied, and a workspace set to Voice
+     * mail played its messages aloud.
+     *
+     * Returns `record` (null when nothing resolves) and `matches`: every workspace
+     * whose display name equals the value when no single one does (empty when the
+     * value names nothing at all).
+     *
+     * @return array{record:?array,matches:array<int,array>}
+     */
+    public static function resolveWorkspace(string $idOrName): array {
+        $idOrName = trim($idOrName);
+        if ($idOrName === '') return ['record' => null, 'matches' => []];
+        $byName = [];
+        foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            if (!is_array($w)) continue;
+            if ((string)($w['id'] ?? '') === $idOrName) return ['record' => $w, 'matches' => []];
+            if ((string)($w['name'] ?? '') === $idOrName) $byName[] = $w;
+        }
+        if (count($byName) === 1) return ['record' => $byName[0], 'matches' => []];
+        return ['record' => null, 'matches' => $byName];
+    }
+
+    /**
+     * The quietest mode of a set of workspaces: off, then mail, then speak. Used when
+     * a speak call names a display name that two or more workspaces share, so an
+     * unresolved workspace never plays what a stored mode would keep silent.
+     *
+     * @param array<int,array> $records
+     */
+    public static function quietestModeOf(array $records): string {
+        $modes = array_map([self::class, 'modeFor'], $records);
+        if (in_array(self::MODE_OFF, $modes, true)) return self::MODE_OFF;
+        if (in_array(self::MODE_MAIL, $modes, true)) return self::MODE_MAIL;
+        return self::MODE_SPEAK;
+    }
+
+    // ------------------------------------------------------------------
+    // Spoken name and intro (R14, Forgejo #376)
+    // ------------------------------------------------------------------
+
+    /** The longest spoken name kept, in characters. */
+    public const SPOKEN_NAME_MAX_CHARS = 40;
+
+    /**
+     * Clean a spoken name: remove control characters, make each run of white space
+     * one space, trim, and cut at SPOKEN_NAME_MAX_CHARS. An empty result means "use
+     * the display name".
+     */
+    public static function normaliseSpokenName(string $name): string {
+        $name = (string)preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $name);
+        $name = trim((string)preg_replace('/\s+/u', ' ', $name));
+        if (mb_strlen($name) > self::SPOKEN_NAME_MAX_CHARS) {
+            $name = rtrim(mb_substr($name, 0, self::SPOKEN_NAME_MAX_CHARS));
+        }
+        return $name;
+    }
+
+    /**
+     * The name a workspace is announced by: its own `spoken_name` when set, else
+     * its display name, else $fallbackName (a message whose workspace is gone).
+     */
+    public static function spokenNameFor(?array $workspace, string $fallbackName = ''): string {
+        if ($workspace !== null) {
+            $spoken = self::normaliseSpokenName((string)($workspace['spoken_name'] ?? ''));
+            if ($spoken !== '') return $spoken;
+            $display = self::normaliseSpokenName((string)($workspace['name'] ?? ''));
+            if ($display !== '') return $display;
+        }
+        return self::normaliseSpokenName($fallbackName);
+    }
+
+    /**
+     * The fixed intro before a workspace message: "<spoken name> says:". The same
+     * wording every time, so the listener learns it. Empty when there is no name.
+     */
+    public static function introFor(string $spokenName): string {
+        $spokenName = self::normaliseSpokenName($spokenName);
+        return $spokenName === '' ? '' : $spokenName . ' says:';
+    }
+
+    /**
+     * Set (or clear, with '') one workspace's spoken name. Saves the FULL record,
+     * like setMode(). Returns ['spokenName' => …] or ['error' => …].
+     */
+    public static function setSpokenName(string $workspaceId, string $spokenName): array {
+        try {
+            $record = null;
+            foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+                if (is_array($w) && (string)($w['id'] ?? '') === $workspaceId) { $record = $w; break; }
+            }
+            if ($record === null) {
+                return ['error' => 'That workspace no longer exists.'];
+            }
+            $clean = self::normaliseSpokenName($spokenName);
+            $record['spoken_name'] = $clean;
+            if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
+                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the spoken name.'];
+            }
+            return ['spokenName' => $clean];
+        } catch (\Throwable $e) {
+            return ['error' => 'Could not save the spoken name.'];
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Recording (R1)
     // ------------------------------------------------------------------
 
@@ -467,8 +579,8 @@ final class VoiceMailService {
             if ($changedId !== null && $changedId !== '') $payload['changedId'] = $changedId;
             if (self::$publisher !== null) {
                 (self::$publisher)('voicemail', $payload);
-            } elseif (class_exists(NchanService::class)) {
-                NchanService::publish('voicemail', $payload);
+            } elseif (class_exists(EventBus::class)) {
+                EventBus::publish('voicemail', [], $payload);
             }
         } catch (\Throwable $e) {
             // Announcing is best-effort. The record is already written.

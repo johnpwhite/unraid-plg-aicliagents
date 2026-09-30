@@ -412,6 +412,66 @@ _layer_discover_sorted() {
     shopt -u nullglob
 }
 
+# _layer_stack_cut <type> — filter newest-first layer paths (stdin) down to the
+# layers ONE mount stacks. #338 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md
+# "2026-09-26 — #338 agent layer retention"): an agent `_consolidated_` layer
+# (a "base") holds the complete agent tree, so an agent stack ends at the newest
+# base — a layer below it is not part of the view and the retention sweep may
+# delete it. Homes keep the old rule (every layer). No base → every layer.
+# The PHP mirror is LayerManifestService::agentStack(); keep the two in step.
+_layer_stack_cut() {
+    local type="${1:-}" f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        printf '%s\n' "$f"
+        if [ "$type" = "agent" ]; then
+            case "$(basename -- "$f")" in *_consolidated_*) return 0 ;; esac
+        fi
+    done
+    return 0
+}
+
+# _layer_largest_bytes <file>... -> the size in bytes of the largest file (0 when none).
+# #338: an agent layer that replaced the package is about one package, so the
+# largest layer of an agent's stack estimates the size of its next base.
+_layer_largest_bytes() {
+    local f b max=0
+    for f in "$@"; do
+        [ -f "$f" ] || continue
+        b="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+        case "$b" in ''|*[!0-9]*) b=0 ;; esac
+        if [ "$b" -gt "$max" ]; then max="$b"; fi
+    done
+    printf '%d\n' "$max"
+}
+
+# _layer_fits_space <persist> <estimate_bytes>
+# #338 (2026-09-26, .4 reached 100 % /boot): true when the persist target has
+# room for a new layer of about <estimate_bytes> (+10 %) plus a margin
+# (AICLI_LAYER_SPACE_MARGIN_MB, default 64). A bake or pack must not START when
+# its result cannot fit: a write that fills the flash fails half way and can
+# take the settings files with it. Sets _FIT_NEED_MB and _FIT_FREE_MB for the
+# caller's log line. Free space that cannot be read does not block (the same
+# rule as check_disk_space).
+_layer_fits_space() {
+    local persist="${1:-}" est="${2:-0}" margin="${AICLI_LAYER_SPACE_MARGIN_MB:-64}" free
+    case "$est" in ''|*[!0-9]*) est=0 ;; esac
+    case "$margin" in ''|*[!0-9]*) margin=64 ;; esac
+    _FIT_NEED_MB=$(( (est + est / 10 + 1048575) / 1048576 + margin ))
+    free="$(df -Pm "$persist" 2>/dev/null | awk 'NR==2 {print $4}')"
+    _FIT_FREE_MB="${free:-unknown}"
+    case "$free" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$free" -ge "$_FIT_NEED_MB" ]
+}
+
+# _layer_stack_sorted <persist> <type> <id> -> newest-first FULL PATHS of the
+# layers a mount of this entity stacks (_layer_discover_sorted, then
+# _layer_stack_cut). op_mount and op_stage use this; code that must see every
+# layer FILE on disk (reconcile, wipe, graduate) keeps _layer_discover_sorted.
+_layer_stack_sorted() {
+    _layer_discover_sorted "$1" "$2" "$3" | _layer_stack_cut "$2"
+}
+
 # ---------------------------------------------------------------------------
 # Phase 5: homes-only consolidate policy constants + the effective-MAX helper.
 #
@@ -489,15 +549,13 @@ _entity_paths() {
         local _ep_fst; _ep_fst=$(findmnt --noheadings --output FSTYPE --target "$_ep_persist" 2>/dev/null || echo '')
         { [ "$_ep_fst" = "vfat" ] || [ -z "$_ep_fst" ]; } && _ep_mode="zram" || _ep_mode="disk"
     fi
-    if [ "$_ep_mode" = "zram" ]; then
-        ENTITY_UPPER_MODE="zram"
-        UPPER_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_key/upper"
-        WORK_DIR="$ZRAM_BASE/${_ep_type}s/$_ep_key/work"
-    else
-        ENTITY_UPPER_MODE="disk"
-        UPPER_DIR="$_ep_persist/_upper/${_ep_type}s/$_ep_key"
-        WORK_DIR="$_ep_persist/_work/${_ep_type}s/$_ep_key"
-    fi
+    [ "$_ep_mode" = "zram" ] || _ep_mode="disk"
+    ENTITY_UPPER_MODE="$_ep_mode"
+    UPPER_DIR="$(_entity_upper_for_mode "$_ep_type" "$_ep_key" "$_ep_persist" "$_ep_mode" upper)"
+    WORK_DIR="$(_entity_upper_for_mode "$_ep_type" "$_ep_key" "$_ep_persist" "$_ep_mode" work)"
+    # #372: the mode the POLICY gives. _entity_paths_live can replace
+    # ENTITY_UPPER_MODE with the mode of the live mount; this one stays.
+    ENTITY_POLICY_UPPER_MODE="$_ep_mode"
     if [ "$_ep_type" = "home" ]; then
         MNT_POINT="/tmp/unraid-aicliagents/work/$_ep_id/home"
     elif declare -f agent_mount >/dev/null 2>&1; then
@@ -527,14 +585,27 @@ _entity_paths() {
 # sourced — so home mounts and pre-Phase-3 agents are byte-identical to before.
 # Additionally sets ENTITY_GENERATION (empty when not applicable) so a caller can
 # tell whether the layer it just operated on belongs to a specific generation.
+#
+# #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"): the upper
+# mode that the policy gives is correct only for a NEW mount. When the entity is
+# mounted, the kernel's own upperdir/workdir (from the mount table) is the
+# answer, whatever the policy says now. When it is not mounted and the policy
+# upper is empty but the upper of the other mode holds data, that upper is the
+# answer (the next mount adopts it). ENTITY_UPPER_SOURCE tells which rule
+# decided: policy | live | orphan. A versioned agent generation keeps its
+# recorded layer (that record is already the live truth).
 _entity_paths_live() {
     local _epl_type="$1" _epl_id="$2" _epl_persist="$3" _epl_gen _epl_up _epl_wk
     _entity_paths "$_epl_type" "$_epl_id" "$_epl_persist"
     ENTITY_GENERATION=""
-    [ "$_epl_type" = "agent" ] || return 0
-    declare -f agent_live_generation >/dev/null 2>&1 || return 0
+    ENTITY_UPPER_SOURCE="policy"
+    if [ "$_epl_type" != "agent" ]; then
+        _entity_apply_live_upper "$_epl_type" "$_epl_id" "$_epl_persist"
+        return 0
+    fi
+    declare -f agent_live_generation >/dev/null 2>&1 || { _entity_apply_live_upper "$_epl_type" "$_epl_id" "$_epl_persist"; return 0; }
     _epl_gen="$(agent_live_generation "$_epl_id" 2>/dev/null || true)"
-    [ -n "$_epl_gen" ] || return 0
+    [ -n "$_epl_gen" ] || { _entity_apply_live_upper "$_epl_type" "$_epl_id" "$_epl_persist"; return 0; }
     _epl_up="$(agent_generation_state_get "$_epl_id" "$_epl_gen" upper 2>/dev/null || true)"
     _epl_wk="$(agent_generation_state_get "$_epl_id" "$_epl_gen" work 2>/dev/null || true)"
     if [ -n "$_epl_up" ] && [ -n "$_epl_wk" ]; then
@@ -542,6 +613,158 @@ _entity_paths_live() {
         WORK_DIR="$_epl_wk"
     fi
     ENTITY_GENERATION="$_epl_gen"
+}
+
+# ---- #372: the live mount wins ---------------------------------------------
+# docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins".
+# The policy (storage_backend_mode, then the device test) says where the upper
+# of a NEW mount goes. It can change while an entity is mounted (a settings
+# change, the 2026-09-22 policy rule, an upgrade from 2026.09.15.08). Before
+# #372 every bake, the shutdown bake and the supervisor calculated the mode
+# again and read the upper of the NEW mode — an empty directory — so the bake
+# logged bash_bake_skipped_empty and saved nothing, and a remount hid the real
+# upper. These helpers read the truth from the mount table instead.
+
+# _entity_upper_for_mode <type> <key> <persist> <zram|disk> <upper|work>
+# The path of the upper (or work) directory for one mode. Pure.
+_entity_upper_for_mode() {
+    local type="${1:-}" key="${2:-}" persist="${3:-}" mode="${4:-disk}" which="${5:-upper}"
+    if [ "$mode" = "zram" ]; then
+        printf '%s\n' "$ZRAM_BASE/${type}s/$key/$which"
+    elif [ "$which" = "work" ]; then
+        printf '%s\n' "$persist/_work/${type}s/$key"
+    else
+        printf '%s\n' "$persist/_upper/${type}s/$key"
+    fi
+}
+
+# _upper_mode_of <upper_path> -> zram | disk. An upper under ZRAM_BASE is in RAM.
+_upper_mode_of() {
+    case "${1:-}" in
+        "$ZRAM_BASE"/*) printf 'zram' ;;
+        *) printf 'disk' ;;
+    esac
+}
+
+# _overlay_opt_at <mnt> <option> -> the value of <option> (upperdir, workdir)
+# of the overlay mounted at exactly <mnt>, from the mount table. The LAST row
+# wins (the top mount of a stack). Returns 1 when no overlay is mounted there.
+# Reads _proc_mounts_path, so a unit test can stub the table.
+_overlay_opt_at() {
+    local mnt="${1:-}" opt="${2:-}"
+    [ -n "$mnt" ] && [ -n "$opt" ] || return 1
+    awk -v m="$mnt" -v o="$opt=" '
+        $2==m && $3=="overlay" {
+            v = ""; n = split($4, a, ",")
+            for (i = 1; i <= n; i++) if (index(a[i], o) == 1) v = substr(a[i], length(o) + 1)
+            last = v; found = 1
+        }
+        END { if (found && last != "") { print last; exit 0 } exit 1 }' "$(_proc_mounts_path)" 2>/dev/null
+}
+
+# _entity_live_upper <mnt> — sets LIVE_UPPER_DIR / LIVE_WORK_DIR from the
+# overlay mounted at <mnt>. Returns 1 (and clears both) when none is mounted.
+_entity_live_upper() {
+    LIVE_UPPER_DIR=""; LIVE_WORK_DIR=""
+    LIVE_UPPER_DIR="$(_overlay_opt_at "${1:-}" upperdir)" || { LIVE_UPPER_DIR=""; return 1; }
+    [ -n "$LIVE_UPPER_DIR" ] || return 1
+    LIVE_WORK_DIR="$(_overlay_opt_at "${1:-}" workdir 2>/dev/null || true)"
+    return 0
+}
+
+# _upper_holds_data <dir> — true (0) when <dir> holds any entry that is not a
+# directory: a file, a symlink, or a whiteout (a character device that records
+# a deletion). Directories alone hold no data a remount could hide that a
+# skeleton copy (op_mount) cannot keep. A missing directory holds nothing.
+_upper_holds_data() {
+    [ -n "${1:-}" ] && [ -d "$1" ] || return 1
+    [ -n "$(find "$1" -mindepth 1 ! -type d -print -quit 2>/dev/null)" ]
+}
+
+# _other_upper_mode <zram|disk> -> the other mode.
+_other_upper_mode() { if [ "${1:-}" = "zram" ]; then printf 'disk'; else printf 'zram'; fi; }
+
+# _entity_apply_live_upper <type> <id> <persist> — called after _entity_paths.
+# 1. Mounted: UPPER_DIR/WORK_DIR/ENTITY_UPPER_MODE become the live mount's own
+#    (ENTITY_UPPER_SOURCE=live).
+# 2. Not mounted (homes only): the policy upper holds no data and the upper of
+#    the other mode holds data -> that upper (ENTITY_UPPER_SOURCE=orphan).
+# 3. Otherwise the policy paths stay (ENTITY_UPPER_SOURCE=policy).
+_entity_apply_live_upper() {
+    local type="${1:-}" id="${2:-}" persist="${3:-}" mnt other_mode other_up other_wk
+    ENTITY_UPPER_SOURCE="policy"
+    mnt="$MNT_POINT"
+    if [ "$type" = "agent" ] && declare -f agent_mount_real >/dev/null 2>&1; then
+        mnt="$(agent_mount_real "$id" 2>/dev/null || printf '%s' "$MNT_POINT")"
+    fi
+    if _entity_live_upper "$mnt"; then
+        UPPER_DIR="$LIVE_UPPER_DIR"
+        [ -n "$LIVE_WORK_DIR" ] && WORK_DIR="$LIVE_WORK_DIR"
+        ENTITY_UPPER_MODE="$(_upper_mode_of "$UPPER_DIR")"
+        ENTITY_UPPER_SOURCE="live"
+        return 0
+    fi
+    [ "$type" = "home" ] || return 0
+    other_mode="$(_other_upper_mode "$ENTITY_UPPER_MODE")"
+    other_up="$(_entity_upper_for_mode "$type" "$id" "$persist" "$other_mode" upper)"
+    other_wk="$(_entity_upper_for_mode "$type" "$id" "$persist" "$other_mode" work)"
+    if ! _upper_holds_data "$UPPER_DIR" && _upper_holds_data "$other_up"; then
+        UPPER_DIR="$other_up"
+        WORK_DIR="$other_wk"
+        ENTITY_UPPER_MODE="$other_mode"
+        ENTITY_UPPER_SOURCE="orphan"
+    fi
+    return 0
+}
+
+# _home_upper_decide <mounted:0|1> <live_upper> <policy_upper> <other_upper>
+# The pure op_mount decision for a HOME's writable layer (#372). Prints one of:
+#   policy     bind the policy upper (the normal case)
+#   keep_live  mounted on another upper that holds data (or the policy upper
+#              holds data too): keep the live upper — never hide it
+#   switch     mounted on another upper that holds no data, and the policy
+#              upper holds none: the remount can move to the policy upper
+#              (op_mount copies the directory skeleton first)
+#   adopt      not mounted, the policy upper holds no data, the upper of the
+#              other mode holds data: bind that upper
+#   conflict   not mounted, BOTH uppers hold data: refuse the mount
+#   policy_hidden_other  mounted on the policy upper while the upper of the
+#              other mode holds data (an earlier remount hid it): bind as
+#              policy, and op_mount logs an error so a person can recover it
+_home_upper_decide() {
+    local mounted="${1:-0}" live="${2:-}" pol="${3:-}" other="${4:-}"
+    if [ "$mounted" = "1" ] && [ -n "$live" ]; then
+        if [ "$live" = "$pol" ]; then
+            # Already on the policy upper. If the other upper holds data, an
+            # earlier remount hid it: say so (op_mount logs an error).
+            if _upper_holds_data "$other"; then printf 'policy_hidden_other'; else printf 'policy'; fi
+            return 0
+        fi
+        if _upper_holds_data "$live" || _upper_holds_data "$pol"; then
+            printf 'keep_live'
+        else
+            printf 'switch'
+        fi
+        return 0
+    fi
+    if _upper_holds_data "$other"; then
+        if _upper_holds_data "$pol"; then printf 'conflict'; else printf 'adopt'; fi
+        return 0
+    fi
+    printf 'policy'
+}
+
+# _copy_dir_skeleton <from> <to> — copy a tree that holds only directories
+# (checked by the caller with _upper_holds_data) with its modes, owners, times
+# and extended attributes, so the view does not lose an empty directory or
+# change a directory's permissions when the upper moves. Returns non-zero on
+# any failure (the caller then keeps the old upper).
+_copy_dir_skeleton() {
+    local from="${1:-}" to="${2:-}"
+    [ -d "$from" ] || return 0
+    mkdir -p "$to" || return 1
+    _upper_holds_data "$from" && return 1
+    cp -a "$from/." "$to/" 2>/dev/null
 }
 
 # home_mount_in_use <mount_point>
@@ -640,6 +863,24 @@ _overlay_present_at() {
     awk -v m="$mnt" '$2==m && $3=="overlay"{f=1} END{exit f?0:1}' "$(_proc_mounts_path)" 2>/dev/null
 }
 
+# _upper_still_bound <upper> <work> -> 0 (true) IFF the mount table still lists an
+# overlay whose upperdir or workdir is <upper> or <work>. Forgejo #303 (spec
+# docs/specs/OP_MOUNT_BUSY_REMOUNT_SAFETY.md, 2026-09-23): op_mount runs this
+# after the busy-arbiter and before it binds. A second overlay on the same
+# writable layer is the copy-up-poison shape (WP #1309), so op_mount refuses the
+# bind instead of doing it. Reads _proc_mounts_path, so the unit test can stub it.
+# Paths with spaces are not supported (the plugin never uses them).
+_upper_still_bound() {
+    local upper="${1:-}" work="${2:-}"
+    [ -n "$upper" ] || return 1
+    awk -v u="upperdir=$upper" -v w="workdir=${work:-/nonexistent-workdir}" '
+        $3=="overlay" {
+            n = split($4, opt, ",")
+            for (i = 1; i <= n; i++) if (opt[i] == u || opt[i] == w) { f = 1 }
+        }
+        END { exit f ? 0 : 1 }' "$(_proc_mounts_path)" 2>/dev/null
+}
+
 # _mount_teardown_arbiter <mnt> — THE single busy-arbiter for the overlay
 # (re)mount chokepoint (WP #1309; spec docs/specs/OP_MOUNT_BUSY_REMOUNT_SAFETY.md).
 # Safely release an existing mount before a fresh overlay bind on the SAME
@@ -660,6 +901,14 @@ _mount_teardown_arbiter() {
     [ -n "$mnt" ] || return 0
     mountpoint -q "$mnt" 2>/dev/null || return 0     # not mounted -> safe to bind fresh
     if umount "$mnt" 2>/dev/null; then               # REAL (non-lazy) umount ONLY
+        # GH #9 (root cause found 2026-09-17): a REAL umount releases the
+        # kernel's "in use as upperdir/workdir" mark on UPPER_DIR/WORK_DIR
+        # synchronously — verified on this kernel with immediate remounts on
+        # tmpfs and ZFS (0 warnings in 16 tries). The warning the plugin kept
+        # logging came from a lazily detached overlay-on-overlay (the consolidate
+        # merge mount) keeping the PREVIOUS home overlay's superblock alive via
+        # its private lower clone, not from any teardown latency, so there is
+        # nothing to wait for here. See _umount_real_or_detach_logged below.
         return 0                                      # released -> safe to bind fresh
     fi
     # umount refused: the mount is BUSY. NEVER lazy-umount-then-rebind.
@@ -797,8 +1046,167 @@ install_failure_trap() {
     local t_type="${1:-unknown}"
     local t_id="${2:-unknown}"
     local t_source="${3:-storage_script}"
+    # 2026-09-30 (#374): the exit hooks run first, on EVERY exit (0, 1, 2, a
+    # set -e stop, a signal that the op turns into an exit). They remove the
+    # op's scratch folders (aicli_on_exit). The exit code does not change.
     # shellcheck disable=SC2064 — intentional eager expansion of $t_* here.
-    trap "ec=\$?; if [ \$ec -ne 0 ] && [ \$ec -ne 2 ]; then snapshot_failure '$t_type' '$t_id' \$ec '$t_source'; fi" EXIT
+    trap "ec=\$?; aicli_run_exit_hooks; if [ \$ec -ne 0 ] && [ \$ec -ne 2 ]; then snapshot_failure '$t_type' '$t_id' \$ec '$t_source'; fi" EXIT
+}
+
+# ---- 2026-09-30 (#374): exit hooks + the SQLite stage folder ----------------
+# docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the SQLite stage folder".
+# On .4 every scheduled bake of the root home copied 29 SQLite databases (up to
+# 2.5 GB) into /tmp/unraid-aicliagents/.sqlite_stage_home_root_<pid>, then
+# stopped with exit 2 and left the copy behind. /tmp is the RAM root file
+# system: it filled to 100 % and every agent on the box failed. Now:
+#   1. the stage folder is on the file system of the writable layer (the
+#      persist device for a disk upper, the zram device for a zram upper),
+#      never on the RAM root file system by default;
+#   2. the op removes it on every exit (aicli_on_exit + install_failure_trap);
+#   3. each bake first removes stage folders whose owner process has ended;
+#   4. the op stages nothing when the file system has no room for the copies.
+
+# aicli_on_exit <function> — run <function> when this (sub)shell exits, through
+# install_failure_trap's EXIT handler. A function name only, no arguments.
+: "${AICLI_EXIT_HOOKS:=}"
+aicli_on_exit() {
+    case " $AICLI_EXIT_HOOKS " in *" ${1:-} "*) return 0 ;; esac
+    AICLI_EXIT_HOOKS="${AICLI_EXIT_HOOKS:+$AICLI_EXIT_HOOKS }${1:-}"
+}
+
+# aicli_run_exit_hooks — run every registered hook once. Never fails.
+aicli_run_exit_hooks() {
+    local _h _hooks="${AICLI_EXIT_HOOKS:-}"
+    AICLI_EXIT_HOOKS=""
+    for _h in $_hooks; do
+        declare -F "$_h" >/dev/null 2>&1 || continue
+        "$_h" 2>/dev/null || true
+    done
+    return 0
+}
+
+# The folder of the stage folders that old versions made (the RAM root file
+# system). A bake still sweeps it, so an upgrade removes their leftovers.
+AICLI_SQLITE_STAGE_LEGACY_ROOT="/tmp/unraid-aicliagents"
+
+# sqlite_stage_root <upper_dir> — the folder that holds the SQLite stage folder
+# of a bake of <upper_dir>: the parent folder of the writable layer, so the
+# copies use the same file system as the layer (disk upper -> the persist
+# device, zram upper -> the zram device). AICLI_SQLITE_STAGE_ROOT overrides it
+# (tests, or a person who wants a pool folder).
+sqlite_stage_root() {
+    if [ -n "${AICLI_SQLITE_STAGE_ROOT:-}" ]; then
+        printf '%s\n' "${AICLI_SQLITE_STAGE_ROOT%/}"
+        return 0
+    fi
+    local up="${1%/}"
+    [ -n "$up" ] || return 1
+    printf '%s\n' "$(dirname "$up")"
+}
+
+# sqlite_stage_path <root> <tag> <type> <id> <pid> — the stage folder name.
+# The owner pid is the LAST "_" field: sqlite_stage_sweep_orphans reads it.
+sqlite_stage_path() {
+    local root="${1%/}" tag="${2:-}" type="${3:-}" id="${4:-}" pid="${5:-}"
+    printf '%s/.sqlite_stage_%s%s_%s_%s\n' "$root" "${tag:+${tag}_}" "$type" "${id//[^a-zA-Z0-9_-]/_}" "$pid"
+}
+
+# _stage_owner_alive <pid> — true when a process with this pid exists. /proc, not
+# kill -0: kill -0 fails for a live process of another user.
+_stage_owner_alive() {
+    case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ -d "/proc/$1" ]
+}
+
+# sqlite_stage_sweep_orphans <root>... — remove every .sqlite_stage_* folder in
+# each <root> whose owner process (the pid after the last "_") has ended.
+# Prints each removed path. A folder of a live process stays.
+sqlite_stage_sweep_orphans() {
+    local root d name pid
+    for root in "$@"; do
+        [ -n "$root" ] && [ -d "$root" ] || continue
+        for d in "$root"/.sqlite_stage_*; do
+            [ -d "$d" ] || continue
+            name="${d##*/}"
+            pid="${name##*_}"
+            case "$pid" in ''|*[!0-9]*) continue ;; esac
+            [ "$pid" = "${BASHPID:-$$}" ] && continue
+            _stage_owner_alive "$pid" && continue
+            rm -rf -- "$d" 2>/dev/null || true
+            [ -e "$d" ] || printf '%s\n' "$d"
+        done
+    done
+    return 0
+}
+
+# bake_merge_sweep_orphans <upper_dir> — remove the hardlink merge folders
+# (<upper>.bake_merge_<pid>, bake_via_hardlink_merge) of ended processes. A
+# killed bake leaves one behind; its SQLite copies are full size. Prints each
+# removed path.
+bake_merge_sweep_orphans() {
+    local up="${1%/}" d pid
+    [ -n "$up" ] || return 0
+    for d in "$up".bake_merge_*; do
+        [ -d "$d" ] || continue
+        pid="${d##*.bake_merge_}"
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ "$pid" = "$$" ] && continue
+        _stage_owner_alive "$pid" && continue
+        rm -rf -- "$d" 2>/dev/null || true
+        [ -e "$d" ] || printf '%s\n' "$d"
+    done
+    return 0
+}
+
+# _path_on_ram_rootfs <path> — true when <path> is on the RAM root file system
+# (the "/" mount with fstype rootfs, tmpfs or ramfs). The zram device mounted
+# at ZRAM_BASE is a separate file system and does not count.
+_path_on_ram_rootfs() {
+    local tgt fst
+    tgt="$(findmnt -no TARGET -T "${1:-/}" 2>/dev/null | head -1)"
+    fst="$(findmnt -no FSTYPE -T "${1:-/}" 2>/dev/null | head -1)"
+    [ "$tgt" = "/" ] || return 1
+    case "$fst" in rootfs|tmpfs|ramfs) return 0 ;; esac
+    return 1
+}
+
+# sqlite_stage_fits <root> <db paths...> — true when the file system of <root>
+# has room for a copy of each database (the .db plus its -wal, which the
+# backup folds in), plus AICLI_SQLITE_STAGE_MARGIN_MB (default 32; the new layer has its own
+# space check with its own margin, so this only keeps a small reserve and a
+# small persist device still saves a small database). On the RAM
+# root file system it also keeps AICLI_SQLITE_STAGE_RAM_RESERVE_MB (default
+# 2048) free, so a stage can never fill it. Sets STAGE_NEED_MB, STAGE_FREE_MB,
+# STAGE_DB_MB and STAGE_ON_RAM. Free space that cannot be read does not block
+# (the same rule as check_disk_space and _layer_fits_space).
+sqlite_stage_fits() {
+    local root="${1:-}"; shift || true
+    local margin="${AICLI_SQLITE_STAGE_MARGIN_MB:-32}" reserve=0
+    local bytes=0 b f free
+    case "$margin" in ''|*[!0-9]*) margin=32 ;; esac
+    for f in "$@"; do
+        [ -f "$f" ] || continue
+        b="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+        case "$b" in ''|*[!0-9]*) b=0 ;; esac
+        bytes=$((bytes + b))
+        if [ -f "$f-wal" ]; then
+            b="$(stat -c '%s' "$f-wal" 2>/dev/null || echo 0)"
+            case "$b" in ''|*[!0-9]*) b=0 ;; esac
+            bytes=$((bytes + b))
+        fi
+    done
+    STAGE_ON_RAM=0
+    if _path_on_ram_rootfs "$root"; then
+        STAGE_ON_RAM=1
+        reserve="${AICLI_SQLITE_STAGE_RAM_RESERVE_MB:-2048}"
+        case "$reserve" in ''|*[!0-9]*) reserve=2048 ;; esac
+    fi
+    STAGE_DB_MB=$(( (bytes + 1048575) / 1048576 ))
+    STAGE_NEED_MB=$(( STAGE_DB_MB + margin + reserve ))
+    free="$(df -Pm "$root" 2>/dev/null | awk 'NR==2 {print $4}')"
+    STAGE_FREE_MB="${free:-unknown}"
+    case "$free" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$free" -ge "$STAGE_NEED_MB" ]
 }
 
 # ----------------------------------------------------------------------------
@@ -834,28 +1242,91 @@ detect_sqlite_dbs() {
 # API works on a live DB without preventing concurrent writers. Returns:
 #   0 — all DBs backed up successfully
 #   2 — at least one backup failed (locked / disk full / timeout); caller should defer
+#
+# #374 (2026-09-30): WHICH name sqlite3 opens (_sqlite_backup_source):
+#   - AICLI_SQLITE_READ_ROOT set (the caller's mounted view of the same upper)
+#     and the file is there: the view path. The agents open their databases
+#     through the view, so the backup takes the same locks and sees the same
+#     -wal/-shm. op_bake sets it for a mounted home.
+#   - otherwise, when a sidecar (-wal/-shm/-journal) beside the file in the
+#     upper is an overlay WHITEOUT (a character device 0,0: the sidecar was
+#     deleted in the view) and no real -wal with data is there: an immutable
+#     read (file:<path>?immutable=1). sqlite3 opens no sidecar and writes
+#     nothing. Before #374 sqlite3 opened the upper path, met the whiteout and
+#     failed with "unable to open database file" on EVERY try: on .4 three
+#     Codex databases in the root home made every save of that home fail.
+#   - otherwise the path as given.
+# On a failure it sets SQLITE_BACKUP_FAILED_DB and SQLITE_BACKUP_ERROR (the
+# sqlite3 message), so the caller can log which database failed and why.
 sqlite_backup_all() {
     local root="$1"; shift
     local staging="$1"; shift
+    SQLITE_BACKUP_FAILED_DB=""; SQLITE_BACKUP_ERROR=""
     if ! command -v sqlite3 >/dev/null 2>&1; then
         echo "[sqlite_backup_all] WARN: sqlite3 not on PATH; cannot back up SQLite DBs" >&2
+        SQLITE_BACKUP_ERROR="sqlite3 not on PATH"
         return 2
     fi
     mkdir -p "$staging" 2>/dev/null || return 1
-    local db rel dest
+    local db rel dest src err
     for db in "$@"; do
         [ -f "$db" ] || continue
         rel="${db#$root/}"
         dest="$staging/$rel"
-        mkdir -p "$(dirname "$dest")" 2>/dev/null
+        # #374: a folder that cannot be made is a hard error (return 1). As a
+        # bare command it stopped the caller under set -e with no cleanup.
+        mkdir -p "$(dirname "$dest")" 2>/dev/null || return 1
+        src="$(_sqlite_backup_source "$root" "$db")"
         # 30 s timeout — if a writer holds an exclusive lock that long, defer.
-        if ! timeout 30 sqlite3 "$db" ".timeout 30000
-.backup '$dest'" 2>/dev/null; then
-            echo "[sqlite_backup_all] backup failed: $db (locked / disk full / timeout)" >&2
+        # Forgejo #306: each dot-command is its OWN argument. sqlite3 3.53
+        # (Unraid 7.3.2) reads one argument as ONE command, so ".timeout N"
+        # plus a newline plus ".backup" ran only .timeout and exited 0 with
+        # no backup written.
+        rm -f "$dest" 2>/dev/null
+        if ! err="$(timeout 30 sqlite3 "$src" ".timeout 30000" ".backup '$dest'" 2>&1 >/dev/null)"; then
+            SQLITE_BACKUP_FAILED_DB="$rel"
+            SQLITE_BACKUP_ERROR="$(printf '%s' "${err:-timeout or no message}" | tr '\n"\\' '   ' | head -c 200)"
+            echo "[sqlite_backup_all] backup failed: $db (locked / disk full / timeout): $SQLITE_BACKUP_ERROR" >&2
+            return 2
+        fi
+        # Exit 0 is not proof. Check that the backup file is there and holds
+        # a database header; defer otherwise, never bake without it.
+        if [ ! -s "$dest" ] || ! head -c 16 "$dest" 2>/dev/null | grep -qa "SQLite format 3"; then
+            SQLITE_BACKUP_FAILED_DB="$rel"; SQLITE_BACKUP_ERROR="backup not written"
+            echo "[sqlite_backup_all] backup not written: $db -> $dest" >&2
             return 2
         fi
     done
     return 0
+}
+
+# _sqlite_sidecar_whiteout <db> — true when a -wal, -shm or -journal beside
+# <db> is a character device (an overlay whiteout in an upper directory).
+_sqlite_sidecar_whiteout() {
+    local s
+    for s in "$1-wal" "$1-shm" "$1-journal"; do
+        [ -c "$s" ] && return 0
+    done
+    return 1
+}
+
+# _sqlite_backup_source <root> <db> — the name sqlite3 opens (see above).
+_sqlite_backup_source() {
+    local root="${1%/}" db="$2" rel view p
+    rel="${db#$root/}"
+    view="${AICLI_SQLITE_READ_ROOT:-}"
+    if [ -n "$view" ] && [ "$rel" != "$db" ] && [ -f "${view%/}/$rel" ]; then
+        printf '%s\n' "${view%/}/$rel"
+        return 0
+    fi
+    # A real -wal with data holds committed pages: an immutable read would
+    # miss them. Then open the path as given (a failure defers the bake).
+    if _sqlite_sidecar_whiteout "$db" && ! { [ -f "$db-wal" ] && [ -s "$db-wal" ]; }; then
+        p="${db//%/%25}"; p="${p//\?/%3f}"; p="${p//#/%23}"
+        printf 'file:%s?immutable=1\n' "$p"
+        return 0
+    fi
+    printf '%s\n' "$db"
 }
 
 # selective_upper_cleanup <upper_dir> <marker_file> [confirmed_manifest]
@@ -1036,10 +1507,9 @@ build_mksquashfs_sqlite_excludes() {
 
 # build_mksquashfs_sqlite_sidecar_excludes <root> <db-paths...>
 # Echoes `-e <relpath>-wal -e <relpath>-shm -e <relpath>-journal` arguments —
-# the SIDECAR files only, NOT the .db itself. Used by the overlay-merge bake
-# path (WP #1078): the .db is provided via the overlay upper from the
-# sqlite3 .backup snapshot, so it doesn't need exclusion; the sidecars are
-# transient and reconstructed by SQLite on next open.
+# the SIDECAR files only, NOT the .db itself. Retained for callers that build
+# their own mksquashfs command; the consolidate path uses a temporary exclude
+# file because the no-mount pseudo-file merge must also exclude each live .db.
 build_mksquashfs_sqlite_sidecar_excludes() {
     local root="$1"; shift
     local db rel
@@ -1049,24 +1519,181 @@ build_mksquashfs_sqlite_sidecar_excludes() {
     done
 }
 
-# bake_via_overlay_merge <type> <id> <persist_path> <lower_dir> <sqlite_stage> <kind> <db-paths...>
+# bake_via_pseudofile_merge <type> <id> <persist_path> <lower_dir> <sqlite_stage> <kind> <db-paths...>
 #
-# Bakes a SquashFS layer from the merged view of <lower_dir> + <sqlite_stage>.
-# Stdout: final basename on success. Stderr: progress + diagnostics.
-# Returns 0 on success, non-zero on any failure (overlay mount, atomic_write_layer, umount).
+# Bakes a SquashFS layer from <lower_dir>, replacing each detected SQLite DB
+# with its consistent Online Backup snapshot from <sqlite_stage>. Stdout is the
+# final basename on success; stderr carries progress and diagnostics.
 #
-# WP #1078 fix: replaces the broken two-pass `wide-bake + mksquashfs -append`
-# protocol. mksquashfs's append mode does NOT merge new content into existing
-# directories — it RENAMES them with _N suffix, stranding the SQLite backups
-# at unreachable paths (.copilot_1/session-store.db etc.). This helper uses
-# overlayfs to merge the lower (UPPER_DIR for commit, MNT_POINT for consolidate)
-# with the SQLite backup stage, then bakes the merged view in ONE atomic pass.
-# The .db sidecar files (-wal/-shm/-journal) are excluded — SQLite reconstructs
-# them from the .db on next open.
+# WP #236/#1078: mksquashfs pseudo-files provide the backup at the canonical
+# path while an exclude file removes the live DB and its WAL/SHM/journal
+# siblings from the source scan. This is deliberately a NO-MOUNT merge. The
+# previous overlay-merge helper mounted a second overlay with the live home as
+# its lowerdir; a lazy detach could keep that home overlay's superblock pinned
+# and poison a later remount (GH #9). `atomic_write_layer` still performs the
+# single atomic write and read-only verification.
+bake_via_pseudofile_merge() {
+    local type="${1:-}"; shift
+    local id="${1:-}"; shift
+    local persist_path="${1:-}"; shift
+    local lower_dir="${1:-}"; shift
+    local sqlite_stage="${1:-}"; shift
+    local kind="${1:-delta}"; shift
+
+    if [ -z "$type" ] || [ -z "$id" ] || [ -z "$persist_path" ] || [ -z "$lower_dir" ] || [ -z "$sqlite_stage" ]; then
+        echo "[bake_via_pseudofile_merge] ERROR: missing required arguments" >&2
+        return 1
+    fi
+    if [ ! -d "$lower_dir" ] || [ ! -d "$sqlite_stage" ]; then
+        echo "[bake_via_pseudofile_merge] ERROR: lower_dir or sqlite_stage missing" >&2
+        return 1
+    fi
+
+    # These files are consumed by mksquashfs through -ef/-pf. Keep them beside
+    # neither the live source nor the persistent layer directory, and remove
+    # them on every exit path. The pseudo-file parser accepts quoted names, so
+    # paths containing spaces remain lossless; exclude-file entries are one
+    # complete path per line and likewise preserve spaces.
+    local merge_root="/tmp/unraid-aicliagents/.bake_pseudofile_${type}_${id}_$$"
+    local exclude_file="$merge_root/excludes"
+    local pseudo_file="$merge_root/pseudo"
+    rm -rf "$merge_root" 2>/dev/null
+    mkdir -p "$merge_root" 2>/dev/null || {
+        echo "[bake_via_pseudofile_merge] ERROR: cannot create merge metadata under $merge_root" >&2
+        return 1
+    }
+    : > "$exclude_file"
+    : > "$pseudo_file"
+
+    # Quote a pseudo-file field for mksquashfs without allowing a path to
+    # terminate the quoted field. Newlines are not valid in these internal
+    # paths; reject them rather than generating an ambiguous definition.
+    _pseudo_quote() {
+        case "$1" in
+            *$'\n'*|*$'\r'*) return 1 ;;
+        esac
+        printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\\"]/[\\&]/g')"
+    }
+
+    local db rel staged mode uid gid quoted_rel quoted_stage
+    for db in "$@"; do
+        [ -n "$db" ] || continue
+        case "$db" in
+            "$lower_dir"/*) ;;
+            *)
+                echo "[bake_via_pseudofile_merge] ERROR: database path is outside lower_dir: $db" >&2
+                rm -rf "$merge_root" 2>/dev/null
+                return 1
+                ;;
+        esac
+        rel="${db#$lower_dir/}"
+        case "$rel" in
+            ''|/*|.|..|../*|*/../*|*/..)
+                echo "[bake_via_pseudofile_merge] ERROR: unsafe database relative path: $rel" >&2
+                rm -rf "$merge_root" 2>/dev/null
+                return 1
+                ;;
+        esac
+        staged="$sqlite_stage/$rel"
+        if [ ! -f "$staged" ]; then
+            # A missing backup is not a safe reason to bake the live DB. Fail
+            # closed so the caller preserves the current layers and retries.
+            echo "[bake_via_pseudofile_merge] ERROR: SQLite backup missing: $staged" >&2
+            rm -rf "$merge_root" 2>/dev/null
+            return 1
+        fi
+        read -r mode uid gid < <(stat -c '%a %u %g' "$staged" 2>/dev/null) || {
+            echo "[bake_via_pseudofile_merge] ERROR: cannot stat SQLite backup: $staged" >&2
+            rm -rf "$merge_root" 2>/dev/null
+            return 1
+        }
+        _pseudo_quote "$rel" >/dev/null || {
+            echo "[bake_via_pseudofile_merge] ERROR: SQLite path contains a newline: $db" >&2
+            rm -rf "$merge_root" 2>/dev/null
+            return 1
+        }
+        quoted_rel="$(_pseudo_quote "$rel")"
+        quoted_stage="$(_pseudo_quote "$staged")"
+        printf '%s\n' "$rel" "${rel}-wal" "${rel}-shm" "${rel}-journal" >> "$exclude_file"
+        printf '%s f %s %s %s cat %s\n' "$quoted_rel" "$mode" "$uid" "$gid" "$quoted_stage" >> "$pseudo_file"
+    done
+
+    local base_args="${MKSQUASHFS_ARGS:-${_AWL_DEFAULT_ARGS:--comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend}}"
+    local final_args="$base_args -ef $exclude_file -pf $pseudo_file"
+    local result=""
+    if ! result=$(MKSQUASHFS_ARGS="$final_args" atomic_write_layer "$type" "$id" "$persist_path" "$lower_dir" "$kind"); then
+        rm -rf "$merge_root" 2>/dev/null
+        echo "[bake_via_pseudofile_merge] ERROR: atomic_write_layer failed" >&2
+        return 1
+    fi
+
+    rm -rf "$merge_root" 2>/dev/null
+    printf '%s\n' "$result"
+    return 0
+}
+
+# _umount_real_or_detach_logged <mnt> <what> [tries]
 #
-# Caller must have already populated $sqlite_stage via sqlite_backup_all.
-# Caller is responsible for `rm -rf "$sqlite_stage"` after this returns.
-bake_via_overlay_merge() {
+# GH #9 root cause (2026-09-17): `umount X || umount -l X` is only safe when
+# nothing holds X. A lazily detached mount that something still holds keeps its
+# superblock alive out of sight. Two consequences the plugin actually suffered:
+#   * X was previously an overlay whose lowerdir was a LIVE overlay; that
+#     consolidate merge was removed by Forgejo #236 because its private lower
+#     clone could keep the home superblock alive after a lazy detach.
+#   * X is a squashfs loop mount (atomic_write_layer's verify scratch) — the
+#     loop stays attached to the layer file for as long as the holder lives, even
+#     after a consolidate deletes the file (loop2/loop8 pinned for days).
+# So: REAL umount first, retried briefly (holders such as a verify `find` are
+# short-lived), and only then lazy-detach — recording WHO held it, so the next
+# occurrence names the culprit instead of leaving another silent leak.
+# Returns 0 when released, 2 when it had to lazy-detach. AICLI_UMOUNT_RETRY_S
+# (default 1) is the pause between tries (unit tests set 0).
+_umount_real_or_detach_logged() {
+    local mnt="${1:-}" what="${2:-mount}" tries="${3:-5}" i holders
+    [ -n "$mnt" ] || return 0
+    mountpoint -q "$mnt" 2>/dev/null || return 0
+    for ((i = 1; i <= tries; i++)); do
+        umount "$mnt" 2>/dev/null && return 0
+        sleep "${AICLI_UMOUNT_RETRY_S:-1}"
+    done
+    holders=""
+    if command -v fuser >/dev/null 2>&1; then
+        holders="$(fuser -vm "$mnt" 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/["\\]/ /g' | cut -c1-600)"
+    fi
+    echo "[umount] $what at $mnt still busy after $tries tries — lazy-detaching (GH #9 leak path). holders: ${holders:-unknown}" >&2
+    lifecycle_log "warn" "storage" "lazy_detach_with_holders" \
+        "{\"what\":\"$what\",\"mnt\":\"$mnt\",\"tries\":$tries,\"holders\":\"${holders:-unknown}\"}" 2>/dev/null || true
+    umount -l "$mnt" 2>/dev/null || true
+    return 2
+}
+
+# bake_via_hardlink_merge <type> <id> <persist_path> <lower_dir> <sqlite_stage> <kind> <db-paths...>
+#
+# Same job and contract as bake_via_pseudofile_merge above (bakes a SquashFS
+# layer from lower_dir + the SQLite backups in sqlite_stage, WAL/SHM/journal
+# sidecars excluded) — but for a lower_dir that is ITSELF, right now, the live
+# upperdir of another mount. That is exactly op_bake's case: lower_dir is
+# $UPPER_DIR, and the home overlay stays mounted with apps writing to it
+# throughout the whole bake (op_consolidate's case is different — its
+# lower_dir is $MNT_POINT, the mounted MERGED view spanning several lower
+# layers, so it uses bake_via_pseudofile_merge without mounting over that view.
+#
+# GitHub #9: mounting a SECOND overlay using $UPPER_DIR as ITS OWN lowerdir is
+# exactly the kernel-flagged "lowerdir is in-use as upperdir/workdir of another
+# mount" hazard. This helper avoids that mount entirely for op_bake as well.
+#
+# No mount at all is used here — the whole point of the merge is just "the
+# live tree, but with SQLite DBs swapped for their known-consistent backup",
+# which is a plain filesystem operation: `cp -al` hardlinks the whole tree
+# (merge_out is a SIBLING of lower_dir — guaranteed the same filesystem, so
+# this can never fail cross-device — same inode, essentially free for every
+# file that is not being swapped), each detected SQLite DB is then replaced
+# with an INDEPENDENT copy of its backup (never the live hardlink, which
+# would share the live file's data and defeat the whole point), and the
+# WAL/SHM/journal sidecars are deleted outright — SQLite reconstructs them
+# from the .db on next open, the same end state the old exclude-from-
+# mksquashfs args produced.
+bake_via_hardlink_merge() {
     local type="${1:-}"; shift
     local id="${1:-}"; shift
     local persist_path="${1:-}"; shift
@@ -1076,57 +1703,57 @@ bake_via_overlay_merge() {
     # remaining positional args are the detected SQLite DB paths (absolute, under $lower_dir)
 
     if [ -z "$type" ] || [ -z "$id" ] || [ -z "$persist_path" ] || [ -z "$lower_dir" ] || [ -z "$sqlite_stage" ]; then
-        echo "[bake_via_overlay_merge] ERROR: missing required arguments" >&2
+        echo "[bake_via_hardlink_merge] ERROR: missing required arguments" >&2
         return 1
     fi
     if [ ! -d "$lower_dir" ] || [ ! -d "$sqlite_stage" ]; then
-        echo "[bake_via_overlay_merge] ERROR: lower_dir or sqlite_stage missing" >&2
+        echo "[bake_via_hardlink_merge] ERROR: lower_dir or sqlite_stage missing" >&2
         return 1
     fi
 
-    # Per-invocation working dirs on tmpfs (overlay requires upper + work on same fs).
-    local merge_root="/tmp/unraid-aicliagents/.bake_merge_${type}_${id}_$$"
-    local merge_work="$merge_root/work"
-    local merge_out="$merge_root/merged"
-    rm -rf "$merge_root" 2>/dev/null
-    mkdir -p "$merge_work" "$merge_out" 2>/dev/null || {
-        echo "[bake_via_overlay_merge] ERROR: cannot create merge dirs under $merge_root" >&2
-        return 1
-    }
-
-    # Mount overlay: lower=lower_dir (read-only logically), upper=sqlite_stage (shadows
-    # the live DBs at their original paths), work=fresh tmpfs dir.
-    if ! mount -t overlay overlay \
-        -o "lowerdir=${lower_dir},upperdir=${sqlite_stage},workdir=${merge_work}" \
-        "$merge_out" 2>/dev/null; then
-        echo "[bake_via_overlay_merge] ERROR: overlay mount failed: lower=$lower_dir upper=$sqlite_stage" >&2
-        rm -rf "$merge_root" 2>/dev/null
+    local merge_out="${lower_dir%/}.bake_merge_$$"
+    rm -rf "$merge_out" 2>/dev/null
+    if ! cp -al "$lower_dir" "$merge_out" 2>/dev/null; then
+        echo "[bake_via_hardlink_merge] ERROR: hardlink snapshot of $lower_dir failed" >&2
+        rm -rf "$merge_out" 2>/dev/null
         return 1
     fi
 
-    # Build sidecar excludes (relative to lower_dir, which is the overlay's effective root).
-    local sidecar_excludes
-    # shellcheck disable=SC2086 — intentional word-split on positional args
-    sidecar_excludes=$(build_mksquashfs_sqlite_sidecar_excludes "$lower_dir" "$@")
+    local _db _rel _dest
+    for _db in "$@"; do
+        _rel="${_db#$lower_dir/}"
+        # Forgejo #306: a missing backup must fail the bake. Skipping it baked
+        # the LIVE database file (and its WAL) as a possibly torn copy.
+        if [ ! -f "$sqlite_stage/$_rel" ]; then
+            echo "[bake_via_hardlink_merge] ERROR: SQLite backup missing: $sqlite_stage/$_rel" >&2
+            rm -rf "$merge_out" 2>/dev/null
+            return 1
+        fi
+        _dest="$merge_out/$_rel"
+        rm -f "$_dest"
+        mkdir -p "$(dirname "$_dest")" 2>/dev/null
+        # #374: the stage folder is now on the file system of the upper, so a
+        # hard link puts the backup in the merge tree with no second copy (the
+        # peak space is one copy of each database, not two). A stage folder
+        # on another file system falls back to a copy.
+        if ! ln -f "$sqlite_stage/$_rel" "$_dest" 2>/dev/null \
+           && ! cp -f "$sqlite_stage/$_rel" "$_dest" 2>/dev/null; then
+            echo "[bake_via_hardlink_merge] ERROR: could not stage SQLite backup for $_rel" >&2
+            rm -rf "$merge_out" 2>/dev/null
+            return 1
+        fi
+        rm -f "$_dest-wal" "$_dest-shm" "$_dest-journal"
+    done
 
-    # Compose final mksquashfs args. Preserve any caller-supplied MKSQUASHFS_ARGS
-    # (e.g. compression override from supervisor), append sidecar excludes.
     local base_args="${MKSQUASHFS_ARGS:-${_AWL_DEFAULT_ARGS:--comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend}}"
-    local final_args="$base_args $sidecar_excludes"
-
     local result=""
-    if ! result=$(MKSQUASHFS_ARGS="$final_args" atomic_write_layer "$type" "$id" "$persist_path" "$merge_out" "$kind"); then
-        umount "$merge_out" 2>/dev/null || umount -l "$merge_out" 2>/dev/null || true
-        rm -rf "$merge_root" 2>/dev/null
-        echo "[bake_via_overlay_merge] ERROR: atomic_write_layer failed" >&2
+    if ! result=$(MKSQUASHFS_ARGS="$base_args" atomic_write_layer "$type" "$id" "$persist_path" "$merge_out" "$kind"); then
+        rm -rf "$merge_out" 2>/dev/null
+        echo "[bake_via_hardlink_merge] ERROR: atomic_write_layer failed" >&2
         return 1
     fi
 
-    # Cleanup overlay. Lazy umount is the safety net for cases where a stray fd
-    # held the merge_out path open during bake (shouldn't happen, but harmless).
-    umount "$merge_out" 2>/dev/null || umount -l "$merge_out" 2>/dev/null || true
-    rm -rf "$merge_root" 2>/dev/null
-
+    rm -rf "$merge_out" 2>/dev/null
     printf '%s\n' "$result"
     return 0
 }
@@ -1140,13 +1767,38 @@ bake_via_overlay_merge() {
 #   busy_cooldown                   — home busy + within the per-session bake cooldown (op_bake)
 #   sqlite_backup_deferred          — a SQLite .backup was locked / timed out (bake, consolidate)
 #   consolidate_lowerdir_incomplete — live overlay short vs on-disk layers (op_consolidate, WP #1278)
-#   bake_lock_held                  — consolidate found the per-entity bake lock held (bake wins)
+#   bake_lock_held                  — consolidate found the per-entity bake lock held (bake wins);
+#                                     a bake that waited its limit for a NON-bake holder (#357, NOT saved)
 #   bake_landed_during_consolidate  — a delta baked during the unlocked mksquashfs window
 #   target_not_mounted              — persist path's backing mount absent (UD device may mount late) (op_mount, S-02 #1352)
 #   fat32_size_cap                  — projected layer would exceed the FAT32 4 GiB per-file cap (bake/consolidate exit 4, S-09 #1352)
 #   upper_not_empty                 — graduate found unflushed files in the upper after the flush+consolidate (op_graduate exit 2, S-10 #1354)
 #   graduate_precondition           — graduate precondition failed (exit 4 — wrong device/engine/backend, no layers, or pt dir occupied) (op_graduate, S-10 #1354)
-AICLI_DEFER_REASONS="mount_busy busy_cooldown sqlite_backup_deferred consolidate_lowerdir_incomplete bake_lock_held bake_landed_during_consolidate target_not_mounted fat32_size_cap upper_not_empty graduate_precondition"
+AICLI_DEFER_REASONS="mount_busy busy_cooldown sqlite_backup_deferred consolidate_lowerdir_incomplete bake_lock_held bake_landed_during_consolidate target_not_mounted fat32_size_cap upper_not_empty graduate_precondition no_space"
+
+# 2026-09-29 (#357): a bake's exit 2 does NOT always mean "saved". mount_busy
+# (the refresh after the layer was written) and busy_cooldown (saved within
+# the cooldown) keep the "saved, RAM release waits" meaning. These reasons mean
+# that NO new layer was written: the changes are only in the writable layer.
+# A caller that must know the data is on durable storage (Persist, a backup,
+# an install, a release) treats a bake exit 2 with one of these reasons as NOT
+# saved. KEEP IN SYNC with FileStorage::NOT_SAVED_DEFER_REASONS (PHP).
+# #374 (2026-09-30): no_space as an exit 2 = the file system of the SQLite
+# stage folder had no room for the database copies, so nothing was staged and
+# no layer was written.
+AICLI_NOT_SAVED_DEFER_REASONS="bake_lock_held sqlite_backup_deferred no_space"
+
+# bake_result_saved <exit> <defer_reason> — 0 when a bake result means the
+# changes are on durable storage (exit 0, or exit 2 with a "saved" reason).
+bake_result_saved() {
+    local ex="${1:-1}" reason="${2:-}"
+    [ "$ex" = "0" ] && return 0
+    [ "$ex" = "2" ] || return 1
+    case " $AICLI_NOT_SAVED_DEFER_REASONS " in
+        *" $reason "*) return 1 ;;
+    esac
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # S-03 (#1352): defer-marker TTL. A defer-reason marker is a point-in-time
@@ -1222,6 +1874,43 @@ _intent_delete_segment() {
 # Anchored to the delete segment so the "keep" layer can never be masked (F1).
 intent_layer_is_intentional_prune() {
     case "$(_intent_delete_segment "$1")" in *"\"$2\""*) return 0 ;; *) return 1 ;; esac
+}
+
+# ---------------------------------------------------------------------------
+# GitHub #16: an overlay upperdir must never be wiped in place while it is
+# (or is about to become) a live mount's upperdir — mutating the underlying
+# directory of a mounted overlay is undefined kernel behaviour (see also the
+# removed overlay-on-live SQLite merge, Forgejo #236) and in practice strands
+# files. These two pure helpers implement the safe alternative: rename the
+# directory aside to a throwaway sibling (same filesystem, atomic, no data
+# copy) and recreate a fresh empty one at the canonical path BEFORE a caller
+# remounts using that path, so the mount's upper was never the directory
+# about to be reclaimed. No mount/overlay knowledge here — root-free,
+# testable with plain directories.
+
+# swap_dir_for_reclaim <dir> — rename <dir> aside, recreate <dir> empty.
+# Prints the stale (renamed-aside) path on stdout and returns 0 on success.
+# Returns 1 (nothing printed) if <dir> doesn't exist or the rename fails, in
+# which case the caller must proceed without swapping (existing upper unchanged).
+swap_dir_for_reclaim() {
+    local dir="${1%/}" stale
+    [ -d "$dir" ] || return 1
+    stale="$dir.stale-$$"
+    mv -T "$dir" "$stale" 2>/dev/null || return 1
+    mkdir -p "$dir"
+    printf '%s\n' "$stale"
+}
+
+# restore_swapped_dir <dir> <stale> — undo swap_dir_for_reclaim: used when the
+# caller's own follow-up action (e.g. a remount) did NOT end up using the
+# fresh <dir>, so the real data must return to the canonical path instead of
+# being stranded under the throwaway name. A no-op if <stale> is empty (the
+# swap never happened). Best-effort: logs nothing itself, callers report.
+restore_swapped_dir() {
+    local dir="${1%/}" stale="$2"
+    [ -n "$stale" ] || return 0
+    rmdir "$dir" 2>/dev/null || rm -rf "$dir" 2>/dev/null
+    mv -T "$stale" "$dir" 2>/dev/null
 }
 
 # Test-only DETERMINISTIC SIGKILL hook (Epic #1310 Follow-on 4 L3.5). A no-op in
@@ -1605,7 +2294,15 @@ _batch_mksquashfs_args() {
         *" -processors "*) printf '%s' "$existing"; return 0 ;;
     esac
     _batch_plan
-    printf '%s' "${existing}${existing:+ }-processors ${_BATCH_PROCESSORS}"
+    # mksquashfs reads every word after "-e" as a path to exclude. Put
+    # -processors BEFORE a trailing "-e ..." list, or it becomes two excludes.
+    case " $existing " in
+        *" -e "*)
+            local head="${existing%% -e *}"
+            printf '%s -processors %s%s' "$head" "$_BATCH_PROCESSORS" "${existing#"$head"}"
+            ;;
+        *) printf '%s' "${existing}${existing:+ }-processors ${_BATCH_PROCESSORS}" ;;
+    esac
 }
 
 # _batch_log_line — one-shot human log describing the resolved plan (stderr).

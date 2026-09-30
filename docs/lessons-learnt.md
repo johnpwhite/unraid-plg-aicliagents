@@ -2,6 +2,79 @@
 
 ---
 
+## 2026-09-22 — Factory generation and the public storefront are separate release surfaces
+
+**Context:** GitHub issue #12 describes the managed login-shell environment regression. The fix was
+already present in the internal plugin history and could be activated safely on Factory, but the
+public GitHub repository is a separate standalone release history still at v2026.09.15.08. Its
+`main` branch therefore did not contain the fix even after Factory was promoted.
+
+**Rule:** Treat Forgejo `master`/Factory and the public GitHub storefront as separate release
+surfaces. Verify the target remote's history and deployed generation before saying a public issue is
+resolved. A Factory promotion can prove the fix on `.4`; it does not close the GitHub issue or update
+the storefront. Record the public issue as still open until an explicitly authorised public release
+sync and issue update have completed.
+
+---
+
+## 2026-09-22 — Provider-owned native wait state must clear on negative detection
+
+**Context:** Claude Code's provider-owned automatic Continue fired and work resumed, but the workspace drawer continued to show `native` until a page refresh.
+
+**Root cause:** `AICliAgentsTerminal` only updated `nativeQuotaStates` when the detector positively matched a wait message. A normal terminal frame therefore left the previous state untouched, and scanning recent scrollback could rediscover an old wait message after the session had resumed.
+
+**Rule:** Provider-owned terminal state is a current observation, not a durable positive-only flag. Read the active terminal viewport, clear the state when no verified current message remains, and never use retained scrollback to reassert a live wait. Keep a regression test for waiting → working without a reload.
+
+---
+
+## 2026-09-22 — The global storage policy must be authoritative over per-entity backend hints
+
+**Context:** The normal persistence default is `/boot/config/plugins/unraid-aicliagents/persistence`, but older entities can retain direct-directory state and report different capabilities. That made Codex queue an upgrade even though the user-facing storage choice was global.
+
+**Rule:** Resolve the effective engine from the global policy plus actual mount/device facts, then migrate all installed entities together. Do not let a stale per-entity backend hint silently override the selected policy; preserve explicit legacy-path handling separately because `persistence_base` is not the active storage root.
+
+---
+
+## 2026-09-21 — A legitimate queued upgrade must use the explicit no-deadline activity state
+
+**Context:** A Codex upgrade correctly waited for its final legacy workspace to close, but its tray activity remained `running`. The ordinary activity watchdog applied its 1,200-second hard cap, marked it `failed`, and left the durable queue request looking terminal even though it was still safe to resume.
+
+**Rule:** A durable state which intentionally has no worker yet must be represented with `ActivityService::wait()`, not a progress update that leaves it `running`. `wait()` is the explicit hard-cap-exempt state and also repairs an activity a previous watchdog pass had already failed; the install worker must re-register itself as running when the queue becomes ready. Guard both the state transition and the behaviour after a backdated hard-cap interval.
+
+---
+
+## 2026-09-21 — A green release gate certifies a committed tree; force the factory publish deliberately
+
+**Context:** The schedule-cancellation fix and its smoke-harness repair were committed before the full release gate. A normal `ci/publish` then saw clean plugin files and classified the run as commit-only, updating only the workspace's gitlink instead of producing a plugin release.
+
+**Rule:** For a clean, already-committed tree that has a fresh signed gate, run `ci/publish --force-publish --gate=.ci-artifacts/release-gate.json` so the factory re-verifies the gate before it bumps the version. Do not omit the explicit `--gate`: a forced publish of an otherwise non-functional tree is gate-exempt by default. If the workspace root has an unrelated dirty submodule, pass `--no-root-sync`, then stage and commit only the released plugin and private-index gitlinks; never let the publish wrapper's root-wide `git add -A` capture someone else's change.
+
+---
+
+## 2026-09-20 — Version selection must never infer or rewrite the release channel
+
+**Context:** Claude Code was deliberately set to Beta, but it later appeared as Stable. When Beta was selected again, the Store picker exposed only the installed version and the latest release.
+
+**Root cause:** The version picker treated a selected version as evidence for which channel should be saved. A browser fixture supplied a Stable radio state while exercising the picker, so that otherwise harmless selection wrote Stable into the real registry. Separately, an L4 playbook restored a hard-coded Stable state rather than the state it found. The old Beta rule admitted only prereleases, but this upstream uses ordinary semantic versions on the Beta/next tag; those releases therefore disappeared from the catalogue.
+
+**Rule:** Only the explicit channel control may call `set_agent_channel`; selecting a version is an install choice, never a channel mutation. Browser tests that touch a live channel must snapshot and restore its actual value, and tests must use an isolated version-cache path. For registries that publish a normal-semver Beta/next tag, make Beta the release train strictly newer than the Stable tag and no newer than the Beta target, with prereleases included too. Keep a rendered-browser regression that fails if version selection tries to call the channel endpoint.
+
+---
+
+## 2026-09-19 — iOS terminal scrolling must own the iframe gesture
+
+**Context:** Chrome on iOS let a one-finger drag move the page toward pull-to-refresh. The ttyd terminal resized during the drag and xterm scrollback did not move.
+
+**Root cause:** CSS on `.xterm-viewport` alone cannot reliably own the gesture. xterm's rendered screen/canvas can sit above that viewport in the hit-test tree, and iOS WebKit does not reliably honour `overscroll-behavior` for pull-to-refresh.
+
+**Rule:** Install the scroll owner inside the same-origin ttyd iframe. Prefer capture-phase pointer events with an iframe-local `touch-action: none` surface on WebKit, retain an explicitly non-passive touch-event fallback for older builds, wait for a small movement threshold, reject horizontal and multi-touch gestures, map a clearly vertical drag to xterm's public `window.term.scrollLines()` API, then call `preventDefault()` and stop propagation. Rediscover `window.term` on the first move and do not require `.xterm-viewport` to exist before using the xterm API; otherwise the page can be successfully locked while scrollback stays still. Keep the passive long-press paste observer in capture phase too, and cancel it when the scroll owner claims the event. Dispose both handlers on iframe reload so reconnects cannot multiply them. Lock the first measured terminal host height on touch devices so browser-toolbar movement cannot resize xterm during a page pull; allow real width/orientation changes to remeasure. The remaining acceptance test must be performed on a real iPhone because desktop Chromium emulation cannot reproduce WebKit pull-to-refresh.
+
+## 2026-09-19 — API voice playback needs a browser recovery path
+
+**Context:** The voice switch unlocked browser audio but its spoken confirmation always constructed a browser `SpeechSynthesisUtterance`, so a configured TTS endpoint was ignored. Automatic event playback and voice-mail replay could also stop silently when an engine clip failed or never began playing.
+
+**Rule:** Keep the voice source text beside every engine audio payload. Try configured TTS first, bound both the server request and client audio startup, and send the same text to browser speech on any failure or timeout. Only an actual `ended` event counts as heard; a fallback or timeout must release the queue without claiming success.
+
 ## 2026-07-17 — An agent upgrade is not complete until the new layer is active
 
 **Context:** A forced Claude Code upgrade downloaded and baked the new version, but a surviving process still held the old overlay mount. The backend logged `agent_refresh_still_deferred` and retained the exact-session relaunch manifest, while the progress API nevertheless reported completion. The browser reopened the retired session id, showed “Terminal session not found”, and the retry launched against the stale binary, pinning that layer again.
@@ -49,7 +122,9 @@ it returns **`flash/boot  zfs  /boot`** — the Unraid 7.3.1 **ZFS boot pool** (
 Both `aicliagent` and `root` homes (layers + `_upper/homes/<user>`) are co-located there. That zfs
 (not vfat) fstype is exactly why homes run `upper_mode:disk` and why overlay whiteout char-devices
 exist in the upper. **Always resolve the real device with `findmnt --target <home_storage_path>`;
-never infer location from `persistence_base`.** (Consider deleting that dead cfg key.) Relevant to the
+never infer location from `persistence_base`.** ConfigService now keeps that legacy key as a
+read-time fallback only, removes it from effective settings, and never lets it override the modern
+path. Relevant to the
 Epic #1310 `detect_backend.sh` work: a zfs boot pool must classify as **flash** (it's the flash
 replacement), not passthrough, so the layering engine keeps running.
 
@@ -319,3 +394,15 @@ When the `upper/` directory is deleted while an overlayfs mount is still live (k
 ## 2026-05-27 — Factory publish script entity/attribute split-brain (WP #1226)
 
 `publish-factory.php` updates `<PLUGIN version="...">` but NOT `<!ENTITY version "...">` in the PLG DOCTYPE. `consolidate-changelog.ps1` reads the ENTITY to determine what version has shipped; the mismatch means the PLG's src.tar.gz tarball URL in FILE entries still pointed at the old version tarball. Users who upgraded got old code silently. Manual workaround: always bump BOTH the ENTITY declaration (line ~5) AND the PLUGIN attribute (line ~12) before regenerating the tarball. **Fix needed in `publish-factory.php`** (WP #1226).
+## 2026-09-19 — xterm scrollback must be changed through xterm, not its DOM viewport
+
+The first iOS drag fix correctly claimed the one-finger gesture and stopped
+WebKit pull-to-refresh, but it changed `.xterm-viewport.scrollTop`. That DOM
+element is not the source of truth for xterm's line-based scrollback, so the
+page stopped moving while the terminal also appeared not to scroll. ttyd
+exposes the xterm instance as `window.term`; use its public `scrollLines()` API
+for touch-driven movement, carrying fractional row deltas between touch events
+and leaving xterm to clamp the top and bottom boundaries. Keep the scrollbar
+visible as a secondary control, but do not make it the primary mobile fix.
+
+---

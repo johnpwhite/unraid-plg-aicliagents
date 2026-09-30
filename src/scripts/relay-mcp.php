@@ -19,38 +19,65 @@ use AICliAgents\Services\RelayMcpTools;
 $session=(string)(getenv('AICLI_SESSION_ID') ?: '');
 if ($session === '') $session = RelayMcpTools::inheritedSession();
 
+// The resolved identity travels to any child this server starts (below). An MCP
+// host that forwards no environment would otherwise leave the child unable to
+// resolve "myself".
+if ($session !== '') putenv('AICLI_SESSION_ID=' . $session);
+
 /**
- * Generation trampoline (issues #112 and #123).
+ * Serve from the LIVE plugin generation, never a stale one (Forgejo #333,
+ * docs/specs/RELAY_MCP_GENERATION_PINNING.md "2026-09-25").
  *
- * The projected MCP command names the STABLE `src` path, so it never needs
- * re-projecting and always reaches current code. Which generation should
- * actually serve a session can only be answered once a session is in hand — at
- * spawn — so it is answered here: hand off to the adapter belonging to the
- * generation this session launched with, honouring generation.sh's contract
- * that "existing processes keep using the generation path captured at launch".
+ * This server used to exec itself into the relay-mcp.php of the generation its
+ * workspace launched with (#112/#123), and PHP loads its code once, so a
+ * long-running session kept the Relay code it started with through every
+ * update. Found on prod01 2026-09-25: after an update, a session's MCP server
+ * still ran code from before linked boxes, so relay_send_direct_message stored
+ * a reply to a "peer_…__szlngk" contact as a LOCAL message instead of sending
+ * it to the other box, and relay_list_contacts did not know that box.
  *
- * Resolving it at projection time instead (the previous rule) satisfied neither
- * goal: the config is per-agent and shared, so the frozen path matched no
- * particular session, and being immutable it could never receive a fix.
- *
- * The guard variable stops a second hop: the pinned adapter must serve, not
- * trampoline again.
+ * The Relay store is SHARED state, exactly like the admin tools' state, so the
+ * rule is the one admin-mcp.php already follows: each tools/list and
+ * tools/call checks the live `src` link. When it names a different generation
+ * from the one this process loaded, a one-request child running the live
+ * generation's relay-mcp.php answers (AICLI_RELAY_MCP_ONESHOT). The stdio
+ * session with the agent stays open and intact; only the code that answers
+ * changes. A child that gives no answer falls back to this process, so the
+ * transport never dies.
  */
-if (getenv('AICLI_RELAY_MCP_PINNED') === false) {
-    putenv('AICLI_RELAY_MCP_PINNED=1');
-    $pinned = \AICliAgents\Services\AgentRelayService::sessionMcpScriptPath($session);
-    // Carry the resolved identity forward. The pinned adapter may predate the
-    // process-tree fallback and read AICLI_SESSION_ID alone, so passing it here is
-    // what lets an older generation serve a host that forwards no environment —
-    // without it, resolving the session and then handing off would throw the
-    // answer away and the old adapter would fail exactly as before.
-    if ($session !== '') putenv('AICLI_SESSION_ID=' . $session);
-    if ($pinned !== '' && realpath($pinned) !== realpath(__FILE__) && function_exists('pcntl_exec')) {
-        // pcntl_exec replaces this process, so the JSON-RPC stdio transport is
-        // inherited intact — no proxying, no buffering layer in between.
-        @pcntl_exec(PHP_BINARY, [$pinned]);
-        // Only reached if exec failed; carry on serving from this generation.
+const RELAY_MCP_LIVE_SRC = '/usr/local/emhttp/plugins/unraid-aicliagents/src';
+$relayMcpLoadedRoot = (string)(realpath(__DIR__ . '/..') ?: '');
+$relayMcpOneShot = getenv('AICLI_RELAY_MCP_ONESHOT') === '1';
+
+/** The live generation's relay-mcp.php when it is not the code this process loaded, else null. */
+function relayMcpLiveScript(string $loadedRoot): ?string {
+    $live = (string)(getenv('AICLI_RELAY_MCP_LIVE_SRC') ?: RELAY_MCP_LIVE_SRC);   // test seam
+    $real = realpath($live);
+    if ($real === false || $loadedRoot === '' || $real === $loadedRoot) return null;
+    // Only an INSTALLED generation delegates (its tree sits under the plugin
+    // directory). A copy run from a repository checkout serves itself.
+    $pluginDir = realpath(dirname($live));
+    if ($pluginDir === false || strpos($loadedRoot, $pluginDir . '/') !== 0) return null;
+    $script = $real . '/scripts/relay-mcp.php';
+    return is_file($script) ? $script : null;
+}
+
+/** Answer one JSON-RPC request line with a one-request child. Null when it gave no reply. */
+function relayMcpAskChild(string $script, string $requestLine): ?string {
+    putenv('AICLI_RELAY_MCP_ONESHOT=1');
+    $proc = @proc_open([PHP_BINARY, $script], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+    putenv('AICLI_RELAY_MCP_ONESHOT');
+    if (!is_resource($proc)) return null;
+    fwrite($pipes[0], rtrim($requestLine, "\r\n") . "\n");
+    fclose($pipes[0]);
+    $out = (string)stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    proc_close($proc);
+    foreach (explode("\n", $out) as $reply) {
+        $reply = trim($reply);
+        if ($reply !== '' && is_array(json_decode($reply, true))) return $reply;
     }
+    return null;
 }
 
 function relayMcpReply($id, $result): void { echo json_encode(['jsonrpc'=>'2.0','id'=>$id,'result'=>$result], JSON_UNESCAPED_SLASHES) . "\n"; }
@@ -89,7 +116,15 @@ while (true) {
     // side effect and must succeed rather than being treated as an unknown
     // method, otherwise a healthy client may mark this server disconnected.
     if ($method === 'ping') { relayMcpReply($id,new stdClass()); continue; }
-    if ($method === 'tools/list') { relayMcpReply($id,['tools'=>RelayMcpTools::definitions()]); continue; }
-    if ($method === 'tools/call') { relayMcpReply($id,RelayMcpTools::toolResult(RelayMcpTools::call((string)($params['name'] ?? ''),is_array($params['arguments'] ?? null)?$params['arguments']:[],$session))); continue; }
+    if (($method === 'tools/list' || $method === 'tools/call') && !$relayMcpOneShot) {
+        $liveScript = relayMcpLiveScript($relayMcpLoadedRoot);
+        if ($liveScript !== null) {
+            $reply = relayMcpAskChild($liveScript, $line);
+            if ($reply !== null) { echo $reply . "\n"; continue; }
+            // No usable reply: answer from this process rather than failing the call.
+        }
+    }
+    if ($method === 'tools/list') { relayMcpReply($id,['tools'=>RelayMcpTools::definitions()]); if ($relayMcpOneShot) break; continue; }
+    if ($method === 'tools/call') { relayMcpReply($id,RelayMcpTools::toolResult(RelayMcpTools::call((string)($params['name'] ?? ''),is_array($params['arguments'] ?? null)?$params['arguments']:[],$session))); if ($relayMcpOneShot) break; continue; }
     if ($id !== null) relayMcpError($id,-32601,'Method not found');
 }

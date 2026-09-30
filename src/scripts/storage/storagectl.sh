@@ -17,6 +17,7 @@
 #   graduate     Migrate a flash (layering) entity to the passthrough backend on
 #                a capable device (S-10 #1354). Exit 0 ok / 2 deferred / 4
 #                precondition failed. See STORAGE_BACKEND_GRADUATION.md.
+#   backend-migrate  Convert one entity for the global layering|passthrough policy.
 #
 # Exit-code contract (STABLE — tests bind to this):
 #   0   ok (includes no-ops: mount-when-mounted, bake-when-empty, etc.)
@@ -84,12 +85,14 @@ _sc_err() { printf '[storagectl] %s\n' "$*" >&2; }
 
 # ---- argument parsing -------------------------------------------------------
 VERB="${1:-}"; shift || true
-TYPE=""; ID=""; PERSIST=""; OWNER=""; LAZY=0; WANT_UPPER=0; WANT_LAYERS=0; WANT_MANIFEST=0; KEEP_UPPER=0; STAGED=0
+TYPE=""; ID=""; PERSIST=""; OWNER=""; TARGET=""; FORCE_DIRECT=0; LAZY=0; WANT_UPPER=0; WANT_LAYERS=0; WANT_MANIFEST=0; KEEP_UPPER=0; STAGED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --type)     TYPE="${2:-}"; shift 2 ;;
         --id)       ID="${2:-}"; shift 2 ;;
         --persist)  PERSIST="${2:-}"; shift 2 ;;
+        --target)   TARGET="${2:-}"; shift 2 ;;
+        --force-direct) FORCE_DIRECT=1; shift ;;
         --owner)    OWNER="${2:-}"; shift 2 ;;   # Bug #1054: chown home overlay to this user (mount only)
         --lazy)     LAZY=1; shift ;;
         # Phase 3: `unstage --keep-upper` leaves the staging writable layer on disk
@@ -325,7 +328,12 @@ emit_json() {
             _bk="$(effective_backend "$TYPE" "$ID" "$PERSIST" 2>/dev/null)"; [ -n "$_bk" ] || _bk="flash"
         fi
         [ "$_bk" = "flash" ] || { _sb="false"; _sc="false"; }
-        printf '"backend":"%s","supportsBake":%s,"supportsConsolidate":%s,' "$(_json_str "$_bk")" "$_sb" "$_sc"
+        # A plain directory has a stable-link activation path for agent
+        # upgrades too. Keep this capability explicit so PHP does not infer it
+        # from the older bake flags (which are intentionally false here).
+        local _sbs="false"
+        [ "$TYPE" = "agent" ] && _sbs="true"
+        printf '"backend":"%s","supportsBake":%s,"supportsConsolidate":%s,"supportsSideBySide":%s,' "$(_json_str "$_bk")" "$_sb" "$_sc" "$_sbs"
     fi
     # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3: an optional verb-specific object
     # (today: `stage`, carrying the staging mount path the installer writes to).
@@ -356,6 +364,36 @@ require_entity_args() {
     case "$TYPE" in home|agent) : ;; *) _sc_err "invalid --type: $TYPE"; emit_json 3 "failed" "invalid_type"; exit 3 ;; esac
 }
 
+# _mount_wait_entity_lock <lock_file> <wait_s>
+# Return 0 as soon as nobody holds the per-entity storage lock, 1 if it is still
+# held after <wait_s> seconds (0 = probe once, the old behaviour; capped at 60).
+# A non-blocking flock in a poll loop with a deadline, never a blocking flock:
+# a wedged holder must never hang a workspace start. A wait of 1 s or more is
+# logged, so a slow mount can be traced to the operation that held the lock.
+_mount_wait_entity_lock() {
+    local lock="$1" wait_s="${2:-0}" start deadline waited
+    case "$wait_s" in ''|*[!0-9]*) wait_s=0 ;; esac
+    [ "$wait_s" -le 60 ] || wait_s=60
+    [ -e "$lock" ] || return 0
+    start=$SECONDS
+    deadline=$((SECONDS + wait_s))
+    while ! ( exec 7>"$lock"; flock -n 7 ) 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            waited=$((SECONDS - start))
+            declare -f cmn_log >/dev/null 2>&1 && cmn_log WARN MOUNT \
+                "Mount of $TYPE/$ID deferred: another storage operation still holds its lock after ${waited}s (bake_lock_held)."
+            return 1
+        fi
+        sleep 0.25
+    done
+    waited=$((SECONDS - start))
+    if [ "$waited" -ge 1 ]; then
+        declare -f cmn_log >/dev/null 2>&1 && cmn_log INFO MOUNT \
+            "Mount of $TYPE/$ID waited ${waited}s for its storage lock (a reconcile, bake or consolidate held it); mounting now."
+    fi
+    return 0
+}
+
 # ---- verbs ------------------------------------------------------------------
 do_mount() {
     require_entity_args
@@ -372,8 +410,17 @@ do_mount() {
     # layers by on-disk glob (_layer_discover_sorted), so mounting mid-delete can hit
     # a just-removed .sqsh and hard-fail (exit 1, "Failed to mount"). The supervisor
     # mount path already probes this; do_mount (the PHP-direct path) was the gap.
+    #
+    # 2026-09-25 (SIDE_BY_SIDE_AGENT_INSTALLS.md "a mount waits out a short
+    # storage-lock hold"): the lock is NOT only held by a bake or a consolidate.
+    # The supervisor's reconcile pass takes it for every entity in turn while it
+    # checks that entity's layers (sha256 of each layer on flash): about 1-7 s
+    # per entity, every ~20 s. A one-shot probe deferred a mount that landed in
+    # that window, and with no overlay up yet the caller saw no binary (the live
+    # agent suite, factory-cli, 4 s after an upgrade). Wait a bounded time for
+    # the lock with a non-blocking poll; defer only if it is still held.
     local _bake_lock="/var/run/aicli-bake-${TYPE}-${_LOCK_ID}.lock"
-    if [ -e "$_bake_lock" ] && ! ( exec 7>"$_bake_lock"; flock -n 7 ) 2>/dev/null; then
+    if ! _mount_wait_entity_lock "$_bake_lock" "${AICLI_MOUNT_LOCK_WAIT_S:-20}"; then
         write_defer_reason "$TYPE" "$ID" "bake_lock_held"
         emit_json 2 "deferred" "bake_lock_held" "[]"
         exit 2
@@ -405,9 +452,11 @@ do_unmount() {
 }
 
 # ---- stage / unstage (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, 2026-09-15) ----
-# The install-only overlay an agent upgrade writes into, so the version in
-# service keeps its own layer untouched and no session has to close. Agents
-# only — a home has no second version to install beside the first.
+# The install-only successor an agent upgrade writes into, so the version in
+# service keeps its own data untouched and no session has to close. Layering
+# uses an overlay; plain directories use a copied durable directory and an
+# atomic stable-link promotion. Agents only — a home has no second version to
+# install beside the first.
 do_stage() {
     require_entity_args
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
@@ -420,7 +469,12 @@ do_stage() {
     local ex=$?
     local events; events="$(_lifecycle_events_json "$start")"
     if [ "$ex" -ne 0 ]; then
-        emit_json "$ex" "$(_outcome_for "$ex")" "stage_failed" "$events"
+        # A deferred stage (exit 2) names its reason — no_space must reach the
+        # installer, which then fails the install instead of writing into the
+        # live tree on a full drive.
+        local reason="stage_failed"
+        if [ "$ex" -eq 2 ]; then reason="$(_read_defer_reason)"; [ -n "$reason" ] || reason="stage_failed"; fi
+        emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$events"
         exit "$ex"
     fi
     # The staging mount path is what the installer needs; emit_json's payload is
@@ -446,6 +500,24 @@ do_unstage() {
 do_bake() {
     require_entity_args
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
+    # Direct storage has no SquashFS bake, but a staged direct install still
+    # needs a durable atomic generation promotion. Do this before the normal
+    # passthrough no-op guard; the no-op remains correct for ordinary persists.
+    if [ "$STAGED" -eq 1 ] && [ "$TYPE" = "agent" ] \
+       && declare -f effective_backend >/dev/null 2>&1 \
+       && [ "$(effective_backend "$TYPE" "$ID" "$PERSIST" 2>/dev/null)" = "passthrough" ]; then
+        local start; start="$(_lifecycle_count)"
+        if declare -f op_promote_passthrough_stage >/dev/null 2>&1; then
+            op_promote_passthrough_stage "$ID" "$PERSIST" >&2
+        else
+            emit_json 1 "failed" "passthrough_stage_unavailable"
+            exit 1
+        fi
+        local ex=$?
+        local reason=""; [ "$ex" -eq 2 ] && reason="$(_read_defer_reason)"
+        emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")"
+        exit "$ex"
+    fi
     _passthrough_guard bake   # Step 6: no-op (data is already durable) if passthrough
     local start; start="$(_lifecycle_count)"
     # Phase 3: --staged redirects the bake at the install-only staging layer.
@@ -475,6 +547,45 @@ do_bake() {
     # Distinguish a successful no-op (empty upper) from a real bake for the contract.
     if [ "$ex" -eq 0 ]; then
         case "$events" in *bash_bake_skipped_empty*|*bake_skipped_concurrent*) outcome="noop" ;; esac
+    fi
+    # #357: an exit 2 that wrote no layer (bake_lock_held after the lock wait,
+    # sqlite_backup_deferred) is "not_saved", never a plain "deferred" that
+    # callers read as "saved, RAM release waits".
+    [ "$ex" -eq 2 ] && _bake_not_saved "$reason" && outcome="not_saved"
+    emit_json "$ex" "$outcome" "$reason" "$events"
+    exit "$ex"
+}
+
+# _bake_not_saved <defer_reason> — 0 when a bake exit 2 with this reason wrote
+# no layer (#357). Falls back to the known reasons (#374: + no_space) if common.sh is absent.
+_bake_not_saved() {
+    if declare -f bake_result_saved >/dev/null 2>&1; then
+        ! bake_result_saved 2 "${1:-}"
+        return
+    fi
+    case "${1:-}" in bake_lock_held|sqlite_backup_deferred|no_space) return 0 ;; esac
+    return 1
+}
+
+# rebase (#338, SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-26 — #338 agent layer
+# retention"): the one-time consolidation of an IDLE layered agent's long
+# stack into one base. Agents only; a no-op when none is due.
+do_rebase() {
+    require_entity_args
+    _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
+    if [ "$TYPE" != "agent" ]; then
+        emit_json 3 "failed" "rebase_is_agent_only"
+        exit 3
+    fi
+    _passthrough_guard rebase   # a plain-folder agent has no layers
+    local start; start="$(_lifecycle_count)"
+    op_rebase_agent "$ID" "$PERSIST" >&2
+    local ex=$?
+    local reason=""; [ "$ex" -eq 2 ] && reason="$(_read_defer_reason)"
+    local events; events="$(_lifecycle_events_json "$start")"
+    local outcome; outcome="$(_outcome_for "$ex")"
+    if [ "$ex" -eq 0 ]; then
+        case "$events" in *agent_rebase_not_due*) outcome="noop" ;; esac
     fi
     emit_json "$ex" "$outcome" "$reason" "$events"
     exit "$ex"
@@ -584,6 +695,22 @@ do_graduate() {
     exit "$ex"
 }
 
+# backend-migrate — one entity's part of the global storage-engine migration.
+do_backend_migrate() {
+    require_entity_args
+    _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
+    case "$TARGET" in
+        layering|passthrough) ;;
+        *) emit_json 64 "failed" "invalid_target"; exit 64 ;;
+    esac
+    local start; start="$(_lifecycle_count)"
+    op_backend_migrate "$TYPE" "$ID" "$PERSIST" "$TARGET" "$FORCE_DIRECT" >&2
+    local ex=$?
+    local reason=""; { [ "$ex" -eq 2 ] || [ "$ex" -eq 4 ]; } && reason="$(_read_defer_reason)"
+    emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")"
+    exit "$ex"
+}
+
 # probe — S-01 (#1351) DARK phase: read-only capability probe for a persist PATH.
 # Path-scoped (no --type/--id), never mutates, ALWAYS exit 0 (the probe itself
 # errs toward flash internally). stdout is the probe JSON from detect_backend.sh
@@ -626,7 +753,11 @@ do_release() {
         _mount_teardown_arbiter "$mnt" || true
     fi
     local reason=""; [ "$ex" -eq 2 ] && reason="$(_read_defer_reason)"
-    emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")"
+    # #357: a bake that met a non-bake lock holder past its wait wrote no layer.
+    # The overlay stays up (exit 2 above); the outcome says "not_saved".
+    local outcome; outcome="$(_outcome_for "$ex")"
+    [ "$ex" -eq 2 ] && _bake_not_saved "$reason" && outcome="not_saved"
+    emit_json "$ex" "$outcome" "$reason" "$(_lifecycle_events_json "$start")"
     exit "$ex"
 }
 
@@ -639,9 +770,165 @@ do_release() {
 # consumers see no difference.
 _pt_dir() { printf '%s' "$PERSIST/passthrough/${TYPE}s/$ID"; }
 
+# ---- 2026-09-24 (#317): plain-directory side by side ------------------------
+# docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-24 (#317, #318)".
+# Before: agents/<id> was a real directory with ONE bind of the active version.
+# A session holding it kept every NEW workspace on the old version too.
+# Now: each version directory persistence/passthrough/agents/.versions/<id>/<gen>
+# has its own bind at agents/.versions/<id>/<gen> (the path the layered engine
+# uses for an overlay generation) and agents/<id> is a symlink to the active one.
+# A running session keeps its bind; a new workspace resolves the new version.
+
+# _pt_versioned_generation — echo the active generation when the persistence
+# name is a version link (.versions/<id>/<gen>) to a directory; fail otherwise.
+_pt_versioned_generation() {
+    local pdir link gen
+    pdir="$(_pt_dir)"
+    [ -L "$pdir" ] || return 1
+    link="$(readlink "$pdir" 2>/dev/null)" || return 1
+    case "$link" in .versions/"$ID"/*) gen="${link#.versions/$ID/}" ;; *) return 1 ;; esac
+    case "$gen" in ""|.*|*/*) return 1 ;; esac
+    [ -d "$PERSIST/passthrough/agents/.versions/$ID/$gen" ] || return 1
+    printf '%s\n' "$gen"
+}
+
+# _pt_same_dir <a> <b> — true when both paths show the same directory (same
+# device and inode). A bind shows the device and inode of its source.
+_pt_same_dir() {
+    local a b
+    a="$(stat -L -c '%d:%i' "$1" 2>/dev/null)" || return 1
+    b="$(stat -L -c '%d:%i' "$2" 2>/dev/null)" || return 1
+    [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# _pt_sweep_generations — the same GC the layered engine runs on every mount:
+# release unused version binds, then prune old version directories (#318).
+# House-keeping only: never changes this verb's exit code.
+_pt_sweep_generations() {
+    local gen_sh="$_SC_DIR/../installer/generation.sh" out
+    [ -f "$gen_sh" ] || return 0
+    # shellcheck source=/dev/null
+    source "$gen_sh" 2>/dev/null || return 0
+    declare -f aicli_gc_agent_generations >/dev/null 2>&1 || return 0
+    out="$(aicli_gc_agent_generations "$ID" "$PERSIST" 0 "${AICLI_PROC_SCAN_DIR:-/proc}" 2>&1 || true)"
+    [ -n "$out" ] && _sc_err "$out"
+    return 0
+}
+
+# ---- 2026-09-29 (#350): convert a BUSY old layout without closing a session --
+# docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-29 — a busy old layout".
+# Before: while a session held the old one-mount bind at agents/<id>, the
+# conversion waited (exit 2). An upgrade then stayed parked for as long as ANY
+# session of the agent ran (codex-cli on .4: days), and every new workspace
+# also got the old version. Now the busy bind is MOVED (mount --move, which
+# the kernel allows for a busy mount) to the path of the version it shows,
+# agents/.versions/<id>/<gen>. The running processes keep their open files and
+# their binary; the bind stays mounted and busy, so the clean-up keeps it
+# (a real umount decides). agents/<id> is then free to become the symlink.
+# The version the old-layout sessions run is written to a marker in RAM, so
+# the drawer can offer them the switch to the installed version.
+_pt_legacy_marker() { printf '%s/passthrough-legacy-%s' "${AICLI_PT_LEGACY_MARKER_DIR:-/tmp/unraid-aicliagents}" "$ID"; }
+
+# _pt_move_busy_old_layout <stable> — 0 when the busy bind was moved to its
+# version path; 1 (nothing changed) when the bind shows no known version, the
+# target is taken, or the kernel refuses the move.
+_pt_move_busy_old_layout() {
+    local stable="$1" d name old="" target marker
+    for d in "$PERSIST/passthrough/agents/.versions/$ID"/*/; do
+        d="${d%/}"; [ -d "$d" ] || continue
+        name="$(basename -- "$d")"
+        case "$name" in ""|.*) continue ;; esac
+        if _pt_same_dir "$stable" "$d"; then old="$name"; break; fi
+    done
+    [ -n "$old" ] || return 1
+    target="$(agent_versioned_mount "$ID" "$old")"
+    [ -n "$target" ] || return 1
+    mkdir -p "$target" 2>/dev/null || return 1
+    mountpoint -q "$target" 2>/dev/null && return 1
+    mount --move "$stable" "$target" 2>/dev/null || return 1
+    marker="$(_pt_legacy_marker)"
+    mkdir -p "$(dirname "$marker")" 2>/dev/null
+    printf '%s\n' "$old" > "$marker" 2>/dev/null || true
+    lifecycle_log "info" "storagectl" "passthrough_layout_converted_busy" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"moved_generation\":\"$old\"}" 2>/dev/null || true
+    return 0
+}
+
+_pt_mount_versioned() {
+    local gen src target stable
+    gen="$(_pt_versioned_generation)" || { emit_json 1 "failed" "passthrough_bind_failed"; exit 1; }
+    src="$PERSIST/passthrough/agents/.versions/$ID/$gen"
+    target="$(agent_versioned_mount "$ID" "$gen")"
+    stable="$(agent_mount "$ID")"
+
+    # Idempotent: the active version is bound at its own path and the stable
+    # symlink names it. The path every workspace launch takes.
+    if [ -L "$stable" ] && [ "$(readlink "$stable" 2>/dev/null)" = ".versions/$ID/$gen" ] \
+       && mountpoint -q "$target" 2>/dev/null && _pt_same_dir "$target" "$src"; then
+        _pt_sweep_generations
+        emit_json 0 "ok" ""; exit 0
+    fi
+
+    # One-time conversion from the old layout: agents/<id> is a real directory
+    # with a bind. A running session that started on that layout names
+    # agents/<id>/... and not a version, so the directory can only become a
+    # symlink when nothing holds it. A REAL umount decides (never lazy): busy
+    # keeps the bind in place, which is still usable (exit 2).
+    if [ -e "$stable" ] && [ ! -L "$stable" ]; then
+        if mountpoint -q "$stable" 2>/dev/null; then
+            if umount "$stable" 2>/dev/null; then
+                lifecycle_log "info" "storagectl" "passthrough_layout_converted" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"generation\":\"$gen\"}" 2>/dev/null || true
+            elif ! _pt_move_busy_old_layout "$stable"; then
+                # 2026-09-29 (#350): the move is the normal path. Only a bind
+                # that shows no known version, or a failed move, still waits.
+                _sc_err "passthrough: $stable is held by a running session (old layout) and could not be moved — the side-by-side layout starts when it is free"
+                write_defer_reason "$TYPE" "$ID" "mount_busy" 2>/dev/null || true
+                emit_json 2 "deferred" "mount_busy"; exit 2
+            fi
+        fi
+    fi
+
+    # Bind the active version at its own path. Another mount already there is
+    # replaced only when nothing holds it (the same rule as the old layout).
+    mkdir -p "$target" 2>/dev/null
+    if mountpoint -q "$target" 2>/dev/null && ! _pt_same_dir "$target" "$src"; then
+        if ! umount "$target" 2>/dev/null; then
+            _sc_err "passthrough: a different mount occupies $target and is busy — deferring"
+            emit_json 2 "deferred" "mount_busy"; exit 2
+        fi
+        lifecycle_log "info" "storagectl" "passthrough_replaced_foreign_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$src\"}" 2>/dev/null || true
+    fi
+    if ! mountpoint -q "$target" 2>/dev/null; then
+        if [ -n "$OWNER" ] && [ "$OWNER" != "root" ] && id "$OWNER" >/dev/null 2>&1; then
+            chown -R "$OWNER" "$src" 2>/dev/null || true
+            chown "$OWNER" "$target" 2>/dev/null || true
+        fi
+        if ! mount --bind "$src" "$target" 2>/dev/null; then
+            _sc_err "passthrough bind failed: $src -> $target"
+            emit_json 1 "failed" "passthrough_bind_failed"; exit 1
+        fi
+        lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$src\",\"generation\":\"$gen\"}" 2>/dev/null || true
+    fi
+
+    # Only now, with the bind live, move the stable name (atomic rename). The
+    # previous version's bind is NOT touched: a session running from it keeps
+    # it. The sweep below releases it once no process names it.
+    if ! agent_activate_stable_symlink "$ID" "$gen" "$target"; then
+        _sc_err "passthrough: bound $target but could not point $stable at it — retry on the next mount"
+        emit_json 1 "failed" "passthrough_activate_failed"; exit 1
+    fi
+    lifecycle_log "info" "storagectl" "passthrough_generation_activated" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"generation\":\"$gen\"}" 2>/dev/null || true
+    _pt_sweep_generations
+    emit_json 0 "ok" ""; exit 0
+}
+
 _pt_mount() {
     local mnt pdir; mnt="$(_mnt_point)"; pdir="$(_pt_dir)"
     guard_path "$PERSIST" "PERSIST" || { emit_json 1 "failed" "guard_reject"; exit 1; }
+    # 2026-09-24 (#317): an agent whose persistence name is a version link gets
+    # one bind per version and a stable symlink, like the layered engine.
+    if [ "$TYPE" = "agent" ] && _pt_versioned_generation >/dev/null; then
+        _pt_mount_versioned
+    fi
     mkdir -p "$pdir" 2>/dev/null
     [ -L "$mnt" ] && rm -f "$mnt"
     mkdir -p "$mnt" 2>/dev/null
@@ -650,7 +937,23 @@ _pt_mount() {
         chown -R "$OWNER" "$pdir" 2>/dev/null || true
         chown "$OWNER" "$mnt" 2>/dev/null || true
     fi
-    if mountpoint -q "$mnt" 2>/dev/null; then emit_json 0 "ok" ""; exit 0; fi
+    if mountpoint -q "$mnt" 2>/dev/null; then
+        # A mount is already there. It is only correct when it IS a bind of this
+        # plain dir: a bind shows the same device and inode as its source. The
+        # 2026-09-24 antigravity-cli report: an EMPTY overlay left from before
+        # #304 sat on the mount point, this branch reported "ok", and the agent
+        # stayed "[Agent Binary Missing]" with its install on disk.
+        if [ "$(stat -L -c '%d:%i' "$mnt" 2>/dev/null)" = "$(stat -L -c '%d:%i' "$pdir" 2>/dev/null)" ]; then
+            emit_json 0 "ok" ""; exit 0
+        fi
+        # Something else is mounted. Remove it only when nothing holds it (a real
+        # umount, never a lazy one); a busy mount is "retry when idle".
+        if ! umount "$mnt" 2>/dev/null; then
+            _sc_err "passthrough: a different mount occupies $mnt and is busy — deferring"
+            emit_json 2 "deferred" "mount_busy"; exit 2
+        fi
+        lifecycle_log "info" "storagectl" "passthrough_replaced_foreign_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$pdir\"}" 2>/dev/null || true
+    fi
     if mount --bind "$pdir" "$mnt" 2>/dev/null; then
         lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$pdir\"}" 2>/dev/null || true
         emit_json 0 "ok" ""; exit 0
@@ -669,6 +972,28 @@ _pt_persist_noop() {
 _pt_wipe() {
     local mnt pdir; mnt="$(_mnt_point)"; pdir="$(_pt_dir)"
     mountpoint -q "$mnt" 2>/dev/null && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null; }
+    # 2026-09-24 (#318): a versioned agent keeps every version under
+    # .versions/<id> and binds each at agents/.versions/<id>/<gen>. Removing
+    # only the stable symlink (as before) left all of them on flash for good.
+    if [ "$TYPE" = "agent" ]; then
+        local vroot gdir
+        # Plain-directory binds only (the persistence name is a version link):
+        # a layered overlay generation is the layered wipe's business.
+        if declare -f agent_versions_dir >/dev/null 2>&1 && _pt_versioned_generation >/dev/null; then
+            vroot="$(agent_versions_dir "$ID")"
+            for gdir in "$vroot"/*/; do
+                [ -d "$gdir" ] || continue
+                gdir="${gdir%/}"
+                case "$(basename -- "$gdir")" in .*) continue ;; esac
+                mountpoint -q "$gdir" 2>/dev/null && { umount "$gdir" 2>/dev/null || umount -l "$gdir" 2>/dev/null; }
+                rmdir "$gdir" 2>/dev/null || true
+            done
+            [ -L "$mnt" ] && case "$(readlink "$mnt")" in .versions/"$ID"/*) rm -f "$mnt" ;; esac
+        fi
+        case "$PERSIST" in
+            /*) rm -rf "${PERSIST:?}/passthrough/agents/.versions/${ID:?}" "${PERSIST:?}/passthrough/agents/.staging-data/${ID:?}" 2>/dev/null ;;
+        esac
+    fi
     case "$pdir" in "$PERSIST"/passthrough/*) rm -rf "$pdir" 2>/dev/null ;; esac
     emit_json 0 "ok" ""; exit 0
 }
@@ -680,7 +1005,8 @@ _passthrough_guard() {
     [ "$(effective_backend "$TYPE" "$ID" "$PERSIST" 2>/dev/null)" = "passthrough" ] || return 0
     case "$1" in
         mount)            _pt_mount ;;
-        bake|consolidate) _pt_persist_noop ;;
+        stage)            emit_json 3 "failed" "side_by_side_unavailable_passthrough"; exit 3 ;;
+        bake|consolidate|rebase) _pt_persist_noop ;;
         wipe)             _pt_wipe ;;
         release)          _pt_release ;;
     esac
@@ -704,10 +1030,12 @@ case "$VERB" in
     status)      do_status ;;
     probe)       do_probe ;;
     graduate)    do_graduate ;;
+    backend-migrate) do_backend_migrate ;;
     stage)       do_stage ;;
     unstage)     do_unstage ;;
+    rebase)      do_rebase ;;
     ""|-h|--help|help)
-        _sc_err "usage: storagectl.sh <mount|unmount|bake|consolidate|wipe|status|graduate|stage|unstage> --type <home|agent> --id <ID> --persist <PATH> [flags]"
+        _sc_err "usage: storagectl.sh <mount|unmount|bake|consolidate|wipe|status|graduate|backend-migrate|stage|unstage|rebase> --type <home|agent> --id <ID> --persist <PATH> [flags]"
         _sc_err "       storagectl.sh probe --persist <PATH>   (read-only capability probe, JSON)"
         exit 64 ;;
     *)

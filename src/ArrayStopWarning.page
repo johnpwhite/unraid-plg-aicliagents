@@ -1,4 +1,5 @@
 Menu="Buttons"
+Link='nav-user'
 ---
 <?php
 // Determine if home/agent storage paths are on the array
@@ -9,7 +10,11 @@ $homePath = '';
 $agentPath = '';
 if (file_exists($cfgFile)) {
     $cfg = @parse_ini_file($cfgFile) ?: [];
-    $homePath = $cfg['home_storage_path'] ?? $cfg['persistence_base'] ?? '';
+    // The legacy persistence_base key is not an active storage location. The
+    // ConfigService read-time migration handles old cfg files; this warning
+    // must inspect only the modern path so a stale value cannot misdiagnose the
+    // live persistence device.
+    $homePath = $cfg['home_storage_path'] ?? '';
     $agentPath = $cfg['agent_storage_path'] ?? '';
     // Check if paths are on array/pool (starts with /mnt/ but not /mnt/storage, /mnt/disks, /mnt/remotes)
     $classifyScript = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/classify-path.sh';
@@ -105,6 +110,22 @@ if (file_exists($cfgFile)) {
                     var arraySessionIds = arraySessions.map(function(s) { return s.id; }).join(',');
 
                     if (typeof window.swal === 'function') {
+                        // Epic #307: 44 px buttons at phone size. The rule is
+                        // scoped to a body class that is set only while THIS
+                        // dialog is open, so Unraid's own dialogs keep their style.
+                        if (!document.getElementById('aicli-array-stop-swal-style')) {
+                            var st = document.createElement('style');
+                            st.id = 'aicli-array-stop-swal-style';
+                            st.textContent = '@media (max-width:600px){'
+                                + 'body.aicli-array-stop-swal .sweet-alert .sa-button-container button,'
+                                + 'body.aicli-array-stop-swal .sweet-alert .sa-confirm-button-container button'
+                                + '{min-height:44px !important;min-width:44px !important;box-sizing:border-box !important;}'
+                                + 'body.aicli-array-stop-swal .sweet-alert{padding:1.25rem 1rem;}'
+                                + 'body.aicli-array-stop-swal .sweet-alert strong{min-width:0 !important;color:inherit !important;font-weight:700;}'
+                                + '}';
+                            document.head.appendChild(st);
+                        }
+                        document.body.classList.add('aicli-array-stop-swal');
                         window.swal({
                             title: "AI CLI Agents Affected",
                             text: bodyHtml,
@@ -115,6 +136,7 @@ if (file_exists($cfgFile)) {
                             cancelButtonText: "Cancel",
                             confirmButtonColor: "#DD6B55"
                         }, function(confirmed) {
+                            document.body.classList.remove('aicli-array-stop-swal');
                             if (confirmed) {
                                 if (arraySessions.length > 0) {
                                     var csrf = window.csrf_token || '';

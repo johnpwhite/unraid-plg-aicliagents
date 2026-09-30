@@ -114,6 +114,53 @@ function pauseAutoscroll(paused) {
 // R-08 (#1371): support/share UX — redacted bundle + summary. Server-side
 // redaction throughout; nothing is ever auto-posted anywhere.
 // ---------------------------------------------------------------------------
+// 2026-09-29: the four support actions and "Strict anonymize" sit in the
+// "Support" menu of the one-row console header (menu button pattern):
+// Enter/Space/click opens it and moves focus to the first item; Up/Down/Home/End
+// move between items; Escape closes it and returns focus to the button; Tab,
+// a click outside or choosing an action closes it. The check box keeps it open.
+function logSupportMenuItems() {
+    return $('#diag-support-row').find('[role="menuitem"], [role="menuitemcheckbox"]');
+}
+
+function setLogSupportMenu(open, returnFocus) {
+    const btn = document.getElementById('log-support-btn');
+    const menu = document.getElementById('diag-support-row');
+    if (!btn || !menu) return;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+        const first = logSupportMenuItems()[0];
+        if (first) first.focus();
+    } else if (returnFocus) {
+        btn.focus();
+    }
+}
+
+function toggleLogSupportMenu() {
+    const menu = document.getElementById('diag-support-row');
+    setLogSupportMenu(!!(menu && menu.hidden), true);
+}
+
+$(document).on('keydown', '#log-support-btn', function(e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setLogSupportMenu(true); }
+});
+$(document).on('keydown', '#diag-support-row', function(e) {
+    const items = logSupportMenuItems();
+    const i = items.index(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setLogSupportMenu(false, true); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); items.eq((i + 1) % items.length).focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items.eq((i - 1 + items.length) % items.length).focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); items.first().focus(); }
+    else if (e.key === 'End') { e.preventDefault(); items.last().focus(); }
+    else if (e.key === 'Tab') { setLogSupportMenu(false); }
+});
+$(document).on('click', '#diag-support-row [role="menuitem"]', function() { setLogSupportMenu(false); });
+$(document).on('click', function(e) {
+    const menu = document.getElementById('diag-support-row');
+    if (menu && !menu.hidden && !$(e.target).closest('.log-menu-wrap').length) setLogSupportMenu(false);
+});
+
 function diagEsc(s) {
     return $('<div>').text(String(s == null ? '' : s)).html();
 }

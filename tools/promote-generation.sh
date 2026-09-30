@@ -57,6 +57,17 @@ chmod 755 "$STAGE/agents" 2>/dev/null || true
 chmod 755 "$STAGE/src/event"/* 2>/dev/null || true
 aicli_validate_staged_payload "$STAGE"
 aicli_activate_generation "$EMHTTP" "$STAGE" "$GEN_ID"
+# 3. Refresh the root entry points (Forgejo #367). Unraid runs these copies at
+# the plugin root, not the ones inside the generation. install-engine.sh
+# refreshes them after each activation; without the same step here a promote
+# left the root AICliAjax.php and .page files on an older version (for #367,
+# on the version that loaded code through the src link twice). Temp file plus
+# rename, so a request reads the whole old file or the whole new one.
+for f in AICliAjax.php AICliAgentsManager.page AICliAgents.page AICliMenuIcon.page AICliOpenFile.page AICliRelayMcp.page ArrayStopWarning.page README.md; do
+  if [ -f "$EMHTTP/src/$f" ]; then
+    cp -f "$EMHTTP/src/$f" "$EMHTTP/$f.tmp.$$" && mv -f "$EMHTTP/$f.tmp.$$" "$EMHTTP/$f"
+  fi
+done
 echo "active=$(readlink "$EMHTTP/src")"
 grep -o 'version="[^"]*"' "/var/log/plugins/$NAME.plg" | head -1
 tmux list-sessions 2>/dev/null | wc -l | sed 's/^/tmux sessions: /'

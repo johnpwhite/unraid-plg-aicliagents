@@ -1,6 +1,24 @@
 #!/bin/bash
 # AICliAgents Installer: Runtime Dependencies (Node, tmux, fd, rg)
 
+# Forgejo #292 (2026-09-23): any human-readable line this script prints must go
+# through log_status (or log_step/log_ok/log_warn/log_fail), never a raw
+# "echo ... >&3". FD 3 is the installer's numeric PROGRESS channel (see the
+# I/O Setup block in the parent .plg), not a text channel, and on a real
+# install it can go away mid-run (the browser tab drops the connection, a
+# proxy times out). An unguarded write to a dead FD 3 fails loudly ("write
+# error: Transport endpoint is not connected") and, worse, never reaches the
+# user, so the install looked frozen even though it kept going and finished.
+# log_status writes to FD 4 (the UI channel) AND the log file, and its FD 4
+# write is guarded, so a dead descriptor is silent there and the message still
+# lands in install.log. v2026.04.10.23 fixed two such raw "echo >&3" lines
+# (the squashfs-tools download and extract lines, though it dropped them to
+# ">&3"-free bare echoes rather than log_status, so they still never reached
+# the UI). Three more raw FD 3 writes were missed that day — Node.js, tmux,
+# and the shared install_tool helper used for fd/rg/git-lfs — and kept
+# failing for five months until this fix.
+# Do not reintroduce a raw ">&3" here.
+
 # D-170: Move Runtime to plugin root (Flash/RAM) instead of Btrfs agents image.
 # This ensures that if the agent image is corrupted or being replaced during a repair,
 # the core system tools (Node, tmux, etc.) remain available to the repair engine.
@@ -59,7 +77,7 @@ if [ "$USE_SYSTEM_NODE" -eq 1 ]; then
     if command -v npx > /dev/null 2>&1; then ln -sf "$(which npx)" "$BIN_DEST/npx"; fi
 else
     if [ ! -f "$RUNTIME_BASE/node/bin/node" ]; then
-        echo "    > Downloading portable Node.js..." >&3
+        log_status "    > Downloading portable Node.js..."
         if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
             wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
         fi
@@ -104,7 +122,7 @@ if [ -n "$REAL_TMUX" ] && [ -f "$REAL_TMUX" ] && [[ "$REAL_TMUX" != "$BIN_DEST"*
     ln -sf "$REAL_TMUX" "$BIN_DEST/tmux"
 else
     if [ ! -f "$RUNTIME_BASE/bin/tmux" ]; then
-        echo "    > Downloading portable tmux..." >&3
+        log_status "    > Downloading portable tmux..."
         if [ ! -f "$CONFIG_DIR/$TMUX_TAR" ]; then
             wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$TMUX_TAR" "$TMUX_URL"
         fi
@@ -174,7 +192,7 @@ install_tool() {
         ln -sfn "$real" "$BIN_DEST/$name"
     else
         if [ ! -f "$RUNTIME_BASE/bin/$name" ]; then
-            echo "    > Downloading portable $name..." >&3
+            log_status "    > Downloading portable $name..."
             if [ ! -f "$CONFIG_DIR/$tar" ]; then
                 wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$tar" "$url"
             fi
@@ -248,7 +266,7 @@ if [ "$IS_SYSTEM" -eq 1 ]; then
 else
     if [ ! -f "$RUNTIME_BASE/bin/mksquashfs" ]; then
         if [ ! -f "$CONFIG_DIR/$SQUASH_TAR" ]; then
-            echo "    > Downloading squashfs-tools..."
+            log_status "    > Downloading squashfs-tools..."
             wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_URL" || \
             wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_URL_ALT"
         fi
@@ -264,7 +282,7 @@ else
         TMP_EXTRACT="/tmp/squash-extract-$$"
         mkdir -p "$TMP_EXTRACT"
         
-        echo "    > Extracting squashfs-tools..."
+        log_status "    > Extracting squashfs-tools..."
         if ! tar -xf "$CONFIG_DIR/$SQUASH_TAR" -C "$TMP_EXTRACT" --no-same-owner 2>&1; then
             log_fail "Extraction of squashfs-tools failed. The download may be corrupted."
             rm -rf "$TMP_EXTRACT"

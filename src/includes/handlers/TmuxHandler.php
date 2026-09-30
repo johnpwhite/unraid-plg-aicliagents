@@ -10,7 +10,7 @@
 
 namespace AICliAgents\Handlers;
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/TmuxService.php';
+require_once __DIR__ . '/../services/TmuxService.php'; // #367: same generation as this file
 
 use AICliAgents\Services\TmuxService;
 use AICliAgents\Services\LifecycleLogService;
@@ -33,6 +33,11 @@ class TmuxHandler {
             // Per-session live ops (T-04 / T-06 — docs/specs/TERMINAL_COPY_PASTE.md).
             case 'tmux_set_session_option':     return self::setSessionOption($id);
             case 'tmux_paste_text':             return self::pasteText($id);
+            // Mobile terminal redesign (docs/specs/TERMINAL_MOBILE_COPY_PASTE.md,
+            // "Redesign 2026-09-23 — backend actions").
+            case 'tmux_scroll':                 return self::scroll($id);
+            case 'tmux_send_key':               return self::sendKey($id);
+            case 'tmux_capture_history':        return self::captureHistory($id);
             default:                            return null;
         }
     }
@@ -43,7 +48,8 @@ class TmuxHandler {
                 'tmux_get_agent_defaults', 'tmux_save_agent_defaults',
                 'tmux_get_workspace_overrides', 'tmux_save_workspace_overrides',
                 'tmux_get_effective',
-                'tmux_set_session_option', 'tmux_paste_text'];
+                'tmux_set_session_option', 'tmux_paste_text',
+                'tmux_scroll', 'tmux_send_key', 'tmux_capture_history'];
     }
 
     private static function args() {
@@ -150,6 +156,53 @@ class TmuxHandler {
             return ['status' => 'error', 'message' => 'text required (POST body)'];
         }
         return TmuxService::pasteText($agentId, $id, $text);
+    }
+
+    // ---------- Mobile terminal redesign (docs/specs/TERMINAL_MOBILE_COPY_PASTE.md) ----------
+
+    /**
+     * Scroll tmux copy-mode history for the mobile terminal's swipe gesture.
+     * `lines`: positive scrolls up into older history, negative scrolls back
+     * down (only while already in copy-mode), 0 just reports state.
+     * `exit=1` cancels copy-mode outright (the "done scrolling" release).
+     */
+    private static function scroll($id) {
+        $agentId = $_POST['agentId'] ?? $_GET['agentId'] ?? '';
+        if (empty($agentId)) return ['status' => 'error', 'message' => 'agentId required'];
+        if ($id === 'default') return ['status' => 'error', 'message' => 'session id required'];
+        $lines = (int)($_POST['lines'] ?? $_GET['lines'] ?? 0);
+        $exit = (string)($_POST['exit'] ?? $_GET['exit'] ?? '0') === '1';
+        return TmuxService::scrollHistory($agentId, $id, $lines, $exit);
+    }
+
+    /**
+     * Send one allow-listed special key, or a short run of literal text, into
+     * the session (mobile arrow pad / Esc-Tab-Ctrl row, or the plain-text
+     * keyboard). `text` is accepted from POST ONLY — same reasoning as
+     * pasteText(): GET would put typed content into the query string and thus
+     * into nginx access logs.
+     */
+    private static function sendKey($id) {
+        $agentId = $_POST['agentId'] ?? $_GET['agentId'] ?? '';
+        if (empty($agentId)) return ['status' => 'error', 'message' => 'agentId required'];
+        if ($id === 'default') return ['status' => 'error', 'message' => 'session id required'];
+        $key = $_POST['key'] ?? $_GET['key'] ?? '';
+        $text = $_POST['text'] ?? '';
+        if (!is_string($key)) $key = '';
+        if (!is_string($text)) $text = '';
+        return TmuxService::sendSpecialKey($agentId, $id, $key, $text);
+    }
+
+    /**
+     * Fetch a plain-text slice of tmux scrollback for the mobile "history"
+     * view — no copy-mode interaction, no colour codes.
+     */
+    private static function captureHistory($id) {
+        $agentId = $_POST['agentId'] ?? $_GET['agentId'] ?? '';
+        if (empty($agentId)) return ['status' => 'error', 'message' => 'agentId required'];
+        if ($id === 'default') return ['status' => 'error', 'message' => 'session id required'];
+        $lines = (int)($_POST['lines'] ?? $_GET['lines'] ?? 2000);
+        return TmuxService::captureHistory($agentId, $id, $lines);
     }
 
     // ---------- Four-tier endpoints ----------

@@ -1,53 +1,35 @@
-I'm resuming work on unraid-plg-aicliagents. Context from the previous session (2026-09-15):
+I'm resuming work on unraid-plg-aicliagents. Context from 2026-09-23 AEST (evening):
 
 **Repo state:**
-- Branch: master, pushed, clean.
-- Live on 192.168.1.4: **v2026.09.15.05**, promoted with no session closed
-  (generation 2026.09.15.05-6789e930d00e52e0). Release gate green and signed for it.
+- Branch `master`, HEAD `945b47f2` (v2026.09.23.06 + a test-only commit) plus this handover commit. Working tree clean.
+- Workspace root repo `unraid-extensions` HEAD `4693230` (host-identity guard in `ci/`).
 
-**Shipped this session (all live):**
-1. **Side-by-side agent installs, phase 3 (#216, v.01).** An npm, tarball or GitHub-release
-   agent upgrade installs beside the running version; open workspaces keep theirs.
-   Spec `docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md`.
-2. **Upgrades no longer interrupt (v.02).** No blocked terminals, no "queued", no force
-   close for side-by-side; a completion notice says how to move a workspace over.
-   Spec `docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md`.
-3. **Switch a workspace to the installed version (v.02, fixes v.03).** Workspace menu item;
-   names the version (it can be a downgrade); sends NO continue.
-   Spec `docs/specs/WORKSPACE_APPLY_AGENT_VERSION.md`.
-4. **Close intent (#218, v.02).** Closing no longer flashes an untracked row.
-   Spec `docs/specs/WORKSPACE_CLOSE_INTENT.md`.
-5. **Supervisor 39 s stall (v.03).** Old-generation reference scan is now one /proc pass.
-6. **Voice mail (#210, v.04).** Kept messages, drawer badge and row counts, panel,
-   Speak / Voice mail / Off per workspace, retention settings, admin tools + CLI
-   (`voicemail`, `voicemail-heard`). Spec `docs/specs/VOICE_MAIL.md`.
-7. **Claude resume by id (#221, v.05).** A named Claude session's exit line prints its name;
-   `ClaudeSessionNameResolver` maps it to the conversation id from Claude's `custom-title`
-   records. Spec `docs/specs/CLAUDE_RESUME_BY_SESSION_ID.md`.
+**Running state:**
+- .4 runs v2026.09.23.06, active generation `2026.09.23.06-72134bb35e6f9f5f` (session-safe promote).
+- Public store (GitHub) is still **2026.09.15.08**. All forum reporters run that version.
 
-**Open issues, not started:**
-- **#222** Switching a workspace's version reloads the whole page and leaves a white line
-  across the terminal. Proposed: reconnect the iframe in place; capture state if the line
-  persists.
-- **#219** Terminal shrinks with dot-filled space after a deploy. `window-size latest` is
-  DELIBERATE (phone + desktop). Reproduce in a throwaway tmux session before changing
-  anything; the likely fix is a `refresh-client -S` once reattach settles.
-- **#214** Workspace launcher exposes injected secrets in process command lines.
-- Phase 4 of side-by-side: the three `curl_install` agents. Needs its own design.
+**Waiting on John:** he is testing on .4 first. On his go: run the Storefront flow (`/jpw-unraid-storefront`) — net-off `<CHANGES>` since 2026.09.15.08 into user-facing notes, show him, then push to public GitHub. Then draft a forum reply (thread page 4: Uliphant, pmyoung, fatredwombat1, protagonista) for him to post.
+
+**Shipped this session (v2026.09.23.04, all Forgejo issues closed with evidence):**
+- #297 `/mnt/user` storage target: allowed but advised against (picker + move dialog advice), useCache=only share resolves to pool path, `executeMigrate` re-validates, `evictAll` kills only the plugin's own ttyd/tmux. Docs: `docs/USER_GUIDE.md`, `README.public.md`, `docs/specs/STORAGE_TARGET_PICKER.md`.
+- #296 consolidate refresh-only mode (never switches agent generation mid-bake), bound-upper re-checks, refuse a bake that loses the agent binary; `-processors` now goes before the `-e` exclude list (`common.sh`).
+- #298/#276 caches excluded from the squashfs instead of deleted from the live upper.
+- #292 installer progress: raw `echo >&3` replaced by `log_status` in `runtime.sh`.
+- #291 host guard: `ci/lib/host-guard.sh`, exit 37, proven in two gate runs.
+- #300 box detector ignores muted placeholder text (relative WCAG contrast < 60% of the box text colour). Real capture fixture `tests/fixtures/pane-input-box/opencode-placeholder.txt`.
+- Shift+drag hint moved to bottom-centre (the Activity tray pill covered its close button).
+- #279 verified (one EventSource per page), #290 closed (scripts live in `~/.claude/host/`).
+
+**Also shipped (v2026.09.23.05):** #301 iOS image paste via `navigator.clipboard.read()` (unit-tested; John tests on iPhone), #302 e2e operator guard merges instead of overwriting (renames survive a gate), #303 ghost "installed" agent self-heal + no empty-stack remount loop, #304 plain-directory agents stay bound under the `layering` policy (codex/grok/kimi would have mounted empty after a reboot), antigravity-cli removed from the test pipeline (live test archived to `tests/archive/`, e2e never picks it, `ci/scripts/testing/shared/visual_review.sh` now uses `claude -p`). #305 (flaky e2e image-paste timing) is open, low priority.
+
+**Also shipped (v2026.09.23.06):** #306 URGENT for public users on Unraid 7.3.2 — `sqlite_backup_all` passed `.timeout` + `.backup` as ONE argument; sqlite3 3.53 ran only `.timeout`, so no backup was written: every home merge failed closed and every save packed the LIVE database. Fixed (separate args, verified backup, hardlink bake fails closed). `_layer_near_empty` now reads the unsquashfs listing (a small valid layer is 4096 bytes). #236 proven live with an isolated test home and closed. #270 Phase 4 (curl-install agents share `agent-state/<id>/`; unit-tested only, no accounts) closed. #305 flaky e2e fixed (945b47f2).
+
+**Open backlog (no defects):** #287 backup redesign, #299 Relay request grants for external remotes (forum feature request, spec first), #201 deferred.
 
 **Active gotchas:**
-- Ad-hoc storage-op scripts write the REAL layer manifest and can leave halt markers that
-  block every Playwright click. Sweep halts, manifest, loops and mounts before a gate.
-- The L4 container cannot SSH to the box. To run ONE Playwright spec after
-  `../ci/run deploy`: `docker run --rm -v /mnt/appdata/runner_aicliagents:/work -w /work/ui-build
-  mcr.microsoft.com/playwright:v1.59.1-jammy npx playwright test tests/e2e/specs/<spec>
-  --project=chromium` (bootstrap auth first with `.ci/runners/auth-bootstrap.sh` if
-  `tests/e2e/.auth/storageState.json` is missing). A Chromium signal 11 is a container
-  flake; rerun.
-- Smoke tests that call real services write real stores (voice mail). Clean them in the
-  smoke file's own cleanup.
-- The FUSE guard refuses a Bash call that mixes `find`/`grep -r` with a `/mnt/user` path;
-  keep them in separate calls or use `/mnt/cache`.
+- The storage integration layer SKIPS on .4 (live sessions). #296/#298 are proven by unit tests + smoke only, not by a live antigravity-cli reinstall.
+- A held Relay notice shows a "1 message waiting" pill bottom-right; it can cover bottom-right UI in L4 tests.
+- A workspace's tmux socket is `/tmp/unraid-aicliagents/tmux/s-<id>/tmux-0/default`; use the plugin's own tmux binary (`/usr/local/emhttp/plugins/unraid-aicliagents/.runtime/bin/tmux`), the system tmux says "no server running".
+- `ci/run deploy` deletes the runner's `storageState.json`; copy it before a dev deploy if a browser probe needs it.
 
-**Files to read before editing:** the spec for the area, then
-`C4-Documentation/c4-component-*.md`.
+**Skills to load first:** `jpw-forgejo-backlog`, `jpw-unraid-storefront` (for the release), `jpw-handover` at the end.

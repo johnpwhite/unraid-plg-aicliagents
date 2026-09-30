@@ -10,6 +10,8 @@
 
 namespace AICliAgents\Services\Sources;
 
+require_once __DIR__ . '/../AgentCaptiveStateService.php';
+
 use AICliAgents\Services\LogService;
 
 class SourceResolver {
@@ -55,20 +57,22 @@ class SourceResolver {
      * can therefore be installed into a layer of their own beside the version
      * that is running — docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3.
      *
-     * The line is drawn where the spec's own 2026-09-09 investigation drew it.
-     * For these three types the install writes nothing a user would recognise as
-     * their own data: it is the same bytes the same install command would
-     * produce again, on this box, right now. Credentials and history live in the
-     * shared managed home, outside every agent layer, so two versions of one
-     * agent share nothing writable.
+     * The line is drawn where the spec's 2026-09-09 correction landed. The
+     * vendor install HOME is only an install-time payload location; the runtime
+     * shell exports the shared managed HOME, outside every agent layer, for
+     * credentials, history and configuration. CurlInstallSource also honours
+     * the same install-root override as the other sources, so its payload can
+     * be staged into a generation of its own.
      *
-     * `curl_install` is deliberately absent. Those agents' vendor scripts land
-     * their binary inside a captive home directory inside the agent's own tree,
-     * so a versioned layout has to version that path too — a real piece of work
-     * the spec defers to its own phase, not something to infer here. Until then
-     * they keep the existing behaviour: an upgrade waits for their sessions.
+     * `curl_install` qualifies only with a valid `source.captive_state`
+     * declaration (see supportsSideBySideInstall and AgentCaptiveStateService).
+     *
+     * A storage backend may still decline staging (notably passthrough, which
+     * has no versioned activation path). InstallerService then retains the
+     * existing closed-set fallback instead of pretending that backend can do
+     * concurrent activation.
      */
-    private const SIDE_BY_SIDE_SOURCE_TYPES = ['npm', 'tarball', 'github_release'];
+    private const SIDE_BY_SIDE_SOURCE_TYPES = ['npm', 'tarball', 'github_release', 'curl_install'];
 
     /**
      * True when a new version of this agent can be installed while the version
@@ -79,7 +83,18 @@ class SourceResolver {
     public static function supportsSideBySideInstall(array $agent): bool {
         $desc = self::descriptor($agent);
         $type = (string)($desc['type'] ?? '');
-        return $type !== '' && in_array($type, self::SIDE_BY_SIDE_SOURCE_TYPES, true);
+        if ($type === '' || !in_array($type, self::SIDE_BY_SIDE_SOURCE_TYPES, true)) {
+            return false;
+        }
+        // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 4 — 2026-09-23 (#270): a vendor
+        // script can write user state into the captive home. Two generations
+        // may share that state only through the version-independent store, and
+        // only for the paths the registry declares after a check against the
+        // vendor's installer and docs. No valid declaration: the upgrade waits.
+        if ($type === 'curl_install') {
+            return \AICliAgents\Services\AgentCaptiveStateService::declaredPaths($agent) !== null;
+        }
+        return true;
     }
 
     /**

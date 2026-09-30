@@ -122,8 +122,8 @@ class AutoLaunchService
         foreach (array_keys($recommended) as $user) $job['users'][$user] = $byUser[$user];
         $jobFile = '/tmp/unraid-aicliagents/.boot_consolidate_job_' . bin2hex(random_bytes(4)) . '.json';
         if (@file_put_contents($jobFile, json_encode($job)) === false) return [];
-        // nosemgrep: php.lang.security.exec-use.exec-use
-        @shell_exec('nohup /usr/bin/php ' . escapeshellarg(self::BOOT_CONSOLIDATE_WORKER) . ' ' . escapeshellarg($jobFile) . ' >/dev/null 2>&1 &');
+        // #337: fully detached — this runs from the boot sweep and the install.
+        UtilityService::spawnDetached(['/usr/bin/php', self::BOOT_CONSOLIDATE_WORKER, $jobFile]);
         self::log("Boot consolidate: deferred " . count($defer) . " session(s) across " . count($recommended) . " home(s) for pre-launch consolidation (#129)", AICLI_LOG_INFO);
         return $defer;
     }

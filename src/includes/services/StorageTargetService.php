@@ -276,6 +276,16 @@ class StorageTargetService {
      * comma-separated list of "<path-or-ancestor>:<fstype>" pairs, first match
      * (by exact path or the path being under it) wins.
      */
+    /**
+     * The filesystem type at $path (or its deepest existing ancestor), '' when
+     * unknown. Public for the folder browser's "New folder" action (HOME_BACKUP.md
+     * 2026-09-24 follow-up), which refuses a FUSE parent the same way
+     * resolveBackupTarget() refuses a FUSE target.
+     */
+    public static function fstypeAt(string $path): string {
+        return self::findmntFstype($path);
+    }
+
     private static function findmntFstype(string $path): string {
         $hook = getenv('AICLI_ITEST_FSTYPE_MAP');
         if ($hook !== false) {
@@ -347,9 +357,92 @@ class StorageTargetService {
             && is_string($probe['realpath'] ?? null) && $probe['realpath'] !== ''
             && $probe['realpath'] . $suffix !== $path) {
             $resolved = $probe['realpath'] . $suffix;
+        } elseif (($probe['mount_class'] ?? '') === 'user_share') {
+            // 2026-09-23 (Bug #297): same fallback as candidate() above — a
+            // share the live probe left on /mnt/user (still FUSE) may still
+            // record, in its OWN config, that every file lives on one pool
+            // (useCache="only"). Never a guess: resolveViaShareConfig() reads
+            // that field from the SAME live per-share status source this
+            // class already trusts for the appdata-pool recommendation
+            // (appdataPrimaryPool(), shares.ini — emhttpd's generated mirror
+            // of each share's /boot/config/shares/<share>.cfg) and fails
+            // closed to null the moment the share spans disks, has no
+            // section, or the resolved pool directory doesn't exist. This is
+            // what executeMigrate() relies on to never write a live
+            // /mnt/user (shfs) path as a migration destination when the
+            // config can prove a single-pool path is equally correct.
+            $viaCfg = self::resolveViaShareConfig($probePath, $suffix, $path);
+            if ($viaCfg !== null) {
+                $resolved = $viaCfg;
+                $warnings[] = 'resolved_via_share_config';
+            }
         }
         return ['ok' => true, 'message' => '', 'warnings' => array_values(array_unique($warnings)),
                 'resolved_path' => $resolved];
+    }
+
+    /**
+     * 2026-09-23 (Bug #297): resolve a /mnt/user0?/<share>(/rest) path whose
+     * live probe did NOT already resolve it (the OS-level exclusive-share
+     * bypass didn't fire — it is genuinely still FUSE) by reading the
+     * NAMED share's own cache-mode fields from shares.ini — the same file
+     * and the same useCache/cachePool keys appdataPrimaryPool() already
+     * reads for the appdata share, generalised to any share name. Resolves
+     * ONLY when useCache="only" (every file on one named pool) AND the
+     * resolved pool directory actually exists; any other case (share spans
+     * disks, "yes"/"prefer" caching, no shares.ini section, missing pool
+     * dir) returns null — the raw /mnt/user path is kept, never rewritten
+     * on a guess. Honours the same AICLI_SHARES_INI / AICLI_MNT_ROOT test
+     * hooks as the rest of this class.
+     *
+     * $probePath/$suffix come from the SAME existingAncestor() split the
+     * caller already computed (mirrors the realpath-resolution arm above),
+     * so a not-yet-created destination subdirectory resolves exactly like
+     * one that already exists; $path is the original full path, only used
+     * to detect a no-op resolution.
+     *
+     * @return string|null the resolved pool path (+ suffix), or null when
+     *   no safe resolution is possible.
+     */
+    private static function resolveViaShareConfig(string $probePath, string $suffix, string $path): ?string {
+        $mnt = rtrim(getenv('AICLI_MNT_ROOT') ?: '/mnt', '/');
+        $quoted = preg_quote($mnt, '#');
+        if (!preg_match('#^' . $quoted . '/user0?/([^/]+)(/.*)?$#', $probePath, $m)) return null;
+        $share = $m[1];
+        $rest = ($m[2] ?? '') . $suffix;
+        $cfg = self::shareCacheConfig($share);
+        if ($cfg === null || $cfg['useCache'] !== 'only') return null;
+        $pool = $cfg['cachePool'] !== '' ? $cfg['cachePool'] : 'cache';
+        if (!preg_match('/^[A-Za-z0-9_.-]+$/', $pool)) return null;
+        $target = "$mnt/$pool/$share";
+        if (!is_dir($target)) return null;
+        $resolved = $target . $rest;
+        return ($resolved !== $path) ? $resolved : null;
+    }
+
+    /**
+     * The named share's `useCache` / `cachePool` fields from shares.ini
+     * (generalises appdataPrimaryPool()'s section parser to an arbitrary
+     * share name). @return array{useCache:string,cachePool:string}|null
+     * null when the share has no section in the file.
+     */
+    private static function shareCacheConfig(string $share): ?array {
+        $ini = getenv('AICLI_SHARES_INI') ?: '/var/local/emhttp/shares.ini';
+        if (!is_file($ini)) return null;
+        $in = false; $useCache = ''; $cachePool = ''; $found = false;
+        foreach ((array)@file($ini, FILE_IGNORE_NEW_LINES) as $line) {
+            if ($line !== '' && $line[0] === '[') {
+                if ($in) break; // left the target share's section
+                $in = (str_replace(['[', ']', '"'], '', $line) === $share);
+                if ($in) $found = true;
+                continue;
+            }
+            if (!$in) continue;
+            if (strpos($line, 'useCache=') === 0)  $useCache  = trim(substr($line, 9), '"');
+            if (strpos($line, 'cachePool=') === 0) $cachePool = trim(substr($line, 10), '"');
+        }
+        if (!$found) return null;
+        return ['useCache' => $useCache, 'cachePool' => $cachePool];
     }
 
     // -------------------------------------------------------------------------
@@ -378,6 +471,19 @@ class StorageTargetService {
             $original = $path;
             $path = $probe['realpath'] . $suffix;
             $note = "Resolves to $path (exclusive share) — the direct pool path is stored.";
+        } elseif (($probe['mount_class'] ?? '') === 'user_share') {
+            // 2026-09-23 (Bug #297): the live probe did NOT resolve this path
+            // off /mnt/user (it is genuinely still FUSE-backed). Ask the
+            // share's OWN config whether it keeps every file on one pool
+            // anyway. See the matching block in validateTarget() below for
+            // the full rationale — kept in sync deliberately.
+            $viaCfg = self::resolveViaShareConfig($probePath, $suffix, $path);
+            if ($viaCfg !== null) {
+                $original = $path;
+                $path = $viaCfg;
+                $note = "This share keeps all its files on one pool (useCache=\"only\") — resolves to $path.";
+                $warnings[] = 'resolved_via_share_config';
+            }
         }
 
         // S-02 per-kind network policy (the probe has no kind axis — applied here).

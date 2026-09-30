@@ -19,7 +19,7 @@
  * the consolidate outcome.
  */
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\StorageMountService;
 use AICliAgents\Services\AutoLaunchService;
@@ -27,7 +27,7 @@ use AICliAgents\Services\ProcessManager;
 use AICliAgents\Services\ConsolidateState;
 use AICliAgents\Services\LogService;
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/ConsolidateState.php';
+require_once dirname(__DIR__) . '/includes/services/ConsolidateState.php';
 
 /**
  * #131: raise an Unraid notification (dynamix) so the user is told a large

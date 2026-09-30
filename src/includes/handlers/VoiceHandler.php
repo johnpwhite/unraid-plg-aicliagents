@@ -34,12 +34,27 @@ namespace AICliAgents\Handlers;
 use AICliAgents\Services\AdminService;
 use AICliAgents\Services\SecretService;
 use AICliAgents\Services\VoiceMailService;
+use AICliAgents\Services\VoiceEngineSetupService;
 use AICliAgents\Services\VoiceService;
 
 class VoiceHandler
 {
-    /** The fixed sentence test_voice speaks (R6). */
+    /** The fixed sentence test_voice speaks for the Settings Test button (R6). */
     private const TEST_SENTENCE = 'Voice is working on this server.';
+
+    /**
+     * The fixed sentences for the other test_voice purposes. The page picks a
+     * purpose, never the text: test_voice never speaks client-supplied text.
+     * - `switch`: VOICE_SWITCHES.md, the confirmation when voice is turned on.
+     * - `voice`: AGENT_VOICE.md R14, the Voice… dialog sample.
+     * - `announce`: VOICE_MAIL.md "Test the spoken name"; the intro goes first.
+     */
+    private const PURPOSE_SENTENCES = [
+        ''         => self::TEST_SENTENCE,
+        'switch'   => 'Voice enabled.',
+        'voice'    => 'This is how this voice sounds.',
+        'announce' => 'This is how this workspace is announced.',
+    ];
 
     public static function handle($action, $id): ?array
     {
@@ -57,6 +72,14 @@ class VoiceHandler
             case 'voicemail_set_mode':  return self::voicemailSetMode();
             case 'voicemail_delete':    return self::voicemailDelete();
             case 'voicemail_delete_all':return self::voicemailDeleteAll();
+            // VOICE_MAIL.md R14 — Forgejo #376.
+            case 'voicemail_set_spoken_name': return self::voicemailSetSpokenName();
+            // AGENT_VOICE.md R14 — Forgejo #377.
+            case 'voice_set_workspace_voice': return self::voiceSetWorkspaceVoice();
+            // AGENT_VOICE.md "#323 guided setup" — Forgejo #323.
+            case 'voice_engine_prepare':return self::voiceEnginePrepare();
+            case 'check_voice_engine':  return VoiceEngineSetupService::check();
+            case 'voice_engine_finish': return self::voiceEngineFinish();
             default:                    return null;
         }
     }
@@ -109,25 +132,29 @@ class VoiceHandler
         if ($m === null) {
             return ['status' => 'error', 'message' => 'That voice mail has expired or was never kept.'];
         }
+        // R14 (Forgejo #376): the same fixed intro as the live message, from the
+        // workspace's CURRENT spoken name, or the stored name when it is gone.
+        $record = VoiceMailService::resolveWorkspace((string)($m['workspaceId'] ?? ''))['record'];
+        $intro = VoiceMailService::introFor(VoiceMailService::spokenNameFor($record, (string)($m['name'] ?? '')));
         $clipId = (string)($m['clipId'] ?? '');
         if ($clipId !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/', $clipId)
             && is_file(VoiceService::dir() . '/' . $clipId . '.mp3')) {
             return [
-                'status' => 'ok', 'mode' => 'audio', 'text' => (string)$m['text'],
+                'status' => 'ok', 'mode' => 'audio', 'text' => (string)$m['text'], 'intro' => $intro,
                 'url' => '/plugins/unraid-aicliagents/AICliAjax.php?action=voice_clip&id=' . $clipId,
             ];
         }
         // The clip is gone (clips are short-lived tmpfs files). With an engine
         // configured, make a new one so replay sounds like the engine that is set,
         // not the browser's own voice (operator report 2026-09-15).
-        $fresh = VoiceService::replayClip((string)$m['text'], isset($m['voice']) ? (string)$m['voice'] : null);
+        $fresh = VoiceService::replayClip((string)$m['text'], isset($m['voice']) ? (string)$m['voice'] : null, $intro);
         if (($fresh['mode'] ?? '') === 'audio' && !empty($fresh['clipId'])) {
             return [
-                'status' => 'ok', 'mode' => 'audio', 'text' => (string)$m['text'],
+                'status' => 'ok', 'mode' => 'audio', 'text' => (string)$m['text'], 'intro' => $intro,
                 'url' => '/plugins/unraid-aicliagents/AICliAjax.php?action=voice_clip&id=' . $fresh['clipId'],
             ];
         }
-        $out = ['status' => 'ok', 'mode' => 'speech', 'text' => (string)$m['text'], 'voice' => $m['voice'] ?? null];
+        $out = ['status' => 'ok', 'mode' => 'speech', 'text' => (string)$m['text'], 'intro' => $intro, 'voice' => $m['voice'] ?? null];
         if (!empty($fresh['message'])) $out['engine_error'] = (string)$fresh['message'];
         return $out;
     }
@@ -161,11 +188,71 @@ class VoiceHandler
             : ['status' => 'ok', 'mode' => $r['mode']];
     }
 
+    /**
+     * Set or clear one workspace's spoken name (R14, Forgejo #376). An empty
+     * `spokenName` clears it, so the display name is spoken again.
+     */
+    private static function voicemailSetSpokenName(): array
+    {
+        $workspaceId = trim((string)($_REQUEST['workspaceId'] ?? ''));
+        if ($workspaceId === '') {
+            return ['status' => 'error', 'message' => 'workspaceId is required.'];
+        }
+        $r = VoiceMailService::setSpokenName($workspaceId, (string)($_REQUEST['spokenName'] ?? ''));
+        return isset($r['error'])
+            ? ['status' => 'error', 'message' => (string)$r['error']]
+            : ['status' => 'ok', 'spokenName' => $r['spokenName']];
+    }
+
+    /**
+     * Set or clear one workspace's own engine voice (AGENT_VOICE.md R14, Forgejo
+     * #377). An empty `voice` clears it, so the Settings default is used again.
+     */
+    private static function voiceSetWorkspaceVoice(): array
+    {
+        $workspaceId = trim((string)($_REQUEST['workspaceId'] ?? ''));
+        if ($workspaceId === '') {
+            return ['status' => 'error', 'message' => 'workspaceId is required.'];
+        }
+        $r = VoiceService::setWorkspaceVoice($workspaceId, (string)($_REQUEST['voice'] ?? ''));
+        return isset($r['error'])
+            ? ['status' => 'error', 'message' => (string)$r['error']]
+            : ['status' => 'ok', 'voice' => $r['voice']];
+    }
+
+    // ---- guided natural-voice setup (AGENT_VOICE.md "#323 guided setup") ------
+    // The two writes accept POST only; CSRF is checked centrally in AICliAjax.php.
+    // check_voice_engine is a read (the Settings page polls it). None of the three
+    // takes a URL or a path from the request: the service builds both itself.
+
+    private static function isPost(): bool
+    {
+        return strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'POST';
+    }
+
+    /** Check Docker, then connect to an existing engine or write the template. */
+    private static function voiceEnginePrepare(): array
+    {
+        if (!self::isPost()) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
+        return VoiceEngineSetupService::prepare();
+    }
+
+    /** Save tts_url/tts_voice for the running engine and file it in Folder View 3. */
+    private static function voiceEngineFinish(): array
+    {
+        if (!self::isPost()) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
+        $r = VoiceEngineSetupService::finish();
+        if (($r['status'] ?? '') === 'ok') $r['settings'] = VoiceService::settings();
+        return $r;
+    }
+
     public static function actions(): array
     {
         return ['get_voice_settings', 'save_voice_settings', 'test_voice', 'list_voices', 'voice_transcribe', 'voice_dictate',
                 'voicemail_list', 'voicemail_mark_heard', 'voicemail_replay', 'voicemail_set_mode',
-                'voicemail_delete', 'voicemail_delete_all'];
+                'voicemail_delete', 'voicemail_delete_all', 'voicemail_set_spoken_name',
+                'voice_set_workspace_voice',
+                'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish'];
     }
 
     private static function getVoiceSettings(): array
@@ -304,16 +391,59 @@ class VoiceHandler
      * operator must be able to hear the configured voice BEFORE deciding
      * whether to turn the global switch on at all, and this click has no
      * workspace of its own for a per-workspace mute to apply to anyway.
+     *
+     * Optional fields (the text is always one of PURPOSE_SENTENCES):
+     * - `purpose`: '' (the Settings Test), `switch` (the voice-on confirmation,
+     *   VOICE_SWITCHES.md), `voice` (the Voice… dialog sample, AGENT_VOICE.md R14)
+     *   or `announce` (the Spoken name dialog Test, VOICE_MAIL.md). Any other
+     *   value is refused.
+     * - `voice`: an engine voice id to use (VOICE_ID_PATTERN). Invalid is refused.
+     * - `workspaceId` + `spokenName` (`announce` only): the workspace to announce
+     *   and the typed, unsaved name ('' = the display name). With no `voice`, the
+     *   workspace's own voice is used.
+     * `voice` and `announce` always answer directly (as if `direct=1`): they play
+     * only in the browser that asked, and nothing is published or kept.
      */
     private static function testVoice(): array
     {
+        $purpose = trim((string)($_REQUEST['purpose'] ?? ''));
+        if (!array_key_exists($purpose, self::PURPOSE_SENTENCES)) {
+            return ['status' => 'error', 'message' => 'Unknown test purpose.'];
+        }
+        $sentence = self::PURPOSE_SENTENCES[$purpose];
+        $voice = trim((string)($_REQUEST['voice'] ?? ''));
+        if ($voice !== '' && !VoiceService::isValidVoiceId($voice)) {
+            return ['status' => 'error', 'message' => "'$voice' is not a valid voice id."];
+        }
+        if ($purpose === 'announce') {
+            $workspaceId = trim((string)($_REQUEST['workspaceId'] ?? ''));
+            $record = $workspaceId !== '' ? VoiceMailService::resolveWorkspace($workspaceId)['record'] : null;
+            if ($record === null) {
+                return ['status' => 'error', 'message' => 'That workspace no longer exists.'];
+            }
+            // The typed name, cleaned like a save; empty = the display name.
+            $intro = VoiceMailService::introFor(VoiceMailService::spokenNameFor(
+                ['spoken_name' => (string)($_REQUEST['spokenName'] ?? '')] + $record));
+            $sentence = $intro !== '' ? $intro . ' ' . $sentence : $sentence;
+            if ($voice === '') $voice = VoiceService::workspaceVoiceFor($record);
+        }
         $caller = AdminService::callerIdentity();
         $actorContext = [
             'workspaceId' => $caller['workspaceId'] !== '' ? $caller['workspaceId'] : 'manager',
             'agentId'     => $caller['agentId'] !== '' ? $caller['agentId'] : 'manager',
             'name'        => $caller['name'] !== '' ? $caller['name'] : 'Manager',
         ];
-        $result = VoiceService::speak(self::TEST_SENTENCE, $actorContext, null, true);
+        // The switch confirmation uses `direct=1`: the browser plays the
+        // returned clip itself, so this one test must not also fan the same
+        // confirmation out through the live voice channel to every open tab.
+        $direct = ((string)($_REQUEST['direct'] ?? '0')) === '1' || $purpose === 'voice' || $purpose === 'announce';
+        $result = VoiceService::speak($sentence, $actorContext, $voice !== '' ? $voice : null, true, !$direct);
+        if ($direct) {
+            $result['text'] = $sentence;
+            if (($result['mode'] ?? '') === 'audio' && isset($result['clipId'])) {
+                $result['url'] = '/plugins/unraid-aicliagents/AICliAjax.php?action=voice_clip&id=' . (string)$result['clipId'];
+            }
+        }
         return isset($result['error'])
             ? ['status' => 'error', 'message' => (string)$result['error']]
             : ['status' => 'ok'] + $result;
@@ -397,6 +527,11 @@ class VoiceHandler
      * (default 1) must be a whole number from 1 to 500. The allow-list
      * itself is enforced server-side one layer down, in
      * TmuxService::sendKey().
+     *
+     * 2026-09-29: `submit_only=1` presses Enter on the text that is already
+     * typed, and types nothing. It is accepted only with `send=1` and with
+     * no `text` and no `key`. The Enter waits for the same idle gate as a
+     * send (VoiceService::dictateSubmit()).
      */
     private static function voiceDictate(): array
     {
@@ -405,6 +540,18 @@ class VoiceHandler
 
         $hasText = array_key_exists('text', $_POST) && (string)$_POST['text'] !== '';
         $hasKey = array_key_exists('key', $_POST) && (string)$_POST['key'] !== '';
+        if (((string)($_POST['submit_only'] ?? '0')) === '1') {
+            if (!$send) {
+                return ['status' => 'error', 'message' => 'submit_only needs send=1.'];
+            }
+            if ($hasText || $hasKey) {
+                return ['status' => 'error', 'message' => 'submit_only takes no text and no key.'];
+            }
+            $result = VoiceService::dictateSubmit($workspaceId);
+            return isset($result['error'])
+                ? ['status' => 'error', 'message' => (string)$result['error']]
+                : ['status' => 'ok'] + $result;
+        }
         if ($hasText === $hasKey) {
             return ['status' => 'error', 'message' => 'Provide exactly one of text or key.'];
         }

@@ -11,14 +11,13 @@ register_shutdown_function(function() use ($argv) {
     $agentId = $argv[1] ?? 'unknown';
     if ($error !== NULL && ($error['type'] === E_ERROR || $error['type'] === E_PARSE)) {
         $msg = "FATAL EMERGENCY INSTALL ERROR for $agentId: {$error['message']} in {$error['file']} on line {$error['line']}";
-        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php';
         aicli_log($msg, AICLI_LOG_ERROR, "EmergencyInstallBG");
         setInstallStatus("Fatal Error: Check logs", 0, $agentId, $msg);
     }
 });
 
-$pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
-require_once "$pluginDir/includes/AICliAgentsManager.php";
+require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php'; // #367: this generation, not the src link
 
 $agentId = $argv[1] ?? '';
 if (empty($agentId)) {

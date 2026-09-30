@@ -11,7 +11,7 @@
  * (not `php -r`) per the publish anti-pattern rule: backslash namespaces
  * inside a double-quoted `php -r` body are eaten by bash.
  *
- * Every option is targeted at one session. APPEND_KEYS emit `-a -t`; all other
+ * Every option is targeted at one session. APPEND_KEYS emit `-a -t` once per entry (#371); all other
  * keys emit `-t`. The tmux server is shared by every workspace, so `-g` would
  * allow the last attached workspace to overwrite all others (#67).
  */
@@ -41,7 +41,18 @@ foreach ($s as $k => $v) {
     if ($v === '' || $v === null) continue;
     $isAppend = in_array($k, $append, true);
     if (!in_array($k, $allowed, true) && !$isAppend) continue;
-    $appendFlag = $isAppend ? '-a ' : '';
-    echo 'tmux set-option ' . $appendFlag . '-t ' . escapeshellarg($target) . ' '
+    if ($isAppend) {
+        // #371: APPEND_KEYS are SERVER array options, and this pass runs on every
+        // terminal attach. Append each entry only when the server does not have it
+        // yet; a plain `set-option -a` added one more copy per attach.
+        foreach (explode(',', (string)$v) as $entry) {
+            if ($entry === '') continue;
+            echo 'tmux show-options -sv ' . escapeshellarg($k) . ' 2>/dev/null | grep -qxF -- ' . escapeshellarg($entry)
+                . ' || tmux set-option -a -t ' . escapeshellarg($target) . ' '
+                . escapeshellarg($k) . ' ' . escapeshellarg(',' . $entry) . "\n";
+        }
+        continue;
+    }
+    echo 'tmux set-option -t ' . escapeshellarg($target) . ' '
         . escapeshellarg($k) . ' ' . escapeshellarg((string)$v) . "\n";
 }

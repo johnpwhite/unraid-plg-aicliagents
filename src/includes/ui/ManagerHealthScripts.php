@@ -3,11 +3,12 @@
  * <module_context>
  * Description: JS for the header health status chip (R-09, Feature #1372) — polls
  *   aicliAjax('health_status') on Manager page load + every 60s (matches the server
- *   cache TTL), maps overall ok|warn|fail to green/amber/red, tooltip lists non-ok
+ *   cache TTL), plus one debounced read when the page's event stream (re)connects,
+ *   breaks, or carries a storage change (EVENT_STREAM_MULTIPLEX.md R6), maps overall ok|warn|fail to green/amber/red, tooltip lists non-ok
  *   checks, click opens the Debug Console tab.
  * Dependencies: CommonLogging.php (aicliAjax), ManagerLayout.php (#aicli-health-chip),
  *   ManagerScripts.php (switchMainTab).
- * Constraints: Atomic UI fragment (< 60 lines). Read-only — never mutates state.
+ * Constraints: Atomic UI fragment (< 80 lines). Read-only — never mutates state.
  * </module_context>
  */
 ?>
@@ -45,6 +46,20 @@ function aicliHealthRefresh() {
 
 $(function () {
     aicliHealthRefresh();
+    // The 60s read is the reconcile (it matches the server cache TTL).
     setInterval(aicliHealthRefresh, 60000);
+    // EVENT_STREAM_MULTIPLEX.md R6: the chip also consumes the page's one stream.
+    // A (re)connect, a broken stream, or a storage change are the moments health
+    // most likely moved — one debounced, cached read; never a forced re-check.
+    var healthHintTimer = null;
+    function aicliHealthHint() {
+        if (healthHintTimer) clearTimeout(healthHintTimer);
+        healthHintTimer = setTimeout(aicliHealthRefresh, 5000);
+    }
+    window.addEventListener('aicli-reconcile', aicliHealthHint);
+    window.addEventListener('aicli-event-status', aicliHealthHint);
+    window.addEventListener('aicli-event', function (e) {
+        if (e && e.detail && e.detail.channel === 'storage_status') aicliHealthHint();
+    });
 });
 </script>

@@ -190,7 +190,34 @@ _backup_relaunch_home() {
 _backup_bake_home() {
     local user="${1:-}"
     local persist; persist="$(home_persist_path "$user" 2>/dev/null)"
-    bash "${STORAGE_DIR}/storagectl.sh" bake --type home --id "$user" --persist "$persist" >/dev/null 2>&1
+    local out rc
+    out="$(bash "${STORAGE_DIR}/storagectl.sh" bake --type home --id "$user" --persist "$persist" 2>/dev/null)"
+    rc=$?
+    # Any non-zero exit fails the backup. An exit 2 is never "saved enough" for a
+    # backup: bake_lock_held / sqlite_backup_deferred wrote no layer (#357).
+    [ "$rc" -eq 0 ] || return "$rc"
+    case "$out" in *bake_skipped_concurrent*) : ;; *) return 0 ;; esac
+    # #357: another bake of this home was running, so this one skipped. That
+    # bake saves the changes, but the copy must start only after it lands. Wait
+    # for the entity lock with a non-blocking poll and a deadline (never a
+    # blocking flock); if it stays held, fail the backup rather than copy a
+    # layer set that is still changing.
+    _backup_wait_entity_lock "$user" "${AICLI_BACKUP_BAKE_WAIT_S:-600}"
+}
+
+# _backup_wait_entity_lock <user> <wait_s> — 0 as soon as nobody holds the
+# home's storage lock, 2 if it is still held after <wait_s> seconds.
+_backup_wait_entity_lock() {
+    local user="${1:-}" wait_s="${2:-600}" lock deadline
+    case "$wait_s" in ''|*[!0-9]*) wait_s=600 ;; esac
+    lock="${AICLI_LOCK_DIR:-/var/run}/aicli-bake-home-${user//[^a-zA-Z0-9_-]/_}.lock"
+    [ -e "$lock" ] || return 0
+    deadline=$((SECONDS + wait_s))
+    while ! ( exec 7>"$lock"; flock -n 7 ) 2>/dev/null; do
+        [ "$SECONDS" -lt "$deadline" ] || return 2
+        sleep 1
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -205,10 +232,14 @@ _backup_bake_home() {
 # Settings card and Health know the outcome and the target even when the run
 # used a target override or the setting changed afterwards. Atomic (tmp + mv).
 _backup_write_last_record() {
-    local user="${1:-}" kind="${2:-}" summary="${3:-}" data_json="${4:-{}}"
+    # "${4:-{}}" is NOT a default of {}: bash ends the expansion at the first
+    # "}", so a given payload got a stray "}" and json_decode dropped it
+    # (HOME_BACKUP.md 2026-09-29: every record had "data": []).
+    local user="${1:-}" kind="${2:-}" summary="${3:-}" data_json="${4-}"
+    [ -n "$data_json" ] || data_json='{}'
     [ -n "$user" ] || return 0
     command -v php >/dev/null 2>&1 || return 0
-    local dir="/boot/config/plugins/unraid-aicliagents" tmp
+    local dir="${AICLI_BACKUP_LAST_DIR:-/boot/config/plugins/unraid-aicliagents}" tmp
     [ -d "$dir" ] || return 0
     tmp="$dir/.backup-last-$user.$$.tmp"
     if AICLI_BK_REC_USER="$user" AICLI_BK_REC_KIND="$kind" AICLI_BK_REC_SUMMARY="$summary" \
@@ -232,7 +263,8 @@ _backup_write_last_record() {
     fi
 }
 _backup_ledger() {
-    local kind="${1:-}" user="${2:-}" summary="${3:-}" data_json="${4:-{}}"
+    local kind="${1:-}" user="${2:-}" summary="${3:-}" data_json="${4-}"
+    [ -n "$data_json" ] || data_json='{}'
     case "$kind" in
         storage.backup.finished|storage.backup.failed) _backup_write_last_record "$user" "$kind" "$summary" "$data_json" ;;
     esac
@@ -329,14 +361,273 @@ _backup_rsync_copy() {
     return "$rc"
 }
 
-# _backup_verify <src_home> <tree_dst> <exclude_file> — a second, --checksum
-# dry-run pass must report ZERO differences. Returns 0 = verified, 1 = differs.
+# _backup_verify <src_home> <tree_dst> <exclude_file> [mode:strict|warm] [copy_start_epoch]
+#
+# A second, --checksum --delete dry-run pass compares the home with the copy.
+# HOME_BACKUP.md "2026-09-29 — warm backups always failed at Verifying":
+#
+# - strict (cold mode, and the restore's safety snapshot): the home is
+#   quiesced, so the pass must report ZERO differences.
+# - warm: the sessions keep running, so files written after the copy began
+#   always differ. A difference is a LIVE CHANGE (not a copy error) when the
+#   home's entry changed at or after <copy_start_epoch>: its mtime or ctime,
+#   a new entry under a directory that is itself new since then, a gone file
+#   (it vanished from the home between the scan and the stat), or — for an
+#   entry the copy holds and the home no longer has — the nearest remaining
+#   parent folder changed since then. Every other difference is a copy error.
+#
+# Sets BK_VERIFY_MODE, BK_VERIFY_RC (rsync's exit), BK_VERIFY_LIVE_COUNT,
+# BK_VERIFY_BAD_COUNT, BK_VERIFY_LIVE_PATHS (every live-change path, relative
+# to the home), BK_VERIFY_BAD_LINES (the first 20 "<itemize code> <path>"
+# lines of copy errors). Returns 0 = verified, 1 = differs, 2 = the pass
+# itself could not run (rsync failed).
+BK_VERIFY_SAMPLE_MAX=20
+BK_VERIFY_MODE="strict"; BK_VERIFY_RC=0; BK_VERIFY_LIVE_COUNT=0; BK_VERIFY_BAD_COUNT=0
+BK_VERIFY_LIVE_PATHS=(); BK_VERIFY_BAD_LINES=(); BK_SQLITE_OK=(); BK_SQLITE_LIVE=()
 _backup_verify() {
-    local src="${1:-}" dst="${2:-}" exclude_file="${3:-}"
-    local diff
-    diff="$(rsync -a --dry-run --checksum --itemize-changes \
-        --exclude-from="$exclude_file" "${src%/}/" "${dst%/}/" 2>/dev/null | grep -v '^$')"
-    [ -z "$diff" ]
+    local src="${1:-}" dst="${2:-}" exclude_file="${3:-}" mode="${4:-strict}" start="${5:-0}"
+    case "$mode" in warm) : ;; *) mode="strict" ;; esac
+    case "$start" in ''|*[!0-9]*) start=0 ;; esac
+    BK_VERIFY_MODE="$mode"; BK_VERIFY_RC=0
+    BK_VERIFY_LIVE_COUNT=0; BK_VERIFY_BAD_COUNT=0
+    BK_VERIFY_LIVE_PATHS=(); BK_VERIFY_BAD_LINES=()
+
+    local out rc
+    # --out-format '%i %n' (not the default '%i %n%L'): a symbolic link line
+    # must not carry " -> target" after its name.
+    out="$(rsync -a --dry-run --checksum --delete --itemize-changes --out-format='%i %n' \
+        --exclude-from="$exclude_file" "${src%/}/" "${dst%/}/" 2>/dev/null)"
+    rc=$?
+    BK_VERIFY_RC=$rc
+    # rsync exit 24 = "some source files vanished": normal for a live home.
+    # Any other non-zero exit means the pass did not see the whole home, so
+    # an empty list proves nothing.
+    if [ "$rc" -ne 0 ] && ! { [ "$rc" -eq 24 ] && [ "$mode" = "warm" ]; }; then
+        return 2
+    fi
+
+    local -a codes=() paths=()
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [ "${#line}" -gt 12 ] || continue
+        codes+=("${line:0:11}")
+        paths+=("${line:12}")
+    done <<< "$out"
+    [ "${#codes[@]}" -gt 0 ] || return 0
+
+    local i
+    if [ "$mode" = "strict" ]; then
+        BK_VERIFY_BAD_COUNT="${#codes[@]}"
+        for (( i = 0; i < ${#codes[@]} && i < BK_VERIFY_SAMPLE_MAX; i++ )); do
+            BK_VERIFY_BAD_LINES+=("${codes[$i]} ${paths[$i]}")
+        done
+        return 1
+    fi
+
+    # Warm: one batched stat of each listed path and each of its parent
+    # folders (never one process per file). "%Y %Z %n" = mtime ctime name.
+    local -A times=() want=()
+    local p d
+    for p in "${paths[@]}"; do
+        p="${p%/}"; [ -n "$p" ] || p="."
+        want["$p"]=1
+        d="$p"
+        while [ "$d" != "." ]; do
+            case "$d" in */*) d="${d%/*}" ;; *) d="." ;; esac
+            want["$d"]=1
+        done
+    done
+    local rec m c n
+    while IFS= read -r -d '' rec; do
+        m="${rec%% *}"; rec="${rec#* }"
+        c="${rec%% *}"; n="${rec#* }"
+        times["$n"]="$m $c"
+    done < <(cd "${src%/}/" 2>/dev/null && printf '%s\0' "${!want[@]}" \
+                | xargs -0 -r stat --printf '%Y %Z %n\0' -- 2>/dev/null)
+
+    # _bv_changed <rel> -> 0 when the home's entry changed at/after start.
+    _bv_changed() {
+        local t="${times[$1]:-}"
+        [ -n "$t" ] || return 1
+        [ "${t%% *}" -ge "$start" ] || [ "${t##* }" -ge "$start" ]
+    }
+
+    local code live new_dirs="" anc
+    for (( i = 0; i < ${#codes[@]}; i++ )); do
+        code="${codes[$i]}"; p="${paths[$i]%/}"; [ -n "$p" ] || p="."
+        live=0
+        if [ "${code:0:9}" = "*deleting" ]; then
+            # In the copy, not in the home: the nearest folder the home
+            # still has must have changed since the copy began.
+            anc="$p"
+            while [ "$anc" != "." ]; do
+                case "$anc" in */*) anc="${anc%/*}" ;; *) anc="." ;; esac
+                [ -n "${times[$anc]:-}" ] && break
+            done
+            _bv_changed "$anc" && live=1
+        elif [ -z "${times[$p]:-}" ]; then
+            # Listed by the pass, gone at the stat: it changed while we looked.
+            live=1
+        elif _bv_changed "$p"; then
+            live=1
+        elif [ "${code:2:9}" = "+++++++++" ] && [ -n "$new_dirs" ]; then
+            # A new entry inside a folder that is itself new since the copy
+            # began (a folder moved into place keeps its files' old ctime).
+            case "$new_dirs" in *$'\n'"${p%/*}"$'\n'*) live=1 ;; esac
+            if [ "$live" -eq 0 ]; then
+                anc="$p"
+                while [ "$anc" != "." ]; do
+                    case "$anc" in */*) anc="${anc%/*}" ;; *) anc="." ;; esac
+                    case "$new_dirs" in *$'\n'"$anc"$'\n'*) live=1; break ;; esac
+                done
+            fi
+        fi
+        if [ "$live" -eq 1 ]; then
+            BK_VERIFY_LIVE_COUNT=$((BK_VERIFY_LIVE_COUNT + 1))
+            BK_VERIFY_LIVE_PATHS+=("$p")
+            [ "${code:1:1}" = "d" ] && [ "${code:2:9}" = "+++++++++" ] && new_dirs="${new_dirs:-$'\n'}${p}"$'\n'
+        else
+            BK_VERIFY_BAD_COUNT=$((BK_VERIFY_BAD_COUNT + 1))
+            [ "${#BK_VERIFY_BAD_LINES[@]}" -lt "$BK_VERIFY_SAMPLE_MAX" ] && BK_VERIFY_BAD_LINES+=("$code ${paths[$i]}")
+        fi
+    done
+    unset -f _bv_changed
+    [ "$BK_VERIFY_BAD_COUNT" -eq 0 ]
+}
+
+# _backup_count_words <n> <singular> <plural> -> "1 file" / "3 files".
+_backup_count_words() {
+    if [ "${1:-0}" = "1" ]; then printf '1 %s' "$2"; else printf '%s %s' "${1:-0}" "$3"; fi
+}
+
+# _backup_verify_reason -> the plain-words cause of the last failed
+# _backup_verify (read by the ledger, the last-run record and the tray).
+_backup_verify_reason() {
+    if [ "${BK_VERIFY_BAD_COUNT:-0}" -eq 0 ]; then
+        printf 'the check could not read the whole home (rsync code %s)' "${BK_VERIFY_RC:-?}"
+    elif [ "${BK_VERIFY_MODE:-strict}" = "warm" ]; then
+        if [ "${BK_VERIFY_BAD_COUNT}" = "1" ]; then
+            printf '1 file differs from the home and was not changed during the backup'
+        else
+            printf '%s files differ from the home and were not changed during the backup' "$BK_VERIFY_BAD_COUNT"
+        fi
+    else
+        if [ "${BK_VERIFY_BAD_COUNT}" = "1" ]; then
+            printf '1 file differs from the home'
+        else
+            printf '%s files differ from the home' "$BK_VERIFY_BAD_COUNT"
+        fi
+    fi
+}
+
+# _backup_json_str <text> -> the text as one JSON string (quotes included),
+# cut to 200 characters. Control characters become a space.
+_backup_json_str() {
+    local s="${1:-}"
+    s="${s:0:200}"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+    s="${s//[$'\001'-$'\037']/ }"
+    printf '"%s"' "$s"
+}
+
+# _backup_json_list <item>... -> a JSON array of strings (each capped).
+_backup_json_list() {
+    local out="[" sep="" x
+    for x in "$@"; do out+="$sep$(_backup_json_str "$x")"; sep=","; done
+    printf '%s]' "$out"
+}
+
+# _backup_debug_log <LEVEL> <message> — one line in the plugin's debug log,
+# the file the Debug Console shows (DiagnosticsService::debugLogPath()).
+_backup_debug_log() {
+    local dir="${AICLI_DEBUG_LOG_DIR:-/tmp/unraid-aicliagents}"
+    [ -d "$dir" ] || return 0
+    printf '[%s] [%s] [HomeBackup] %s%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${1:-INFO}" \
+        "${AICLI_TRACE_ID:+[t:$AICLI_TRACE_ID] }" "${2:-}" >> "$dir/debug.log" 2>/dev/null || true
+}
+
+# _backup_log_verify <entity> <outcome:passed|failed> — write the verify
+# result to the debug log and the lifecycle log: the counts, and the first
+# 20 paths of each kind (with rsync's change codes for a copy error), so the
+# tray's "Check the Debug Console log" leads to the files.
+_backup_log_verify() {
+    local entity="${1:-}" outcome="${2:-failed}" x
+    local -a live_sample=("${BK_VERIFY_LIVE_PATHS[@]:0:$BK_VERIFY_SAMPLE_MAX}")
+    if [ "$outcome" = "failed" ]; then
+        _backup_debug_log "ERROR" "Backup of $entity: verify failed: $(_backup_verify_reason) (mode ${BK_VERIFY_MODE:-strict}, rsync code ${BK_VERIFY_RC:-0}). The snapshot was removed."
+        for x in "${BK_VERIFY_BAD_LINES[@]}"; do
+            _backup_debug_log "ERROR" "Backup of $entity: differs: ${x:0:240}"
+        done
+        [ "${BK_VERIFY_BAD_COUNT:-0}" -gt "${#BK_VERIFY_BAD_LINES[@]}" ] && \
+            _backup_debug_log "ERROR" "Backup of $entity: $(( BK_VERIFY_BAD_COUNT - ${#BK_VERIFY_BAD_LINES[@]} )) more differences not listed."
+    fi
+    if [ "${BK_VERIFY_LIVE_COUNT:-0}" -gt 0 ]; then
+        _backup_debug_log "INFO" "Backup of $entity: $(_backup_count_words "$BK_VERIFY_LIVE_COUNT" file files) changed during the backup (the sessions kept running). First ${#live_sample[@]}: $(printf '%s, ' "${live_sample[@]}" | cut -c1-2000)"
+    fi
+    local level="info" event="backup_verify_passed"
+    [ "$outcome" = "failed" ] && { level="error"; event="backup_verify_failed"; }
+    lifecycle_log "$level" "supervisor" "$event" \
+        "{\"entity\":\"$entity\",\"mode\":\"${BK_VERIFY_MODE:-strict}\",\"rsync_rc\":${BK_VERIFY_RC:-0},\"differ_count\":${BK_VERIFY_BAD_COUNT:-0},\"changed_during_backup\":${BK_VERIFY_LIVE_COUNT:-0},\"differ_sample\":$(_backup_json_list "${BK_VERIFY_BAD_LINES[@]}"),\"changed_sample\":$(_backup_json_list "${live_sample[@]}")}" 2>/dev/null || true
+}
+
+# _backup_sqlite_fixup <src_home> <tree_dst> — warm mode only, after a
+# passed verify. A SQLite database that the sessions wrote during the copy
+# can be torn in the copy: its file and its -wal/-journal were copied at
+# different moments. For each such database (a live-change path, or the
+# database whose -wal/-shm/-journal is one, with the "SQLite format 3"
+# header), copy it again through the SQLite Online Backup API (the same call
+# the bake uses, sqlite_backup_all in common.sh; Forgejo #306: each
+# dot-command is its own argument), check it with PRAGMA quick_check, put it
+# in place of the file copy and remove the copy's -wal/-shm/-journal (the new
+# file is complete on its own; an old -wal next to it would be replayed).
+# Sets BK_SQLITE_OK (databases copied by the backup API) and BK_SQLITE_LIVE
+# (databases that keep the live file copy, because sqlite3 is missing or the
+# backup failed). Never fails the backup.
+_backup_sqlite_fixup() {
+    local src="${1%/}" tree="${2%/}"
+    BK_SQLITE_OK=(); BK_SQLITE_LIVE=()
+    [ "${#BK_VERIFY_LIVE_PATHS[@]}" -gt 0 ] || return 0
+    local -A seen=()
+    local p db
+    for p in "${BK_VERIFY_LIVE_PATHS[@]}"; do
+        db="$p"
+        case "$db" in *-wal|*-shm) db="${db%-???}" ;; *-journal) db="${db%-journal}" ;; esac
+        [ -n "${seen[$db]:-}" ] && continue
+        seen["$db"]=1
+        [ -f "$src/$db" ] && [ ! -L "$src/$db" ] && [ -f "$tree/$db" ] || continue
+        head -c 16 "$src/$db" 2>/dev/null | grep -qa 'SQLite format 3' || continue
+        if _backup_sqlite_copy "$src/$db" "$tree/$db"; then
+            BK_SQLITE_OK+=("$db")
+        else
+            BK_SQLITE_LIVE+=("$db")
+        fi
+    done
+    return 0
+}
+
+# _backup_sqlite_copy <live_db> <snapshot_db> — 0 when the snapshot's file
+# now holds a checked Online Backup copy of the live database.
+_backup_sqlite_copy() {
+    local live="${1:-}" dest="${2:-}"
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    case "$dest" in *"'"*) return 1 ;; esac   # the .backup argument is single-quoted
+    local tmp="${dest}.aicli-sqlite.$$"
+    rm -f "$tmp" "$tmp-wal" "$tmp-shm" "$tmp-journal" 2>/dev/null
+    if ! timeout 30 sqlite3 "$live" ".timeout 30000" ".backup '$tmp'" >/dev/null 2>&1 \
+       || [ ! -s "$tmp" ] || ! head -c 16 "$tmp" 2>/dev/null | grep -qa 'SQLite format 3' \
+       || [ "$(timeout 60 sqlite3 "$tmp" 'PRAGMA quick_check;' 2>/dev/null)" != "ok" ]; then
+        rm -f "$tmp" "$tmp-wal" "$tmp-shm" "$tmp-journal" 2>/dev/null
+        return 1
+    fi
+    rm -f "$tmp-wal" "$tmp-shm" "$tmp-journal" 2>/dev/null
+    chown --reference="$live" "$tmp" 2>/dev/null || true
+    chmod --reference="$live" "$tmp" 2>/dev/null || true
+    # mv gives the path a new inode, so a hard link the copy shares with the
+    # previous snapshot (--link-dest) keeps its old content.
+    mv -f "$tmp" "$dest" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    rm -f "$dest-wal" "$dest-shm" "$dest-journal" 2>/dev/null
+    return 0
 }
 
 # _backup_update_latest <target> <user> <snap_dir> — atomic-enough symlink
@@ -406,6 +697,10 @@ _backup_write_manifest() {
     AICLI_BK_STARTED="$started_iso" AICLI_BK_FINISHED="$finished_iso" \
     AICLI_BK_FILES="$file_count" AICLI_BK_BYTES="$bytes" AICLI_BK_EXCLUDES_FILE="$excludes_file" \
     AICLI_BK_LABEL="$label" \
+    AICLI_BK_VERIFY_MODE="${BK_VERIFY_MODE:-strict}" AICLI_BK_CHANGED="${BK_VERIFY_LIVE_COUNT:-0}" \
+    AICLI_BK_CHANGED_SAMPLE="$(printf '%s\n' "${BK_VERIFY_LIVE_PATHS[@]:0:${BK_VERIFY_SAMPLE_MAX:-20}}")" \
+    AICLI_BK_SQLITE_OK="$(printf '%s\n' "${BK_SQLITE_OK[@]}")" \
+    AICLI_BK_SQLITE_LIVE="$(printf '%s\n' "${BK_SQLITE_LIVE[@]}")" \
     php -d display_errors=0 -r '
         $excludes = [];
         $ef = (string)getenv("AICLI_BK_EXCLUDES_FILE");
@@ -426,6 +721,20 @@ _backup_write_manifest() {
             "bytes"        => (int)getenv("AICLI_BK_BYTES"),
             "excludes"     => $excludes,
             "sessions"     => $closed,
+        ];
+        // HOME_BACKUP.md 2026-09-29: what the verify pass found. A warm
+        // backup lists the files the running sessions changed during it,
+        // and which SQLite databases were copied through the backup API
+        // (consistent) or kept as a live file copy.
+        $lines = static function (string $env): array {
+            return array_values(array_filter(explode("\n", (string)getenv($env)), static fn($l) => $l !== ""));
+        };
+        $manifest["verify"] = [
+            "mode"                         => (string)getenv("AICLI_BK_VERIFY_MODE"),
+            "changed_during_backup"        => (int)getenv("AICLI_BK_CHANGED"),
+            "changed_during_backup_sample" => $lines("AICLI_BK_CHANGED_SAMPLE"),
+            "sqlite_backed_up"             => $lines("AICLI_BK_SQLITE_OK"),
+            "sqlite_copied_live"           => $lines("AICLI_BK_SQLITE_LIVE"),
         ];
         $label = (string)getenv("AICLI_BK_LABEL");
         if ($label !== "") { $manifest["label"] = $label; }
@@ -514,12 +823,17 @@ _backup_home_execute() {
     excludes_file="${snap_dir}.excludes"
     _backup_write_excludes_file "$excludes_file" "${BK_EXCLUDES[@]}"
     started_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # Warm verify: a home entry that changed at or after this second is a
+    # live change, not a copy error (HOME_BACKUP.md 2026-09-29).
+    local copy_start_epoch; copy_start_epoch="$(date +%s)"
 
     if ! _backup_rsync_copy "$home_mnt" "$snap_dir/tree" "$prev_dir" "$excludes_file"; then
         rm -rf "$snap_dir" 2>/dev/null || true
         rm -f "$excludes_file" 2>/dev/null || true
         lifecycle_log "error" "supervisor" "backup_rsync_failed" "{\"entity\":\"$entity\"}" 2>/dev/null || true
-        _backup_ledger "storage.backup.failed" "$user" "home backup of $user failed: copy failed" '{"cause":"rsync_failed"}'
+        _backup_debug_log "ERROR" "Backup of $entity: the copy failed (rsync). The snapshot was removed."
+        _backup_ledger "storage.backup.failed" "$user" "home backup of $user failed: copy failed" \
+            "$(printf '{"cause":"rsync_failed","job_id":"%s","reason":"the copy of the home failed"}' "$job_id")"
         if [ "$warm" -eq 0 ]; then
             job_ledger_set_phase "$job_id" "relaunching" 2>/dev/null || true
             _backup_relaunch_home "$user" "$BK_NUDGE"
@@ -528,17 +842,31 @@ _backup_home_execute() {
     fi
 
     job_ledger_set_phase "$job_id" "verifying" 2>/dev/null || true
-    if ! _backup_verify "$home_mnt" "$snap_dir/tree" "$excludes_file"; then
+    local verify_mode="strict"
+    [ "$warm" -eq 1 ] && verify_mode="warm"
+    BK_SQLITE_OK=(); BK_SQLITE_LIVE=()
+    if ! _backup_verify "$home_mnt" "$snap_dir/tree" "$excludes_file" "$verify_mode" "$copy_start_epoch"; then
         rm -rf "$snap_dir" 2>/dev/null || true
         rm -f "$excludes_file" 2>/dev/null || true
-        lifecycle_log "error" "supervisor" "backup_verify_failed" "{\"entity\":\"$entity\"}" 2>/dev/null || true
-        _backup_ledger "storage.backup.failed" "$user" "home backup of $user failed: verify found differences" '{"cause":"verify_failed"}'
+        _backup_log_verify "$entity" "failed"
+        local verify_reason; verify_reason="$(_backup_verify_reason)"
+        _backup_ledger "storage.backup.failed" "$user" "home backup of $user failed: verify found differences ($verify_reason)" \
+            "$(printf '{"cause":"verify_failed","job_id":"%s","reason":"%s","differ_count":%s,"changed_during_backup":%s}' \
+                "$job_id" "$verify_reason" "${BK_VERIFY_BAD_COUNT:-0}" "${BK_VERIFY_LIVE_COUNT:-0}")"
         if [ "$warm" -eq 0 ]; then
             job_ledger_set_phase "$job_id" "relaunching" 2>/dev/null || true
             _backup_relaunch_home "$user" "$BK_NUDGE"
         fi
         exit 1
     fi
+    if [ "$warm" -eq 1 ]; then
+        _backup_sqlite_fixup "$home_mnt" "$snap_dir/tree"
+        [ "${#BK_SQLITE_OK[@]}" -gt 0 ] && \
+            _backup_debug_log "INFO" "Backup of $entity: copied ${#BK_SQLITE_OK[@]} database(s) that changed during the backup again through the SQLite backup API: $(printf '%s, ' "${BK_SQLITE_OK[@]}" | cut -c1-1000)"
+        [ "${#BK_SQLITE_LIVE[@]}" -gt 0 ] && \
+            _backup_debug_log "WARN" "Backup of $entity: ${#BK_SQLITE_LIVE[@]} database(s) changed during the backup and could not be copied through the SQLite backup API; the snapshot holds a live file copy that can be inconsistent: $(printf '%s, ' "${BK_SQLITE_LIVE[@]}" | cut -c1-1000)"
+    fi
+    _backup_log_verify "$entity" "passed"
 
     local finished_iso; finished_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if ! _backup_write_manifest "$snap_dir" "$user" "$hosting" "$BK_QUIESCE" "$warm" "$closed_json" \
@@ -556,9 +884,13 @@ _backup_home_execute() {
         _backup_relaunch_home "$user" "$BK_NUDGE"
     fi
 
+    local changed_note=""
+    [ "${BK_VERIFY_LIVE_COUNT:-0}" -gt 0 ] && \
+        changed_note=", $(_backup_count_words "$BK_VERIFY_LIVE_COUNT" file files) changed during the backup"
     _backup_ledger "storage.backup.finished" "$user" \
-        "home backup of $user finished (${BK_RSYNC_FILES:-0} files, $(( ${BK_RSYNC_BYTES:-0} / 1048576 )) MB) → $snap_dir" \
-        "$(printf '{"path":"%s","bytes":%s,"files":%s}' "$snap_dir" "${BK_RSYNC_BYTES:-0}" "${BK_RSYNC_FILES:-0}")"
+        "home backup of $user finished (${BK_RSYNC_FILES:-0} files, $(( ${BK_RSYNC_BYTES:-0} / 1048576 )) MB${changed_note}) → $snap_dir" \
+        "$(printf '{"path":"%s","bytes":%s,"files":%s,"job_id":"%s","changed_during_backup":%s,"sqlite_copied_live":%s}' \
+            "$snap_dir" "${BK_RSYNC_BYTES:-0}" "${BK_RSYNC_FILES:-0}" "$job_id" "${BK_VERIFY_LIVE_COUNT:-0}" "${#BK_SQLITE_LIVE[@]}")"
     exit 0
 }
 
@@ -665,9 +997,11 @@ _restore_safety_snapshot() {
         rm -f "$excludes_file" 2>/dev/null || true
         return 1
     fi
-    if ! _backup_verify "$home_mnt" "$snap_dir/tree" "$excludes_file"; then
+    BK_SQLITE_OK=(); BK_SQLITE_LIVE=()
+    if ! _backup_verify "$home_mnt" "$snap_dir/tree" "$excludes_file" "strict"; then
         rm -rf "$snap_dir" 2>/dev/null || true
         rm -f "$excludes_file" 2>/dev/null || true
+        _backup_log_verify "home/$user" "failed"
         return 1
     fi
     finished_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -765,7 +1099,8 @@ _restore_write_last_record() {
 
 # _restore_ledger <kind> <user> <summary> [data_json]
 _restore_ledger() {
-    local kind="${1:-}" user="${2:-}" summary="${3:-}" data_json="${4:-{}}"
+    local kind="${1:-}" user="${2:-}" summary="${3:-}" data_json="${4-}"
+    [ -n "$data_json" ] || data_json='{}'
     command -v php >/dev/null 2>&1 || return 0
     [ -f "$EVENT_APPEND_PHP" ] || return 0
     php -d display_errors=0 "$EVENT_APPEND_PHP" \

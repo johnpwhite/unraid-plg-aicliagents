@@ -21,6 +21,7 @@ This directory contains the modular UI fragments of the AICliAgents plugin, deco
 | `UploadOverlay.php` | HTML for the drag-and-drop file upload UI. | |
 | `TerminalUploadScripts.php` | JS logic for terminal file uploads (paste, drag-drop). | jQuery, SweetAlert. |
 | `TerminalScripts.php` | Core JS logic for terminal (resize, sync). | TerminalUploadScripts. |
+| `SidebarMenuIcon.php` | CSS: the plugin logo as its main-menu icon on Unraid's sidebar themes. Echoed on every page by `AICliMenuIcon.page`. | None. |
 
 ## Architectural Rules
 1. **Scope Inheritance:** These files are intended for server-side inclusion via `require_once`. They inherit the PHP variable scope of the parent `.page` file.

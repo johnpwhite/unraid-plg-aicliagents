@@ -213,6 +213,84 @@ class HubProjector {
         return self::$policyInstructionVendors;
     }
 
+    /** @var OpencodeClaudeInstructionsProjector[]|null */
+    private static $claudeCompatVendors = null;
+
+    /**
+     * Forgejo #311 — agents that read the user's ~/.claude/CLAUDE.md only as a
+     * fallback that the hub's own instruction file switches off. OpenCode loads
+     * ~/.claude/CLAUDE.md only when ~/.config/opencode/AGENTS.md does not exist
+     * (opencode.ai/docs/rules; packages/opencode/src/session/instruction.ts), and the
+     * hub always writes that AGENTS.md. The projector re-adds the user's Claude
+     * instructions (and every *.md under ~/.claude/rules/ except the plugin's own
+     * aicli-*.md) through OpenCode's `instructions` array in opencode.json.
+     * Kilo Code is NOT listed: it has the same fallback (Kilo-Org/kilocode
+     * packages/opencode/src/session/instruction.ts: KILO_CONFIG_DIR/AGENTS.md, then
+     * ~/.config/kilo/AGENTS.md, then ~/.claude/CLAUDE.md), but the hub writes Kilo's
+     * guidance to ~/.kilo/rules/*.md and never creates ~/.config/kilo/AGENTS.md, so
+     * the hub does not switch Kilo's fallback off.
+     * @return array<string,OpencodeClaudeInstructionsProjector>
+     */
+    public static function claudeCompatVendors(): array {
+        if (self::$claudeCompatVendors === null) {
+            self::$claudeCompatVendors = [];
+            foreach ([new OpencodeClaudeInstructionsProjector()] as $p) {
+                self::$claudeCompatVendors[$p->agentId()] = $p;
+            }
+        }
+        return self::$claudeCompatVendors;
+    }
+
+    /**
+     * The environment that decides whether OpenCode's Claude compatibility is off:
+     * the web process env, overlaid with the AGENT-WIDE general env vars the user set
+     * for this agent (the file EnvService::getAgentEnvPath() names — read directly
+     * from the projected home, which IS the user-state home, so this never triggers a
+     * mount). A PER-WORKSPACE env var cannot be honoured here: opencode.json is one
+     * file shared by every OpenCode workspace. That limit is documented in
+     * docs/specs/AGENT_CONFIG_HUB.md (2026-09-23 section).
+     * @return array<string,string>
+     */
+    private static function claudeCompatEnv(string $home, string $agentId): array {
+        $env = [];
+        foreach (OpencodeClaudeInstructionsProjector::DISABLE_ENV as $k) {
+            $v = getenv($k);
+            if ($v !== false) $env[$k] = (string)$v;
+        }
+        $file = rtrim($home, '/') . "/.aicli/envs/env_agent_{$agentId}.json";
+        if (is_file($file)) {
+            $map = json_decode((string)@file_get_contents($file), true);
+            if (is_array($map)) {
+                foreach ($map as $k => $v) {
+                    if (is_string($k) && is_scalar($v)) $env[$k] = (string)$v;
+                }
+            }
+        }
+        return $env;
+    }
+
+    /**
+     * Reconcile OpenCode's managed Claude instruction entries for every in-scope
+     * agent. System-managed like the Relay guidance (restoreDeleted on write): a
+     * lost entry is written again. To opt out, set OPENCODE_DISABLE_CLAUDE_CODE or
+     * OPENCODE_DISABLE_CLAUDE_CODE_PROMPT for the agent — the desired set is then
+     * empty and the ledger removes the entries this hub wrote.
+     */
+    private static function reconcileClaudeCompat(string $home, array &$state, array $scope, bool $write,
+                                                  array &$results, array &$driftAll, array &$writtenAgents): void {
+        foreach (self::claudeCompatVendors() as $agentId => $projector) {
+            if (!in_array($agentId, $scope, true)) continue;
+            $desired = $projector->desiredFor($home, self::claudeCompatEnv($home, $agentId));
+            $r = self::reconcileVendor($projector, $home, $desired, $state, $write, $write);
+            $results[$projector->ledgerKey()] = ['agentId' => $agentId, 'written' => $r['written'],
+                                                'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if ((!empty($r['written']) || !empty($r['removed'])) && !in_array($agentId, $writtenAgents, true)) {
+                $writtenAgents[] = $agentId;
+            }
+        }
+    }
+
     /** @var RelaySkillProjector[]|null */
     private static $relaySkillVendors = null;
 
@@ -538,7 +616,13 @@ class HubProjector {
             if (empty($serving)) continue;
             $targeted = array_values(array_intersect($serving, $instructionTargets));
             $desired = empty($targeted) ? [] : $projector->desired(['content' => $content]);
-            $r = self::reconcileVendor($projector, $home, $desired, $state, true);
+            // Forgejo #245: a DEDICATED rules file (~/.claude/rules/aicli-hub-global.md,
+            // ~/.kilo/rules/…) is owned whole by the hub — the user has no content in
+            // it, so a missing one was lost (a storage event, a home restore), not
+            // deliberately deleted: write it again. A fenced block inside the user's
+            // OWN instruction file keeps the "user deleted it" respect (drift).
+            $restoreLost = $projector instanceof RulesFileInstructionProjector;
+            $r = self::reconcileVendor($projector, $home, $desired, $state, true, $restoreLost);
             $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'],
                                                 'removed' => $r['removed'], 'drift' => $r['drift']];
             foreach ($r['drift'] as $d) $driftAll[] = $d;
@@ -558,7 +642,12 @@ class HubProjector {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
             $desired = $projector->desired([]); // always-on: input ignored
-            $r = self::reconcileVendor($projector, $home, $desired, $state, true);
+            // Forgejo #245 (AGENT_FILE_PATH_CONVENTION.md: "re-asserted by the hub
+            // projection so it self-heals"): system policy, like the Relay guidance,
+            // so a lost file or block is written again. Without restoreDeleted a
+            // rules file lost once stayed lost for ever: every run logged `drift=…`
+            // and every Claude session ran without the rule.
+            $r = self::reconcileVendor($projector, $home, $desired, $state, true, true);
             $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'],
                                                 'removed' => $r['removed'], 'drift' => $r['drift']];
             foreach ($r['drift'] as $d) $driftAll[] = $d;
@@ -577,6 +666,10 @@ class HubProjector {
             foreach ($r['drift'] as $d) $driftAll[] = $d;
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
+
+        // Forgejo #311: runs AFTER the passes that write ~/.config/opencode/AGENTS.md,
+        // because that file's existence is what switches OpenCode's CLAUDE.md fallback off.
+        self::reconcileClaudeCompat($home, $state, $targets, true, $results, $driftAll, $writtenAgents);
 
         foreach (self::relaySkillVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
@@ -658,7 +751,12 @@ class HubProjector {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
             $desired = $projector->desired([]); // always-on: input ignored
-            $r = self::reconcileVendor($projector, $home, $desired, $state, true);
+            // Forgejo #245 (AGENT_FILE_PATH_CONVENTION.md: "re-asserted by the hub
+            // projection so it self-heals"): system policy, like the Relay guidance,
+            // so a lost file or block is written again. Without restoreDeleted a
+            // rules file lost once stayed lost for ever: every run logged `drift=…`
+            // and every Claude session ran without the rule.
+            $r = self::reconcileVendor($projector, $home, $desired, $state, true, true);
             $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'],
                                                 'removed' => $r['removed'], 'drift' => $r['drift']];
             foreach ($r['drift'] as $d) $driftAll[] = $d;
@@ -677,6 +775,10 @@ class HubProjector {
             foreach ($r['drift'] as $d) $driftAll[] = $d;
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
+
+        // Forgejo #311: runs AFTER the passes that write ~/.config/opencode/AGENTS.md,
+        // because that file's existence is what switches OpenCode's CLAUDE.md fallback off.
+        self::reconcileClaudeCompat($home, $state, $targets, true, $results, $driftAll, $writtenAgents);
 
         foreach (self::relaySkillVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
@@ -755,6 +857,10 @@ class HubProjector {
             $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, false);
             foreach ($r['drift'] as $d) $driftAll[] = $d;
         }
+
+        // Forgejo #311: OpenCode's managed Claude instruction entries — read-only, same drift surface.
+        $unusedResults = []; $unusedWritten = [];
+        self::reconcileClaudeCompat($home, $state, $installed, false, $unusedResults, $driftAll, $unusedWritten);
 
         // Skills/commands tree pass (H-03) — read-only, same drift surface.
         $tree = self::reconcileTrees($home, $state, $installed, false);
@@ -855,6 +961,12 @@ class HubProjector {
         if ($projector === null) foreach (self::policyInstructionVendors() as $p) {
             if ($p->ledgerKey() === $file) { $projector = $p; $isPolicy = true; break; }
         }
+        // Forgejo #311: OpenCode's managed Claude instruction entries have their own
+        // ledger row on opencode.json; their desired set comes from the home, not the store.
+        $isClaudeCompat = false;
+        if ($projector === null) foreach (self::claudeCompatVendors() as $p) {
+            if ($p->ledgerKey() === $file) { $projector = $p; $isClaudeCompat = true; break; }
+        }
         if ($projector === null) foreach (array_merge(array_values(self::supportedVendors()), array_values(self::instructionVendors()), self::treeVendors()) as $p) {
             if ($p->ledgerKey() === $file) { $projector = $p; break; }
         }
@@ -872,7 +984,11 @@ class HubProjector {
         // too — no managed-key precondition here.
 
         $mcp = HubStore::getMcp();
-        if ($isRelay) {
+        if ($isClaudeCompat) {
+            /** @var OpencodeClaudeInstructionsProjector $projector */
+            $serverName = null;
+            $desired = $projector->desiredFor($homeInfo['home'], self::claudeCompatEnv($homeInfo['home'], $projector->agentId()));
+        } elseif ($isRelay) {
             $serverName = null;
             $desired = $projector->desired([]);
         } elseif ($isPolicy) {
@@ -908,7 +1024,7 @@ class HubProjector {
                 $entry['managedKeys'] = array_values(array_diff($entry['managedKeys'] ?? [], [$key]));
                 self::putLedgerEntry($state, $file, $entry);
                 HubStore::saveState($state);
-                if ($isPolicy) {
+                if ($isPolicy || $isClaudeCompat) {
                     // Always-on policy content has no target list to remove the
                     // agent from (it is unconditional for every installed agent,
                     // never gated by instructions_enabledFor) — falling through to

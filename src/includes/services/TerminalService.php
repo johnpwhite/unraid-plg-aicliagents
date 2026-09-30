@@ -10,11 +10,53 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/SessionLaunchLock.php';
+
 class TerminalService {
     /**
      * Starts a new AICli console session via ttyd.
+     *
+     * Forgejo #352 (2026-09-29): every start of a workspace first takes the
+     * workspace's SessionLaunchLock. A close or a restart of the same workspace
+     * holds that lock from the close until the new agent runs. A start that
+     * arrives in that window (an open page saw the agent stop and asked for a
+     * start) waits, then finds the new session live and only attaches to it.
+     * Before this, the page's start and the restart each launched an agent on
+     * the same conversation: two `claude --resume <id>` processes in two tmux
+     * servers, one of them invisible. See docs/specs/WORKSPACE_RELOAD_ONTO_CURRENT.md.
      */
     public static function startTerminal($id = 'default', $path = null, $chatId = null, $agentId = 'gemini-cli', string $origin = 'interactive') {
+        if (!SessionLaunchLock::acquire((string)$id, SessionLaunchLock::START_WAIT_SECONDS)) {
+            LogService::log("Start of $id refused: another start, close or restart of this workspace did not finish in time. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
+            return;
+        }
+        try {
+            self::startTerminalLocked($id, $path, $chatId, $agentId, $origin);
+        } finally {
+            SessionLaunchLock::release((string)$id);
+        }
+    }
+
+    /**
+     * TERMINAL_BACKGROUND_WARM.md: launch ONLY the ttyd bridge of a workspace
+     * whose tmux session is live. Call it only while this process holds the
+     * workspace's SessionLaunchLock and after the caller checked
+     * ProcessManager::isRunning() under that lock (BridgeWarmService::attach).
+     * Origin 'bridge_warm' skips --ensure-session, so it never launches an agent.
+     */
+    public static function attachBridgeLocked(string $id, ?string $path, string $agentId): void {
+        if (!SessionLaunchLock::heldHere($id)) {
+            LogService::log("Bridge warm-up of $id refused: the caller does not hold the workspace lock.", LogService::LOG_WARN, "TerminalService");
+            return;
+        }
+        self::startTerminalLocked($id, $path, 'auto', $agentId, self::ORIGIN_BRIDGE_WARM);
+    }
+
+    /** TERMINAL_BACKGROUND_WARM.md: the origin of a bridge-only (re)attach. */
+    public const ORIGIN_BRIDGE_WARM = 'bridge_warm';
+
+    /** startTerminal() body. Call it only while this process holds the workspace's SessionLaunchLock. */
+    private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin) {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
         
         // 1. Pre-launch checks
@@ -335,12 +377,18 @@ class TerminalService {
         // Plugin-internal vars set above (AICLI_*, AGENT_ID, BINARY, etc.) must
         // win over user-set vars regardless — EnvService rejects reserved names
         // at save time; the explicit precedence here is belt-and-braces.
-        $effective = EnvService::buildEffectiveEnv($path ?: null, $agentId);
-        foreach ($effective as $k => $v) {
-            if (EnvService::isReservedKey($k)) continue;
-            if (array_key_exists($k, $env)) continue; // plugin-internal wins
-            $env[$k] = $v;
-        }
+        // #214 (security): the user/secret env tiers deliberately DO NOT go on the
+        // launch command line. `env $envStr` becomes the argv of the long-lived
+        // ttyd/runuser processes, world-readable in `ps` / /proc/<pid>/cmdline, so
+        // merging vault + workspace secrets into $env here leaked every secret to
+        // any local user. It was also redundant: the wrapper's RUN_SCRIPT injects
+        // the SAME 5-tier effective-env merge (secrets included)
+        // off-argv via effective-env-export.php — for BOTH the headless
+        // ensure-session tmux create and the ttyd attach (same session) — plus
+        // _aicli_load_envs re-applies it every run-loop iteration. So $env carries
+        // ONLY the non-secret plugin-internal launch vars (AICLI_*, AGENT_ID,
+        // BINARY, …) set above; the agent still gets its full env, just from the
+        // environment (RUN_SCRIPT), never argv. See ENV_AND_SECRETS_TIERS.md.
 
         $envStrParts = [];
         foreach ($env as $k => $v) {
@@ -362,9 +410,19 @@ class TerminalService {
                      escapeshellarg($shell) . " --ensure-session";
         $ensureLog = "/tmp/unraid-aicliagents/ensure-$id.log";
         ActivityService::update($actId, ['step' => 'starting_agent', 'progress' => 60]);
+        $ensureRc = 0;
+        if ($origin === self::ORIGIN_BRIDGE_WARM) {
+            // TERMINAL_BACKGROUND_WARM.md: a bridge warm-up attaches to a tmux
+            // session the caller found live under the workspace lock. It never
+            // creates a session, so it can never launch an agent.
+            LogService::log("Bridge warm-up for $id: tmux session is live — launching the terminal bridge only.", LogService::LOG_INFO, "TerminalService");
+        } else {
         LogService::log("Ensuring detached agent session (headless): $ensureCmd", LogService::LOG_DEBUG, "TerminalService");
         exec("$ensureCmd > " . escapeshellarg($ensureLog) . " 2>&1", $ensureOut, $ensureRc);
-        if ($ensureRc !== 0) {
+        }
+        if ($origin === self::ORIGIN_BRIDGE_WARM) {
+            // No ensure-session ran; nothing to report.
+        } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
             LogService::log("ensure-session returned rc=$ensureRc for $id (continuing to ttyd; attach will retry). tail: $tail", LogService::LOG_WARN, "TerminalService");
         } else {
@@ -379,7 +437,11 @@ class TerminalService {
         LogService::log("Executing: $cmd", LogService::LOG_DEBUG, "TerminalService");
 
         ActivityService::update($actId, ['step' => 'launching_ttyd', 'progress' => 70]);
-        exec("nohup $cmd > " . escapeshellarg($logFile) . " 2>&1 & echo $!", $out);
+        // #337: fully detached — an auto-launch runs from `plugin install`, and
+        // ttyd must not keep the installer's output pipe open. `exec` keeps
+        // the reported pid equal to ttyd's own.
+        $spawned = UtilityService::spawnDetached(['/bin/bash', '-c', 'exec ' . $cmd], $logFile, true);
+        $out = $spawned > 0 ? [(string)$spawned] : [];
         
         $pid = trim($out[0] ?? '');
         LogService::log("Launch result - PID: $pid", LogService::LOG_DEBUG, "TerminalService");
@@ -398,6 +460,18 @@ class TerminalService {
                     // Done from PHP's perspective — the agent itself cold-starts
                     // inside tmux; AICLI_TTYD_READY covers that last leg in the UI.
                     ActivityService::finish($actId, 'starting_agent');
+                    if ($origin === self::ORIGIN_BRIDGE_WARM) {
+                        // TERMINAL_BACKGROUND_WARM.md: the agent did not start —
+                        // only its web bridge is new. Publish the bridge identity
+                        // (the SPA remounts the frame on the new ttyd) and NOT
+                        // `started`, which a page may read as a restart.
+                        $gen = class_exists(TerminalGenerationService::class) ? TerminalGenerationService::current((string)$id) : null;
+                        if (is_string($gen) && $gen !== '') {
+                            EventBus::publish('workspace', [], ['event' => 'bridge', 'id' => (string)$id, 'generation' => $gen]);
+                        }
+                        $found = true;
+                        break;
+                    }
                     // Tell live surfaces (the drawer, the Relay owner table) that a
                     // workspace just started — whether from the UI, Relay "Start now",
                     // or a system autolaunch — so they refresh without a manual reload.
@@ -412,8 +486,13 @@ class TerminalService {
                         $startedPayload['continuedBy'] = 'backup';
                     } elseif ($origin === 'restore_relaunch') {
                         $startedPayload['continuedBy'] = 'restore';
+                    } elseif (class_exists(ContinueHold::class) && ContinueHold::isHeld((string)$id)) {
+                        // #349: the operator restarted this workspace with "do not
+                        // continue" (Switch to the installed version). The same
+                        // field tells every open page not to auto-continue it.
+                        $startedPayload['continuedBy'] = 'operator-switch';
                     }
-                    NchanService::publish('workspaces', $startedPayload);
+                    EventBus::publish('workspace', [], $startedPayload);
                     $found = true;
                     break;
                 }
@@ -688,18 +767,6 @@ class TerminalService {
     }
 
     /**
-     * Enumerate active terminal sessions whose agent matches $agentId.
-     * Returns a list of {id, agentId, path, chatId, started_at} records so
-     * the UI can warn the user and the install flow can gracefully close
-     * them before clobbering the binary.
-     *
-     * Session metadata lives in parallel /var/run files keyed by session id:
-     *   aicliterm-<id>.sock                  — running-flag
-     *   unraid-aicliagents-<id>.agentid      — agent id
-     *   unraid-aicliagents-<id>.workdir      — workspace path
-     *   unraid-aicliagents-<id>.chatid       — last-known resume id
-     */
-    /**
      * Which live sessions are running an agent version that is no longer the
      * one installed — docs/specs/WORKSPACE_APPLY_AGENT_VERSION.md.
      *
@@ -723,10 +790,24 @@ class TerminalService {
      *        container with no versioned agents installed. Without the seam the
      *        cases that matter — a downgrade, a mismatch — could only skip there,
      *        and a test that skips in CI guards nothing.
+     * #350 (2026-09-29): a session that started on the OLD plain-folder layout
+     * names the stable path agents/<id>/... and no generation. When a busy
+     * old-layout bind is moved beside the new version
+     * (SIDE_BY_SIDE_AGENT_INSTALLS.md "a busy old layout"), storagectl writes
+     * the version it shows to /tmp/unraid-aicliagents/passthrough-legacy-<id>.
+     * Such a session runs that version, so it is offered the switch too.
+     *
+     * @param callable|null $legacyResolver agentId => the moved old-layout
+     *        generation|null. Injected by tests.
      * @return array<string,string> session id => the generation it is running
      */
-    public static function sessionsOnOtherAgentVersion(?string $procRoot = null, ?callable $activeResolver = null): array
+    public static function sessionsOnOtherAgentVersion(?string $procRoot = null, ?callable $activeResolver = null, ?callable $legacyResolver = null): array
     {
+        $legacyResolver = $legacyResolver ?? static function (string $agent): ?string {
+            $g = trim((string)@file_get_contents('/tmp/unraid-aicliagents/passthrough-legacy-' . $agent));
+            return preg_match('/^[A-Za-z0-9][A-Za-z0-9._@-]*$/', $g) ? $g : null;
+        };
+        $legacy = [];   // agentId => moved old-layout generation|null
         $root = $procRoot ?? '/proc';
         $active = [];   // agentId => active generation
         $out = [];
@@ -757,12 +838,22 @@ class TerminalService {
             if (isset($out[$sid])) continue;
 
             // The generation this session is pinned to, from its own binary path.
-            if (!preg_match('#/\.versions/' . preg_quote($agent, '#') . '/([A-Za-z0-9._@-]+)/#', $binary, $m)) {
-                // Not on the versioned layout (or an unreadable shape) — nothing
-                // to offer, because there is no second version to switch to.
-                continue;
+            if (preg_match('#/\.versions/' . preg_quote($agent, '#') . '/([A-Za-z0-9._@-]+)/#', $binary, $m)) {
+                $sessionGen = $m[1];
+            } else {
+                // Not on the versioned layout. Only an old-layout session whose
+                // bind was moved beside a new version (#350) has a version to
+                // name; any other shape has nothing to offer.
+                if (!array_key_exists($agent, $legacy)) {
+                    $resolved = $legacyResolver($agent);
+                    $legacy[$agent] = is_string($resolved) && $resolved !== '' ? $resolved : null;
+                }
+                $stablePrefix = rtrim(AgentRegistry::agentBase(), '/') . '/' . $agent . '/';
+                if ($legacy[$agent] === null || strncmp($binary, $stablePrefix, strlen($stablePrefix)) !== 0) {
+                    continue;
+                }
+                $sessionGen = $legacy[$agent];
             }
-            $sessionGen = $m[1];
 
             if (!array_key_exists($agent, $active)) {
                 $active[$agent] = null;
@@ -787,30 +878,76 @@ class TerminalService {
         return $out;
     }
 
+    /**
+     * Forgejo #315 (2026-09-24): the running sessions of every agent, read from
+     * tmux (ProcessManager::listAgentTmuxSessions) — NOT from the ttyd socket.
+     *
+     * A workspace runs in tmux whether or not a browser terminal is attached.
+     * The terminal page mounts a terminal only for the workspaces opened in that
+     * browser (#308), and ttyd can be gone after a restart while the agent keeps
+     * running. Scanning /var/run/aicliterm-*.sock therefore counted 0 sessions
+     * for an agent that was in use, and the install warning, the side-by-side
+     * decision and the upgrade queue then treated a busy agent as idle.
+     *
+     * 'attached' carries the separate fact "a browser terminal (ttyd socket)
+     * exists" for a caller that needs it. A ttyd socket with no tmux session is
+     * not a running session.
+     *
+     * @return array<int,array{id:string,agentId:string,path:string,chatId:string,user:string,started_at:int,attached:bool}>
+     */
+    private static function runningSessionRecords(): array
+    {
+        $out = [];
+        foreach (ProcessManager::listAgentTmuxSessions() as $t) {
+            $id = (string)$t['id'];
+            $workdirFile = UtilityService::getWorkDirFilePath($id);
+            $chatFile    = UtilityService::getChatIdPath($id);
+            $userFile    = UtilityService::getUserIdPath($id);
+            $path = is_file($workdirFile) ? trim((string)@file_get_contents($workdirFile)) : '';
+            // The .workdir metadata holds the path as the user chose it (the
+            // /mnt/user form). tmux holds the resolved start dir — use it only
+            // when the metadata file is gone.
+            if ($path === '') $path = (string)($t['path'] ?? '');
+            $out[] = [
+                'id'         => $id,
+                'agentId'    => (string)$t['agentId'],
+                'path'       => $path,
+                'chatId'     => is_file($chatFile) ? trim((string)@file_get_contents($chatFile)) : '',
+                'user'       => is_file($userFile) ? trim((string)@file_get_contents($userFile)) : '',
+                'started_at' => (int)($t['created'] ?? 0),
+                'attached'   => file_exists(UtilityService::getSockPath($id)),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Running workspace sessions whose agent matches $agentId, so the UI can
+     * warn the user and the install flow can decide whether to wait, install
+     * side by side, or close them before it replaces the binary.
+     *
+     * "Running" means a tmux session aicli-agent-<agentId>-<id> exists on the
+     * workspace's tmux server (Forgejo #315). Metadata comes from the parallel
+     * /var/run files keyed by session id, when present:
+     *   unraid-aicliagents-<id>.workdir      — workspace path
+     *   unraid-aicliagents-<id>.chatid       — last-known resume id
+     * Each record also carries 'attached' — whether the ttyd socket
+     * aicliterm-<id>.sock (a browser terminal) exists.
+     *
+     * @return array<int,array{id:string,agentId:string,path:string,chatId:string,started_at:int,attached:bool}>
+     */
     public static function listActiveSessionsForAgent(string $agentId): array
     {
-        // Bug #1067: reconcile orphan ttyd processes before enumerating, so the
-        // agent-upgrade dialog's "open sessions" count reflects reality (not
-        // stale sock files from failed launches or unclean exits).
+        // Bug #1067: reconcile orphan ttyd processes first. This only tidies
+        // stale browser-terminal sockets now; the count itself comes from tmux
+        // (Forgejo #315), so a missing ttyd can no longer hide a running agent.
         ProcessManager::sweepOrphanSessions();
 
         $out = [];
-        foreach (glob("/var/run/aicliterm-*.sock") ?: [] as $sock) {
-            if (!preg_match('/aicliterm-(.*)\.sock$/', $sock, $m)) continue;
-            $id = $m[1];
-            $agentFile = UtilityService::getAgentIdPath($id);
-            $sessionAgent = is_file($agentFile) ? trim((string)@file_get_contents($agentFile)) : '';
-            if ($sessionAgent !== $agentId) continue;
-
-            $workdirFile = UtilityService::getWorkDirFilePath($id);
-            $chatFile = UtilityService::getChatIdPath($id);
-            $out[] = [
-                'id'         => $id,
-                'agentId'    => $sessionAgent,
-                'path'       => is_file($workdirFile) ? trim((string)@file_get_contents($workdirFile)) : '',
-                'chatId'     => is_file($chatFile) ? trim((string)@file_get_contents($chatFile)) : '',
-                'started_at' => @filemtime($sock) ?: 0,
-            ];
+        foreach (self::runningSessionRecords() as $rec) {
+            if ($rec['agentId'] !== $agentId) continue;
+            unset($rec['user']);
+            $out[] = $rec;
         }
         return $out;
     }
@@ -864,25 +1001,10 @@ class TerminalService {
         $configUser  = (string)($config['user'] ?? '');
         if ($configUser === '') $configUser = 'root';
 
-        $all = [];
-        foreach (glob("/var/run/aicliterm-*.sock") ?: [] as $sock) {
-            if (!preg_match('/aicliterm-(.*)\.sock$/', $sock, $m)) continue;
-            $id = $m[1];
-
-            $agentFile   = UtilityService::getAgentIdPath($id);
-            $workdirFile = UtilityService::getWorkDirFilePath($id);
-            $chatFile    = UtilityService::getChatIdPath($id);
-            $userFile    = UtilityService::getUserIdPath($id);
-
-            $all[] = [
-                'id'         => $id,
-                'agentId'    => is_file($agentFile)   ? trim((string)@file_get_contents($agentFile))   : '',
-                'path'       => is_file($workdirFile) ? trim((string)@file_get_contents($workdirFile)) : '',
-                'chatId'     => is_file($chatFile)    ? trim((string)@file_get_contents($chatFile))    : '',
-                'user'       => is_file($userFile)    ? trim((string)@file_get_contents($userFile))    : '',
-                'started_at' => @filemtime($sock) ?: 0,
-            ];
-        }
+        // Forgejo #315: tmux is the source of truth for a running session, the
+        // same as listActiveSessionsForAgent — a workspace with no browser
+        // terminal attached still holds this home.
+        $all = self::runningSessionRecords();
 
         return self::filterSessionsByHome($all, $user, $configUser);
     }

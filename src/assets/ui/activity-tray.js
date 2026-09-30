@@ -7,7 +7,9 @@
  * Dependencies: none (vanilla JS; EventSource for Nchan, fetch for AJAX).
  * Constraints: collapsed pill bottom-right, raised to bottom:48px so it clears
  *   the fixed Dynamix footer/status line (OP#1381); z-index 10003 (above Unraid
- *   headers per repo standard 10002+). Subscribes Nchan /sub/aicli_activity.
+ *   headers per repo standard 10002+). Consumes the `activity` channel of the
+ *   page's one multiplexed stream (aicli-events.js, EVENT_STREAM_MULTIPLEX.md);
+ *   falls back to its own /sub/aicli_activity only when that script is absent.
  *   Reconcile-first on load: the first `list_activities` read lands before the
  *   stream opens. One more reconcile read fires on every stream `onopen` and on
  *   every tab `visibilitychange` to visible (EVENT_FIRST_RECONCILIATION.md R6).
@@ -71,13 +73,27 @@
         // collapsed pill and the expanded panel are children of .wrap, so raising
         // .wrap clears both). z-index 10003 keeps it above Unraid headers (10002+)
         // and the footer (10000).
-        + '.wrap { position: fixed; bottom: 48px; right: 14px; z-index: 10003;'
+        // SIDEBAR_THEME_LAYOUT.md: --aicli-content-left/-right (aicli-content-box.js)
+        // are the widths of Unraid's fixed side menu; 0px on the top-menu themes.
+        // #328: while the panel is OPEN it must draw above the terminal page's
+        // drawer and its icon strip (z-index 1000000-1000002), which crossed it
+        // on a phone. Only while open: the collapsed pill stays at 10003 so it
+        // never covers Unraid's own dialogs. Modal backdrops (1000004) still win.
+        + '.wrap.open { z-index: 1000003; }'
+        // 2026-09-26: the pill stays in its corner under the open panel (it
+        // jumped to the panel's left edge, onto other controls).
+        + '.wrap.open { display: flex; flex-direction: column; align-items: flex-end; }'
+        + '.wrap { position: fixed; bottom: 48px; right: calc(14px + var(--aicli-content-right, 0px)); z-index: 10003;'
         + '  font-family: clear-sans, sans-serif; font-size: 12px; color: var(--text-color, #e0e0e0); }'
         + '.pill { display: flex; align-items: center; gap: 7px; cursor: pointer; user-select: none;'
         + '  padding: 7px 14px; border-radius: 16px; border: 1px solid var(--border-color, #444);'
         + '  background: var(--title-header-background-color, #1c1b1b); color: var(--text-color, #e0e0e0);'
         + '  box-shadow: 0 4px 14px rgba(0,0,0,0.4); font-weight: 600; }'
         + '.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--orange, #e68a00); }'
+        // 2026-09-26 (ACTIVITY_TRAY.md): the pill carries its full text and a
+        // short count; a phone shows only the dot and the count (the full text
+        // stays the button's accessible name and is in the open panel).
+        + '.pill .short { display: none; }'
         + '.pill .dot.spin { animation: aicli-act-pulse 1.2s ease-in-out infinite; }'
         + '.pill .dot.bad { background: #d9534f; animation: none; }'
         + '.pill .dot.stall { background: #eab308; animation: none; }'
@@ -99,11 +115,14 @@
         + '.row .label { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }'
         + '.row .status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;'
         + '  padding: 1px 7px; border-radius: 9px; flex-shrink: 0; }'
-        + '.status.running { background: rgba(230,138,0,0.18); color: var(--orange, #e68a00); }'
-        + '.status.stalled { background: rgba(234,179,8,0.18); color: #eab308; }'
-        + '.status.waiting { background: rgba(91,155,213,0.18); color: #5b9bd5; }'
-        + '.status.failed  { background: rgba(217,83,79,0.18); color: #d9534f; }'
-        + '.status.done    { background: rgba(0,128,64,0.2); color: #4caf50; }'
+        // Epic #307: each status label mixes its hue with the theme text colour,
+        // so it reads at WCAG AA on the light theme (plain orange on its own
+        // tint was 2:1) and stays bright on a dark one.
+        + '.status.running { background: rgba(230,138,0,0.18); color: color-mix(in srgb, var(--orange, #e68a00) 50%, var(--text-color, #e0e0e0)); }'
+        + '.status.stalled { background: rgba(234,179,8,0.18); color: color-mix(in srgb, #eab308 45%, var(--text-color, #e0e0e0)); }'
+        + '.status.waiting { background: rgba(91,155,213,0.18); color: color-mix(in srgb, #5b9bd5 50%, var(--text-color, #e0e0e0)); }'
+        + '.status.failed  { background: rgba(217,83,79,0.18); color: color-mix(in srgb, #d9534f 60%, var(--text-color, #e0e0e0)); }'
+        + '.status.done    { background: rgba(0,128,64,0.2); color: color-mix(in srgb, #4caf50 50%, var(--text-color, #e0e0e0)); }'
         // pending_approval: Tier 3 (PLUGIN_MANAGEMENT_TOOLS.md "Phase 3 as built",
         // 2026-09-09) — a tool validated a destructive request and is waiting for a
         // human, not a worker. Distinct purple so it reads as "needs YOUR action",
@@ -113,9 +132,11 @@
         // relay_waiting (RELAY_WAITING_PILL.md, 2026-09-09): a Relay notice the
         // readiness gate held back, now visible and one click from delivered.
         // Calm teal, no pulse — nothing is broken, it just needs a human's OK.
-        + '.status.relay_waiting { background: rgba(20,184,166,0.18); color: #14b8a6; }'
+        + '.status.relay_waiting { background: rgba(20,184,166,0.18); color: color-mix(in srgb, #14b8a6 45%, var(--text-color, #e0e0e0)); }'
         + '.pill .dot.relay { background: #14b8a6; animation: none; }'
-        + '.btn.deliver { border-color: #14b8a6; color: #14b8a6; font-weight: 700; }'
+        // Epic #307: text mixed with the theme text colour, as the other
+        // status labels above (plain teal was 1.9:1 / 2.2:1 on the light theme).
+        + '.btn.deliver { border-color: #14b8a6; color: color-mix(in srgb, #14b8a6 45%, var(--text-color, #e0e0e0)); font-weight: 700; }'
         // Force inject types into a pane the plugin still judges busy. It is the
         // operator overruling a safety check, so it is amber, not the calm teal of
         // the "go and look" step that precedes it.
@@ -133,7 +154,26 @@
         + '  border: 1px solid var(--border-color, #555); background: transparent; color: inherit; }'
         + '.btn:hover { background: rgba(255,255,255,0.06); }'
         + '.btn.retry { border-color: var(--orange, #e68a00); color: var(--orange, #e68a00); font-weight: 700; }'
-        + '.empty { padding: 16px 12px; text-align: center; opacity: 0.5; }';
+        + '.empty { padding: 16px 12px; text-align: center; opacity: 0.5; }'
+        // Epic #307: the pill and the panel's close control are real <button>s
+        // (keyboard and screen reader reachable). The shadow root keeps the
+        // Unraid theme out, so only the UA button look is reset here.
+        + 'button.pill, button.close { font: inherit; margin: 0; text-align: left; }'
+        + 'button.close { border: 0; background: transparent; color: inherit; font-size: 13px; line-height: 1; }'
+        // Epic #307: at phone width every control is a 44 px touch target and
+        // the panel never runs off the left edge of the screen.
+        + '@media (max-width: 640px) {'
+        // ...and never under Unraid's side menu (sidebar themes, SIDEBAR_THEME_LAYOUT.md).
+        + '  .panel { width: min(340px, calc(100vw - 28px - var(--aicli-content-left, 0px) - var(--aicli-content-right, 0px))); max-height: 60vh; }'
+        + '  .pill { min-height: 44px; min-width: 44px; box-sizing: border-box; justify-content: center; padding: 7px 12px; }'
+        + '  .pill .full { display: none; }'
+        + '  .pill .short { display: inline; font-variant-numeric: tabular-nums; }'
+        + '  .panel-head { padding: 0 0 0 12px; }'
+        + '  .panel-head .close { min-width: 44px; min-height: 44px; padding: 0; opacity: 0.8;'
+        + '    display: inline-flex; align-items: center; justify-content: center; }'
+        + '  .btns { flex-wrap: wrap; }'
+        + '  .btn { min-height: 44px; min-width: 44px; padding: 0 14px; font-size: 13px; }'
+        + '}';
 
     // ACTIVITY_TRAY.md "When a start row appears" (2026-09-11): a start row appears only if
     // nobody watched the launch, or it went wrong. The entries still EXIST for everything
@@ -160,6 +200,42 @@
     // smoke test can pin its name and behaviour by source text.
     function _needsFastPoll(entries) {
         return entries.some(function (a) { return a.status !== 'done'; });
+    }
+
+    // 2026-09-26 (ACTIVITY_TRAY.md "The pill never covers a control"): the short
+    // pill text on a phone — the number of entries that are not done (or of all
+    // entries, while the panel is open over done ones only).
+    function _pillShortText(counts, total) {
+        var n = 0;
+        Object.keys(counts).forEach(function (k) { n += counts[k] || 0; });
+        return String(n > 0 ? n : total);
+    }
+
+    // 2026-09-26: the pill's distance from the bottom of the window. `base` is
+    // the footer clearance; `pill` is {left, right, height} of the pill; `rects`
+    // are the boxes ({left, right, top, bottom}) of the controls it must not
+    // cover (elements marked data-aicli-tray-avoid, e.g. the phone key row).
+    // Each control in the pill's column that the pill (plus `gap`) would touch
+    // lifts the pill to `gap` above that control's top; repeat until nothing
+    // is touched, so stacked controls (key row, then the Latest pill) all stay
+    // clear. Never lifts the pill above the top of the window.
+    function _clearAvoid(base, pill, rects, vh, gap) {
+        var bottom = base;
+        var max = Math.max(base, vh - pill.height - gap);
+        for (var pass = 0; pass < 12; pass++) {
+            var moved = false;
+            var pTop = vh - bottom - pill.height;
+            var pBot = vh - bottom;
+            for (var i = 0; i < rects.length; i++) {
+                var r = rects[i];
+                if (r.right <= pill.left || r.left >= pill.right) continue;   // another column
+                if (r.top >= pBot + gap || r.bottom <= pTop - gap) continue;  // clear already
+                var need = Math.ceil(vh - r.top + gap);
+                if (need > bottom) { bottom = Math.min(need, max); moved = true; }
+            }
+            if (!moved || bottom >= max) break;
+        }
+        return bottom;
     }
 
     class AicliActivityTray extends HTMLElement {
@@ -208,6 +284,10 @@
             this._positionAboveFooter();
             this._onResize = this._positionAboveFooter.bind(this);
             window.addEventListener('resize', this._onResize);
+            // 2026-09-26: a control the pill must avoid appeared or went away
+            // (ui-build/src/lib/trayAvoid.ts), or the page scrolled under it.
+            window.addEventListener('aicli-tray-layout', this._onResize);
+            window.addEventListener('scroll', this._onResize, { passive: true });
             // R6: one reconcile read on every return to the foreground. Bound in
             // the constructor and removed in disconnectedCallback, so a tray that
             // is removed and reattached never double-registers.
@@ -224,7 +304,11 @@
 
         disconnectedCallback() {
             window.removeEventListener('aicli-activity-local', this._onLocal);
-            if (this._onResize) window.removeEventListener('resize', this._onResize);
+            if (this._onResize) {
+                window.removeEventListener('resize', this._onResize);
+                window.removeEventListener('aicli-tray-layout', this._onResize);
+                window.removeEventListener('scroll', this._onResize);
+            }
             document.removeEventListener('visibilitychange', this._onVisibility);
             if (this._es) { try { this._es.close(); } catch (e) { /* noop */ } this._es = null; }
             if (this._pollTimer) clearTimeout(this._pollTimer);
@@ -256,35 +340,74 @@
                     }
                 }
             } catch (e) { /* keep the default clearance */ }
+            // 2026-09-26: never cover a control near the bottom of the page (the
+            // terminal's phone key row, its Latest pill, the one-shot hint).
+            try {
+                var pillEl = this._root.querySelector('.pill');
+                var avoid = document.querySelectorAll('[data-aicli-tray-avoid]');
+                if (pillEl && avoid.length) {
+                    var pr = pillEl.getBoundingClientRect();
+                    var rects = [];
+                    for (var i = 0; i < avoid.length; i++) {
+                        var ar = avoid[i].getBoundingClientRect();
+                        if (ar.width <= 0 || ar.height <= 0) continue;
+                        if (ar.bottom <= 0 || ar.top >= window.innerHeight) continue;
+                        var acs = window.getComputedStyle(avoid[i]);
+                        if (acs.visibility === 'hidden' || acs.display === 'none') continue;
+                        rects.push({ left: ar.left, right: ar.right, top: ar.top, bottom: ar.bottom });
+                    }
+                    if (pr.width > 0 && rects.length) {
+                        bottom = _clearAvoid(bottom, { left: pr.left, right: pr.right, height: pr.height }, rects, window.innerHeight, 8);
+                    }
+                }
+            } catch (e) { /* keep the footer clearance */ }
             this._root.style.bottom = bottom + 'px';
         }
 
         // ---- data flow ------------------------------------------------------
 
         _subscribe() {
+            var self = this;
+            // R5 (EVENT_FIRST_RECONCILIATION.md): one rule for a pushed entry,
+            // whichever connection carried it.
+            var apply = function (data) {
+                self._esBroken = false;
+                if (!data || !data.opId) return;
+                // Drop a message older than the last reconcile snapshot. A
+                // payload with no `ts` (an older server) is applied, for one
+                // release, per EVENT_PUBLISH_OBSERVABILITY.md.
+                if (typeof data.ts === 'number' && data.ts < self._snapshotTs) return;
+                self._merge(data);
+            };
+            // EVENT_STREAM_MULTIPLEX.md R2/R3: the page's ONE multiplexed stream
+            // (aicli-events.js) carries `activity`. The tray opens no connection
+            // of its own when that script is on the page.
+            if (window.aicliEvents && typeof window.aicliEvents.on === 'function') {
+                this._esBroken = (window.aicliEvents.status === 'broken' || window.aicliEvents.status === 'unsupported');
+                window.aicliEvents.on('activity', function (evt) { apply(evt.data); });
+                // D4 (EVENT_ARCHITECTURE_REVIEW.md): one reconcile read on every
+                // (re)connect closes the gap the Nchan buffer cannot replay.
+                window.addEventListener('aicli-reconcile', function () { self._poll(); });
+                window.addEventListener('aicli-event-status', function (e) {
+                    var status = e && e.detail && e.detail.status;
+                    // Broken or absent stream -> the fallback poll tightens to 5 s.
+                    self._esBroken = (status === 'broken' || status === 'unsupported');
+                });
+                return;
+            }
+            // Fallback: a page shell without aicli-events.js (an older page
+            // generation served with this newer tray).
             if (typeof EventSource === 'undefined') { this._esBroken = true; return; }
             try {
-                var self = this;
                 this._es = new EventSource('/sub/aicli_activity');
                 this._es.onopen = function () {
-                    // D4 (EVENT_ARCHITECTURE_REVIEW.md): clear the broken flag on the
-                    // reconnect itself, not on the next message — an idle server can
-                    // go a long time between messages. One immediate reconcile read
-                    // also closes the gap the one-message Nchan buffer cannot replay.
                     self._esBroken = false;
                     self._poll();
                 };
                 this._es.onmessage = function (msg) {
-                    self._esBroken = false;
                     var data;
                     try { data = JSON.parse(msg.data); } catch (e) { return; }
-                    if (!data || !data.opId) return;
-                    // R5 (EVENT_FIRST_RECONCILIATION.md): drop a message older than
-                    // the last reconcile snapshot. A payload with no `ts` (an older
-                    // server) is applied, for one release, per
-                    // EVENT_PUBLISH_OBSERVABILITY.md.
-                    if (typeof data.ts === 'number' && data.ts < self._snapshotTs) return;
-                    self._merge(data);
+                    apply(data);
                 };
                 this._es.onerror = function () {
                     // EventSource auto-reconnects; flag so the fallback poll tightens to 5 s.
@@ -476,7 +599,7 @@
             var html = '';
             if (this._open) {
                 html += '<div class="panel"><div class="panel-head"><span>Activity</span>'
-                    + '<span class="close" data-act="toggle" title="Collapse">&#x2715;</span></div>';
+                    + '<button type="button" class="close" data-act="toggle" title="Collapse" aria-label="Collapse activity">&#x2715;</button></div>';
                 if (all.length === 0) {
                     html += '<div class="empty">No activity</div>';
                 } else {
@@ -484,9 +607,15 @@
                 }
                 html += '</div>';
             }
-            html += '<div class="pill" data-act="toggle"><span class="' + dotClass + '"></span>'
-                + '<span>' + esc(pillText || all.length + ' item' + (all.length > 1 ? 's' : '')) + '</span></div>';
+            var fullText = pillText || all.length + ' item' + (all.length > 1 ? 's' : '');
+            var shortText = _pillShortText({ running: running, stalled: stalled, failed: failed, waiting: waiting, pending: pending, relay: relayWaiting }, all.length);
+            html += '<button type="button" class="pill" data-act="toggle" aria-expanded="' + (this._open ? 'true' : 'false') + '"'
+                + ' aria-label="Activity: ' + esc(fullText) + '" title="' + esc(fullText) + '">'
+                + '<span class="' + dotClass + '" aria-hidden="true"></span>'
+                + '<span class="full">' + esc(fullText) + '</span>'
+                + '<span class="short" aria-hidden="true">' + esc(shortText) + '</span></button>';
 
+            this._root.classList.toggle('open', !!this._open);
             this._root.innerHTML = html;
             this._positionAboveFooter();   // re-measure: footer height varies by viewport/version
 
@@ -548,7 +677,12 @@
             if (relayWaiting) {
                 var session = (a.meta && a.meta.sessionId) || '';
                 var ws = a.workspace || (a.meta && a.meta.workspace) || '';
-                if (this._relayArmed[a.opId]) {
+                if (this._relayArmed[a.opId] && (a.reasonCode === 'own-notice-unsent' || a.reasonCode === 'own-notice-stuck')) {
+                    // #320: the notice is already typed in the agent's input box. The
+                    // server presses Enter only for this case, so say exactly that.
+                    btns += '<button class="btn force" data-act="deliver_relay_waiting" data-opid="' + esc(a.opId) + '"'
+                        + ' title="The notice is already typed in the agent\'s input box. This presses Enter only. Nothing is typed again.">Press Enter</button>';
+                } else if (this._relayArmed[a.opId]) {
                     btns += '<button class="btn force" data-act="deliver_relay_waiting" data-opid="' + esc(a.opId) + '"'
                         + ' title="Types the message into the agent now and presses Enter, without waiting for the plugin to judge the screen idle.'
                         + ' Use this when you can see the agent is idle but the plugin cannot tell — an agent that changed its interface can hold a message for ever.'
@@ -594,6 +728,9 @@
                 + '</div>';
         }
     }
+
+    // Pure layout helpers, read by ui-build/src/__tests__/activityTrayLayout.test.ts.
+    AicliActivityTray.layout = { clearAvoid: _clearAvoid, pillShortText: _pillShortText };
 
     if (!customElements.get('aicli-activity-tray')) {
         customElements.define('aicli-activity-tray', AicliActivityTray);

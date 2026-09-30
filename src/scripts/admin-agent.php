@@ -86,7 +86,14 @@
  *                                workspace's own voice switch; `value` is
  *                                on/off/true/false/1/0. A muted workspace
  *                                refuses `speak` even while the global voice
- *                                switch is on).
+ *                                switch is on), spoken-name (VOICE_MAIL.md
+ *                                R14 — the name each spoken message starts
+ *                                with; every word after the field is the
+ *                                name; no value clears it), voice-id
+ *                                (AGENT_VOICE.md R14 — this workspace's own
+ *                                engine voice, e.g. af_heart; it wins over an
+ *                                agent's --voice and the Settings default;
+ *                                no value clears it).
  *   set-args <id> <args...>     CHANGES state. Every argument after `id` is
  *                                joined with a single space and saved as the
  *                                workspace's CLI arguments. Give no arguments
@@ -201,6 +208,17 @@
  *                                cron never carries an agent session id, so
  *                                this can only refuse an agent's own shell,
  *                                never the real cron job.
+ *   persist-home [user]         (HOME_PERSIST_CONSOLIDATE_TOOLS.md, 2026-09-17)
+ *                                Tier 2 — CHANGES state. Queues a save of
+ *                                `user`'s home (default: the configured home
+ *                                user) to its storage layers. Closes no
+ *                                session. Prints the supervisor job id.
+ *   consolidate-home <user>     (HOME_PERSIST_CONSOLIDATE_TOOLS.md, 2026-09-17)
+ *                                PROPOSES merging every saved layer of
+ *                                `user`'s home into one — validates and asks
+ *                                a human to approve in the Manager UI. Nothing
+ *                                is merged and no session is closed until
+ *                                approved.
  *   list-backups <user>         Tier 1 (read, HOME_RESTORE.md, 2026-09-12).
  *                                Prints one user's backup snapshots plus their
  *                                last backup and last restore records.
@@ -216,6 +234,18 @@
  *                                first, with unheard counts per workspace.
  *                                `heard` means the operator played it from
  *                                voice mail or marked it heard.
+ *   read-screen <workspaceId> [lines]
+ *                                Tier 1 (read, AUTO_CONTINUE_PATTERNS.md). The
+ *                                last `lines` (default 40, max 200) lines of a
+ *                                running workspace's screen as plain, masked
+ *                                text, with its agent version and the model
+ *                                when shown. Every call is logged.
+ *   propose-pattern <agentId|all> <error|quota|busy|chrome> <name> <regex> [sample...]
+ *                                CHANGES state (AUTO_CONTINUE_PATTERNS.md).
+ *                                Adds one auto-continue pattern after the same
+ *                                validation as Settings; every argument after
+ *                                `regex` is joined with a space as the sample.
+ *                                Prints the prefilled GitHub report URL.
  *   restore-home <user> --snapshot=<path|latest> [--mode=replace|merge]
  *                  [--no-safety-snapshot] --yes
  *                                (HOME_RESTORE.md, 2026-09-12) This is the
@@ -273,11 +303,12 @@ const ADMIN_AGENT_USAGE = [
     'logs' => 'logs [context] [lines]',
     'favourites' => 'favourites',
     'voicemail' => 'voicemail [workspaceId] -- messages spoken through speak, newest first, with unheard counts',
+    'read-screen' => 'read-screen <workspaceId> [lines] -- a running workspace\'s screen as plain, masked text (logged)',
     'subscribe' => 'subscribe <kind> [<kind>...] [--replace=0] -- no kind clears your subscription',
     'events' => 'events [--since=<seq>] [--kinds=a,b] [--limit=N] [--no-ack]',
     'ack' => 'ack <seq>',
     'create-workspace' => 'create-workspace [--favourite=<id>] [path] [agentId] [name] -- CHANGES state',
-    'update-workspace' => 'update-workspace <id> <name|path|agentId|order|voice> <value> -- CHANGES state',
+    'update-workspace' => 'update-workspace <id> <name|path|agentId|order|voice|spoken-name|voice-id> <value> -- CHANGES state; spoken-name or voice-id with no value clears it',
     'set-args' => 'set-args <id> [args...] -- CHANGES state; no args after id clears them',
     'set-env' => 'set-env <id> <key> <value> [secret] -- CHANGES state; value is never printed back',
     'auto-launch' => 'auto-launch <agentId> <autoLaunch> [freshIfNoResume] -- CHANGES state',
@@ -289,8 +320,13 @@ const ADMIN_AGENT_USAGE = [
     'favourite-add' => 'favourite-add <workspaceId> -- CHANGES state; bookmarks a workspace\'s agent and folder',
     'favourite-remove' => 'favourite-remove <id> -- CHANGES state; removes one favourite by id',
     'voicemail-heard' => 'voicemail-heard <id> | voicemail-heard --workspace=<id> --all -- CHANGES state; marks voice mail heard on every device',
+    'persist-home' => 'persist-home [user] -- CHANGES state; queues a save of the home to its storage layers, closes no session',
+    'schedule-continue' => 'schedule-continue <workspaceId> <at-epoch> [none|daily|weekly] -- CHANGES state; fire a Continue at a wall-clock time (e.g. when the quota resets)',
+    'clear-scheduled-continue' => 'clear-scheduled-continue <workspaceId> -- CHANGES state; remove a scheduled Continue',
+    'propose-pattern' => 'propose-pattern <agentId|all> <error|quota|busy|chrome> <name> <regex> [sample...] -- CHANGES state; adds an auto-continue pattern and prints its GitHub report URL',
     'delete-workspace' => 'delete-workspace <id> -- PROPOSES ONLY; a human must approve in the Manager UI',
     'upgrade-agent' => 'upgrade-agent <agentId> [version] -- PROPOSES ONLY; a human must approve in the Manager UI',
+    'consolidate-home' => 'consolidate-home <user> -- PROPOSES ONLY; a human must approve in the Manager UI (closes every session of that user when approved)',
     'backup-home' => 'backup-home <user> [--quiesce=cold|warm] [--target=<path>] [--scheduled] -- PROPOSES ONLY unless --scheduled (the operator\'s own cron; do not pass it yourself); --scheduled refuses from inside an agent workspace',
     'list-backups' => 'list-backups <user>',
     'restore-home' => 'restore-home <user> --snapshot=<path|latest> [--mode=replace|merge] [--no-safety-snapshot] --yes -- the OPERATOR\'s own command; without --yes prints the plan and exits 2; --yes refuses from inside an agent workspace; an agent must use aicli_restore_home instead',
@@ -298,7 +334,7 @@ const ADMIN_AGENT_USAGE = [
 ];
 
 /** Fields update-workspace may change, one per call. */
-const ADMIN_AGENT_UPDATE_WORKSPACE_FIELDS = ['name', 'path', 'agentId', 'order', 'voice'];
+const ADMIN_AGENT_UPDATE_WORKSPACE_FIELDS = ['name', 'path', 'agentId', 'order', 'voice', 'spoken-name', 'voice-id'];
 
 /** update-workspace fields whose <value> is boolean-shaped (on/off/true/false/1/0), not a raw string. */
 const ADMIN_AGENT_UPDATE_WORKSPACE_BOOL_FIELDS = ['voice'];
@@ -490,6 +526,18 @@ try {
             } elseif (in_array($field, ADMIN_AGENT_UPDATE_WORKSPACE_BOOL_FIELDS, true)) {
                 $fieldValue = filter_var($value, FILTER_VALIDATE_BOOLEAN);
             }
+            // VOICE_MAIL.md R14: the CLI field `spoken-name` is the tool's `spokenName`.
+            // Every word after the field is the name, so a two-word name needs no quotes.
+            if ($field === 'spoken-name') {
+                $field = 'spokenName';
+                $fieldValue = implode(' ', array_map('strval', array_slice($argv, 4)));
+            }
+            // AGENT_VOICE.md R14: the CLI field `voice-id` is the tool's `voiceId`.
+            // No value clears it (the Settings default is used).
+            if ($field === 'voice-id') {
+                $field = 'voiceId';
+                $fieldValue = trim($value);
+            }
             $updateArgs = ['id' => $wsId, $field => $fieldValue];
             $result = AdminMcpTools::call('aicli_update_workspace', $updateArgs);
             break;
@@ -594,6 +642,42 @@ try {
             $upAgentId = (string)($argv[2] ?? '');
             $upVersion = (string)($argv[3] ?? '');
             $result = AdminMcpTools::call('aicli_upgrade_agent', ['agentId' => $upAgentId, 'version' => $upVersion]);
+            break;
+        case 'persist-home':
+            // HOME_PERSIST_CONSOLIDATE_TOOLS.md, 2026-09-17. Tier 2: queues the
+            // bake through the same tool the MCP path uses; closes no session.
+            $result = AdminMcpTools::call('aicli_persist_home', ['user' => (string)($argv[2] ?? '')]);
+            break;
+        case 'schedule-continue':
+            // SCHEDULED_CONTINUE.md (#234). Positional: <workspaceId> <at-epoch> [repeat].
+            $result = AdminMcpTools::call('aicli_set_scheduled_continue', [
+                'workspaceId' => (string)($argv[2] ?? ''),
+                'at'          => (int)($argv[3] ?? 0),
+                'repeat'      => (string)($argv[4] ?? 'none'),
+            ]);
+            break;
+        case 'clear-scheduled-continue':
+            $result = AdminMcpTools::call('aicli_clear_scheduled_continue', ['workspaceId' => (string)($argv[2] ?? '')]);
+            break;
+        case 'read-screen':
+            // AUTO_CONTINUE_PATTERNS.md. Positional: <workspaceId> [lines].
+            $rsArgs = ['workspaceId' => (string)($argv[2] ?? '')];
+            if (isset($argv[3]) && $argv[3] !== '') $rsArgs['lines'] = (int)$argv[3];
+            $result = AdminMcpTools::call('aicli_read_workspace_screen', $rsArgs);
+            break;
+        case 'propose-pattern':
+            // AUTO_CONTINUE_PATTERNS.md. Positional: <agentId|all> <kind> <name> <regex> [sample...].
+            $result = AdminMcpTools::call('aicli_propose_autocontinue_pattern', [
+                'agentId' => (string)($argv[2] ?? ''),
+                'kind'    => (string)($argv[3] ?? ''),
+                'name'    => (string)($argv[4] ?? ''),
+                'regex'   => (string)($argv[5] ?? ''),
+                'sample'  => implode(' ', array_map('strval', array_slice($argv, 6))),
+            ]);
+            break;
+        case 'consolidate-home':
+            // HOME_PERSIST_CONSOLIDATE_TOOLS.md, 2026-09-17. Tier 3: proposes only.
+            $result = AdminMcpTools::call('aicli_consolidate_home', ['user' => (string)($argv[2] ?? '')]);
             break;
         case 'backup-home':
             // HOME_BACKUP.md, 2026-09-12. `--scheduled` is the ONE exception to

@@ -16,17 +16,14 @@ register_shutdown_function(function() use ($argv) {
     $agentId = $argv[1] ?? 'unknown';
     if ($error !== NULL && ($error['type'] === E_ERROR || $error['type'] === E_PARSE)) {
         $msg = "FATAL INSTALL ERROR for $agentId: {$error['message']} in {$error['file']} on line {$error['line']}";
-        require_once "/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php";
+        require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php';
         aicli_log($msg, AICLI_LOG_ERROR, "InstallBG");
         setInstallStatus("Fatal Error: Check logs", 0, $agentId, $msg);
     }
 });
 
-// 1. Define base path
-$pluginDir = "/usr/local/emhttp/plugins/unraid-aicliagents";
-
-// 2. Include the manager logic
-require_once "$pluginDir/includes/AICliAgentsManager.php";
+// 1. Include the manager logic from this script's own generation.
+require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php'; // #367: this generation, not the src link
 
 // 3. Get agent ID, optional target version, optional backup dest from argv.
 // argv[2] (version) and argv[3] (backup dest) are always passed by
@@ -71,7 +68,7 @@ aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmy
 // bake_lock_held — and a shfs-wedge-watch trip on Tower). The heavy phase runs
 // one-at-a-time; the rest queue here (the UI shows the "upgrading" chip meanwhile).
 // Non-blocking with a deadline: a wedged holder can never hang every other install.
-require_once "$pluginDir/includes/services/InstallLock.php";
+require_once dirname(__DIR__) . '/includes/services/InstallLock.php';
 $installLock = \AICliAgents\Services\InstallLock::acquire(
     function () use ($agentId) {
         setInstallStatus("Queued — waiting for another agent upgrade to finish...", 5, $agentId);
@@ -172,6 +169,24 @@ try {
                         'agent_refresh_still_deferred', ['agent' => $agentId, 'layer' => $newest]);
                 }
             }
+        } elseif (\AICliAgents\Services\StorageMountService::passthroughActivationPending($agentId)) {
+            // 2026-09-24 (SIDE_BY_SIDE_AGENT_INSTALLS.md "plain-directory
+            // activation"): a plain-directory agent has no layer file, so the
+            // check above never ran and the new generation stayed unbound — the
+            // Store showed the new version while every new workspace ran the old
+            // one (grok-build, kimi-code on .4). Rebind now; a session that holds
+            // the mount keeps it, and the activation below waits for it.
+            $newest = (string)\AICliAgents\Services\StorageMountService::passthroughStableGeneration($agentId);
+            \AICliAgents\Services\LifecycleLogService::log(
+                \AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer',
+                'agent_refresh_forced', ['agent' => $agentId, 'layer' => $newest, 'backend' => 'passthrough']);
+            $ok = \AICliAgents\Services\InstallerService::forceAgentRefresh($agentId);
+            $layerLive = $ok && !\AICliAgents\Services\StorageMountService::passthroughActivationPending($agentId);
+            if (!$layerLive) {
+                \AICliAgents\Services\LifecycleLogService::log(
+                    \AICliAgents\Services\LifecycleLogService::LEVEL_WARN, 'installer',
+                    'agent_refresh_still_deferred', ['agent' => $agentId, 'layer' => $newest, 'backend' => 'passthrough']);
+            }
         }
 
         // R4: relaunch EXACTLY the sessions we closed for this upgrade (resumed),
@@ -181,7 +196,7 @@ try {
         // left the old binary mounted, relaunching would re-pin the stale layer
         // and reproduce the original bug (spec: AGENT_UPGRADE_SESSION_RELAUNCH.md
         // Edge Cases). Leave the manifest in place so a later retry can pick it up.
-        require_once "$pluginDir/includes/services/UpgradeRelaunchService.php";
+        require_once dirname(__DIR__) . '/includes/services/UpgradeRelaunchService.php';
         if ($layerLive) {
             if (!empty(\AICliAgents\Services\UpgradeRelaunchService::readManifest($agentId))) {
                 $rl = \AICliAgents\Services\UpgradeRelaunchService::relaunchClosedSet($agentId);
@@ -204,7 +219,7 @@ try {
             // waits for (best-effort — a detection miss just yields the generic text).
             $holderCount = 0;
             try {
-                $ahFile = "$pluginDir/includes/handlers/AgentHandler.php";
+                $ahFile = dirname(__DIR__) . '/includes/handlers/AgentHandler.php';
                 if (is_file($ahFile)) require_once $ahFile;
                 if (class_exists('\AICliAgents\Handlers\AgentHandler')
                     && method_exists('\AICliAgents\Handlers\AgentHandler', 'externalBinaryHolders')) {
@@ -223,13 +238,15 @@ try {
                 $waitStep = "Upgrade installed — waiting for $who to close before activation and relaunch";
                 setInstallStatus($waitStep, 99, $agentId);
             } else {
-                // Nothing was closed, so there is nothing to relaunch and no barrier
-                // to hold: the merged overlay already serves the new files to any new
-                // workspace; only the consolidated-layer swap (storage clean-up) waits
-                // for the mount to go idle. Publish completion so the Store card and
-                // terminals stay usable — the wait is tracked separately below.
-                $waitStep = "Upgrade installed — storage clean-up runs when $who close";
-                setInstallStatus($waitStep, 100, $agentId);
+                // The legacy fixed mount can keep the preceding version in service
+                // while this staged successor is already baked. Do not claim success
+                // at 100% before the activation job can replace that stable path:
+                // a new workspace would otherwise be labelled as upgraded while it
+                // still launches the old binary. Existing versioned installs normally
+                // activate immediately, so reaching this branch is the durable
+                // installed-and-awaiting-activation state.
+                $waitStep = "Upgrade installed — waiting for $who to close before activation";
+                setInstallStatus($waitStep, 99, $agentId);
             }
             // Stamp phase=awaiting_activation: activationBlocked() treats this as
             // the ONE in-flight marker state where the supervisor MUST run the

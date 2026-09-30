@@ -121,7 +121,7 @@ class HealthService {
             $checks['voice_input'] = self::result(self::STATUS_WARN, 'check errored: ' . $e->getMessage());
         }
         // HOME_BACKUP.md R10: `backup` is CONDITIONAL, like `voice` — absent
-        // (not merely 'ok') while backup_target is empty (the feature is off).
+        // (not merely 'ok') while no home has a backup folder (#287: per home).
         try {
             $backupCheck = self::collectBackup();
             if ($backupCheck !== null) {
@@ -696,56 +696,73 @@ class HealthService {
     }
 
     /**
-     * HOME_BACKUP.md R10: null (never a check entry) while backup_target is
-     * empty. Otherwise the WORST (oldest) last_backup age across every user
-     * with a home, so one neglected user's stale backup is never hidden by
-     * a healthy one. Reads StorageHandler::backupStatusFor() — the SAME
-     * per-user object `get_storage_status`'s `last_backup` field carries.
+     * HOME_BACKUP.md R10, per home since #287: null (never a check entry)
+     * while NO home has a backup folder. Otherwise each home with a folder is
+     * judged against its OWN schedule and the worst verdict wins, so one
+     * neglected home's stale backup is never hidden by a healthy one. Reads
+     * StorageHandler::backupStatusFor() — the SAME per-user object
+     * `get_storage_status`'s `last_backup` field carries.
      */
     private static function collectBackup(): ?array {
         $config = ConfigService::getConfig();
-        $target = trim((string)($config['backup_target'] ?? ''));
-        if ($target === '') {
-            return null;
-        }
-        $intervalS = self::backupScheduleIntervalSeconds((string)($config['backup_schedule'] ?? 'off'));
 
         require_once __DIR__ . '/../handlers/StorageHandler.php';
         require_once __DIR__ . '/UtilityService.php';
+        require_once __DIR__ . '/HomeBackupSettingsService.php';
         $users = UtilityService::getUnraidUsers();
         if (empty($users)) {
             $users = [(string)($config['user'] ?? 'root')];
         }
 
-        $anyBackup = false;
-        $worstAgeS = -1;
-        $worstUser = '';
+        $perHome = [];
         $lastRestoreByUser = [];
         foreach ($users as $u) {
-            $status = \AICliAgents\Handlers\StorageHandler::backupStatusFor((string)$u);
+            $u = (string)$u;
+            if (!HomeBackupSettingsService::validUser($u)) continue;
+            $settings = HomeBackupSettingsService::peek($u); // never writes
+            if (trim((string)$settings['target']) === '') continue;
+            $status = \AICliAgents\Handlers\StorageHandler::backupStatusFor($u);
             $last = $status['last_backup'] ?? null;
+            $ageS = -1;
             if (is_array($last)) {
                 $at = strtotime((string)($last['at'] ?? ''));
-                if ($at !== false) {
-                    $anyBackup = true;
-                    $age = time() - $at;
-                    if ($age > $worstAgeS) {
-                        $worstAgeS = $age;
-                        $worstUser = (string)$u;
-                    }
-                }
+                if ($at !== false) $ageS = time() - $at;
             }
-            $restoreStatus = \AICliAgents\Handlers\StorageHandler::restoreStatusFor((string)$u);
-            $lastRestoreByUser[(string)$u] = $restoreStatus['last_restore'] ?? null;
+            $perHome[$u] = ['ageS' => $ageS, 'intervalS' => self::backupScheduleIntervalSeconds((string)$settings['schedule'])];
+            $restoreStatus = \AICliAgents\Handlers\StorageHandler::restoreStatusFor($u);
+            $lastRestoreByUser[$u] = $restoreStatus['last_restore'] ?? null;
+        }
+        if (empty($perHome)) {
+            return null;
         }
 
         // HOME_RESTORE.md R7: a failed restore is a warn cause of its own,
-        // independent of the backup-age check above.
+        // independent of the backup-age check below.
         $restoreFailedUser = self::firstFailedRestoreUser($lastRestoreByUser);
         if ($restoreFailedUser !== '') {
             return self::result(self::STATUS_WARN, "$restoreFailedUser's last restore failed");
         }
-        return self::evalBackup($anyBackup, $worstAgeS, $intervalS, $worstUser);
+        return self::evalBackupPerHome($perHome);
+    }
+
+    /**
+     * #287: pure — each home judged by evalBackup() against its own schedule
+     * interval; the first warn wins, else the newest-backup ok message (or the
+     * "no backup has run yet" ok when no home with a folder has a snapshot).
+     *
+     * @param array<string,array{ageS:int,intervalS:int}> $perHome ageS -1 = never backed up
+     */
+    public static function evalBackupPerHome(array $perHome): array {
+        $anyBackup = false;
+        foreach ($perHome as $user => $h) {
+            if ($h['ageS'] < 0) continue;
+            $anyBackup = true;
+            $verdict = self::evalBackup(true, $h['ageS'], $h['intervalS'], (string)$user);
+            if (($verdict['status'] ?? '') === self::STATUS_WARN) return $verdict;
+        }
+        return $anyBackup
+            ? self::result(self::STATUS_OK, 'the newest home backup is within the expected window')
+            : self::evalBackup(false, -1, 0, '');
     }
 
     /**

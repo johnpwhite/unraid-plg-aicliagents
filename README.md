@@ -192,10 +192,17 @@ anything:
   hears back a clear message telling it so.
 
 With no engine configured, your browser's own voice (the Web Speech API)
-speaks the message — no install, no extra container. For a real voice,
-install **Kokoro-FastAPI-CPU** from Community Applications (one click, CPU
-only, free), set its address as the Endpoint URL in Settings, and every
-device with voice on switches from the browser voice to this engine.
+speaks the message — no install, no extra container. For a natural voice,
+press **Set up natural voice** in Settings > Agent voice. The plugin checks
+that Docker is on, prepares a corrected **Kokoro-FastAPI-CPU** template (its
+voice model is kept on your pool drive, on a free port), and opens Unraid's
+own Add Container page. Press Apply there. The Settings page waits until the
+engine answers, connects it, and plays a test sentence. The download is about
+3.3 GB plus a 0.7 GB voice model, and the engine uses about 1.7 GB of memory
+while it runs. If Folder View 3 is installed, the container goes into an
+`aicliagents` folder. If you already run Kokoro-FastAPI, the button just
+connects it. You can also install it yourself and type its address as the
+Endpoint URL.
 
 **Settings.** Voice (all devices), Endpoint URL (empty means browser mode),
 Voice, Speed, and an API key field (only needed if your engine requires one;
@@ -332,6 +339,33 @@ Configuration, under Home Storage and Agent Storage.
 That layered storage is not the same thing as a backup: it is one
 continuously-updated copy. For a second, independent copy you can restore
 from, use Home backup below.
+
+### Where to put agent and home storage
+
+Pick a location for Home Storage and Agent Storage in this order:
+
+1. **A cache pool path**, for example `/mnt/cache/appdata/aicliagents`. This
+   is the fastest and safest choice. The Storage picker recommends a path
+   like this first, when one is available.
+2. **An Unassigned Devices path**, for example `/mnt/disks/mydrive`. Use this
+   when you have a spare drive that is not part of the array or a pool.
+3. **A single array disk**, for example `/mnt/disk1`. This works, but an
+   array disk spins up on every save.
+4. **`/mnt/user`** (a user share). Use this only when none of the paths
+   above is open to you — for example, you have no cache pool, no spare
+   drive, and your share spans more than one disk.
+
+Paths 1 to 3 write straight to a disk. `/mnt/user` sends every write through
+Unraid's shared-folder layer, called shfs. Shfs has only about 10 worker
+threads, so heavy save or merge activity through it can slow down or freeze
+the whole server, not only the plugin. The Storage picker still lets you
+choose a `/mnt/user` path — it warns you about this instead of blocking you,
+because some setups genuinely have no other option.
+
+When your `/mnt/user/<share>` path already lives on one pool, because the
+share's "Use cache pool" setting is "Only", the plugin stores the direct
+pool path instead. Your data then never passes through shfs, even though you
+picked a `/mnt/user` path in the list.
 
 ### Home backup
 
@@ -481,10 +515,11 @@ WebUI.
   tray, the same as a change you make yourself: create or update a
   workspace, set its launch arguments or environment variables, turn an
   agent's auto-launch or update channel on or off, change one allow-listed
-  setting, speak a message, type text into a workspace, and add or remove a
-  favourite.
+  setting, speak a message, type text into a workspace, add or remove a
+  favourite, and save a user's home to its storage layers.
 - **Destructive actions never run by themselves.** Deleting a workspace,
-  upgrading an agent, and restoring a home backup can only be **proposed**
+  upgrading an agent, backing up or restoring a home, and consolidating a
+  home's storage layers (which closes its sessions) can only be **proposed**
   by an agent. The proposal waits in the Manager UI for you to approve it —
   an agent can never approve its own proposal, and it is told never to sit
   and wait for one.

@@ -29,6 +29,11 @@ class UtilityHandler {
                 $_POST['parent'] ?? $_GET['parent'] ?? '',
                 $_POST['name'] ?? $_GET['name'] ?? ''
             );
+            case 'picker_create_folder': return self::createPickerFolder(
+                $_POST['parent'] ?? $_GET['parent'] ?? '',
+                $_POST['name'] ?? $_GET['name'] ?? '',
+                filter_var($_POST['allow_hidden'] ?? $_GET['allow_hidden'] ?? false, FILTER_VALIDATE_BOOLEAN)
+            );
             case 'check_path':       return self::checkPath();
             case 'save_file':        return self::saveFile(
                 $_POST['path'] ?? '',
@@ -57,7 +62,7 @@ class UtilityHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'get_env', 'save_env',
-                'filetree', 'list_dir', 'create_dir', 'check_path', 'save_file', 'save_file_chunk',
+                'filetree', 'list_dir', 'create_dir', 'picker_create_folder', 'check_path', 'save_file', 'save_file_chunk',
                 'get_upload_limits', 'save_pasted_image', 'perf_log', 'log_client_error', 'get_secrets_dir'];
     }
 
@@ -161,12 +166,12 @@ class UtilityHandler {
 
     private static function save() {
         saveAICliConfig($_POST);
-        // HOME_BACKUP.md R1: the Storage tab's Home backup card posts its six
-        // backup_* fields through this same generic settings-save action (the
-        // form the whole Manager page shares, ManagerLayout.php). Only resync
-        // the cron when a backup field was actually submitted, so an ordinary
-        // save (e.g. a theme change) never rewrites a root-owned cron file for
-        // no reason.
+        // HOME_BACKUP.md: the Manager UI no longer posts backup_* fields here
+        // (#287: each home saves its own settings through
+        // set_home_backup_setting, and the Storage tab is outside this form
+        // since Bug #710). A caller that still posts the global
+        // backup_schedule (the seed for homes with no settings of their own)
+        // resyncs the cron; an ordinary save never rewrites the cron file.
         if (array_key_exists('backup_schedule', $_POST)) {
             \AICliAgents\Services\BackupCronService::sync(getAICliConfig());
         }
@@ -323,46 +328,62 @@ class UtilityHandler {
             return;
         }
         if (!file_exists($dir)) return;
-        $files = @scandir($dir);
-        if (!is_array($files)) return;
+        $scanDir = \AICliAgents\Services\PoolPathService::resolvePoolPath($dir) ?? $dir;
+        $listing = self::readDirectoryPage($scanDir, $dir, 1, self::DIRECTORY_PAGE_MAX);
+        if (($listing['error'] ?? '') !== '') return;
 
-        natcasesort($files);
         echo "<ul class=\"jqueryFileTree\" style=\"display: none;\">";
         if ($dir !== '/') {
             $up = dirname(rtrim($dir, '/')) . '/';
             echo "<li class=\"directory collapsed\"><a href=\"#\" rel=\"" . htmlentities($up) . "\"><i class=\"fa fa-level-up-alt\" style=\"margin-right:8px; opacity:0.6;\"></i>..</a></li>";
         }
-        foreach ($files as $file) {
-            if ($file === '.' || $file === '..') continue;
-            $full = rtrim($dir, '/') . '/' . $file;
-            if (is_dir($full)) {
-                echo "<li class=\"directory collapsed\"><a href=\"#\" rel=\"" . htmlentities($full) . "/\">" . htmlentities($file) . "</a></li>";
-            }
+        foreach ($listing['items'] as $item) {
+            echo "<li class=\"directory collapsed\"><a href=\"#\" rel=\"" . htmlentities($item['path']) . "/\">" . htmlentities($item['name']) . "</a></li>";
+        }
+        if (!empty($listing['has_more'])) {
+            echo '<li class="directory"><span>More folders are available in the paged workspace picker.</span></li>';
         }
         echo "</ul>";
     }
 
+    private const DIRECTORY_PAGE_DEFAULT = 50;
+    private const DIRECTORY_PAGE_MAX = 100;
+    private const DIRECTORY_PAGE_MAX_NUMBER = 10;
+    private const DIRECTORY_SCAN_MAX = 1000;
+
     private static function listDir() {
         $rawPath = $_GET['path'] ?? '/mnt';
-        // Resolve canonical path (prevent traversal) but allow browsing anywhere readable
+        $page = max(1, min(self::DIRECTORY_PAGE_MAX_NUMBER, (int)($_GET['page'] ?? 1)));
+        $limit = max(1, min(self::DIRECTORY_PAGE_MAX, (int)($_GET['limit'] ?? self::DIRECTORY_PAGE_DEFAULT)));
+        // Resolve canonical path first (prevent traversal), then choose a safe
+        // direct pool scan only for a proven cache-only user share. The logical
+        // path is retained in the response and in every child item.
         $path = realpath($rawPath);
         if ($path === false || !is_dir($path) || !is_readable($path)) {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];
         }
+        if (ValidationService::validatePath($rawPath) === false) {
+            return ['status' => 'error', 'message' => 'Path not found or access denied'];
+        }
+        $scanPath = \AICliAgents\Services\PoolPathService::resolvePoolPath($path) ?? $path;
+        $listing = self::readDirectoryPage($scanPath, $path, $page, $limit);
+        if (($listing['error'] ?? '') !== '') {
+            return ['status' => 'error', 'message' => 'Directory is temporarily unavailable'];
+        }
         $items = [];
         if ($path !== '/') $items[] = ['name' => '..', 'path' => dirname($path)];
-        $files = @scandir($path);
-        if (is_array($files)) {
-            foreach ($files as $file) {
-                if ($file === '.' || $file === '..') continue;
-                $full = rtrim($path, '/') . '/' . $file;
-                // Only show directories the user can actually read
-                if (is_dir($full) && is_readable($full)) {
-                    $items[] = ['name' => $file, 'path' => $full];
-                }
-            }
-        }
-        $response = ['status' => 'ok', 'path' => $path, 'items' => $items];
+        $items = array_merge($items, $listing['items']);
+        $hasMore = (bool)$listing['has_more'] && $page < self::DIRECTORY_PAGE_MAX_NUMBER;
+        $response = [
+            'status' => 'ok',
+            'path' => $path,
+            'items' => $items,
+            'page' => $page,
+            'limit' => $limit,
+            'has_more' => $hasMore,
+            'next_page' => $hasMore ? $page + 1 : null,
+            'truncated' => !empty($listing['scan_capped']) || ((bool)$listing['has_more'] && !$hasMore),
+        ];
         // FILE_VIEWER_SECRET_DROP.md R3: a listing of the secrets directory
         // fixes any loose (e.g. 0775) modes it finds on existing files and
         // reports how many — the files themselves never appear in $items
@@ -371,6 +392,42 @@ class UtilityHandler {
             $response['normalised'] = \AICliAgents\Services\SecretPaths::normaliseModes($path);
         }
         return $response;
+    }
+
+    /**
+     * Read at most DIRECTORY_SCAN_MAX directory entries. This deliberately
+     * uses readdir rather than scandir: the picker must never materialise an
+     * arbitrarily large directory before returning a bounded page.
+     *
+     * @return array{items:array<int,array{name:string,path:string}>,has_more:bool,scan_capped:bool,error:string}
+     */
+    private static function readDirectoryPage(string $scanPath, string $logicalPath, int $page, int $limit): array {
+        $handle = @opendir($scanPath);
+        if ($handle === false) return ['items' => [], 'has_more' => false, 'scan_capped' => false, 'error' => 'open'];
+        $skip = ($page - 1) * $limit;
+        $matching = 0;
+        $scanned = 0;
+        $items = [];
+        $hasMore = false;
+        $scanCapped = false;
+        while (($file = readdir($handle)) !== false) {
+            if ($file === '.' || $file === '..') continue;
+            if (++$scanned > self::DIRECTORY_SCAN_MAX) {
+                $hasMore = true;
+                $scanCapped = true;
+                break;
+            }
+            $full = rtrim($scanPath, '/') . '/' . $file;
+            if (!is_dir($full) || !is_readable($full)) continue;
+            if ($matching++ < $skip) continue;
+            if (count($items) >= $limit) {
+                $hasMore = true;
+                break;
+            }
+            $items[] = ['name' => $file, 'path' => rtrim($logicalPath, '/') . '/' . $file];
+        }
+        closedir($handle);
+        return ['items' => $items, 'has_more' => $hasMore, 'scan_capped' => $scanCapped, 'error' => ''];
     }
 
     /**
@@ -420,6 +477,114 @@ class UtilityHandler {
 
         aicli_log("Workspace folder created: $created", AICLI_LOG_INFO, 'UtilityHandler');
         return ['status' => 'ok', 'path' => $created];
+    }
+
+    /**
+     * Roots the folder browser may create a folder under: the browser's own
+     * roots (ValidationService) without the flash drive.
+     */
+    public const PICKER_CREATE_BASES = ['/mnt', '/home', '/root', '/tmp/unraid-aicliagents'];
+
+    /** Folders that only hold mount points: a folder made here would sit in RAM, not on a disk. */
+    private const PICKER_MOUNT_HOLDERS = ['/mnt', '/mnt/disks', '/mnt/remotes', '/mnt/addons', '/mnt/rootshare', '/mnt/user', '/mnt/user0'];
+
+    /**
+     * The rules for a new folder's name. '' when the name is good, else the
+     * reason in plain words. One path segment, 1-64 characters of letters,
+     * digits, space and . _ - + @ , ( ) ; no leading dot unless $allowHidden;
+     * no leading dash or space; no trailing dot or space.
+     */
+    public static function pickerFolderNameError(string $name, bool $allowHidden = false): string {
+        if ($name === '') return 'Type a name for the new folder.';
+        if (strlen($name) > 64) return 'Use a name of 64 characters or fewer.';
+        if ($name === '.' || $name === '..' || strpos($name, '/') !== false || strpos($name, '\\') !== false) {
+            return 'Type one folder name, not a path.';
+        }
+        if ($name[0] === '.' && !$allowHidden) return 'A name that starts with a dot makes a hidden folder. Use another name.';
+        if (!preg_match('/^[A-Za-z0-9 ._+@,()-]+$/', $name)) {
+            return 'Use only letters, digits, spaces and . _ - + @ , ( ) in the name.';
+        }
+        if ($name[0] === '-' || $name[0] === ' ') return 'The name cannot start with a dash or a space.';
+        $last = substr($name, -1);
+        if ($last === '.' || $last === ' ') return 'The name cannot end with a dot or a space.';
+        return '';
+    }
+
+    /**
+     * HOME_BACKUP.md "2026-09-24 follow-up" — the "New folder" action of the
+     * shared folder browser (openPathPicker). Makes ONE folder under a parent
+     * inside PICKER_CREATE_BASES. A /mnt/user share parent is created on its
+     * pool path when the share lives only on a pool (the same rule list_dir and
+     * the backup target use); any other /mnt/user or /mnt/user0 parent, and any
+     * FUSE parent, is refused, so the browser never writes through the share.
+     *
+     * @param array|null    $allowedBases test seam (null = PICKER_CREATE_BASES)
+     * @param callable|null $fstype       test seam: fn(string $path): string
+     * @param callable|null $poolResolver test seam: fn(string $userPath): ?string
+     * @return array{status:string,message?:string,path?:string,resolved?:string}
+     */
+    public static function createPickerFolder($rawParent, $rawName, bool $allowHidden = false,
+                                              ?array $allowedBases = null, ?callable $fstype = null,
+                                              ?callable $poolResolver = null): array {
+        if (!is_string($rawParent) || !is_string($rawName)) {
+            return ['status' => 'error', 'message' => 'The folder and the name must be text.'];
+        }
+        $nameError = self::pickerFolderNameError($rawName, $allowHidden);
+        if ($nameError !== '') return ['status' => 'error', 'message' => $nameError];
+
+        $parent = rtrim($rawParent, '/');
+        if ($parent === '' || $rawParent[0] !== '/' || strlen($rawParent) > 4096
+            || preg_match('/[\x00-\x1F\x7F]/', $rawParent) || preg_match('#(^|/)\.{1,2}(/|$)#', $parent)
+            || strpos($parent, '//') !== false) {
+            return ['status' => 'error', 'message' => 'The folder you are in is not a valid path.'];
+        }
+
+        // /mnt/user (FUSE): never write through the share. A cache-only share
+        // is created on its pool path; everything else is refused.
+        $logicalParent = $parent;
+        if (preg_match('#^/mnt/user0?(/|$)#', $parent)) {
+            $resolver = $poolResolver ?? static fn(string $p): ?string => \AICliAgents\Services\PoolPathService::resolvePoolPath($p);
+            $pool = preg_match('#^/mnt/user/[^/]+#', $parent) ? $resolver($parent) : null;
+            if ($pool === null || $pool === '') {
+                return ['status' => 'error', 'message' => 'A folder cannot be made here: ' . $parent
+                    . ' is on a /mnt/user share, which can freeze the server under heavy use. Open the pool or disk path instead (for example /mnt/cache/...).'];
+            }
+            $parent = rtrim($pool, '/');
+        }
+
+        $bases = $allowedBases ?? self::PICKER_CREATE_BASES;
+        $realParent = ValidationService::validatePath($parent, $bases);
+        if ($realParent === false || !is_dir($realParent)) {
+            return ['status' => 'error', 'message' => 'A folder can only be made inside /mnt, /home or /root, in a folder that exists.'];
+        }
+        if (in_array($realParent, self::PICKER_MOUNT_HOLDERS, true) || preg_match('#^/mnt/user0?(/|$)#', $realParent)) {
+            return ['status' => 'error', 'message' => 'A folder cannot be made directly in ' . $realParent . '. Open a disk, a pool or a share first.'];
+        }
+        $fs = $fstype !== null ? (string)$fstype($realParent) : \AICliAgents\Services\StorageTargetService::fstypeAt($realParent);
+        if ($fs !== '' && stripos($fs, 'fuse') === 0) {
+            return ['status' => 'error', 'message' => 'A folder cannot be made here: ' . $realParent . ' is a FUSE share mount. Open the pool or disk path instead.'];
+        }
+        if (!is_writable($realParent)) {
+            return ['status' => 'error', 'message' => 'You cannot write to ' . $realParent . '.'];
+        }
+        $destination = $realParent . '/' . $rawName;
+        if (file_exists($destination) || is_link($destination)) {
+            return ['status' => 'error', 'message' => 'A file or folder named "' . $rawName . '" already exists here.'];
+        }
+        error_clear_last();
+        if (!@mkdir($destination, 0777, false)) {
+            $phpError = error_get_last();
+            aicli_log("Folder browser: could not create $destination" . ($phpError !== null ? ': ' . $phpError['message'] : ''), AICLI_LOG_ERROR, 'UtilityHandler');
+            return ['status' => 'error', 'message' => 'The folder could not be made. Check the permissions of ' . $realParent . '.'];
+        }
+        $created = realpath($destination);
+        if ($created === false || dirname($created) !== $realParent) {
+            aicli_log("Folder browser: created $destination but could not verify it", AICLI_LOG_ERROR, 'UtilityHandler');
+            return ['status' => 'error', 'message' => 'The folder was made but could not be checked safely.'];
+        }
+        aicli_log("Folder browser: folder created: $created", AICLI_LOG_INFO, 'UtilityHandler');
+        $logical = ($logicalParent !== $parent) ? $logicalParent . '/' . $rawName : $created;
+        return ['status' => 'ok', 'path' => $logical, 'resolved' => $created];
     }
 
     /**

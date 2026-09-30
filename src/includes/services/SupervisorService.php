@@ -60,13 +60,12 @@ class SupervisorService {
     }
 
     /**
-     * Spawn the supervisor daemon in the background (setsid + nohup + disown).
-     * setsid is required when the parent has a controlling TTY (e.g. SSH session
-     * during plugin install) — without it, the daemon's heartbeat loop keeps
-     * descriptors coupled to the parent and the install hangs at session exit.
-     * 4>&- closes any inherited non-stdio FDs (e.g. the PLG installer progress
-     * pipe) so PHP-FPM can exit cleanly even if an FD was inherited from a
-     * parent process chain that crossed a script boundary.
+     * Spawn the supervisor daemon in the background, fully detached through
+     * the shared spawn helper (#337): a new session (setsid is required when
+     * the parent has a controlling TTY, e.g. an SSH session during plugin
+     * install), stdin from /dev/null, and every inherited descriptor above 2
+     * closed — not only fd 4 — so the daemon never holds the installer's
+     * output pipe or lock open.
      */
     public static function start(): bool {
         if (!file_exists(self::SCRIPT_PATH)) {
@@ -81,17 +80,7 @@ class SupervisorService {
             return true;
         }
 
-        $script = self::SCRIPT_PATH;
-        $cmd = 'setsid nohup bash ' . escapeshellarg($script) . ' start </dev/null >/dev/null 2>&1 4>&- & disown';
-
-        $desc = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
-        $proc = @proc_open($cmd, $desc, $pipes, null, null, ['bypass_shell' => false]);
-        if ($proc !== false) {
-            foreach ($pipes as $pipe) {
-                @fclose($pipe);
-            }
-            @proc_close($proc);
-        }
+        UtilityService::spawnDetached(['bash', self::SCRIPT_PATH, 'start']);
 
         usleep(200000);
         return self::isRunning();
@@ -673,6 +662,32 @@ class SupervisorService {
      * queued|running|deferred states (the set a UI poll cares about).
      * @return array<int,array<string,mixed>>
      */
+    /**
+     * docs/specs/HOME_STORAGE_CARD_JOB_STATE.md (Forgejo #247): the ONE active
+     * job of an entity, in the small shape the storage card renders, or null.
+     * "Active" = queued, running or deferred (a deferred job will retry, so the
+     * card must stay locked). Newest first when several exist, which only
+     * happens for a moment between a finished job and its record's reap.
+     *
+     * @return array{jobId:string,op:string,state:string,reason:?string,defer_reason:?string,attempt:int,queued_at:int,started_at:?int}|null
+     */
+    public static function activeJobFor(string $entity, ?array $jobs = null): ?array {
+        foreach ($jobs ?? self::listJobs(true) as $j) {
+            if ((string)($j['entity'] ?? '') !== $entity) continue;
+            return [
+                'jobId'        => (string)$j['job_id'],
+                'op'           => (string)($j['op'] ?? ''),
+                'state'        => (string)($j['state'] ?? ''),
+                'reason'       => isset($j['reason']) ? (string)$j['reason'] : null,
+                'defer_reason' => isset($j['defer_reason']) ? (string)$j['defer_reason'] : null,
+                'attempt'      => (int)($j['attempt'] ?? 0),
+                'queued_at'    => (int)($j['queued_at'] ?? 0),
+                'started_at'   => isset($j['started_at']) ? (int)$j['started_at'] : null,
+            ];
+        }
+        return null;
+    }
+
     public static function listJobs(bool $activeOnly = true): array {
         $out = [];
         foreach (@glob(self::jobsDir() . '/*.json') ?: [] as $f) {
@@ -802,6 +817,38 @@ class SupervisorService {
      * registered. Entries the handlers never registered are left alone
      * (supervisor-internal jobs don't surface in the tray).
      */
+    /**
+     * HOME_BACKUP.md 2026-09-29: the plain-words cause of a failed backup job,
+     * from the durable last-run record the job wrote before it exited
+     * (backup_home.sh _backup_write_last_record). Only a record of THIS job
+     * counts (data.job_id). '' when there is none.
+     */
+    public static function backupFailureReason(string $entity, string $jobId): string {
+        if (strpos($entity, 'home/') !== 0 || $jobId === '') {
+            return '';
+        }
+        $user = preg_replace('/[^A-Za-z0-9._-]/', '', substr($entity, 5));
+        if ($user === '') {
+            return '';
+        }
+        $dir = getenv('AICLI_BACKUP_LAST_DIR') ?: '/boot/config/plugins/unraid-aicliagents';
+        $path = rtrim($dir, '/') . "/backup-last-$user.json";
+        if (!is_file($path)) {
+            return '';
+        }
+        $rec = json_decode((string)@file_get_contents($path), true);
+        if (!is_array($rec) || !empty($rec['ok'])) {
+            return '';
+        }
+        $data = is_array($rec['data'] ?? null) ? $rec['data'] : [];
+        if ((string)($data['job_id'] ?? '') !== $jobId) {
+            return '';
+        }
+        $reason = trim((string)($data['reason'] ?? ''));
+        // Our own text (counts and fixed words); cap it for the tray all the same.
+        return substr((string)preg_replace('/[\x00-\x1f]+/', ' ', $reason), 0, 200);
+    }
+
     public static function syncJobActivities(): void {
         require_once __DIR__ . '/ActivityService.php';
         foreach (self::listJobs(false) as $job) {
@@ -826,7 +873,14 @@ class SupervisorService {
                         $op     = (string)($job['op'] ?? '');
                         $entity = (string)($job['entity'] ?? '');
                         $step   = 'Done';
-                        if (
+                        if ($op === 'bake' && ($defer === 'busy_cooldown' || $defer === 'mount_busy')) {
+                            // Forgejo #248: the supervisor ends a user Persist that kept
+                            // deferring for these reasons as DONE, because the data was
+                            // already on disk. Say exactly that, from the ONE plain-English
+                            // source (#231), never a raw token.
+                            require_once __DIR__ . '/TaskService.php';
+                            $step = 'Already saved. ' . TaskService::deferReasonHuman($defer, 'bake');
+                        } elseif (
                             ($op === 'bake' || $op === 'consolidate') &&
                             strpos($entity, 'home/') === 0
                         ) {
@@ -841,8 +895,24 @@ class SupervisorService {
                     break;
                 case 'failed':
                     if (($entry['status'] ?? '') !== 'failed') {
-                        $err = 'storage job failed (exit ' . (string)($job['exit'] ?? '?') . ')'
-                             . ($defer !== '' ? ", reason: $defer" : '');
+                        // Forgejo #248: the tray used to print "storage job failed (exit 2),
+                        // reason: busy_cooldown" — internal tokens that mean nothing to a
+                        // user. A job that gave up while deferring gets the plain "why";
+                        // a real error points at the log, with its code at the end.
+                        $backupReason = ((string)($job['op'] ?? '') === 'backup')
+                            ? self::backupFailureReason((string)($job['entity'] ?? ''), $jobId) : '';
+                        if ($defer !== '') {
+                            require_once __DIR__ . '/TaskService.php';
+                            $err = 'Could not finish. ' . TaskService::deferReasonHuman($defer, (string)($job['op'] ?? ''));
+                        } elseif ($backupReason !== '') {
+                            // HOME_BACKUP.md 2026-09-29: name the cause in plain
+                            // words; the Debug Console log lists the files.
+                            $err = 'The backup stopped: ' . $backupReason
+                                 . '. Check the Debug Console log. (code ' . (string)($job['exit'] ?? '?') . ')';
+                        } else {
+                            $err = 'The storage job stopped with an error. Check the Debug Console log. (code '
+                                 . (string)($job['exit'] ?? '?') . ')';
+                        }
                         ActivityService::fail($opId, $err);
                     }
                     break;
@@ -934,8 +1004,12 @@ class SupervisorService {
      */
     private static function zramUpperDirtyMb(string $id): int
     {
-        $upper = '/tmp/unraid-aicliagents/zram_upper/homes/' . $id . '/upper';
-        if (!is_dir($upper)) {
+        // #372: measure the upper the home's mount REALLY uses. Only an upper in
+        // zram stays "in RAM"; a disk upper is not RAM, so it reports 0 here.
+        require_once __DIR__ . '/StoragePathResolver.php';
+        require_once __DIR__ . '/StorageMountService.php';
+        $upper = StorageMountService::resolveHomeUpperPath($id) ?? '';
+        if (strpos($upper, StoragePathResolver::ZRAM_BASE . '/') !== 0 || !is_dir($upper)) {
             return 0;
         }
         $out = shell_exec('du -sm ' . escapeshellarg($upper) . ' 2>/dev/null');

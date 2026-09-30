@@ -65,6 +65,57 @@ class ProcessManager {
     /** @var (callable(string):bool)|null test seam — stubs restartTerminalBridge's ttyd kill (AUTO_RECONNECT_ALL_ON_DEPLOY). */
     public static $bridgeRestartProbe = null;
 
+    /**
+     * Forgejo #364 test seam — the directory that holds one folder per
+     * generation (`<root>/<gen>/src/...`). Null = PLUGIN_ROOT/.generations.
+     * @var string|null
+     */
+    public static $generationsRoot = null;
+
+    /** @var array<string,string> Forgejo #364: bridge fingerprint per generation (generations are immutable). */
+    private static $bridgeFingerprintCache = [];
+
+    /**
+     * @var (callable():array<int,array{name:string,sock:string,created?:int,path?:string}>)|null
+     * Forgejo #315 test seam — replaces the raw tmux listing behind
+     * listAgentTmuxSessions() (every aicli-agent-* session on every plugin tmux
+     * server). The parse into {id, agentId} still runs, so tests cover it.
+     */
+    public static $tmuxSessionListProbe = null;
+
+    /**
+     * Bug #297: the `pgrep -f` alternation for THIS PLUGIN'S OWN ttyd
+     * processes only. A bare `ttyd` alternative also matches Unraid's own
+     * web terminal (`ttyd -R -o -i /var/run/ttyd.sock bash --login`) and any
+     * other plugin's ttyd — killing those breaks the terminal for the whole
+     * host, not just this plugin's sessions.
+     *
+     * This plugin always launches ttyd with `-i` pointed at a socket named
+     * `aicliterm-<id>.sock` or `temp-terminal-<id>.sock` (TerminalService),
+     * or the legacy `geminiterm-<id>.sock`. Matching on those socket-name
+     * substrings — never on the bare word `ttyd` — identifies only this
+     * plugin's own ttyd processes. This mirrors the proven pattern already
+     * used by the uninstaller sweep (`cleanup.sh`) and
+     * `InitService::bootCleanup`, kept here as ONE named constant so
+     * `evictAll()` (and any future caller) can never drift from it or fall
+     * back to an unscoped match.
+     */
+    public const EVICT_TTYD_PATTERN = 'ttyd.*(aicliterm|temp-terminal|geminiterm)-';
+
+    /** Bug #297: the tmux half — this plugin's own detached agent sessions only, never a bare `tmux`. */
+    public const EVICT_TMUX_PATTERN = 'tmux.*aicli-agent-';
+
+    /**
+     * The full `pgrep -f` pattern evictAll() kills: this plugin's own ttyd
+     * instances OR its own tmux agent sessions. Extracted to its own method
+     * (Bug #297) so a unit test can assert, without running a real kill,
+     * that it matches this plugin's process lines and never a bare Unraid
+     * ttyd line such as `ttyd -R -o -i /var/run/ttyd.sock bash --login`.
+     */
+    public static function evictKillPattern(): string {
+        return '(' . self::EVICT_TTYD_PATTERN . '|' . self::EVICT_TMUX_PATTERN . ')';
+    }
+
     /** Plugin root holding the `src` symlink and the .active-generation marker. */
     public const PLUGIN_ROOT = '/usr/local/emhttp/plugins/unraid-aicliagents';
 
@@ -86,6 +137,9 @@ class ProcessManager {
         self::$owningSessionProbe = null;
         self::$sessionGenerationProbe = null;
         self::$bridgeRestartProbe = null;
+        self::$tmuxSessionListProbe = null;
+        self::$generationsRoot = null;
+        self::$bridgeFingerprintCache = [];
     }
 
     // ---------- Generation drift (#142) ----------
@@ -143,6 +197,117 @@ class ProcessManager {
         return $launched !== $active;
     }
 
+    // ---------- Bridge equivalence (Forgejo #364) ----------
+    //
+    // A new generation is not always new BRIDGE code. On 2026-09-29 eleven
+    // generations in a row carried a byte-identical aicli-shell.sh, yet each
+    // activation (every release-gate dev overlay and every promote) SIGTERMed
+    // the ttyd of every open workspace. The owner's terminals dropped at each
+    // one, and nginx logged `connect() to unix:/var/run/aicliterm-<id>.sock
+    // failed` until the warm-up started a new ttyd. Renewing a bridge whose
+    // code did not change gives nothing and costs a visible drop.
+
+    /**
+     * The files a live ttyd executes, from ITS OWN generation, each time a
+     * browser connects to a workspace whose agent already runs (the attach
+     * path of aicli-shell.sh). Paths are relative to `<generation>/src`.
+     *
+     * - aicli-shell.sh: ttyd runs it on every connection.
+     * - log-bridge.php, storage/resolve_paths.sh, terminfo/tmux.terminfo:
+     *   the `$PLUGIN_SRC/...` references OUTSIDE the new-session block.
+     * - user/apply-tmux-json.php + services/TmuxService.php: the tmux option
+     *   pass; its output comes from TmuxService::ALLOWED_KEYS / APPEND_KEYS
+     *   only, so for TmuxService just those two declarations are digested
+     *   (BRIDGE_ATTACH_CONSTS) — the rest of that class changes often and is
+     *   not run by the bridge.
+     *
+     * The `$PLUGIN_SRC/...` files INSIDE the new-session block run only when
+     * the agent's tmux session does not exist (a launch, not an attach), so
+     * they are listed in BRIDGE_LAUNCH_ONLY_FILES and do not make a bridge
+     * stale. BridgeEquivalenceTest pins both lists against the script text:
+     * a new reference must be put in one list or the other.
+     */
+    public const BRIDGE_ATTACH_FILES = [
+        'scripts/aicli-shell.sh',
+        'scripts/log-bridge.php',
+        'scripts/storage/resolve_paths.sh',
+        'terminfo/tmux.terminfo',
+        'scripts/user/apply-tmux-json.php',
+        'includes/services/TmuxService.php',
+    ];
+
+    /** Forgejo #364: for these attach files only the named `const` declarations are digested. */
+    public const BRIDGE_ATTACH_CONSTS = [
+        'includes/services/TmuxService.php' => ['ALLOWED_KEYS', 'APPEND_KEYS'],
+    ];
+
+    /** Forgejo #364: `$PLUGIN_SRC/...` references that run only when a new tmux session is made. */
+    public const BRIDGE_LAUNCH_ONLY_FILES = [
+        'scripts/relay-agent.php',
+        'scripts/admin-agent.php',
+        'secret-service/secret-service-up.sh',
+        'scripts/user/effective-env-export.php',
+        'includes/AICliAgentsManager.php',
+        'scripts/user/agent-exit-recorder.sh',
+    ];
+
+    /**
+     * A digest of a generation's BRIDGE_ATTACH_FILES, or '' when it cannot be
+     * read (no such generation folder, or no aicli-shell.sh in it). A missing
+     * optional file hashes as "missing", so adding or removing one changes the
+     * digest.
+     */
+    public static function bridgeFingerprint(string $generation): string {
+        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $generation) !== 1) return '';
+        if (isset(self::$bridgeFingerprintCache[$generation])) return self::$bridgeFingerprintCache[$generation];
+        $root = (self::$generationsRoot ?? self::PLUGIN_ROOT . '/.generations') . '/' . $generation . '/src';
+        if (!is_file($root . '/scripts/aicli-shell.sh')) return '';
+        $parts = [];
+        foreach (self::BRIDGE_ATTACH_FILES as $rel) {
+            $file = $root . '/' . $rel;
+            if (!is_file($file)) {
+                $digest = 'missing';
+            } elseif (isset(self::BRIDGE_ATTACH_CONSTS[$rel])) {
+                $digest = self::constDeclarationsDigest((string) @file_get_contents($file), self::BRIDGE_ATTACH_CONSTS[$rel]);
+            } else {
+                $digest = (string) @hash_file('sha256', $file);
+            }
+            $parts[] = $rel . "\0" . ($digest !== '' ? $digest : 'unreadable');
+        }
+        return self::$bridgeFingerprintCache[$generation] = hash('sha256', implode("\n", $parts));
+    }
+
+    /**
+     * sha256 of the text of the named `const NAME = ...;` declarations, in the
+     * given order; a declaration that is not found counts as "missing:NAME".
+     *
+     * @param string[] $names
+     */
+    public static function constDeclarationsDigest(string $php, array $names): string {
+        $parts = [];
+        foreach ($names as $name) {
+            $parts[] = preg_match('/\bconst\s+' . preg_quote($name, '/') . '\s*=\s*[^;]*;/', $php, $m) === 1
+                ? $m[0] : 'missing:' . $name;
+        }
+        return hash('sha256', implode("\n", $parts));
+    }
+
+    /**
+     * Must this session's web bridge be renewed to run current code?
+     *
+     * Only when the generations differ (generationIsStale — unknown is never
+     * stale) AND the bridge code differs. When either digest cannot be read
+     * the answer is "stale": that keeps the #142 behaviour, and a bridge whose
+     * generation folder is gone cannot serve a new connection anyway.
+     */
+    public static function bridgeIsStale(string $launched, string $active): bool {
+        if (!self::generationIsStale($launched, $active)) return false;
+        $old = self::bridgeFingerprint($launched);
+        $new = self::bridgeFingerprint($active);
+        if ($old === '' || $new === '') return true;
+        return $old !== $new;
+    }
+
     /**
      * Restart ONLY the web bridge for a session: kill its ttyd, leave the
      * detached tmux session and the agent inside it running.
@@ -186,7 +351,7 @@ class ProcessManager {
         $generation = TerminalGenerationService::current($safeId);
         if ($generation === null || $generation === '') return;
         if (!class_exists('\\AICliAgents\\Services\\NchanService')) return;
-        NchanService::publish('workspaces', ['event' => 'bridge', 'id' => $safeId, 'generation' => $generation]);
+        EventBus::publish('workspace', [], ['event' => 'bridge', 'id' => $safeId, 'generation' => $generation]);
     }
 
     /**
@@ -213,7 +378,9 @@ class ProcessManager {
             $id = (string) $id;
             if ($id === '') continue;
             $launched = self::sessionLaunchGeneration($id);
-            if (!self::generationIsStale($launched, $active)) continue;
+            // Forgejo #364: a bridge whose code is the same in both generations
+            // is left alone — no drop for an open terminal.
+            if (!self::bridgeIsStale($launched, $active)) continue;
             if (self::restartTerminalBridge($id)) {
                 $ids[] = $id;
             }
@@ -299,6 +466,49 @@ class ProcessManager {
     }
 
     /**
+     * Remove a closed session's private tmux folder (sessionTmuxTmpdir()) once
+     * no tmux server answers on any socket in it. A server can take a moment
+     * to exit after its last session is killed, so liveness is re-checked for
+     * up to ~1 s; a folder whose server is still up is kept. Only the folder
+     * of THIS session id is ever touched (the id is sanitised by
+     * sessionTmuxTmpdir(), so it cannot escape $root).
+     *
+     * @param callable|null $serverAlive fn(string $socket): bool — test seam;
+     *        defaults to `tmux -S <socket> list-sessions` exiting 0.
+     * @return bool true when the folder is gone (or never existed).
+     */
+    public static function removeDeadSessionTmuxDir(string $sessionId, string $root = self::TMUX_ROOT, ?callable $serverAlive = null, int $waitMs = 1000): bool {
+        $dir = $root . substr(self::sessionTmuxTmpdir($sessionId), strlen(self::TMUX_ROOT));
+        if (!is_dir($dir) || is_link($dir)) return !file_exists($dir);
+        $serverAlive ??= static function (string $sock): bool {
+            $rc = 1; $out = [];
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            @exec('tmux -S ' . escapeshellarg($sock) . ' list-sessions > /dev/null 2>&1', $out, $rc);
+            return $rc === 0;
+        };
+        $deadline = microtime(true) + max(0, $waitMs) / 1000;
+        do {
+            $alive = false;
+            foreach (glob($dir . '/tmux-*/default') ?: [] as $sock) {
+                if ($serverAlive($sock)) { $alive = true; break; }
+            }
+            if (!$alive) break;
+            if (microtime(true) >= $deadline) return false;
+            usleep(100000);
+        } while (true);
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $f) {
+            $path = $f->getPathname();
+            if ($f->isDir() && !$f->isLink()) @rmdir($path); else @unlink($path);
+        }
+        @rmdir($dir);
+        return !file_exists($dir);
+    }
+
+    /**
      * Every tmux server socket the plugin can talk to, newest layout first.
      *
      * Two layouts coexist during migration:
@@ -318,6 +528,126 @@ class ProcessManager {
             if (file_exists($dir . '/default')) $socks[] = $dir . '/default';
         }
         return $socks;
+    }
+
+    /**
+     * Forgejo #315: every RUNNING agent session, read from tmux — the source of
+     * truth for "a session of agent X is running".
+     *
+     * The ttyd socket /var/run/aicliterm-<id>.sock only says that a browser
+     * terminal is attached. The terminal page mounts a terminal only for the
+     * workspaces opened in that browser, and a ttyd can be gone after a restart
+     * while tmux (and the agent in it) keeps running. So a ttyd scan can count
+     * zero sessions for an agent that is in use.
+     *
+     * Cost, per call: one glob, one in-process connect() per socket file (a dead
+     * server's socket file refuses at once, with no process spawn), and ONE
+     * shell spawn that runs `tmux ls` on the live servers only. No spawn at all
+     * when no server is live.
+     *
+     * @return array<int,array{id:string,agentId:string,name:string,sock:string,created:int,path:string}>
+     *         One row per aicli-agent-<agentId>-<id> session, in socket order.
+     */
+    public static function listAgentTmuxSessions(): array {
+        $raw = is_callable(self::$tmuxSessionListProbe)
+            ? (array) call_user_func(self::$tmuxSessionListProbe)
+            : self::rawAgentTmuxSessions();
+        $out = [];
+        $seen = [];
+        foreach ($raw as $row) {
+            if (!is_array($row)) continue;
+            $name = trim((string)($row['name'] ?? ''));
+            $sock = (string)($row['sock'] ?? '');
+            [$id, $agentId] = self::parseAgentSessionName($name, $sock);
+            if ($id === '' || $agentId === '' || isset($seen[$id])) continue;
+            $seen[$id] = true;
+            $out[] = [
+                'id'      => $id,
+                'agentId' => $agentId,
+                'name'    => $name,
+                'sock'    => $sock,
+                'created' => (int)($row['created'] ?? 0),
+                'path'    => (string)($row['path'] ?? ''),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Split a tmux session name `aicli-agent-<agentId>-<id>` into [id, agentId].
+     *
+     * Agent ids contain dashes (claude-code), so the split point is the session
+     * id. On the per-session layout (<root>/s-<id>/tmux-<uid>/default) the id is
+     * the socket directory name, which is exact. On the legacy shared socket the
+     * id is the last dash-delimited token (the plugin mints ids with no dash).
+     *
+     * @return array{0:string,1:string} ['', ''] when the name is not an agent session.
+     */
+    public static function parseAgentSessionName(string $name, string $sock = ''): array {
+        $prefix = 'aicli-agent-';
+        if (strncmp($name, $prefix, strlen($prefix)) !== 0) return ['', ''];
+        $rest = substr($name, strlen($prefix));
+        $id = '';
+        if ($sock !== '' && preg_match('#/s-([A-Za-z0-9_-]+)/tmux-[^/]+/default$#', $sock, $m)) {
+            $id = $m[1];
+            $suffix = '-' . $id;
+            if (strlen($rest) <= strlen($suffix) || substr($rest, -strlen($suffix)) !== $suffix) {
+                return ['', ''];
+            }
+        } else {
+            $dash = strrpos($rest, '-');
+            if ($dash === false) return ['', ''];
+            $id = substr($rest, $dash + 1);
+        }
+        if ($id === '' || !preg_match('/^[A-Za-z0-9_-]+$/', $id)) return ['', ''];
+        $agentId = substr($rest, 0, -(strlen($id) + 1));
+        if ($agentId === '') return ['', ''];
+        return [$id, $agentId];
+    }
+
+    /**
+     * The live half of listAgentTmuxSessions(): raw {name, sock, created, path}
+     * rows from every plugin tmux server that answers.
+     *
+     * @return array<int,array{name:string,sock:string,created:int,path:string}>
+     */
+    private static function rawAgentTmuxSessions(): array {
+        $live = [];
+        foreach (self::tmuxSocketPaths() as $sock) {
+            // A socket file outlives its server (e2e runs leave dozens). connect()
+            // refuses at once on a dead one, so only live servers cost a tmux call.
+            if (!self::isLiveUnixSocket($sock)) continue;
+            $live[] = $sock;
+        }
+        if ($live === []) return [];
+
+        $marker = '@@AICLI_SOCK ';
+        $script = '';
+        foreach ($live as $sock) {
+            $esc = escapeshellarg($sock);
+            $script .= 'printf ' . escapeshellarg($marker . '%s\n') . " $esc; "
+                . "tmux -S $esc ls -F '#{session_name}|#{session_created}|#{session_path}' 2>/dev/null; ";
+        }
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        $raw = (string) @shell_exec($script);
+
+        $rows = [];
+        $sock = '';
+        foreach (explode("\n", $raw) as $line) {
+            if (strncmp($line, $marker, strlen($marker)) === 0) {
+                $sock = substr($line, strlen($marker));
+                continue;
+            }
+            if ($sock === '' || strncmp($line, 'aicli-agent-', 12) !== 0) continue;
+            $parts = explode('|', $line, 3);
+            $rows[] = [
+                'name'    => $parts[0],
+                'sock'    => $sock,
+                'created' => (int)($parts[1] ?? 0),
+                'path'    => (string)($parts[2] ?? ''),
+            ];
+        }
+        return $rows;
     }
 
     /**
@@ -694,6 +1024,10 @@ class ProcessManager {
                 // nosemgrep: php.lang.security.exec-use.exec-use
                 @shell_exec("$tmuxBin kill-session -t $escSess > /dev/null 2>&1");
             }
+            // The session's own tmux server exits with its last session, but
+            // its s-<id> socket folder stayed behind: 97 of them had piled up
+            // on .4 by 2026-09-24. Remove it once no server answers there.
+            self::removeDeadSessionTmuxDir((string)$id);
         }
         
         // #218: the close is over — drop the intent mark on every path that
@@ -749,7 +1083,11 @@ class ProcessManager {
                 // Best-effort — proceed with the evict even with no ids to announce.
             }
         }
-        exec("pgrep -f '(ttyd|aicliterm|geminiterm|tmux.*aicli-agent-)' | xargs kill -9 > /dev/null 2>&1");
+        // Bug #297: this used to be a bare `pgrep -f '(ttyd|...)'`, which
+        // matched (and killed) EVERY ttyd on the host, including Unraid's own
+        // web terminal. evictKillPattern() matches only this plugin's own
+        // ttyd/tmux processes — see EVICT_TTYD_PATTERN above.
+        exec("pgrep -f '" . self::evictKillPattern() . "' | xargs kill -9 > /dev/null 2>&1");
         foreach ($ids as $id) {
             self::publishStoppedEvent($id, 'evict');
             // Fix 2026-09-12: a global evict is an operator/tool decision to
@@ -796,7 +1134,7 @@ class ProcessManager {
      */
     private static function publishStoppedEvent(string $id, string $reason): void {
         if ($id === '' || !class_exists('\\AICliAgents\\Services\\NchanService')) return;
-        NchanService::publish('workspaces', ['event' => 'stopped', 'id' => $id, 'reason' => $reason]);
+        EventBus::publish('workspace', [], ['event' => 'stopped', 'id' => $id, 'reason' => $reason]);
     }
 
     /**
@@ -844,11 +1182,19 @@ class ProcessManager {
      * to use for all subsequent tmux invocations on the resolved session
      * (e.g. 'tmux -S /tmp/.../tmux-1003/default send-keys ...'). Empty
      * values + plain 'tmux' when no session matches anywhere.
+     *
+     * Cost (2026-09-24): the session's OWN per-session socket is asked first,
+     * and a socket whose server is gone is skipped with an in-process
+     * connect() instead of a shell + tmux spawn. The orphan sweep calls this
+     * three times per open browser terminal on every list_sessions_for_agent,
+     * and with 8 terminals and the dead socket files e2e runs leave behind a
+     * full scan cost 2-5 s per call (the Store's install dialogs wait on it).
      */
     public static function findTmuxSessionForId(string $safeId): array {
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $safeId);
         if ($safeId === '') return ['', '', 'tmux'];
-        foreach (self::tmuxSocketPaths() as $sock) {
+        foreach (self::sessionSocketCandidates($safeId) as $sock) {
+            if (!self::isLiveUnixSocket($sock)) continue;
             $cmd = 'tmux -S ' . escapeshellarg($sock) . " ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
             // nosemgrep: php.lang.security.exec-use.exec-use
             $name = trim((string) @shell_exec($cmd));
@@ -858,6 +1204,40 @@ class ProcessManager {
             }
         }
         return ['', '', 'tmux'];
+    }
+
+    /**
+     * The tmux sockets to search for session $safeId, in search order: its
+     * own per-session server(s) (<root>/s-<id>/tmux-<uid>/default) first,
+     * then every other socket (other per-session servers and the legacy
+     * shared ones), each once.
+     *
+     * @return list<string>
+     */
+    public static function sessionSocketCandidates(string $safeId, string $root = self::TMUX_ROOT): array {
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $safeId);
+        $all = self::tmuxSocketPaths($root);
+        if ($safeId === '') return $all;
+        $ownPrefix = $root . '/s-' . $safeId . '/';
+        $own = [];
+        $rest = [];
+        foreach ($all as $sock) {
+            if (strncmp($sock, $ownPrefix, strlen($ownPrefix)) === 0) $own[] = $sock;
+            else $rest[] = $sock;
+        }
+        return array_merge($own, $rest);
+    }
+
+    /**
+     * True when a server listens on the unix socket $path. A socket file
+     * outlives its tmux server; connect() on it refuses at once, so a dead
+     * server costs no process spawn.
+     */
+    public static function isLiveUnixSocket(string $path): bool {
+        $c = @stream_socket_client('unix://' . $path, $errno, $errstr, 0.2);
+        if ($c === false) return false;
+        @fclose($c);
+        return true;
     }
 
     /**

@@ -118,7 +118,8 @@ if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
         \$persistPath = \$config['agent_storage_path'] ?? '/boot/config/plugins/unraid-aicliagents';
         if (\AICliAgents\Services\StorageMountService::isPathAvailable(\$persistPath)) {
             aicli_log('disks_mounted: Storage path available. Notifying UI.', AICLI_LOG_INFO, 'EventDisks');
-            \AICliAgents\Services\NchanService::publish('storage_status', aicli_get_storage_status());
+            // EVENT_STREAM_MULTIPLEX.md R4: every publisher goes through EventBus.
+            \AICliAgents\Services\EventBus::publish('storage.status', [], aicli_get_storage_status());
             // Bug #1065: mount every installed agent's overlay so the binaries are
             // visible to the host's terminal immediately after array start — not
             // just to terminals opened through the plugin's UI. Without this, a

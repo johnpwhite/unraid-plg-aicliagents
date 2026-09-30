@@ -37,19 +37,26 @@ log() {
 }
 
 # D-402/D2/D9/D7 (EVENT_PUBLISH_OBSERVABILITY.md R7): publish migration progress
-# via Nchan, fire-and-forget. The /pub/ endpoint lives on the internal Unix
-# socket server, not the main HTTP server (D2 published over TCP to an
-# endpoint that does not exist). This now shares the single
-# `aicli_migrate_progress` channel with the PHP-side storage-path migration
-# (StorageHandler::migrateProgress) instead of its own dead `aicli_migration`
-# channel (D9), so the Manager needs only one subscriber.
+# via Nchan, fire-and-forget. This shares the single `aicli_migrate_progress`
+# channel with the PHP-side storage-path migration (StorageHandler::
+# migrateProgress) instead of its own dead `aicli_migration` channel (D9), so
+# the Manager needs only one subscriber.
+#
+# EVENT_STREAM_MULTIPLEX.md R4: routed through event-publish.php (EventBus::
+# publish('storage.migrate', ...) under it) instead of curling nginx's Nchan
+# socket directly (D2's original mistake was publishing over TCP to an
+# endpoint that does not exist — the /pub/ endpoint only ever lived on the
+# internal Unix socket server). event-publish.php stamps its own `ts`, so this
+# no longer needs to build one — best-effort, `|| true` keeps this fire-and-
+# forget when php or the script is missing, exactly as the old curl call was.
 publish_progress() {
     local step="$1"
     local progress="${2:-0}"
-    local json="{\"step\":\"$step\",\"progress\":$progress,\"ts\":$(date +%s%3N)}"
-    curl -s --unix-socket /var/run/nginx.socket -X POST \
-        "http://localhost/pub/aicli_migrate_progress?buffer_length=1" \
-        -H "Content-Type: application/json" -d "$json" --connect-timeout 1 --max-time 2 > /dev/null 2>&1 || true
+    local json="{\"step\":\"$step\",\"progress\":$progress}"
+    # Bounded, like the old curl (--max-time 2): progress is cosmetic, the
+    # migration must never wait on it.
+    timeout 10 php "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/event-publish.php" \
+        migrate_progress "$json" > /dev/null 2>&1 || true
 }
 
 # Helper: Check if a directory has actual content (files, not just empty subdirs)

@@ -3,14 +3,17 @@
  * <module_context>
  *     <name>CurlInstallSource</name>
  *     <description>Install source that runs a vendor-provided install shell script (e.g. curl install.sh piped to bash) inside a sandboxed $HOME/$PREFIX pointing at AGENT_BASE/$id. Agents like Goose or Aider historically ship this way. Version probing uses {binary} --version or a VERSION file written at install time.</description>
- *     <dependencies>GithubReleaseSource (reused for checkUpdates when repo is set), LogService, AgentRegistry</dependencies>
- *     <constraints>Script must respect $HOME/$PREFIX; audit step verifies the expected binary exists in bin/ or aborts the install.</constraints>
+ *     <dependencies>GithubReleaseSource (reused for checkUpdates when repo is set), LogService, AgentRegistry, AgentCaptiveStateService</dependencies>
+ *     <constraints>Script must respect $HOME/$PREFIX; audit step verifies the expected binary exists in bin/ or aborts the install. User state the script writes at a declared source.captive_state path is kept in the version-independent store (AgentCaptiveStateService), not in the generation.</constraints>
  * </module_context>
  */
 
 namespace AICliAgents\Services\Sources;
 
+require_once __DIR__ . '/../AgentCaptiveStateService.php';
+
 use AICliAgents\Services\AgentRegistry;
+use AICliAgents\Services\AgentCaptiveStateService;
 use AICliAgents\Services\LogService;
 
 class CurlInstallSource implements AgentSource {
@@ -26,7 +29,11 @@ class CurlInstallSource implements AgentSource {
             \RecursiveIteratorIterator::CHILD_FIRST
         );
         foreach ($it as $f) {
-            if ($f->isDir()) {
+            // A captive state path is a symlink into the version-independent
+            // store. Remove the link itself; never descend into or rmdir it.
+            if ($f->isLink()) {
+                @unlink($f->getPathname());
+            } elseif ($f->isDir()) {
                 @rmdir($f->getPathname());
             } else {
                 @unlink($f->getPathname());
@@ -48,29 +55,117 @@ class CurlInstallSource implements AgentSource {
             return false;
         }
 
-        $agentDir = AgentRegistry::agentPath($agentId);
+        // A side-by-side install binds an install-only overlay and sets the
+        // process-scoped install-root override. The vendor payload must land in
+        // that overlay, never in the generation currently serving sessions.
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
+
+        // The script is downloaded BEFORE the captive tree is wiped, so a failed
+        // download leaves the current install as it was.
+        self::$lastError = '';
+        if (is_callable($progress)) $progress("Fetching install script…", 25);
+        $scriptPath = "/tmp/unraid-aicliagents/dl/$agentId-install.sh";
+        @mkdir(dirname($scriptPath), 0755, true);
+        @unlink($scriptPath);
+        $curlOut = trim((string)@shell_exec(self::downloadCommand($scriptUrl, $scriptPath)));
+        if (!file_exists($scriptPath) || filesize($scriptPath) === 0) {
+            self::$lastError = self::VENDOR_PREFIX . "the install script could not be downloaded from $scriptUrl"
+                . ($curlOut !== '' ? " ($curlOut)" : '') . '. Check the network, then try again later.';
+            LogService::log("CurlInstallSource: failed to download install script for $agentId from $scriptUrl" . ($curlOut !== '' ? ": $curlOut" : ''), LogService::LOG_ERROR, "CurlInstallSource");
+            return false;
+        }
+        // 2026-09-26 (.4 live suite): the vendor's web server had cached a gzip
+        // copy of antigravity's install.sh and sent it, with Content-Encoding:
+        // gzip, also to a client that did not ask for gzip (4 of 10 requests).
+        // Plain `curl -o` saved the compressed bytes and bash refused them:
+        // "cannot execute binary file", exit 126, reported as a plugin install
+        // failure. --compressed (downloadCommand) decodes such a reply; this
+        // check turns any other non-script reply into a clear vendor problem.
+        $bad = self::prepareDownloadedScript($scriptPath);
+        if ($bad !== null) {
+            self::$lastError = self::VENDOR_PREFIX . $bad;
+            LogService::log("CurlInstallSource: $agentId: " . self::$lastError . " (url $scriptUrl)", LogService::LOG_ERROR, "CurlInstallSource");
+            @unlink($scriptPath);
+            return false;
+        }
+
+        return self::installFromScript(
+            $agentId, $src, $targetVersion, $scriptPath, $agentDir,
+            self::statePathsForInstall($agentId, $agent, AgentRegistry::installRoot() !== null),
+            $progress
+        );
+    }
+
+    /**
+     * Which captive state paths this install shares through the
+     * version-independent store (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md
+     * "Phase 4 — 2026-09-23", Forgejo #270), or null to install exactly as
+     * before (each generation keeps its own captive files).
+     *
+     * A staged install writes a new generation of its own, so it never changes
+     * a file a running session uses. A non-staged install writes into the live
+     * tree: it shares state only when no session of this agent runs. The
+     * closed-set barrier normally closes those sessions first; this check is the
+     * second line, and it answers "a session may run" when it cannot tell.
+     *
+     * @param callable|null $sessionsOf fn(string $agentId): array — test seam.
+     * @return list<string>|null
+     */
+    public static function statePathsForInstall(string $agentId, array $agent, bool $staged, ?callable $sessionsOf = null): ?array {
+        $paths = AgentCaptiveStateService::declaredPaths($agent);
+        if ($paths === null || $paths === []) return null;
+        if ($staged) return $paths;
+        try {
+            if ($sessionsOf === null) {
+                if (!class_exists('\AICliAgents\Services\TerminalService')) return null;
+                $sessionsOf = [\AICliAgents\Services\TerminalService::class, 'listActiveSessionsForAgent'];
+            }
+            $live = $sessionsOf($agentId);
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (!is_array($live) || $live !== []) {
+            LogService::log("CurlInstallSource: $agentId has a running session; captive state is not moved during this install.", LogService::LOG_WARN, "CurlInstallSource");
+            return null;
+        }
+        return $paths;
+    }
+
+    /**
+     * Run a downloaded vendor script into $agentDir. With $statePaths set, the
+     * captive state is shared through AgentCaptiveStateService:
+     *   1. migrate — copy existing captive state into the store (once);
+     *   2. wipe the captive bin/ and home/ (WP #963 clean reinstall);
+     *   3. seed    — copy the stored state into the fresh captive home, so
+     *      the script sees it (a failed script cannot change the store);
+     *   4. run the vendor script under the captive HOME/PREFIX;
+     *   5. settle  — each declared path becomes a link to the store; a path
+     *      the script changed replaces the stored copy (a rollback copy is kept).
+     * Public so a test can drive the whole sequence with a fake installer.
+     *
+     * @param list<string>|null $statePaths
+     */
+    public static function installFromScript(string $agentId, array $src, ?string $targetVersion, string $scriptPath, string $agentDir, ?array $statePaths, $progress = null): bool {
+        if ($statePaths !== null) {
+            AgentCaptiveStateService::migrate($agentId, $agentDir, $statePaths);
+        }
 
         // WP #963: clean-reinstall. Wipe the prior captive bin/ and home/
         // before re-running the vendor script. Vendor installers are commonly
         // idempotent — they short-circuit ("already installed", exit 0) when
         // their target binary is present — so a plugin-driven *upgrade* would
         // otherwise no-op. The captive home/ is install-script scratch space
-        // ($HOME/.bashrc, $HOME/.cache staging), never user data; user data
-        // lives in the separate workspace overlay. Wiping it on every fetch
-        // is the correct semantic for an install-or-upgrade re-run.
+        // ($HOME/.bashrc, $HOME/.cache staging). User state that a vendor
+        // script does write there is a declared captive_state path: it was
+        // copied to the version-independent store in step 1, and the wipe
+        // removes only the link to it, never the store.
         self::rrmdir("$agentDir/bin");
         self::rrmdir("$agentDir/home");
         @mkdir("$agentDir/home", 0755, true);
         @mkdir("$agentDir/bin", 0755, true);
 
-        if (is_callable($progress)) $progress("Fetching install script…", 25);
-        $scriptPath = "/tmp/unraid-aicliagents/dl/$agentId-install.sh";
-        @mkdir(dirname($scriptPath), 0755, true);
-        $dl = 'curl -fsSL -m 60 -o ' . escapeshellarg($scriptPath) . ' ' . escapeshellarg($scriptUrl) . ' 2>&1';
-        @shell_exec($dl);
-        if (!file_exists($scriptPath) || filesize($scriptPath) === 0) {
-            LogService::log("CurlInstallSource: failed to download install script for $agentId from $scriptUrl", LogService::LOG_ERROR, "CurlInstallSource");
-            return false;
+        if ($statePaths !== null) {
+            AgentCaptiveStateService::seed($agentId, $agentDir, $statePaths);
         }
 
         if (is_callable($progress)) $progress("Running install script (captive HOME/PREFIX)…", 45);
@@ -95,12 +190,14 @@ class CurlInstallSource implements AgentSource {
         $out = $res['out'];
         @unlink($scriptPath);
         if ($res['rc'] !== 0) {
-            self::$lastError = $res['timedOut']
-                ? "Install script timed out after {$timeoutS}s" . ($res['last'] !== '' ? " while: {$res['last']}" : '')
-                  . ". Retry (a slow download), or raise source.timeout_s for this agent."
-                : "Install script exited with code {$res['rc']}" . ($res['last'] !== '' ? ": {$res['last']}" : '');
+            $free = @disk_free_space($agentDir);
+            self::$lastError = self::scriptFailureReason($res, $timeoutS, $free === false ? null : (int)floor($free / 1048576));
             LogService::log("CurlInstallSource: install script failed for $agentId (" . self::$lastError . "):\n" . $out, LogService::LOG_ERROR, "CurlInstallSource");
             return false;
+        }
+
+        if ($statePaths !== null) {
+            AgentCaptiveStateService::settle($agentId, $agentDir, $statePaths);
         }
 
         if (preg_match('/(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/', $out, $m)) {
@@ -112,6 +209,76 @@ class CurlInstallSource implements AgentSource {
 
     /** Last human-readable failure reason from fetch(); surfaced by InstallerService. */
     private static string $lastError = '';
+
+    /**
+     * Prefix of a failure reason that is the vendor's fault, not the plugin's.
+     * tests/live classifies it as a vendor WARN, never a plugin FAIL.
+     */
+    const VENDOR_PREFIX = 'Vendor problem: ';
+
+    /** Below this much free space (MB), a failed vendor script names the full drive as the likely cause. */
+    const LOW_SPACE_MB = 1024;
+
+    /**
+     * The download command for the vendor script. --compressed asks for a
+     * compressed reply and decodes it, so a server that sends gzip whatever the
+     * client asked for still gives the plain script. Pure.
+     */
+    public static function downloadCommand(string $url, string $dest): string {
+        return 'curl -fsSL --compressed -m 60 -o ' . escapeshellarg($dest) . ' ' . escapeshellarg($url) . ' 2>&1';
+    }
+
+    /**
+     * Make sure the downloaded file is a script bash can run. A gzip body that
+     * reached the disk still compressed is decoded in place. Returns null when
+     * the file is ready, else the (vendor-side) reason it cannot run.
+     */
+    public static function prepareDownloadedScript(string $path): ?string {
+        $body = @file_get_contents($path);
+        if (!is_string($body) || $body === '') return 'the install script download was empty.';
+        $size = strlen($body);
+        if (strncmp($body, "\x1f\x8b", 2) === 0) {
+            $plain = @gzdecode($body);
+            if (!is_string($plain) || $plain === '' || strpos($plain, "\0") !== false) {
+                return "the vendor's server sent the install script as a damaged compressed file ($size bytes). Try again later.";
+            }
+            if (@file_put_contents($path, $plain) !== strlen($plain)) {
+                return "the decoded install script could not be written to $path.";
+            }
+            $body = $plain;
+        }
+        if (strpos($body, "\0") !== false) {
+            return "the vendor's server sent binary data ($size bytes, starting 0x" . bin2hex(substr($body, 0, 4))
+                . ') instead of the install script. Try again later.';
+        }
+        if (preg_match('/^\s*</', $body)) {
+            return "the vendor's server sent a web page ($size bytes) instead of the install script. Try again later.";
+        }
+        return null;
+    }
+
+    /**
+     * The failure reason for a vendor script that did not exit 0. A vendor
+     * script can hide its tool's error (antigravity runs `tar … 2>/dev/null`,
+     * then says only "Failed to extract binary from archive"). On 2026-09-26
+     * 03:25 the real cause was a full flash drive. When the drive that holds
+     * the agent has less than LOW_SPACE_MB free, the reason says so. Pure.
+     *
+     * @param array{rc:int,last:string,timedOut:bool} $res
+     */
+    public static function scriptFailureReason(array $res, int $timeoutS, ?int $freeMb): string {
+        $last = (string)($res['last'] ?? '');
+        if (!empty($res['timedOut'])) {
+            return "Install script timed out after {$timeoutS}s" . ($last !== '' ? " while: $last" : '')
+                . ". Retry (a slow download), or raise source.timeout_s for this agent.";
+        }
+        $r = "Install script exited with code {$res['rc']}" . ($last !== '' ? ": $last" : '');
+        if ($freeMb !== null && $freeMb < self::LOW_SPACE_MB) {
+            $r = rtrim($r, '.') . ". Only $freeMb MB is free on the drive that holds the agent; the vendor script needs room"
+                . ' for its download and the unpacked program. Free some space, then try again.';
+        }
+        return $r;
+    }
 
     public function lastError(): string {
         return self::$lastError;
@@ -255,8 +422,8 @@ class CurlInstallSource implements AgentSource {
     public function stage(string $agentId, array $agent): string {
         $src = $agent['source'] ?? [];
         $executable = (string)($src['executable'] ?? '');
-        if ($executable === '') return $agent['binary'] ?? '';
-        $agentDir = AgentRegistry::agentPath($agentId);
+        if ($executable === '') return AgentRegistry::installBinaryPath($agentId, (string)($agent['binary'] ?? ''));
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
         $expected = "$agentDir/bin/$executable";
         if (file_exists($expected)) {
             @chmod($expected, 0755);
@@ -274,8 +441,8 @@ class CurlInstallSource implements AgentSource {
     }
 
     public function discoverVersion(string $agentId, array $agent): ?string {
-        $agentDir = AgentRegistry::agentPath($agentId);
-        $bin = $agent['binary'] ?? '';
+        $agentDir = AgentRegistry::agentInstallPath($agentId);
+        $bin = AgentRegistry::installBinaryPath($agentId, (string)($agent['binary'] ?? ''));
         $probe = $agent['source']['version_probe'] ?? '{binary} --version';
         if ($bin !== '' && file_exists($bin)) {
             $cmd = str_replace('{binary}', escapeshellarg($bin), $probe) . ' 2>&1';
@@ -350,7 +517,7 @@ class CurlInstallSource implements AgentSource {
         if (!UrlValidator::requireHttps($url, 'CurlInstallSource::probeManifestVersion manifest_url')) {
             return null;
         }
-        $json = @shell_exec('curl -fsSL -m 20 ' . escapeshellarg($url) . ' 2>/dev/null');
+        $json = @shell_exec('curl -fsSL --compressed -m 20 ' . escapeshellarg($url) . ' 2>/dev/null');
         if (!is_string($json) || $json === '') return null;
         if (($src['manifest_format'] ?? 'json') === 'plain') {
             $v = trim($json);

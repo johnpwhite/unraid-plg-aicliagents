@@ -247,6 +247,19 @@ class UpgradeRelaunchService
      * Enqueue the supervisor-owned layer activation using a stable job id.
      * The optional callables are deterministic test seams.
      */
+    /**
+     * #350 (docs/specs/UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md "2026-09-29"):
+     * the supervisor's retry state for one activation job (tries, failures in a
+     * row, last outcome, halted), a key=value file beside the job's .retry file.
+     */
+    public static function activationStatePath(string $agentId, ?string $retryDir = null): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        $retryDir = $retryDir ?? ((class_exists(SupervisorService::class)
+            ? SupervisorService::SUPERVISOR_DIR : '/tmp/unraid-aicliagents/supervisor') . '/jobs-retry');
+        return rtrim($retryDir, '/') . "/upgrade-agent-$safe.activation";
+    }
+
     public static function schedulePendingActivation(
         string $agentId,
         ?callable $enqueue = null,
@@ -264,6 +277,9 @@ class UpgradeRelaunchService
             $wake = static fn(): bool => SupervisorService::wake();
         }
         $jobId = 'upgrade-agent-' . preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
+        // #350: a new activation starts its backoff again at the first delay
+        // and is no longer halted by the failures of an earlier one.
+        @unlink(self::activationStatePath($agentId));
         $queued = (bool)$enqueue($agentId, $jobId);
         if ($queued) $wake();
         return $queued;
@@ -412,6 +428,17 @@ class UpgradeRelaunchService
         $wake     = $wake ?? static fn(): bool => SupervisorService::wake();
         $schedule = $schedule ?? static fn(string $id): bool => self::schedulePendingActivation($id);
 
+        // #350: a halted activation (repeated failures) is armed again by a
+        // session close: the close can free what made the mount fail.
+        $state = self::activationStatePath($agentId, $retryDir);
+        if (is_file($state) && preg_match('/^halted=1$/m', (string)@file_get_contents($state))) {
+            @unlink($state);
+            if (class_exists('\AICliAgents\Services\LifecycleLogService')) {
+                LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'installer',
+                    'upgrade_activation_rearmed', ['agent' => $agentId]);
+            }
+        }
+
         $retry = "$retryDir/$jobId.retry";
         if (is_file($retry)) {
             $data = json_decode((string)@file_get_contents($retry), true);
@@ -457,7 +484,13 @@ class UpgradeRelaunchService
                 require_once __DIR__ . '/InstallerService.php';
                 $persistDir = '/boot/config/plugins/unraid-aicliagents/persistence';
                 $newest = InstallerService::newestAgentLayer($agentId, $persistDir);
-                if ($newest === null) return true; // nothing to activate
+                // No layer file: a plain-directory agent is live once its bind
+                // shows the promoted generation (2026-09-24); any other agent
+                // has nothing to activate.
+                if ($newest === null) {
+                    require_once __DIR__ . '/StorageMountService.php';
+                    return !StorageMountService::passthroughActivationPending($agentId);
+                }
                 $mounts = (string)@file_get_contents('/proc/mounts');
                 return InstallerService::isAgentLayerLive($agentId, $newest, $mounts);
             };

@@ -78,6 +78,34 @@ if [ -n "$NEWEST" ] && [ -n "$LIVE_LOWER" ]; then
   case ":$LIVE_LOWER:" in *"/$STEM:"*|*"/$STEM"*) LAYER_LIVE=yes ;; *) LAYER_LIVE=NO ;; esac
 fi
 echo "newest layer live: $LAYER_LIVE"
+# Plain-directory agents (2026-09-24): the stable name points at a generation
+# directory; the bind at the mount point must show that same directory.
+PT_STABLE="$PERSIST/passthrough/agents/$AGENT"
+if [ -L "$PT_STABLE" ]; then
+  PT_GEN="$(readlink "$PT_STABLE")"
+  # #317: on the side-by-side layout agents/<id> is a symlink to the bind at
+  # agents/.versions/<id>/<gen>; mountinfo records the real path.
+  PT_MNT_REAL="$(readlink -f "$MNT" 2>/dev/null || echo "$MNT")"
+  PT_BOUND="$(awk -v m="$PT_MNT_REAL" '$5==m {print $4}' /proc/self/mountinfo | tail -1)"
+  echo "plain-dir stable generation: $PT_GEN"
+  echo "plain-dir mount shows: ${PT_BOUND:-NOT MOUNTED}"
+  if [ -L "$MNT" ]; then echo "plain-dir layout: side by side (agents/$AGENT -> $(readlink "$MNT"))"
+  else echo "plain-dir layout: OLD one-mount layout (converts at the first launch with no session of this agent)"; fi
+  for PT_G in "$PERSIST/passthrough/agents/.versions/$AGENT"/*/; do
+    [ -d "$PT_G" ] || continue
+    PT_G="$(basename "$PT_G")"
+    PT_B="no bind"; mountpoint -q "$(dirname "$MNT")/.versions/$AGENT/$PT_G" 2>/dev/null && PT_B="bound"
+    echo "plain-dir version on flash: $PT_G ($PT_B, $(du -sm "$PERSIST/passthrough/agents/.versions/$AGENT/$PT_G" 2>/dev/null | cut -f1) MB)"
+  done
+  if [ -n "$PT_BOUND" ]; then
+    if [ "$(stat -L -c '%d:%i' "$MNT" 2>/dev/null)" = "$(stat -L -c '%d:%i' "$PT_STABLE" 2>/dev/null)" ]; then
+      echo "plain-dir generation live: yes"
+    else
+      echo "plain-dir generation live: NO (a new workspace runs the previous version until the mount is rebound)"
+      LAYER_LIVE=NO
+    fi
+  fi
+fi
 losetup -a 2>/dev/null | grep "agent_${AGENT}_" | sed 's/^/loop: /'
 UPPER="$PERSIST/_upper/agents/$AGENT"
 [ -d "$UPPER" ] && echo "upper dir: $UPPER ($(du -sm "$UPPER" 2>/dev/null | cut -f1) MB on flash)"
@@ -102,6 +130,11 @@ INSTALLED="$(php -r '$v=json_decode(@file_get_contents($argv[1]),true); echo (st
 
 hr "8. supervisor job upgrade-agent-$AGENT"
 ls -la "$TMP/supervisor/queue/"*"_agent_${AGENT}_mount.req" "$TMP/supervisor/jobs-retry/upgrade-agent-${AGENT}.retry" 2>/dev/null || echo "not queued / no retry parked"
+# #350: the activation retry state (tries, failures in a row, last outcome, halted).
+if [ -f "$TMP/supervisor/jobs-retry/upgrade-agent-${AGENT}.activation" ]; then
+    echo "-- activation retry state"
+    tr '\n' ' ' < "$TMP/supervisor/jobs-retry/upgrade-agent-${AGENT}.activation"; echo
+fi
 [ -f "$TMP/supervisor/jobs-retry/upgrade-agent-${AGENT}.retry" ] && json "$TMP/supervisor/jobs-retry/upgrade-agent-${AGENT}.retry"
 
 hr "9. lifecycle.log — last $LINES lines for $AGENT (UTC)"
@@ -129,7 +162,7 @@ elif [ "$ACT_STATUS" = "failed" ]; then
   echo "REAL FAILURE: ${ACT_ERR:-see section 10}. installed=$INSTALLED"
 elif [ "$ACT_STATUS" = "waiting" ] || [ "$MARK_PHASE" = "awaiting_activation" ]; then
   echo "PARKED: installed=$INSTALLED, layer live=$LAYER_LIVE, holders=$HOLDERS, closed-set=$HAS_SET, pending-record=$HAS_PEND."
-  echo "Activation runs when the holders exit (supervisor sweep re-queues the mount with backoff)."
+  echo "Activation runs when the holders exit (supervisor retries with a 15 s → 600 s backoff; halted=1 above means it stopped after repeated failures and waits for a session close or a new install)."
 elif [ "$LAYER_LIVE" = "NO" ]; then
   echo "QUIET DRIFT: newest layer not live and no activity entry. holders=$HOLDERS. A remount when idle picks it up."
 else

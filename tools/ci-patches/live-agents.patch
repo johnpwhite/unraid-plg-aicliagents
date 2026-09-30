@@ -1,0 +1,420 @@
+diff -ruN pa/ci/PIPELINE.md pb/ci/PIPELINE.md
+--- pa/ci/PIPELINE.md	2026-09-24 09:29:49.114221241 +1000
++++ pb/ci/PIPELINE.md	2026-09-24 09:32:53.461841350 +1000
+@@ -188,6 +188,19 @@
+   digest · age<24h · all layers pass BEFORE any version bump (exit 36 on
+   failure). Full contract: the plugin's `docs/specs/RELEASE_GATE.md`.
+ 
++### 4.8 `live-agents` — real agent lifecycle on `.4` (not in any group)
++
++`ci/run live-agents` runs `tests/live/agent_lifecycle.sh` on the host (after
++`ci_host_guard`) against the deployed plugin: for every registry agent, install
++through the Store's `install_agent` action → binary runs + `versions.json` +
++Store agree → upgrade, or downgrade and restore, through the version picker →
++the plugin's own release + mount (plain-directory agents get an empty stale
++mount injected first) → a throw-away `e2elive…` workspace start and close.
++Agents a person is using are skipped with reason `in use` (never a failure).
++`runners/live-agents-report.sh` then signs `.ci-artifacts/live-agents.json`
++(`aicli-live-agents/1`, gate key, same canonical JSON as the release gate). It
++downloads every agent, so it runs after the Factory publish, not per gate.
++
+ ### 4.6 `reconcile` — clean exit
+ Runs on the host via a `trap` on `EXIT`/`INT`/`TERM` for any `deploy`/`func` run
+ (so it fires on success, failure, **or** interrupt). Invokes
+@@ -221,7 +234,8 @@
+ | Step | Component | What happens |
+ | :--- | :--- | :--- |
+ | **Factory** | `ci/publish` (no-local-php orchestrator; `publish-and-deploy.php` is the equivalent reference flow for php-capable hosts) | classifies the tree (php container); **functional** changes → verify the signed release-gate artifact (container, key piped via stdin; exit 36 if missing/invalid/stale/red) → `publish-factory.php --no-git` in the container does validations + tarball + version bump `YYYY.MM.DD.XX` + CHANGES fold (files rsynced back) → **local git** commit+push (Forgejo `origin`, index repo, root sync — the push key never leaves the dev box) → scp `.plg` + `plugin install` on `.4` + marker/flash version-verify (31/32) → `CI_FUNC_LAYERS=smoke,e2e ci/run func` (34/35); **docs/tooling** → commit-only via local git (gate-free) |
+-| **Storefront** | `/jpw-unraid-storefront` (GitHub `public`) | promotes the release to Community Applications — **manual, requires confirmation** |
++| **Live agents** | `ci/run live-agents` on `.4` | after the Factory publish: real install / version change / remount / workspace start for every agent; signs `.ci-artifacts/live-agents.json` |
++| **Storefront** | `/jpw-unraid-storefront` (GitHub `public`) | promotes the release to Community Applications — **manual, requires confirmation**. `ci/storefront` step ⓪b requires a green `live-agents.json` for the released version, whole registry, ≤ 7 days old (exit 57); agents skipped as "in use" are a warning only |
+ | **Tower** | Community Applications | installs/auto-updates from CA on its own schedule; **never deployed to directly** |
+ 
+ Tower's CA upgrade runs the **same `install-engine.sh`** the inner-loop `deploy`
+diff -ruN pa/ci/README.md pb/ci/README.md
+--- pa/ci/README.md	2026-09-24 09:29:49.114221241 +1000
++++ pb/ci/README.md	2026-09-24 09:32:53.461841350 +1000
+@@ -124,6 +124,11 @@
+ 
+ # run any workspace php script in the runner container:
+ ci/php ci/scripts/factory/publish-factory.php --plugin=<name> --dry-run
++
++# LIVE agent lifecycle on .4 (real installs; in no group; required before a
++# Storefront push — see "Live agent lifecycle" below):
++ci/run live-agents --plugin=aicliagents
++ci/run live-agents --plugin=aicliagents --live-args="--dry-run"
+ ```
+ 
+ Stages: `docs` `lint` `unit` `build` `deploy` `func` `release-checks` `gate-report`.
+@@ -233,6 +238,42 @@
+ - Classification needs `.4` reachable (it runs in the container). For a real
+   CA release you still need a fresh `ci/run release-gate` first.
+ 
++## Live agent lifecycle (`live-agents`)
++
++`ci/run live-agents --plugin=aicliagents` runs the plugin's
++`tests/live/agent_lifecycle.sh` ON `.4` (through the host guard, exit 37 on a
++wrong host) against the deployed plugin. For every agent in `AgentRegistry` it
++installs the agent through the Store's `install_agent` action when it is absent,
++checks that the binary runs and that `versions.json` and the Store agree,
++upgrades it (or downgrades it and restores it), tears the agent mount down and
++mounts it again through the plugin's own storage seam — on a plain-directory
++agent with an empty stale mount injected first, the 2026-09-24 "[Agent Binary
++Missing]" fault — and starts and closes a throw-away `e2elive…` workspace. Every
++agent stays installed.
++
++- **In no group.** It downloads every agent, so it is not part of `all` or
++  `release-gate`. Run it after the Factory publish of the version you will release.
++- **Agents in use are never disturbed and never fail the run.** An agent with a
++  live non-e2e workspace (or an outside process running its binary) gets a WARN
++  line naming the workspaces; its install, version change and remount are SKIPPED
++  with reason `in use`; the binary check and a separate e2e workspace still run.
++  `--live-args="--include-busy"` runs the full lifecycle on them too.
++- **Pass-through flags:** `--live-args="…"` (or `CI_LIVE_ARGS`) goes to the suite:
++  `--dry-run`, `--agents=a,b`, `--include-busy`, `--skip-change`,
++  `--skip-remount`, `--skip-session`, `--no-version-check`,
++  `--install-timeout=S`, `--session-wait=S`. A dry run signs nothing.
++- **Artifact:** `runners/live-agents-report.sh` signs
++  `<plugin>/.ci-artifacts/live-agents.json` (schema `aicli-live-agents/1`) with
++  the gate key and the release gate's canonical JSON. It records the tested
++  plugin version, per-agent status, the in-use agents, and totals.
++- **Storefront requirement:** `ci/storefront` step ⓪b runs
++  `scripts/factory/live-agents-verify.php`: HMAC valid · same plugin · the run
++  tested THIS version · the whole registry ran · no FAIL · at most 7 days old
++  (`LIVE_AGENTS_MAX_AGE_DAYS`). In-use skips print as a warning ("N agents not
++  re-tested because they were in use"), not a blocker. A failure stops
++  `--push` with exit **57** (`--force` downgrades it to a warning, with the
++  user's explicit consent only); a dry run only warns.
++
+ ## Storefront (public GitHub) release (`ci/storefront`)
+ 
+ The **second half** of a release: after `ci/publish` has bumped + pushed the
+@@ -282,7 +323,9 @@
+ or plugin layout · `50` factory prerequisite (dirty/ahead/not-master) · `51`
+ UI-bundle gate (dirty or not gate-certified) · `52` changelog gate (no net-off
+ entry) · `53` mirror transform (URL/entity/malformed-XML) · `54` scratch-clone
+-assembly · `55` GitHub push · `56` CA index push.
++assembly · `55` GitHub push · `56` CA index push · `57` live-agents gate
++(no green `live-agents.json` for this version within 7 days — see
++"Live agent lifecycle").
+ 
+ > ⚠ **No Tower involvement.** `ci/storefront --push` writes only to the **public
+ > GitHub** repo + CA index. Tower pulls from the CA channel on its own schedule;
+@@ -384,6 +427,7 @@
+ | `release-checks.sh` | Unit (php) | `phpunit --group release` (release-state consistency) |
+ | `gate-report.sh` | Unit (php) | fold layer results → sign `release-gate.json` (HMAC via stdin key) |
+ | `deploy.sh` | **host** | replicate the `.plg` upgrade harness → `install-engine.sh` |
++| `live-agents-report.sh` | Unit (php) | sign the live agent lifecycle result → `live-agents.json` (HMAC via stdin key) |
+ 
+ ## Prerequisites
+ 
+diff -ruN pa/ci/run pb/ci/run
+--- pa/ci/run	2026-09-24 09:29:49.114221241 +1000
++++ pb/ci/run	2026-09-24 09:31:16.105288995 +1000
+@@ -29,6 +29,13 @@
+ #         seconds, and is ordered FIRST so drift is caught before the expensive
+ #         stages and, in a release-gate, before any version bump.
+ #   inventory: regenerate docs/TEST_INVENTORY.md generated block from .ci-artifacts/
++#   live-agents: LIVE agent lifecycle suite on .4 (tests/live/agent_lifecycle.sh):
++#         real install / upgrade-or-downgrade / remount / workspace start for
++#         every registry agent, then signs .ci-artifacts/live-agents.json.
++#         Downloads every agent — in NO group (not in all/release-gate); run it
++#         after a Factory publish. REQUIRED (green, <=7 days, same plugin
++#         version) before ci/storefront --push. Pass suite flags through with
++#         --live-args="--include-busy --agents=a,b" (or CI_LIVE_ARGS).
+ set -uo pipefail
+ 
+ CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+@@ -66,6 +73,7 @@
+ 
+ NOSYNC=0; PLUGIN=""; STAGES=(); RELEASE_GATE="${CI_RELEASE_GATE:-0}"
+ PHP_FILTER="${CI_PHPUNIT_FILTER:-}"   # --php-filter / guards: phpunit-only unit stage
++LIVE_ARGS="${CI_LIVE_ARGS:-}"         # live-agents: flags passed to tests/live/agent_lifecycle.sh
+ c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_cyn=$'\033[36m'; c_0=$'\033[0m'
+ log()  { printf '%s[ci]%s %s\n' "$c_cyn" "$c_0" "$*"; }
+ ok()   { printf '%s[ci] ✓ %s%s\n' "$c_grn" "$*" "$c_0"; }
+@@ -81,7 +89,9 @@
+     --plugin=*) PLUGIN="${a#*=}" ;;
+     --server=*) SERVER="${a#*=}" ;;
+     --key=*) SSH_KEY="${a#*=}" ;;
+-    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
++    --live-args=*) LIVE_ARGS="${a#*=}" ;;
++    live-agents) STAGES+=(live-agents) ;;
++    -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+     docs|lint|unit|build|deploy|func|release-checks|gate-report|inventory) STAGES+=("$a") ;;
+     test) STAGES+=(lint unit) ;;
+     ci)   STAGES+=(docs lint unit build) ;;
+@@ -91,6 +101,9 @@
+   esac
+ done
+ [ "${#STAGES[@]}" -gt 0 ] || die "no stages. try: ci/run lint unit  (see --help)"
++# The live-agents flags travel inside a remote shell command: allow only the
++# characters the suite's own flags use (no quotes, no $, no ;).
++case "$LIVE_ARGS" in *[!A-Za-z0-9=,._\ -]*) die "--live-args may contain only letters, digits, spaces and = , . _ -" ;; esac
+ command -v rsync >/dev/null || die "rsync not found on this host"
+ 
+ # ---- resolve plugin (on the dev box) ----------------------------------------
+@@ -147,6 +160,7 @@
+ HAS_SMOKE=0;   [ -f "$PDIR/tests/smoke.sh" ] && HAS_SMOKE=1
+ HAS_SHELLUNIT=0; ls "$PDIR/tests/unit"/*_test.sh >/dev/null 2>&1 && HAS_SHELLUNIT=1
+ HAS_C4DOCS=0;  [ -f "$PDIR/C4-Documentation/tools/c4-drift.py" ] && HAS_C4DOCS=1
++HAS_LIVE=0;    [ -f "$PDIR/tests/live/agent_lifecycle.sh" ] && HAS_LIVE=1
+ [ -f "$PDIR/ci.conf" ] && . "$PDIR/ci.conf"
+ 
+ log "server $SERVER · plugin $PLUGIN · volume $VOL · stages: ${STAGES[*]}"
+@@ -511,6 +525,41 @@
+   fi
+ }
+ 
++# live-agents — the LIVE agent lifecycle suite, run ON .4 against the deployed
++# plugin, then signed (same HMAC key + canonical JSON as the release gate) into
++# <plugin>/.ci-artifacts/live-agents.json. Agents a person is using are SKIPPED
++# ("in use"), never failed; the artifact lists them and ci/storefront warns.
++stage_live_agents() {
++  sect "LIVE-AGENTS ($PLUGIN) — real install · version change · remount · workspace start, every agent"
++  if [ "$HAS_LIVE" -ne 1 ]; then log "no tests/live/agent_lifecycle.sh — live-agents skipped"; return; fi
++  ci_host_guard "$SERVER" rssh "live agent lifecycle suite (installs agents) on $PLUGIN"
++  local run_rc=0 dry=0
++  case " $LIVE_ARGS " in *" --dry-run "*) dry=1 ;; esac
++  [ -n "$LIVE_ARGS" ] && log "suite flags: $LIVE_ARGS"
++  # shellcheck disable=SC2086  # LIVE_ARGS is a validated, space-separated flag list
++  rssh "rm -f $ARTIFACTS/live-agents-run.json; bash $VOL/tests/live/agent_lifecycle.sh --json=$ARTIFACTS/live-agents-run.json $LIVE_ARGS" || run_rc=$?
++  if [ "$dry" -eq 1 ]; then
++    [ "$run_rc" -eq 0 ] && ok "live-agents dry run (plan printed, nothing signed)" || fail "live-agents dry run"
++    return
++  fi
++  [ "$run_rc" -eq 37 ] && { fail "live-agents (host guard refused)"; return; }
++  ensure_php_image
++  ensure_gate_key
++  local commit sign_rc=0
++  commit="$(git -C "$PDIR" rev-parse HEAD 2>/dev/null || echo unknown)"
++  rssh "docker run --rm -i -v $VOL:/work -w /work \
++    -e LIVE_PLUGIN=$PLUGIN -e LIVE_COMMIT=$commit -e LIVE_SERVER=$SERVER \
++    $PHP_IMAGE bash /work/.ci/runners/live-agents-report.sh" < "$GATE_KEY_FILE" || sign_rc=$?
++  mkdir -p "$PDIR/.ci-artifacts"
++  if copy_from_runner "$VOL/.ci-artifacts/live-agents.json" "$PDIR/.ci-artifacts/live-agents.json"; then
++    ok "live-agents artifact → $(basename "$PDIR")/.ci-artifacts/live-agents.json"
++  else
++    fail "live-agents (artifact fetch)"; return
++  fi
++  if [ "$run_rc" -eq 0 ] && [ "$sign_rc" -eq 0 ]; then ok "live-agents GREEN (signed)"
++  else fail "live-agents RED (suite exit $run_rc, report exit $sign_rc — artifact written, blocks ci/storefront --push)"; fi
++}
++
+ stage_gate_report() {
+   sect "GATE-REPORT ($PLUGIN) — sign release-gate artifact (R-02)"
+   ensure_php_image
+@@ -582,6 +631,7 @@
+     deploy) stage_deploy ;; func) stage_func ;;
+     release-checks) stage_release_checks ;; gate-report) stage_gate_report ;;
+     inventory) stage_inventory ;;
++    live-agents) stage_live_agents ;;
+   esac
+ done
+ 
+diff -ruN pa/ci/runners/live-agents-report.sh pb/ci/runners/live-agents-report.sh
+--- pa/ci/runners/live-agents-report.sh	1970-01-01 10:00:00.000000000 +1000
++++ pb/ci/runners/live-agents-report.sh	2026-09-24 09:30:18.013572600 +1000
+@@ -0,0 +1,58 @@
++#!/usr/bin/env bash
++# Runs INSIDE the Unit-Test Container (aicli-ci/php). Signs the result of a
++# `ci/run live-agents` run (the plugin's tests/live/agent_lifecycle.sh) as
++# /work/.ci-artifacts/live-agents.json — schema aicli-live-agents/1.
++#
++# The Storefront release requires a green artifact no older than 7 days for the
++# EXACT plugin version it releases (ci/scripts/factory/live-agents-verify.php,
++# called from ci/storefront step ⓪b).
++#
++# Inputs (env, provided by ci/run stage_live_agents):
++#   LIVE_PLUGIN   plugin short name (e.g. aicliagents)
++#   LIVE_COMMIT   git HEAD sha of the plugin repo on the dev box (informational)
++#   LIVE_SERVER   test-server host the suite ran on
++# Input (file):  /work/.ci/artifacts/live-agents-run.json (the suite's --json)
++# Input (stdin): the HMAC key (hex) — piped, never argv/env on the .4 host.
++#
++# Signature: HMAC-SHA256 over the SAME canonical JSON as the release gate
++# (lg_gateCanonicalJson in ci/scripts/factory/lib-gate.php, `hmac` excluded).
++#
++# Exit: 0 = artifact written and green; 1 = artifact written but red (a FAIL,
++#       a dry run, or not the full registry); 2 = setup error.
++set -uo pipefail
++
++LIVE_KEY="$(cat || true)"
++[ -n "$LIVE_KEY" ] || { echo "live-agents-report: empty HMAC key on stdin" >&2; exit 2; }
++RUN=/work/.ci/artifacts/live-agents-run.json
++[ -s "$RUN" ] || { echo "live-agents-report: $RUN missing — the suite did not write its summary" >&2; exit 2; }
++export LIVE_KEY
++
++php -d display_errors=stderr -r '
++require "/work/.ci/scripts/factory/lib-gate.php";
++$run = json_decode((string)file_get_contents("/work/.ci/artifacts/live-agents-run.json"), true);
++if (!is_array($run) || ($run["\$schema"] ?? "") !== "aicli-live-agents-run/1") { fwrite(STDERR, "live-agents-report: run summary is not aicli-live-agents-run/1\n"); exit(2); }
++$t = (array)($run["totals"] ?? []);
++$green = ($run["status"] ?? "") === "pass" && empty($run["dry_run"]) && !empty($run["full_registry"])
++    && (int)($t["fail"] ?? 1) === 0 && ($run["plugin_version"] ?? "") !== "";
++$doc = [
++    "\$schema"       => "aicli-live-agents/1",
++    "plugin"         => (string)getenv("LIVE_PLUGIN"),
++    "plugin_version" => (string)($run["plugin_version"] ?? ""),
++    "commit"         => (string)getenv("LIVE_COMMIT"),
++    "server"         => (string)getenv("LIVE_SERVER"),
++    "host"           => (string)($run["host"] ?? ""),
++    "generated_at"   => gmdate("Y-m-d\TH:i:s\Z"),
++    "run_started_at" => (string)($run["started_at"] ?? ""),
++    "full_registry"  => !empty($run["full_registry"]),
++    "agents"         => array_map(static fn($a) => (string)($a["status"] ?? "skip"), (array)($run["agents"] ?? [])),
++    "in_use"         => (array)($run["in_use"] ?? []),
++    "totals"         => $t,
++    "status"         => $green ? "pass" : "fail",
++];
++$doc["hmac"] = hash_hmac("sha256", lg_gateCanonicalJson($doc), trim((string)getenv("LIVE_KEY")));
++@mkdir("/work/.ci-artifacts", 0775, true);
++file_put_contents("/work/.ci-artifacts/live-agents.json", json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
++printf("live-agents artifact: %s · v%s · %d agent(s) · pass %d · fail %d · skip %d (in use: %d agent(s))\n",
++    $doc["status"], $doc["plugin_version"], count($doc["agents"]), $t["pass"] ?? 0, $t["fail"] ?? 0, $t["skip"] ?? 0, count($doc["in_use"]));
++exit($green ? 0 : 1);
++'
+diff -ruN pa/ci/scripts/factory/live-agents-verify.php pb/ci/scripts/factory/live-agents-verify.php
+--- pa/ci/scripts/factory/live-agents-verify.php	1970-01-01 10:00:00.000000000 +1000
++++ pb/ci/scripts/factory/live-agents-verify.php	2026-09-24 09:30:33.471295413 +1000
+@@ -0,0 +1,72 @@
++<?php
++/**
++ * live-agents-verify.php — verify a signed live-agents artifact before a
++ * Storefront (public) release. Runs in the aicli-ci/php container via ci/php
++ * (ci/storefront step ⓪b); the HMAC key arrives on stdin.
++ *
++ *   ci/php ci/scripts/factory/live-agents-verify.php \
++ *       --file=/work/unraid-plg-<name>/.ci-artifacts/live-agents.json \
++ *       --plugin=<name> --version=<YYYY.MM.DD.XX> [--max-age-days=7] < gate.key
++ *
++ * Green means: schema aicli-live-agents/1 · HMAC valid (same canonical JSON as
++ * the release gate) · same plugin · the run tested THIS plugin version on the
++ * test server · generated within --max-age-days · the whole registry ran · no
++ * agent failed. Agents skipped because a person was using them are NOT a
++ * failure: they are printed as a `live-agents-warn:` line for the operator.
++ *
++ * Output lines: `live-agents-ok: …`, `live-agents-warn: …`, `live-agents-fail: …`.
++ * Exit: 0 green (warnings allowed) · 1 fail · 2 usage.
++ */
++declare(strict_types=1);
++require __DIR__ . '/lib-gate.php';
++
++$o = getopt('', ['file:', 'plugin:', 'version:', 'max-age-days::']);
++$file = (string)($o['file'] ?? '');
++$plugin = (string)($o['plugin'] ?? '');
++$version = (string)($o['version'] ?? '');
++$maxDays = (int)($o['max-age-days'] ?? 7);
++if ($file === '' || $plugin === '' || $version === '' || $maxDays < 1) {
++    fwrite(STDERR, "usage: live-agents-verify.php --file=PATH --plugin=NAME --version=X [--max-age-days=7] < key\n");
++    exit(2);
++}
++$fail = static function (string $why): void { echo "live-agents-fail: $why\n"; exit(1); };
++
++$key = trim((string)stream_get_contents(STDIN));
++if ($key === '') $fail('no HMAC key on stdin (fails closed)');
++if (!is_file($file)) $fail("missing — no live-agents.json at $file; run `ci/run live-agents --plugin=$plugin` after the Factory publish");
++$doc = json_decode((string)file_get_contents($file), true);
++if (!is_array($doc)) $fail('not valid JSON');
++if (($doc['$schema'] ?? '') !== 'aicli-live-agents/1') $fail('unexpected $schema "' . ($doc['$schema'] ?? '<missing>') . '"');
++foreach (['plugin', 'plugin_version', 'generated_at', 'agents', 'totals', 'status', 'hmac'] as $k) {
++    if (!array_key_exists($k, $doc)) $fail("missing field '$k'");
++}
++$copy = $doc; unset($copy['hmac']);
++if (!hash_equals(hash_hmac('sha256', lg_gateCanonicalJson($copy), $key), strtolower((string)$doc['hmac']))) {
++    $fail('badsig — HMAC mismatch (edited after signing, or the gate key changed)');
++}
++if ($doc['plugin'] !== $plugin) $fail("artifact is for plugin '{$doc['plugin']}', releasing '$plugin'");
++if ((string)$doc['plugin_version'] !== $version) {
++    $fail("the live run tested v{$doc['plugin_version']}, releasing v$version — deploy v$version to the test server and re-run `ci/run live-agents --plugin=$plugin`");
++}
++$ts = strtotime((string)$doc['generated_at']);
++if ($ts === false) $fail('generated_at is not a timestamp');
++$age = time() - $ts;
++if ($age < 0 || $age > $maxDays * 86400) {
++    $fail(sprintf('stale — generated %s (%.1f days ago, limit %d days)', $doc['generated_at'], $age / 86400, $maxDays));
++}
++if (empty($doc['full_registry'])) $fail('the run covered only a subset of agents (--agents); the release needs the whole registry');
++$t = (array)$doc['totals'];
++if ($doc['status'] !== 'pass' || (int)($t['fail'] ?? 1) !== 0) {
++    $bad = array_keys(array_filter((array)$doc['agents'], static fn($s) => $s === 'fail'));
++    $fail('red — ' . (int)($t['fail'] ?? 0) . ' failed step(s)' . ($bad ? ' in: ' . implode(', ', $bad) : ''));
++}
++$inUse = (array)($doc['in_use'] ?? []);
++if ($inUse !== []) {
++    $parts = [];
++    foreach ($inUse as $agent => $who) $parts[] = "$agent (in use by $who)";
++    echo 'live-agents-warn: ' . count($inUse) . ' agent(s) not re-tested because they were in use: ' . implode('; ', $parts) . "\n";
++}
++printf("live-agents-ok: v%s · %d agent(s) · pass %d · skip %d (%d in use) · %s (%.1f days old)\n",
++    $version, count((array)$doc['agents']), (int)($t['pass'] ?? 0), (int)($t['skip'] ?? 0),
++    (int)($t['skip_in_use'] ?? 0), $doc['generated_at'], $age / 86400);
++exit(0);
+diff -ruN pa/ci/storefront pb/ci/storefront
+--- pa/ci/storefront	2026-09-24 09:29:49.114221241 +1000
++++ pb/ci/storefront	2026-09-24 09:31:16.105288995 +1000
+@@ -103,6 +103,11 @@
+ #   54  scratch-clone assembly failed (clone / branch / commit)
+ #   55  GitHub push failed (--push)
+ #   56  CA index update/push failed (--push)
++#   57  LIVE-AGENTS gate failed (--push, no --force): <plugin>/.ci-artifacts/
++#       live-agents.json is missing / tampered / stale (>7 days) / for another
++#       plugin version / a subset run / red — run `ci/run live-agents
++#       --plugin=NAME` on the released version first. Agents skipped because a
++#       person was using them are a WARNING, never a failure.
+ set -uo pipefail
+ 
+ CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+@@ -286,6 +291,52 @@
+   ok "attestation verified — src/assets/ui clean, factory-tested.json certifies commit ${HEAD_SHA:0:12} v$VER"
+ fi
+ 
++# ---- ⓪b LIVE-AGENTS GATE — a recent green live agent lifecycle run ------------
++# The release gate never installs real agents (it would download several GB on
++# every run). A public release must still prove that every registry agent
++# installs, changes version, survives a remount and starts a workspace on a
++# machine that already has it — the 2026-09-24 "[Agent Binary Missing]" class.
++# `ci/run live-agents` signs <plugin>/.ci-artifacts/live-agents.json; this gate
++# requires it green, for THIS plugin version, the full registry, <= 7 days old.
++# Agents that were in use during the run are listed as a warning only.
++LIVE_MAX_AGE_DAYS="${LIVE_AGENTS_MAX_AGE_DAYS:-7}"
++if [ -f "$PDIR/tests/live/agent_lifecycle.sh" ]; then
++  sect "⓪b LIVE-AGENTS GATE — live-agents.json green · v$VER · full registry · <= ${LIVE_MAX_AGE_DAYS} days"
++  live_fail=""
++  LIVE_FILE="$PDIR/.ci-artifacts/live-agents.json"
++  if [ ! -f "$LIVE_FILE" ]; then
++    live_fail="live-agents-fail: missing — run \`ci/run live-agents --plugin=$PLUGIN\` after the Factory publish"
++  elif [ ! -f "$GATE_KEY_FILE" ]; then
++    live_fail="live-agents-fail: no HMAC key at $GATE_KEY_FILE (fails closed)"
++  else
++    LIVE_OUT="$("$CI_DIR/php" "$FACTORY/live-agents-verify.php" \
++      --file="/work/unraid-plg-$PLUGIN/.ci-artifacts/live-agents.json" --plugin="$PLUGIN" --version="$VER" \
++      --max-age-days="$LIVE_MAX_AGE_DAYS" < "$GATE_KEY_FILE")"
++    LIVE_RC=$?
++    printf '%s\n' "$LIVE_OUT" | sed 's/^/  /'
++    printf '%s\n' "$LIVE_OUT" | grep '^live-agents-warn:' | while IFS= read -r l; do warn "${l#live-agents-warn: }"; done
++    if [ "$LIVE_RC" -ne 0 ]; then
++      live_fail="$(printf '%s\n' "$LIVE_OUT" | grep '^live-agents-fail:' | head -1)"
++      [ -n "$live_fail" ] || live_fail="live-agents-fail: verifier exited $LIVE_RC with no reason line"
++    fi
++  fi
++  if [ -n "$live_fail" ]; then
++    if [ "$PUSH" -eq 1 ] && [ "$FORCE" -ne 1 ]; then
++      err "LIVE-AGENTS GATE FAILED: $live_fail"
++      err "Fix: ci/run live-agents --plugin=$PLUGIN   (on the released version, then re-run)"
++      err "Or, with EXPLICIT user consent after reporting the reason above: ci/storefront --plugin=$PLUGIN --push --force"
++      exit 57
++    elif [ "$PUSH" -eq 1 ]; then
++      warn "LIVE-AGENTS GATE FAILED: $live_fail"
++      warn "--force set — proceeding anyway. This must have been an explicit, informed user decision."
++    else
++      warn "LIVE-AGENTS GATE would FAIL a real push: $live_fail"
++    fi
++  else
++    ok "live-agents verified — every registry agent re-tested on v$VER within ${LIVE_MAX_AGE_DAYS} days"
++  fi
++fi
++
+ # ---- ① factory prerequisite — VERIFY, never auto-push -------------------------
+ # The ps1 auto-committed and auto-pushed to origin; this port refuses instead:
+ # the last factory publish must already be committed AND pushed (ci/publish

@@ -7,6 +7,33 @@
 # other client, so a phone and a desktop tab knocked each other off in an
 # endless loop. Leaked clients are always OLDER than a live reconnect, so
 # pruning oldest-first still fixes the 2026-06-06 reconnect leak.
+# #219: detach any tmux client whose backing ttyd is DEAD, so `window-size
+# latest` cannot size the window to a deploy leftover (the terminal renders
+# shrunk with xterm's background dots). A deploy SIGTERMs the old ttyd but its
+# tmux client lingers (setsid stops the SIGHUP). "Backing ttyd is dead" = no live
+# `ttyd` process anywhere in the client process's ancestry; a genuine second live
+# browser (its own live ttyd) is kept. If no live ttyd can be found at all
+# (pgrep unavailable / renamed) the whole pass is skipped, so we never detach
+# every client. Separate from prune_excess_tmux_clients (which caps by count) so
+# each stays independently testable.
+detach_dead_ttyd_clients() {
+    local session="$1" live_ttyds cpid ctty walk hops alive
+    live_ttyds="$(pgrep -x ttyd 2>/dev/null | tr '\n' ' ')"
+    [ -n "$live_ttyds" ] || return 0
+    while IFS= read -r line; do
+        cpid="${line%% *}"; ctty="${line#* }"
+        [ -n "$cpid" ] && [ -n "$ctty" ] && [ "$cpid" != "$ctty" ] || continue
+        walk="$cpid"; hops=0; alive=0
+        while [ -n "$walk" ] && [ "$walk" != "1" ] && [ "$hops" -lt 12 ]; do
+            case " $live_ttyds " in *" $walk "*) alive=1; break ;; esac
+            walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')"
+            hops=$(( hops + 1 ))
+        done
+        [ "$alive" -eq 1 ] || tmux detach-client -t "$ctty" 2>/dev/null
+    done <<< "$(tmux list-clients -t "$session" -F '#{client_pid} #{client_tty}' 2>/dev/null)"
+    return 0
+}
+
 prune_excess_tmux_clients() {
     local session="$1" limit="${2:-4}" keep list total drop client_tty
     keep=$(( limit - 1 ))
@@ -26,5 +53,6 @@ prune_excess_tmux_clients() {
 # so a phone would squash a desktop tab. 'latest' sizes to the client most
 # recently used.
 tmux set-option -t "$SESSION" window-size latest 2>/dev/null
+detach_dead_ttyd_clients "$SESSION"
 prune_excess_tmux_clients "$SESSION" "${AICLI_MAX_TMUX_CLIENTS:-4}"
 exec tmux -u attach-session -t "$SESSION" 2>>"$DEBUG_LOG"

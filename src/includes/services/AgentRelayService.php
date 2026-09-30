@@ -130,11 +130,12 @@ class AgentRelayService {
      * the generic agent topic (without that an "always on" relay still delivers
      * nothing and looks broken).
      *
-     * The external endpoint is on by default too, at the administrator's
-     * explicit direction. It is TLS-only, follows Unraid's own certificate (see
-     * unraidSslProfile()), requires a 64-hex bearer token that is minted
-     * automatically on first use, and is rate limited per source address. Note
-     * this is the one Relay surface reachable without an Unraid login.
+     * The external endpoint is deliberately OFF until the administrator saves
+     * the setting on. It is the one Relay surface reachable without an Unraid
+     * login, so a fresh install must neither bind a port nor mint a bearer key.
+     * Once explicitly enabled it is TLS-only, follows Unraid's own certificate
+     * (see unraidSslProfile()), requires a 64-hex bearer token, and is rate
+     * limited per source address.
      *
      * array_merge means a value the administrator has explicitly written always
      * wins; the defaults apply only to keys that were never set.
@@ -146,7 +147,35 @@ class AgentRelayService {
     // file and reused this one. See legacyAutoContinueOnRestartIfStored() below
     // for the one-time migration read of a value an operator saved here before
     // the move; a fresh Relay install no longer advertises this key at all.
-    private static function settings(): array { $defaults=['schema'=>self::SCHEMA, 'notifications_mirrored'=>true, 'mcp_enabled'=>true, 'direct_messages_enabled'=>true, 'http_listener_enabled'=>true]; return array_merge($defaults,self::readJson(self::path('settings.json'),$defaults)); }
+    private static function settings(): array {
+        $defaults = [
+            'schema' => self::SCHEMA,
+            'notifications_mirrored' => true,
+            'mcp_enabled' => true,
+            'direct_messages_enabled' => true,
+            'http_listener_enabled' => false,
+            'http_listener_consent' => false,
+            // RELAY_LINKED_BOXES.md: the linked-boxes master switch. Off until the
+            // administrator turns it on, and it needs the listener consent too.
+            'peer_links_enabled' => false,
+        ];
+        $raw = self::readJson(self::path('settings.json'), []);
+        $settings = array_merge($defaults, $raw);
+
+        // Prior releases shipped the external listener enabled by default and
+        // had no consent marker. Treat that state as legacy intent, not as
+        // consent: persist the safe disabled state before any caller can start
+        // the listener or mint a new bearer key.
+        if (array_key_exists('http_listener_enabled', $raw)
+            && !array_key_exists('http_listener_consent', $raw)
+            && !empty($raw['http_listener_enabled'])) {
+            $settings['http_listener_enabled'] = false;
+            $settings['http_listener_consent'] = false;
+            $settings['http_listener_migration_pending'] = true;
+            AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        }
+        return $settings;
+    }
     /** Mirroring is on or off; the destination is fixed (see NOTIFICATION_TOPIC). */
     public static function notificationsMirrored(): bool {
         $s = self::settings();
@@ -168,6 +197,25 @@ class AgentRelayService {
     }
     public static function mcpEnabled(): bool { return !empty(self::settings()['mcp_enabled']); }
     public static function directMessagesEnabled(): bool { return !empty(self::settings()['direct_messages_enabled']); }
+    /**
+     * RELAY_LINKED_BOXES.md R1: linked boxes work only when the administrator
+     * turned on the listener (consent) AND the linked-boxes switch.
+     */
+    public static function peerLinksEnabled(): bool {
+        $s = self::settings();
+        return !empty($s['peer_links_enabled']) && !empty($s['http_listener_consent']);
+    }
+    /** The stored switch alone, for the Manager (it shows "on, but the listener is off"). */
+    public static function peerLinksSwitch(): bool { return !empty(self::settings()['peer_links_enabled']); }
+    public static function setPeerLinksEnabled(bool $enabled): array {
+        if ($enabled && !self::httpListenerConsented()) {
+            return ['status'=>'error','message'=>'Turn on "Allow other machines to connect" and apply it first. Linked boxes use the same listener.'];
+        }
+        $settings = self::settings(); $settings['peer_links_enabled'] = $enabled;
+        if (!AtomicWriteService::writeJson(self::path('settings.json'), $settings)) return ['status'=>'error','message'=>'Could not save the linked-boxes setting.'];
+        if ($enabled) RelayPeerStore::boxId();   // mint the box identity at first use (spec §1)
+        return ['status'=>'ok','enabled'=>$enabled];
+    }
     /**
      * CONTINUE_ON_RESTART.md (2026-09-09): migration seam for the relocation of
      * auto_continue_on_restart to ConfigService. ConfigService::autoContinueOnRestart()
@@ -276,12 +324,17 @@ class AgentRelayService {
                 'vault_key' => (string)($r['vault_key'] ?? self::remoteVaultKey($id)),
                 'created_at' => (string)($r['created_at'] ?? ''),
                 'last_seen_at' => (string)($r['last_seen_at'] ?? ''),
+                // RELAY_LINKED_BOXES.md §6 migration: a row with no grants gets
+                // exactly today's EXTERNAL_TOOLS scope and 30 requests a minute.
+                'grants' => RelayGrants::normalise(RelayGrants::KIND_REMOTE, is_array($r['grants'] ?? null) ? $r['grants'] : null),
+                'rate_per_min' => RelayGrants::normaliseRate(RelayGrants::KIND_REMOTE, $r['rate_per_min'] ?? null),
             ];
         }
         $legacyId = self::cleanId((string)($settings['http_session_id'] ?? ''));
         $legacyHash = (string)($settings['http_token_hash'] ?? '');
         if ($legacyId !== '' && $legacyHash !== '' && !array_filter($out, static fn(array $r): bool => $r['id'] === $legacyId)) {
-            array_unshift($out, ['id' => $legacyId, 'name' => 'Remote 1', 'token_hash' => $legacyHash, 'vault_key' => self::HTTP_TOKEN_KEY, 'created_at' => '', 'last_seen_at' => '']);
+            array_unshift($out, ['id' => $legacyId, 'name' => 'Remote 1', 'token_hash' => $legacyHash, 'vault_key' => self::HTTP_TOKEN_KEY, 'created_at' => '', 'last_seen_at' => '',
+                'grants' => RelayGrants::defaults(RelayGrants::KIND_REMOTE), 'rate_per_min' => RelayGrants::defaultRate(RelayGrants::KIND_REMOTE)]);
         }
         return $out;
     }
@@ -306,12 +359,17 @@ class AgentRelayService {
                 'masked' => self::maskToken($token),
                 'created_at' => $r['created_at'], 'last_seen_at' => $r['last_seen_at'],
                 'online' => $seen > 0 && ($now - $seen) <= self::HTTP_CLIENT_ONLINE_S,
+                'grants' => $r['grants'], 'rate_per_min' => $r['rate_per_min'],
+                'grants_summary' => RelayGrants::summary($r['grants']),
             ];
         }
         return $out;
     }
     /** Add a remote (token returned once, stored only in the vault); with $rotateId, rotate that remote's token instead. */
     public static function createHttpClient(string $name = '', string $rotateId = ''): array {
+        if (!self::httpListenerConsented()) {
+            return ['status' => 'error', 'message' => 'Enable the external Relay endpoint before creating an access token.'];
+        }
         $settings = self::settings(); $rows = self::httpClientRows($settings); $vault = SecretService::getAgentSecrets();
         $token = bin2hex(random_bytes(32)); $rotateId = self::cleanId($rotateId);
         if ($rotateId !== '') {
@@ -325,7 +383,8 @@ class AgentRelayService {
         } else {
             if (count($rows) >= self::HTTP_CLIENT_MAX) return ['status' => 'error', 'message' => 'Too many remotes (max ' . self::HTTP_CLIENT_MAX . '). Remove one first.'];
             $id = 'remote_' . bin2hex(random_bytes(6)); $key = self::remoteVaultKey($id);
-            $rows[] = ['id' => $id, 'name' => self::cleanRemoteName($name, 'Remote ' . (count($rows) + 1)), 'token_hash' => hash('sha256', $token), 'vault_key' => $key, 'created_at' => gmdate('c'), 'last_seen_at' => ''];
+            $rows[] = ['id' => $id, 'name' => self::cleanRemoteName($name, 'Remote ' . (count($rows) + 1)), 'token_hash' => hash('sha256', $token), 'vault_key' => $key, 'created_at' => gmdate('c'), 'last_seen_at' => '',
+                'grants' => RelayGrants::defaults(RelayGrants::KIND_REMOTE), 'rate_per_min' => RelayGrants::defaultRate(RelayGrants::KIND_REMOTE)];
             $vault[$key] = $token;
         }
         if (!SecretService::saveAgentSecrets($vault) || !self::saveHttpClientRows($settings, $rows)) return ['status' => 'error', 'message' => 'Could not save the Relay remote.'];
@@ -346,7 +405,43 @@ class AgentRelayService {
         foreach ($rows as $r) { if ($r['id'] === $id) { $found = true; unset($vault[$r['vault_key']]); continue; } $kept[] = $r; }
         if (!$found) return ['status' => 'error', 'message' => 'Unknown remote.'];
         if (!SecretService::saveAgentSecrets($vault) || !self::saveHttpClientRows($settings, $kept)) return ['status' => 'error', 'message' => 'Could not remove the remote.'];
-        return ['status' => 'ok', 'id' => $id, 'remaining' => count($kept)];
+        // Phase 2 (#299): a removed remote has no authority left, so its open
+        // requests stop at once instead of keeping an actor busy.
+        $cancelled = self::cancelOpenRequests($id, null, 'remote_removed');
+        if ($cancelled !== []) self::remoteAudit($id, 'requests_cancelled', ['reason' => 'remote_removed', 'requests' => $cancelled]);
+        return ['status' => 'ok', 'id' => $id, 'remaining' => count($kept), 'cancelled_requests' => count($cancelled)];
+    }
+
+    /**
+     * Phase 2 (#299): the Permissions dialog for a remote. Never trusts the
+     * posted map: RelayGrants::normalise() drops unknown names, request topics
+     * are kept only when they are requestable NOW, and the rate is clamped.
+     * A request grant that is taken away cancels that remote's open requests on
+     * that topic (RELAY_LINKED_BOXES.md, security review threat 3).
+     */
+    public static function setRemoteGrants(string $id, array $grants, $rate): array {
+        $id = self::cleanId($id); if ($id === '') return ['status' => 'error', 'message' => 'Unknown remote.'];
+        $settings = self::settings(); $rows = self::httpClientRows($settings); $index = null;
+        foreach ($rows as $i => $r) if ($r['id'] === $id) { $index = $i; break; }
+        if ($index === null) return ['status' => 'error', 'message' => 'Unknown remote.'];
+        $clean = RelayGrants::normalise(RelayGrants::KIND_REMOTE, $grants);
+        $requestable = array_column(self::requestableTopics(), 'topic');
+        foreach (array_keys($clean) as $name) {
+            if (strpos($name, RelayGrants::REQUEST_PREFIX) !== 0) continue;
+            if (!in_array(substr($name, strlen(RelayGrants::REQUEST_PREFIX)), $requestable, true)) unset($clean[$name]);
+        }
+        $clean = RelayGrants::normalise(RelayGrants::KIND_REMOTE, $clean);   // drops request.cancel when no topic is left
+        $rate = RelayGrants::normaliseRate(RelayGrants::KIND_REMOTE, $rate);
+        $before = RelayGrants::requestTopics(['kind' => RelayGrants::KIND_REMOTE, 'grants' => $rows[$index]['grants']]);
+        $after = RelayGrants::requestTopics(['kind' => RelayGrants::KIND_REMOTE, 'grants' => $clean]);
+        $rows[$index]['grants'] = $clean; $rows[$index]['rate_per_min'] = $rate;
+        if (!self::saveHttpClientRows($settings, $rows)) return ['status' => 'error', 'message' => 'Could not save the permissions.'];
+        self::remoteAudit($id, 'grants_changed', ['grants' => array_keys($clean), 'rate_per_min' => $rate]);
+        $revoked = array_values(array_diff($before, $after));
+        $cancelled = $revoked !== [] ? self::cancelOpenRequests($id, $revoked, 'grant_revoked') : [];
+        if ($cancelled !== []) self::remoteAudit($id, 'requests_cancelled', ['reason' => 'grant_revoked', 'topics' => $revoked, 'requests' => $cancelled]);
+        return ['status' => 'ok', 'id' => $id, 'grants' => $clean, 'rate_per_min' => $rate,
+            'grants_summary' => RelayGrants::summary($clean), 'cancelled_requests' => count($cancelled)];
     }
     /**
      * At least one remote exists the moment the endpoint is switched on, so it is
@@ -383,16 +478,23 @@ class AgentRelayService {
         return ['status' => 'error', 'message' => 'No token exists for that remote yet.'];
     }
     public static function httpSessionForToken(string $token): string {
-        if ($token === '') return '';
+        return (string)(self::httpPrincipalForToken($token)['id'] ?? '');
+    }
+    /**
+     * RELAY_LINKED_BOXES.md §6: the remote that owns this bearer token as a
+     * RelayGrants principal (kind, id, grants, rate), or null when unknown.
+     */
+    public static function httpPrincipalForToken(string $token): ?array {
+        if ($token === '') return null;
         $hash = hash('sha256', $token); $settings = self::settings(); $rows = self::httpClientRows($settings);
         foreach ($rows as $i => $r) {
             if ($r['token_hash'] === '' || !hash_equals($r['token_hash'], $hash)) continue;
             // Last-used stamp, at most once a minute — keeps the hot path cheap.
             $seen = $r['last_seen_at'] !== '' ? (strtotime($r['last_seen_at']) ?: 0) : 0;
             if (time() - $seen >= 60) { $rows[$i]['last_seen_at'] = gmdate('c'); self::saveHttpClientRows($settings, $rows); }
-            return $r['id'];
+            return RelayGrants::principal(RelayGrants::KIND_REMOTE, $r);
         }
-        return '';
+        return null;
     }
     /** The configured name of a remote id, '' when the id is not a remote. */
     public static function remoteName(string $id): string {
@@ -414,25 +516,6 @@ class AgentRelayService {
         return ($srcDir ?? self::PLUGIN_SRC) . '/scripts/relay-mcp.php';
     }
 
-    /**
-     * The Relay MCP adapter belonging to the generation THIS session launched with.
-     *
-     * The session's own run script records its pin (`PLUGIN_SRC=...`), which is the
-     * only authoritative statement of which generation the session is running.
-     *
-     * @param string|null $workDir Overridable for tests.
-     */
-    public static function sessionMcpScriptPath(string $session, ?string $workDir = null): string {
-        $session = self::cleanId($session); if ($session === '') return '';
-        $dir = $workDir ?? UtilityService::getWorkDir((string)(ConfigService::getConfig()['user'] ?? 'root'));
-        $runScript = rtrim($dir, '/') . "/aicli-run-$session.sh";
-        if (!is_file($runScript)) return '';
-        $head = (string)@file_get_contents($runScript, false, null, 0, 65536);
-        // The generated script writes `export PLUGIN_SRC=...`; accept the bare form too.
-        if (!preg_match('/^(?:export\s+)?PLUGIN_SRC=(\S+)/m', $head, $m)) return '';
-        $candidate = rtrim(trim($m[1], "\"'"), '/') . '/scripts/relay-mcp.php';
-        return is_file($candidate) ? $candidate : '';
-    }
     /** Default port for the plugin-owned Relay HTTP listener (#113). */
     const HTTP_LISTENER_DEFAULT_PORT = 8237;
 
@@ -517,10 +600,14 @@ class AgentRelayService {
     public static function httpListenerSettings(): array {
         $s = self::settings();
         return [
-            'enabled' => !empty($s['http_listener_enabled']),
+            'enabled' => !empty($s['http_listener_enabled']) && !empty($s['http_listener_consent']),
             'port' => self::validPort($s['http_listener_port'] ?? null) ?? self::HTTP_LISTENER_DEFAULT_PORT,
             'bind' => self::validBind($s['http_listener_bind'] ?? null) ?? '0.0.0.0',
         ];
+    }
+    /** True only after the administrator has explicitly enabled the endpoint. */
+    public static function httpListenerConsented(): bool {
+        return !empty(self::settings()['http_listener_consent']);
     }
     /**
      * Build the endpoint from the hostname the administrator is already using
@@ -540,12 +627,16 @@ class AgentRelayService {
 
         $settings = self::settings();
         $settings['http_listener_enabled'] = $enabled;
+        $settings['http_listener_consent'] = $enabled;
         $settings['http_listener_port'] = $validPort;
         $settings['http_listener_bind'] = $validBind;
         if (!AtomicWriteService::writeJson(self::path('settings.json'), $settings)) return ['status'=>'error','message'=>'Could not save the Relay HTTP listener setting.'];
 
         // Never bring the endpoint up without a credential to reach it.
-        if ($enabled) self::ensureHttpClient();
+        if ($enabled) {
+            $client = self::ensureHttpClient();
+            if (($client['status'] ?? '') !== 'ok') return $client;
+        }
 
         $applied = self::applyHttpListener();
         if (($applied['status'] ?? '') !== 'ok') return $applied;
@@ -570,13 +661,19 @@ class AgentRelayService {
         return ['status'=>'ok'];
     }
     /**
-     * Boot hook: restore the listener when it is enabled, minting the access
-     * token first so the endpoint is never up without a way to authenticate.
+     * Boot and activation hook: bring the listener into the stored state,
+     * minting the access token first so the endpoint is never up without a way
+     * to authenticate.
+     *
+     * #331: this also runs when the listener is turned OFF. It used to return
+     * early then, so a listener left over from an older generation was never
+     * stopped: one kept 0.0.0.0:8237 open for 8 days while the setting said off.
+     * The bring-up script's `stop` now removes every listener of this plugin,
+     * from any generation, so running it when off costs one /proc scan.
      */
-    public static function ensureHttpListener(): void {
-        if (!self::httpListenerSettings()['enabled']) return;
-        self::ensureHttpClient();
-        self::applyHttpListener();
+    public static function ensureHttpListener(): array {
+        if (self::httpListenerSettings()['enabled']) self::ensureHttpClient();
+        return self::applyHttpListener();
     }
     /**
      * Running workspaces whose configuration just changed underneath them.
@@ -787,7 +884,7 @@ class AgentRelayService {
             if (!empty($d['request_file'])) {
                 $r=self::readJson(self::path((string)$d['request_file']),[]);
                 if (($r['topic'] ?? '')!==$topic || ($r['actor_session'] ?? '')!==$sessionId) continue;
-                if (!in_array((string)($r['state'] ?? ''),['pending','acked'],true)) continue;
+                if (!in_array((string)($r['state'] ?? ''),['pending','acknowledged'],true)) continue; // 'acknowledged' is the state respondRequest() writes; the old short spelling was never written (2026-09-24)
                 $rows[]=['kind'=>'request','id'=>(string)($r['id'] ?? ''),'topic'=>$topic,'created_at'=>(string)($r['created_at'] ?? ''),'_file'=>basename($f)];
             } else {
                 $m=self::readJson(self::path((string)($d['message_file'] ?? '')),[]);
@@ -823,7 +920,7 @@ class AgentRelayService {
     private static function scheduleActorNotice(string $sessionId, string $topic): void {
         $script='/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-actor-notify.php';
         if (!is_file($script)) return;
-        @shell_exec('nohup /usr/bin/php ' . escapeshellarg($script) . ' ' . escapeshellarg($sessionId) . ' ' . escapeshellarg($topic) . ' >/dev/null 2>&1 &');
+        UtilityService::spawnDetached(['/usr/bin/php', $script, $sessionId, $topic]);
     }
     public static function ensureBootActors(): array {
         $started=[]; $seen=[]; foreach ((self::actors()['actors'] ?? []) as $topic=>$actor) { $sid=is_array($actor)?self::cleanId((string)($actor['session_id'] ?? '')):self::cleanId((string)$actor); if (!$sid || isset($seen[$sid]) || (is_array($actor) && (empty($actor['start_on_boot']) || !empty($actor['paused'])))) continue;
@@ -1153,14 +1250,41 @@ class AgentRelayService {
         if ($topic === '') return ['status'=>'ok','disabled'=>true];
         return self::publish($topic, 'info', trim($subject . ': ' . $message), 'unraid-ui-notification');
     }
-    public static function request(string $sender, string $topic, string $summary, int $ackSeconds = 300, int $resolveSeconds = 1800): array {
+    /** Request states after which nothing may change the request again (RELAY_LINKED_BOXES.md Phase 2). */
+    const REQUEST_CLOSED = ['resolved', 'failed', 'cancelled'];
+    const REQUEST_ID_PATTERN = '/^req_[a-f0-9]{24}$/';
+    const CLIENT_REQUEST_ID_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/';
+
+    /**
+     * $clientRequestId (optional, #299): the caller's own id, for example an A2A
+     * task id. A repeat from the same sender returns the first request and does
+     * not wake the actor again, so a retry or a replay creates nothing.
+     * $origin: plugin-built fields for a request from a remote (origin,
+     * sender_name). Never sender-controlled text.
+     */
+    public static function request(string $sender, string $topic, string $summary, int $ackSeconds = 300, int $resolveSeconds = 1800, string $clientRequestId = '', array $origin = []): array {
         $sender=self::cleanId($sender); $actor=self::actorFor($topic);
         if ($sender==='' || $actor==='') return ['status'=>'error','message'=>'This topic has no assigned actor.'];
+        // An archived topic keeps its actor record; a request to it must still be refused
+        // (the remote path already checked this; the local path did not — 2026-09-24).
+        if (!in_array($topic, self::activeTopics(), true)) return ['status'=>'error','message'=>'This topic is not active.'];
         $summary=trim($summary); if ($summary==='' || strlen($summary)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Request summary must be 1–2048 bytes.'];
+        if ($clientRequestId!=='' && !preg_match(self::CLIENT_REQUEST_ID_PATTERN,$clientRequestId)) return ['status'=>'error','message'=>'client_request_id must be 1–128 characters: letters, digits, . _ : -'];
+        $idemFile=$clientRequestId!=='' ? self::path("requests/_idem/$sender/".hash('sha256',$clientRequestId).'.json') : '';
+        if ($idemFile!=='') {
+            $prior=(string)(self::readJson($idemFile,[])['id'] ?? '');
+            $existing=$prior!=='' ? self::requestRecord($prior) : null;
+            if ($existing!==null && ($existing['sender_session'] ?? '')===$sender) {
+                return ['status'=>'ok','id'=>$prior,'actor_session'=>(string)($existing['actor_session'] ?? ''),'ack_deadline'=>(string)($existing['ack_deadline'] ?? ''),'state'=>(string)($existing['state'] ?? ''),'duplicate'=>true];
+            }
+        }
         $ackSeconds=max(30,min(3600,$ackSeconds)); $resolveSeconds=max($ackSeconds,min(86400,$resolveSeconds));
         $created=gmdate('c'); $id='req_'.bin2hex(random_bytes(12));
         $request=['schema'=>self::SCHEMA,'id'=>$id,'topic'=>$topic,'sender_session'=>$sender,'actor_session'=>$actor,'summary'=>$summary,'state'=>'pending','created_at'=>$created,'ack_deadline'=>gmdate('c',time()+$ackSeconds),'resolve_deadline'=>gmdate('c',time()+$resolveSeconds)];
+        foreach (['origin','sender_name'] as $k) if (isset($origin[$k]) && is_string($origin[$k]) && $origin[$k]!=='') $request[$k]=$origin[$k];
+        if ($clientRequestId!=='') $request['client_request_id']=$clientRequestId;
         if (!AtomicWriteService::writeJson(self::path("requests/$id.json"),$request)) return ['status'=>'error','message'=>'Could not persist request'];
+        if ($idemFile!=='') AtomicWriteService::writeJson($idemFile,['id'=>$id,'created_at'=>$created]);
         $delivery=['schema'=>self::SCHEMA,'message_id'=>$id,'request_file'=>"requests/$id.json",'state'=>'pending','created_at'=>$created];
         AtomicWriteService::writeJson(self::path("deliveries/$actor/$id.json"),$delivery);
         self::ensureActorReady($topic);
@@ -1169,20 +1293,165 @@ class AgentRelayService {
         return $out;
     }
     public static function respondRequest(string $actor, string $id, string $state, string $note=''): array {
-        $actor=self::cleanId($actor); if (!preg_match('/^req_[a-f0-9]{24}$/',$id) || !in_array($state,['acknowledged','resolved','failed'],true)) return ['status'=>'error','message'=>'Invalid request response.'];
+        $actor=self::cleanId($actor); if (!preg_match(self::REQUEST_ID_PATTERN,$id) || !in_array($state,['acknowledged','resolved','failed'],true)) return ['status'=>'error','message'=>'Invalid request response.'];
         $file=self::path("requests/$id.json"); $r=self::readJson($file,[]);
         if (($r['actor_session'] ?? '') !== $actor) return ['status'=>'error','message'=>'Only the assigned actor can respond.'];
+        // A closed request never changes again: a cancelled request cannot be
+        // resolved, and a resolved one cannot be re-opened by a late acknowledge.
+        if (in_array((string)($r['state'] ?? ''), self::REQUEST_CLOSED, true)) return ['status'=>'error','message'=>'This request is already closed ('.$r['state'].').','state'=>$r['state']];
         if (($r['state'] ?? '')==='pending' && $state==='resolved') return ['status'=>'error','message'=>'Acknowledge the request before resolving it.'];
         $note=trim($note); if (strlen($note)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Response note must be 2048 bytes or fewer.'];
         $r['state']=$state; $r['note']=$note; $r[$state.'_at']=gmdate('c');
         return AtomicWriteService::writeJson($file,$r) ? ['status'=>'ok'] : ['status'=>'error','message'=>'Could not save response'];
     }
     public static function requestStatus(string $sender, string $id): array {
-        $sender=self::cleanId($sender); $r=self::readJson(self::path("requests/$id.json"),[]);
-        if (($r['sender_session'] ?? '') !== $sender) return ['status'=>'error','message'=>'Request not found.'];
+        $sender=self::cleanId($sender); $r=self::requestRecord($id) ?? [];
+        if ($sender==='' || ($r['sender_session'] ?? '') !== $sender) return ['status'=>'error','message'=>'Request not found.'];
         $now=time(); if (($r['state'] ?? '')==='pending' && strtotime((string)$r['ack_deadline']) < $now) $r['state']='timed_out';
         elseif (($r['state'] ?? '')==='acknowledged' && strtotime((string)$r['resolve_deadline']) < $now) $r['state']='timed_out';
         return ['status'=>'ok','request'=>$r,'needs_escalation'=>($r['state'] ?? '')==='timed_out'];
+    }
+
+    /** One request file by id, or null. The id pattern keeps any path out of the file name. */
+    public static function requestRecord(string $id): ?array {
+        if (!preg_match(self::REQUEST_ID_PATTERN,$id)) return null;
+        $r=self::readJson(self::path("requests/$id.json"),[]);
+        return ($r['id'] ?? '')===$id ? $r : null;
+    }
+
+    /**
+     * RELAY_LINKED_BOXES.md Phase 2: only the original sender may cancel, and
+     * only while the request is open (pending or acknowledged). A repeated cancel
+     * is harmless. A foreign or unknown id gets the same "not found" reply, so
+     * the call cannot probe other senders' requests. The administrator path
+     * (grant revoked, remote removed) is cancelOpenRequests().
+     */
+    public static function cancelRequest(string $sender, string $id, string $note = ''): array {
+        $sender=self::cleanId($sender); $r=self::requestRecord($id);
+        if ($sender==='' || $r===null || ($r['sender_session'] ?? '')!==$sender) return ['status'=>'error','message'=>'Request not found.'];
+        $note=trim($note); if (strlen($note)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Cancel note must be 2048 bytes or fewer.'];
+        $state=(string)($r['state'] ?? '');
+        if ($state==='cancelled') return ['status'=>'ok','id'=>$id,'state'=>'cancelled','already'=>true];
+        if (in_array($state, self::REQUEST_CLOSED, true)) return ['status'=>'error','message'=>'This request is already closed ('.$state.') and cannot be cancelled.','state'=>$state];
+        return self::markCancelled($r, 'sender', 'sender', $note) ? ['status'=>'ok','id'=>$id,'state'=>'cancelled'] : ['status'=>'error','message'=>'Could not save the cancel.'];
+    }
+
+    private static function markCancelled(array $r, string $by, string $reason, string $note = ''): bool {
+        $r['state']='cancelled'; $r['cancelled_at']=gmdate('c'); $r['cancelled_by']=$by; $r['cancel_reason']=$reason;
+        if ($note!=='') $r['cancel_note']=$note;
+        return AtomicWriteService::writeJson(self::path('requests/'.$r['id'].'.json'),$r);
+    }
+
+    /**
+     * Administrator path: cancel every OPEN request from $sender (on $topics, or
+     * on every topic when null). Used when a remote loses a request grant or is
+     * removed, so an actor never works for a principal without authority.
+     *
+     * @param string[]|null $topics
+     * @return string[] the cancelled request ids
+     */
+    public static function cancelOpenRequests(string $sender, ?array $topics, string $reason): array {
+        $sender=self::cleanId($sender); if ($sender==='') return [];
+        $out=[];
+        foreach (glob(self::path('requests/req_*.json')) ?: [] as $file) {
+            $r=self::readJson($file,[]);
+            if (($r['sender_session'] ?? '')!==$sender || !in_array((string)($r['state'] ?? ''),['pending','acknowledged'],true)) continue;
+            if ($topics!==null && !in_array((string)($r['topic'] ?? ''),$topics,true)) continue;
+            if (!preg_match(self::REQUEST_ID_PATTERN,(string)($r['id'] ?? ''))) continue;
+            if (self::markCancelled($r,'administrator',$reason)) $out[]=(string)$r['id'];
+        }
+        return $out;
+    }
+
+    /**
+     * Topics a remote may be granted (#299): active, concrete, not the managed
+     * notification topic. has_actor tells the dialog whether a request would
+     * reach anybody today.
+     *
+     * @return array<int,array{topic:string,description:string,has_actor:bool}>
+     */
+    public static function requestableTopics(): array {
+        $out=[];
+        foreach (self::topicCatalog() as $t) {
+            if (($t['state'] ?? '')!=='active' || !empty($t['subscription_only']) || !empty($t['managed'])) continue;
+            $topic=(string)$t['topic'];
+            if (!RelayGrants::validRequestTopic($topic)) continue;
+            $out[]=['topic'=>$topic,'description'=>(string)($t['description'] ?? ''),'has_actor'=>self::actorFor($topic)!==''];
+        }
+        return $out;
+    }
+
+    /**
+     * Phase 2 (#299) server enforcement for a request from a remote. The grant
+     * check comes before any request file is touched. Every refusal has the same
+     * text, so a remote cannot learn which topics exist; the audit line keeps
+     * the reason.
+     */
+    public static function remoteRequest(array $principal, string $topic, string $summary, int $ackSeconds = 300, int $resolveSeconds = 1800, string $clientRequestId = ''): array {
+        $id=self::cleanId((string)($principal['id'] ?? ''));
+        $reason='';
+        if ($id==='' || ($principal['kind'] ?? '')!==RelayGrants::KIND_REMOTE) $reason='not_remote';
+        elseif (!RelayGrants::allows($principal, RelayGrants::REQUEST_PREFIX.$topic)) $reason='no_grant';
+        elseif (!in_array($topic, array_column(self::requestableTopics(),'topic'), true)) $reason='topic_inactive';
+        elseif (self::actorFor($topic)==='') $reason='no_actor';
+        if ($reason!=='') {
+            if ($id!=='') self::remoteAudit($id,'request_refused',['topic'=>RelayGrants::validRequestTopic($topic) ? $topic : 'invalid','reason'=>$reason]);
+            return ['status'=>'error','message'=>'This Relay identity may not send requests to that topic.'];
+        }
+        $name=self::remoteName($id);
+        $result=self::request($id,$topic,$summary,$ackSeconds,$resolveSeconds,$clientRequestId,['origin'=>'remote','sender_name'=>$name!=='' ? $name : $id]);
+        if (($result['status'] ?? '')==='ok') self::remoteAudit($id, !empty($result['duplicate']) ? 'request_duplicate' : 'request_created', ['topic'=>$topic,'request'=>(string)$result['id']]);
+        return $result;
+    }
+
+    /** Status for a remote: its own request, and only while it holds the grant for the request's topic. */
+    public static function remoteRequestStatus(array $principal, string $requestId): array {
+        $id=self::cleanId((string)($principal['id'] ?? '')); $r=self::requestRecord($requestId);
+        if ($id==='' || $r===null || !RelayGrants::allows($principal, RelayGrants::REQUEST_PREFIX.(string)($r['topic'] ?? ''))) {
+            if ($id!=='' && $r!==null && ($r['sender_session'] ?? '')===$id) self::remoteAudit($id,'status_refused',['request'=>$requestId,'reason'=>'no_grant']);
+            return ['status'=>'error','message'=>'Request not found.'];
+        }
+        return self::requestStatus($id,$requestId);
+    }
+
+    /** Cancel for a remote: request.cancel, the topic grant, and the sender check in cancelRequest(). */
+    public static function remoteCancelRequest(array $principal, string $requestId, string $note = ''): array {
+        $id=self::cleanId((string)($principal['id'] ?? '')); $r=self::requestRecord($requestId);
+        $own=$r!==null && $id!=='' && ($r['sender_session'] ?? '')===$id;
+        if (!$own || !RelayGrants::allows($principal, RelayGrants::REQUEST_CANCEL) || !RelayGrants::allows($principal, RelayGrants::REQUEST_PREFIX.(string)($r['topic'] ?? ''))) {
+            if ($id!=='') self::remoteAudit($id,'cancel_refused',['request'=>$r!==null ? $requestId : 'unknown','reason'=>$own ? 'no_grant' : 'not_sender']);
+            return ['status'=>'error','message'=>'Request not found.'];
+        }
+        $result=self::cancelRequest($id,$requestId,$note);
+        $ok=($result['status'] ?? '')==='ok';
+        self::remoteAudit($id, $ok ? 'cancelled' : 'cancel_refused', ['request'=>$requestId] + ($ok ? [] : ['reason'=>'closed']));
+        return $result;
+    }
+
+    /**
+     * Durable audit line for one remote (no request text), plus one event-ledger
+     * line. The ledger is cleared at reboot; the file keeps the last 1 000 lines.
+     */
+    public static function remoteAudit(string $remoteId, string $event, array $data = []): void {
+        $remoteId=self::cleanId($remoteId); if ($remoteId==='' || !preg_match('/^[a-z_]{1,40}$/',$event)) return;
+        $f=self::path("remotes/$remoteId/audit.jsonl");
+        @mkdir(dirname($f), 0770, true);
+        @file_put_contents($f, json_encode(['at'=>gmdate('c'),'event'=>$event]+$data, JSON_UNESCAPED_SLASHES)."\n", FILE_APPEND);
+        $lines=@file($f) ?: [];
+        if (count($lines) > 1100) AtomicWriteService::write($f, implode('', array_slice($lines, -1000)));
+        try {
+            if (class_exists('\AICliAgents\Services\EventLedger')) EventLedger::append('relay.remote.'.$event, ['remote'=>$remoteId], "Relay remote $remoteId: $event", $data);
+        } catch (\Throwable $e) {
+            // The ledger never breaks a Relay call.
+        }
+    }
+
+    /** @return array<int,array<string,mixed>> newest last */
+    public static function remoteAuditTail(string $remoteId, int $n = 20): array {
+        $remoteId=self::cleanId($remoteId); if ($remoteId==='') return [];
+        $out=[];
+        foreach (array_slice(@file(self::path("remotes/$remoteId/audit.jsonl")) ?: [], -$n) as $l) { $v=json_decode($l,true); if (is_array($v)) $out[]=$v; }
+        return $out;
     }
     /** Saved workspaces available for opt-out-free, durable private conversations. */
     /**
@@ -1270,8 +1539,18 @@ class AgentRelayService {
      * discovered here — a closed workspace is swept by forgetSessionRelayTraces, and
      * this query never resurrects it as a ghost (contact-scope, #137).
      */
-    public static function agentContacts(string $sessionId): array {
-        $sessionId=self::cleanId($sessionId); $out=[]; $known=[]; $labels=[];
+    /**
+     * Contacts of one workspace. $forListing (the default) is what an agent is
+     * SHOWN — relay_list_contacts, the CLI `contacts`, the inbox. It leaves out
+     * clutter (#334): test sessions (ids starting "e2e") always, and a session
+     * known ONLY from old message history that is not running and has had no
+     * message for HISTORY_CONTACT_MAX_AGE. Saved workspaces, subscribers, topic
+     * actors, remotes and linked-box contacts are always kept. directMessage()
+     * checks a recipient against the FULL set, so a reply to a hidden history
+     * contact still works and its messages stay readable in history.
+     */
+    public static function agentContacts(string $sessionId, bool $forListing = true): array {
+        $sessionId=self::cleanId($sessionId); $out=[]; $known=[]; $labels=[]; $historyOnly=[];
         if (empty(self::settings()['direct_messages_enabled'])) return $out;
         // Discovery: registered subscribers (this is the cross-box registration
         // mechanism — a subscribed peer is a valid contact even before any DM) +
@@ -1283,7 +1562,13 @@ class AgentRelayService {
         foreach (glob(self::path('subscriptions/*.json')) ?: [] as $file) { $traceIds[]=basename($file,'.json'); }
         foreach ((self::actors()['actors'] ?? []) as $actor) { $traceIds[]=is_array($actor)?(string)($actor['session_id'] ?? ''):(string)$actor; }
         self::ensureDirectIndex();
-        foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) foreach (glob(self::path("direct/$box/*"), GLOB_ONLYDIR) ?: [] as $dir) { $traceIds[]=basename($dir); }
+        $strongIds=array_flip(array_filter(array_map(fn($i)=>self::cleanId((string)$i), $traceIds)));
+        foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) foreach (glob(self::path("direct/$box/*"), GLOB_ONLYDIR) ?: [] as $dir) {
+            $traceIds[]=basename($dir);
+            // Newest message activity for this id, from its index directories.
+            $hid=self::cleanId(basename($dir)); if ($hid==='' || isset($strongIds[$hid])) continue;
+            $historyOnly[$hid]=max($historyOnly[$hid] ?? 0, (int)@filemtime($dir));
+        }
         // Merge the live drawer into the discoverable set — see discoverableContactIds:
         // a currently-open workspace is a valid DM target the moment it exists, even
         // before it has touched the Relay (a freshly-launched SIBLING agent in the same
@@ -1307,15 +1592,66 @@ class AgentRelayService {
             $known[$rc['id']]=true; $remoteOnline[$rc['id']]=(bool)$rc['online'];
             if (!isset($labels[$rc['id']])) $labels[$rc['id']]=['name'=>$rc['name'],'agent_id'=>'remote'];
         }
+        // RELAY_LINKED_BOXES.md §4: workspaces on linked boxes, from the cached
+        // contact list only (no network call here). A remote (an MCP client) does
+        // not get them in Phase 1: a remote may not bridge into a linked box.
+        $isRemoteCaller = self::remoteName($sessionId) !== '';
+        $peerRows = $isRemoteCaller ? [] : RelayPeerService::contactRows();
+        $extra = [];
+        foreach ($peerRows as $pc) { $known[$pc['session_id']]=true; $extra[$pc['session_id']]=$pc; }
+        // Saved workspaces (drawer + managed) are never history-only.
+        foreach ($drawer as $w) { $wid=self::cleanId((string)($w['id'] ?? '')); if ($wid!=='') unset($historyOnly[$wid]); }
+        foreach (array_keys(ConfigService::getManagedWorkspaces()) as $mid) unset($historyOnly[self::cleanId((string)$mid)]);
         foreach (array_keys($known) as $id) {
             if ($id===$sessionId) continue;
+            // #351: a test session is never listed, whatever the source of its id
+            // (subscriber, drawer, history or a linked box's contact list).
+            if ($forListing && self::isTestSessionId($id)) continue;
+            if ($forListing && !isset($extra[$id]) && !isset($remoteOnline[$id]) && self::hiddenFromContactList($id, $historyOnly[$id] ?? null)) continue;
+            // A linked-box id seen only in DM history: keep it only while its link is usable.
+            if (RelayPeerService::isPeerContactId($id) && !isset($extra[$id]) && ($isRemoteCaller || !RelayPeerService::historyContactUsable($id))) continue;
+            if (isset($extra[$id])) { $out[]=$extra[$id]; continue; }
             $name=$labels[$id]['name'] ?? '';
             if ($name==='') { $n=self::dmPeerName($id); $name=$n!==''?$n:$id; } // cross-box peer name from its newest DM
             $row=['session_id'=>$id,'name'=>$name,'agent_id'=>$labels[$id]['agent_id'] ?? '','online'=>isset($remoteOnline[$id]) ? $remoteOnline[$id] : ProcessManager::isRunning($id)];
+            if (RelayPeerService::isPeerContactId($id)) $row=RelayPeerService::decorateHistoryContact($row);
             $restart=self::conversationRestart($id); if ($restart!==null) $row['fresh_context_since']=(string)$restart['restarted_at']; // DRAWER_RESTART_AS_NEW.md
             $out[]=$row;
         }
         return self::dedupeContactsByName($out);
+    }
+
+    /**
+     * #351 (docs/specs/AGENT_RELAY_POC.md "2026-09-29"): the ONE rule for a
+     * test session id. Every test suite mints its session ids with the prefix
+     * "e2e" (e2elive<hex>, e2emobterm01, e2ews…, e2epl…, e2ehb…, e2ecp…), the
+     * same anchored rule as tests/lib/e2e-sessions.sh. A linked-box contact id
+     * wraps the remote id as peer_<12 hex>__<id>, so the rule also reads the
+     * remote part. The rule reads the session ID only, never the workspace
+     * name or folder: a real workspace in a folder called "e2e-tests" has a
+     * plugin-minted id (s<random>) and stays listed.
+     */
+    public static function isTestSessionId(string $id): bool {
+        return (bool)preg_match('/^(?:peer_[a-f0-9]{12}__)?e2e[A-Za-z0-9_-]*$/', $id);
+    }
+
+    /** #334: a history-only contact with no message for this long (and not running) is not listed. */
+    const HISTORY_CONTACT_MAX_AGE = 14 * 86400;
+
+    /**
+     * #334: true when a contact is clutter in a contact LIST. A test session id
+     * (starts "e2e", the same anchored rule as tests/lib/e2e-sessions.sh) is
+     * always hidden. A session known only from DM history ($lastActivity is the
+     * newest index activity, null when the id has another source) is hidden
+     * once it is not running and its newest message is older than
+     * HISTORY_CONTACT_MAX_AGE. A linked-box history id is kept: its link state
+     * decides, as before.
+     */
+    public static function hiddenFromContactList(string $id, ?int $lastActivity, ?int $now = null): bool {
+        if (self::isTestSessionId($id)) return true;
+        if ($lastActivity === null || RelayPeerService::isPeerContactId($id)) return false;
+        if (($now ?? time()) - $lastActivity <= self::HISTORY_CONTACT_MAX_AGE) return false;
+        return !ProcessManager::isRunning($id);
     }
 
     /**
@@ -1373,16 +1709,54 @@ class AgentRelayService {
         if ($sender===$recipient) return ['status'=>'error','message'=>'Cannot send a private message to your own workspace session.'];
         if ($summary==='') return ['status'=>'error','message'=>'Empty message. Provide the message text as the final argument (1–'.self::MAX_SUMMARY.' bytes).'];
         if (strlen($summary)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Message too long: '.strlen($summary).' bytes (max '.self::MAX_SUMMARY.').'];
-        if (!array_filter(self::agentContacts($sender), fn($contact) => $contact['session_id']===$recipient)) return ['status'=>'error','message'=>'Recipient is not an available saved workspace.'];
+        if (!array_filter(self::agentContacts($sender, false), fn($contact) => $contact['session_id']===$recipient)) return ['status'=>'error','message'=>'Recipient is not an available saved workspace.'];
         if ($threadId!=='' && !preg_match('/^dm_[a-f0-9]{24}$/',$threadId)) return ['status'=>'error','message'=>'Invalid private thread.'];
         if ($threadId==='') $threadId='dm_'.bin2hex(random_bytes(12));
         // Stamp the sender's workspace name so the recipient can name this peer in
         // its contact list even when the sender lives on another box (#137).
         $id='msg_'.bin2hex(random_bytes(12)); $message=['schema'=>self::SCHEMA,'id'=>$id,'thread_id'=>$threadId,'sender_session'=>$sender,'sender_name'=>self::ownWorkspaceName($sender),'recipient_session'=>$recipient,'summary'=>$summary,'created_at'=>gmdate('c')];
-        if (!AtomicWriteService::writeJson(self::path("direct/$threadId/$id.json"),$message)) return ['status'=>'error','message'=>'Could not save private message.'];
+        // RELAY_LINKED_BOXES.md §4: a `peer_…__…` recipient is a workspace on a
+        // linked box. Keep the sender's copy here and queue it for that box.
+        if (RelayPeerService::isPeerContactId($recipient)) return RelayPeerService::sendDirect($message);
+        $envelope=self::storeAndDeliverDirect($message);
+        $note=self::freshContextNote($sender,$recipient); if ($note!==null) $envelope['recipient_context']=$note; // DRAWER_RESTART_AS_NEW.md
+        return $envelope;
+    }
+
+    /**
+     * Write one direct message to the canonical thread store and index it.
+     * Shared by local delivery, forwarded (linked-box) delivery, and the
+     * sender's own copy of a message that goes to a linked box.
+     */
+    public static function storeDirect(array $message): bool {
+        $id=(string)($message['id'] ?? ''); $threadId=(string)($message['thread_id'] ?? '');
+        if (!preg_match('/^msg_[a-f0-9]{24}$/',$id) || !preg_match('/^dm_[a-f0-9]{24}$/',$threadId)) return false;
+        if (!AtomicWriteService::writeJson(self::path("direct/$threadId/$id.json"),$message)) return false;
         // Only advance the marker when the index actually landed; a failed write must
         // leave the marker behind so the next read rebuilds it.
         if (self::indexDirectMessage($message)) self::recordDirectIndexCount();
+        return true;
+    }
+
+    /**
+     * RELAY_LINKED_BOXES.md §5: THE delivery path for a direct message to a
+     * LOCAL workspace. The local sender path and the inbound linked-box path
+     * both call this, so a forwarded message gets the same store, inbox,
+     * readiness gate, deferral, waiting pill and notice as a local one. There
+     * is no second delivery path (RegressionGuardsTest pins this).
+     *
+     * $message is fully validated by the caller: ids, sizes, sender identity.
+     */
+    /** Test seam: called with each message that enters storeAndDeliverDirect(). Null in production. */
+    public static $onStoreAndDeliver = null;
+
+    public static function storeAndDeliverDirect(array $message): array {
+        if (self::$onStoreAndDeliver !== null) (self::$onStoreAndDeliver)($message);
+        $id=(string)($message['id'] ?? ''); $threadId=(string)($message['thread_id'] ?? '');
+        $sender=self::cleanId((string)($message['sender_session'] ?? '')); $recipient=self::cleanId((string)($message['recipient_session'] ?? ''));
+        if ($sender==='' || $recipient==='') return ['status'=>'error','message'=>'Could not save private message.'];
+        if (!self::storeDirect($message)) return ['status'=>'error','message'=>'Could not save private message.'];
+        $senderName=(string)($message['sender_name'] ?? '');
         // A stored message is not a delivered message. Return status 'ok' ONLY when
         // the recipient is a live session; an offline recipient returns
         // 'recipient_offline' (delivered=false) so no caller can read status==='ok'
@@ -1396,16 +1770,52 @@ class AgentRelayService {
                 // #148: honour the real delivery status. A 'deferred' notice (pane was
                 // mid-decision) is NOT delivered yet — it is queued and re-fires on the
                 // next drain — so delivered stays false rather than falsely claiming ok.
-                $dres = TmuxService::deliverTrustedRelayDirect((string)($w['agentId'] ?? ''),$recipient,$sender,self::ownWorkspaceName($sender));
+                $dres = TmuxService::deliverTrustedRelayDirect((string)($w['agentId'] ?? ''),$recipient,$sender,$senderName);
                 if (($dres['status'] ?? '') === 'ok') $delivered = true;
                 // Carry WHY it was held so the sender can say "queued" honestly instead
                 // of guessing between queued and dropped (mvp-dmoe report, 2026-09-08).
                 elseif (($dres['status'] ?? '') === 'deferred') $deferReason = (string)($dres['reason'] ?? 'not-ready');
             }
         }
-        $envelope=self::deliveryEnvelope($online, $delivered, $id, $threadId, $deferReason);
-        $note=self::freshContextNote($sender,$recipient); if ($note!==null) $envelope['recipient_context']=$note; // DRAWER_RESTART_AS_NEW.md
-        return $envelope;
+        return self::deliveryEnvelope($online, $delivered, $id, $threadId, $deferReason);
+    }
+
+    /** The canonical copy of one direct message, or null. */
+    public static function directMessageRecord(string $threadId, string $id): ?array {
+        if (!preg_match('/^dm_[a-f0-9]{24}$/',$threadId) || !preg_match('/^msg_[a-f0-9]{24}$/',$id)) return null;
+        $m=self::readJson(self::path("direct/$threadId/$id.json"),[]);
+        return $m ?: null;
+    }
+
+    /** Every session id that has sent or received in one thread (bounded read). */
+    public static function threadParticipants(string $threadId): array {
+        if (!preg_match('/^dm_[a-f0-9]{24}$/',$threadId)) return [];
+        $out=[];
+        foreach (array_slice(glob(self::path("direct/$threadId/msg_*.json")) ?: [],0,2000) as $f) {
+            $m=self::readJson($f,[]);
+            foreach (['sender_session','recipient_session'] as $k) { $v=(string)($m[$k] ?? ''); if ($v!=='') $out[$v]=true; }
+        }
+        return array_keys($out);
+    }
+
+    /**
+     * RELAY_LINKED_BOXES.md §5: write the linked box's answer onto the sender's
+     * copy (canonical file and its _sent index entry) as remote_state, so the
+     * sender's inbox shows what happened to a forwarded message.
+     */
+    public static function setDirectRemoteState(string $threadId, string $id, string $state, string $reason = ''): bool {
+        $m=self::directMessageRecord($threadId,$id); if ($m===null) return false;
+        $patch=['remote_state'=>$state,'remote_state_at'=>gmdate('c')];
+        if ($reason!=='') $patch['remote_reason']=$reason; else unset($m['remote_reason']);
+        $m=array_merge($m,$patch);
+        $ok=AtomicWriteService::writeJson(self::path("direct/$threadId/$id.json"),$m);
+        $sender=self::cleanId((string)($m['sender_session'] ?? ''));
+        if ($sender!=='') foreach (glob(self::path("direct/_sent/$sender/*_$id.json")) ?: [] as $f) {
+            $entry=self::readJson($f,[]); if (!$entry) continue;
+            $entry=array_merge($entry,$patch); if ($reason==='') unset($entry['remote_reason']);
+            $ok=AtomicWriteService::writeJson($f,$entry) && $ok;
+        }
+        return $ok;
     }
 
     /**

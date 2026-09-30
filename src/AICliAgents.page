@@ -1,6 +1,7 @@
 Menu="Tasks"
 Title="AI CLI Agents"
 Icon="assets/icons/google-gemini.png"
+Code="f0d0"
 ---
 <?php
 /**
@@ -9,7 +10,12 @@ Icon="assets/icons/google-gemini.png"
  * Dependencies: AICliAgentsManager.php, TerminalStyles, UploadOverlay, TerminalScripts.
  * </module_context>
  */
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+// Forgejo #367: pin this request to ONE plugin generation (see AICliAjax.php).
+if (!defined('AICLI_GEN_SRC')) {
+    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+}
+require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
 aicli_ensure_init(true);
 
 $config = getAICliConfig();
@@ -50,7 +56,10 @@ $csrf_token = $var['csrf_token'] ?? '';
 $aicli_home = dirname(\AICliAgents\Services\ConfigService::getUserStatePath());
 
 // Include UI Components
-$ui_path = '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/ui';
+$ui_path = AICLI_GEN_SRC . '/includes/ui';
+// SIDEBAR_THEME_LAYOUT.md: measure Unraid's side menu first, so every fixed
+// element below already has --aicli-content-left at its first paint.
+require_once "$ui_path/ContentBox.php";
 require_once "$ui_path/TerminalStyles.php";
 require_once "$ui_path/CommonLogging.php";
 ?>
@@ -61,6 +70,11 @@ require_once "$ui_path/CommonLogging.php";
 require_once "$ui_path/UploadOverlay.php";
 ?>
 
+<?php
+// EVENT_STREAM_MULTIPLEX.md R1: the page's ONE live-update connection. Loaded
+// before the SPA bundle, the tray and voice.js, which all consume it.
+require_once "$ui_path/EventStream.php";
+?>
 <?php foreach ($css_files as $css_file): ?>
 <link rel="stylesheet" href="/plugins/unraid-aicliagents/assets/ui/<?= htmlspecialchars(basename($css_file)) ?>?v=<?= htmlspecialchars($asset_ver) ?>">
 <?php endforeach; ?>

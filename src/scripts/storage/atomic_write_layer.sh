@@ -29,9 +29,13 @@
 #   AICLI_BAKE_MANIFEST_OUT — if set, write the list of files captured in the
 #     verified layer (one relative path per line) to this file. WP #1277: lets
 #     op_bake confine the post-bake reclaim to proven-baked files.
+#   AICLI_AWL_SCRATCH_BASE — parent dir of the read-only verify mount point
+#     (default /tmp/unraid-aicliagents/scratch; unit tests use a temp dir).
 #
 # Lifecycle log events emitted:
 #   atomic_write_start, atomic_write_verify_failed, atomic_write_ok, atomic_write_failed
+#   atomic_write_source_resolved (a symlinked source was baked as its real dir),
+#   atomic_write_source_unresolved, atomic_write_empty_refused (2026-09-29)
 
 # Source canonical path resolver (for lifecycle_log) — tolerate missing.
 # Only source if not already sourced (idempotent).
@@ -50,6 +54,45 @@ fi
 # Override via MKSQUASHFS_ARGS env var.
 _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend"
 
+# _awl_resolve_source <path> — print the real directory a symlinked bake source
+# names. Fail (1, nothing printed) when it does not resolve to a directory.
+_awl_resolve_source() {
+    local src="${1:-}" real
+    real="$(readlink -f -- "$src" 2>/dev/null)" || return 1
+    [ -n "$real" ] && [ -d "$real" ] && [ ! -L "$real" ] || return 1
+    printf '%s\n' "$real"
+}
+
+# _awl_empty_output <layer_file> <source_dir> [mounted_view]
+# True (0) when the new layer holds nothing but symlinks (or nothing at all)
+# while the source it was read from holds at least one entry that is not a
+# symlink. Such a layer cannot hold the data, and publishing it would let it
+# replace real layers. That is exactly the image mksquashfs writes for a
+# symlinked source: 4096 bytes, one entry, the link itself (2026-09-29 forum
+# report). A source of only symlinks, or an empty source, gives such a layer
+# correctly. The layer is listed with unsquashfs when it can be, else through
+# [mounted_view] (the read-only verify mount). When neither can list it, the
+# layer counts as not empty: the readability verify stays the gate then.
+_awl_empty_output() {
+    local layer="${1:-}" src="${2:-}" view="${3:-}" listing
+    [ -d "$src" ] || return 1
+    [ -n "$(find "$src" -mindepth 1 ! -type l -print -quit 2>/dev/null)" ] || return 1
+    if [ -f "$layer" ] && command -v unsquashfs >/dev/null 2>&1 \
+       && listing="$(unsquashfs -lls "$layer" 2>/dev/null)"; then
+        # -lls prints "<mode> <owner> <size> <date> <time> squashfs-root/<path>";
+        # a symlink's mode starts with "l".
+        printf '%s\n' "$listing" \
+            | awk 'index($0, " squashfs-root/") && substr($1, 1, 1) != "l" { found = 1 } END { exit found ? 0 : 1 }' \
+            && return 1
+        return 0
+    fi
+    if [ -n "$view" ] && [ -d "$view" ]; then
+        [ -n "$(find "$view" -mindepth 1 ! -type l -print -quit 2>/dev/null)" ] && return 1
+        return 0
+    fi
+    return 1
+}
+
 # atomic_write_layer <type> <id> <persist_path> <upper_dir> <kind>
 atomic_write_layer() {
     local type="${1:-}"
@@ -66,6 +109,25 @@ atomic_write_layer() {
     if [ "$kind" != "delta" ] && [ "$kind" != "consolidated" ]; then
         echo "[atomic_write_layer] ERROR: kind must be 'delta' or 'consolidated', got: $kind" >&2
         return 1
+    fi
+    # 2026-09-29 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-29 — a
+    # consolidate reads the real directory, never the stable name"): mksquashfs
+    # does NOT follow a symlink given as its source. It packs the link alone,
+    # a 4096-byte image with one entry, and that image then replaced a real
+    # agent layer (forum report: antigravity-cli, five times). Resolve a
+    # symlinked source to the real directory it names, and say so.
+    if [ -L "$upper_dir" ]; then
+        local _awl_real
+        _awl_real="$(_awl_resolve_source "$upper_dir")" || {
+            echo "[atomic_write_layer] ERROR: source $upper_dir is a symlink that does not resolve to a directory — refusing to bake" >&2
+            lifecycle_log "error" "atomic_write_layer" "atomic_write_source_unresolved" \
+                "{\"type\":\"$type\",\"id\":\"$id\",\"source\":\"$upper_dir\"}" 2>/dev/null || true
+            return 1
+        }
+        echo "[atomic_write_layer] WARNING: source $upper_dir is a symlink — baking the real directory $_awl_real" >&2
+        lifecycle_log "warn" "atomic_write_layer" "atomic_write_source_resolved" \
+            "{\"type\":\"$type\",\"id\":\"$id\",\"source\":\"$upper_dir\",\"real\":\"$_awl_real\"}" 2>/dev/null || true
+        upper_dir="$_awl_real"
     fi
     if [ ! -d "$upper_dir" ]; then
         echo "[atomic_write_layer] ERROR: upper_dir does not exist: $upper_dir" >&2
@@ -169,7 +231,8 @@ atomic_write_layer() {
         echo "[atomic_write_layer] sha256=$sha256 bytes=$byte_count" >&2
 
         # ----- Step 5: Verify readability via RO mount on scratch mountpoint ----
-        local scratch_mnt="/tmp/unraid-aicliagents/scratch/atomic-verify-${pid}-${epoch}"
+        # AICLI_AWL_SCRATCH_BASE: a unit test puts the verify mount point in its own temp dir.
+        local scratch_mnt="${AICLI_AWL_SCRATCH_BASE:-/tmp/unraid-aicliagents/scratch}/atomic-verify-${pid}-${epoch}"
         mkdir -p "$scratch_mnt" 2>/dev/null || {
             echo "[atomic_write_layer] ERROR: cannot create scratch mount dir: $scratch_mnt" >&2
             exit 1
@@ -196,6 +259,16 @@ atomic_write_layer() {
                 echo "[atomic_write_layer] Verify: readability check passed" >&2
             fi
 
+            # 2026-09-29: never publish a layer that holds nothing while its
+            # source holds something (a symlinked source, or any other short
+            # read). The tempfile is removed by the trap; nothing is renamed.
+            if [ "$verify_ok" -eq 1 ] && _awl_empty_output "$tmp_path" "$upper_dir" "$scratch_mnt"; then
+                verify_ok=0
+                echo "[atomic_write_layer] ERROR: the new layer holds nothing but symlinks, but the source $upper_dir holds data — refusing it" >&2
+                lifecycle_log "error" "atomic_write_layer" "atomic_write_empty_refused" \
+                    "{\"type\":\"$type\",\"id\":\"$id\",\"kind\":\"$kind\",\"final\":\"$final_name\",\"bytes\":$byte_count,\"source\":\"$upper_dir\"}" 2>/dev/null || true
+            fi
+
             # WP #1277 (bake-confirmed reclaim): if the caller asked for a baked-
             # file manifest, emit the FULL list of regular files actually present
             # in the verified layer, relative to the bake root. This is the
@@ -211,7 +284,15 @@ atomic_write_layer() {
                 done > "$AICLI_BAKE_MANIFEST_OUT" 2>/dev/null || true
             fi
 
-            umount -l "$scratch_mnt" 2>/dev/null || umount "$scratch_mnt" 2>/dev/null || true
+            # GH #9: lazy-FIRST detached the verify mount while `find` (above) or
+            # a reader could still hold it, pinning the loop to the layer file for
+            # as long as the holder lived — even after a consolidate deleted the
+            # file. Real umount first; lazy only as a logged last resort.
+            if declare -f _umount_real_or_detach_logged >/dev/null 2>&1; then
+                _umount_real_or_detach_logged "$scratch_mnt" "verify scratch" 5 || true
+            else
+                umount "$scratch_mnt" 2>/dev/null || umount -l "$scratch_mnt" 2>/dev/null || true
+            fi
         else
             # Mount failed — squashfs is corrupt or empty-but-mountable depends on kernel.
             # If mksquashfs wrote 0 files (truly empty upper), the sqsh will mount OK.

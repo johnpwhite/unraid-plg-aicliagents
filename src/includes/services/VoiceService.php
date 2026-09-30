@@ -10,7 +10,11 @@
  *     `POST {tts_url}/v1/audio/speech` (the OpenAI audio API shape Kokoro-FastAPI and
  *     its siblings already speak), writes the clip to tmpfs, and publishes
  *     {mode:"audio", clipId, url, ...} — `url` is the plugin's own `voice_clip` AJAX
- *     action, so the engine URL and any API key never reach a browser.
+ *     action, so the engine URL and any API key never reach a browser. If the
+ *     configured engine fails or times out, the same call publishes a browser-speech
+ *     fallback instead of dropping the notice; the failure remains recorded for
+ *     HealthService. The audio payload includes its capped text so a browser can
+ *     recover if the clip request itself fails later.
  *     docs/specs/VOICE_SWITCHES.md adds two on/off switches `speak()` checks before
  *     any of the above: the global `voice_enabled` config key, and a per-workspace
  *     `voice` field on the caller's own workspace record. Either switch off refuses
@@ -139,6 +143,13 @@ class VoiceService {
     /** R5/R6: the engine HTTP call's hard timeout, in seconds. */
     private const CURL_TIMEOUT_S = 20;
 
+    /**
+     * AGENT_VOICE.md R3/R14: the shape of an engine voice id. The same rule as the
+     * Settings `tts_voice` field (AdminService::SETTINGS_ALLOWLIST), used for the
+     * per-workspace voice and for a replay's stored voice.
+     */
+    public const VOICE_ID_PATTERN = '/^[a-z][a-z0-9_]{0,63}$/';
+
     /** Test seam: overrides RUNTIME_DIR. Null uses the real path. */
     public static ?string $dir = null;
 
@@ -147,6 +158,17 @@ class VoiceService {
 
     /** Test seam: callable(): int returning "now" (epoch seconds). Null uses time(). */
     public static $now = null;
+
+    /**
+     * Test seam for the dictation Enter (VOICE_INPUT.md, 2026-09-29): an array
+     * with optional callables `gate(agentId, workspaceId): array{ready,reason}`
+     * and `enter(agentId, workspaceId): array{status,...}`. Null (or a missing
+     * key) uses the real TmuxService call. There is no live tmux in the test
+     * container, so this is how a test proves "Enter when ready, hold when busy".
+     *
+     * @var array<string,callable>|null
+     */
+    public static $tmux = null;
 
     /** Resolved runtime dir (RUNTIME_DIR unless a test set $dir). */
     public static function dir(): string {
@@ -224,7 +246,7 @@ class VoiceService {
      * events ledger.
      */
     public static function publishState(bool $enabled): void {
-        NchanService::publish('voice', ['mode' => 'state', 'enabled' => $enabled]);
+        EventBus::publish('voice', [], ['mode' => 'state', 'enabled' => $enabled]);
     }
 
     /**
@@ -241,6 +263,50 @@ class VoiceService {
             if (is_array($w) && (string)($w['id'] ?? '') === $id) return $w;
         }
         return null;
+    }
+
+    // ------------------------------------------------------------------
+    // Per-workspace voice — AGENT_VOICE.md R14 (Forgejo #377)
+    // ------------------------------------------------------------------
+
+    /** True when $voice has the shape of an engine voice id (VOICE_ID_PATTERN). */
+    public static function isValidVoiceId(string $voice): bool {
+        return (bool)preg_match(self::VOICE_ID_PATTERN, $voice);
+    }
+
+    /**
+     * The workspace's own voice id, or '' when it has none. A stored value with a
+     * wrong shape (a hand-edited file) is ignored, so the default applies and
+     * speaking never breaks.
+     */
+    public static function workspaceVoiceFor(?array $workspace): string {
+        if ($workspace === null) return '';
+        $voice = trim((string)($workspace['tts_voice'] ?? ''));
+        return ($voice !== '' && self::isValidVoiceId($voice)) ? $voice : '';
+    }
+
+    /**
+     * Set (or clear, with '') one workspace's voice id. Saves the FULL record, like
+     * VoiceMailService::setSpokenName(). Returns ['voice' => ...] or ['error' => ...].
+     */
+    public static function setWorkspaceVoice(string $workspaceId, string $voice): array {
+        try {
+            $voice = trim($voice);
+            if ($voice !== '' && !self::isValidVoiceId($voice)) {
+                return ['error' => "'$voice' is not a valid voice id. Use lowercase letters, digits and underscores, starting with a letter (for example af_heart)."];
+            }
+            $record = self::findWorkspace($workspaceId);
+            if ($record === null) {
+                return ['error' => 'That workspace no longer exists.'];
+            }
+            $record['tts_voice'] = $voice;
+            if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
+                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the voice.'];
+            }
+            return ['voice' => $voice];
+        } catch (\Throwable $e) {
+            return ['error' => 'Could not save the voice.'];
+        }
     }
 
     /** The speech (TTS) engine API key, or '' when none is stored. Never returned by any tool/AJAX result. */
@@ -279,9 +345,9 @@ class VoiceService {
      * on at all.
      *
      * @param array{workspaceId?:string,agentId?:string,name?:string} $actorContext
-     * @return array{mode?:string,chars?:int,clipId?:string,error?:string,reason?:string}
+     * @return array{mode?:string,chars?:int,clipId?:string,error?:string,reason?:string,fallback?:bool,message?:string}
      */
-    public static function speak(string $text, array $actorContext, ?string $voice = null, bool $bypassSwitches = false): array {
+    public static function speak(string $text, array $actorContext, ?string $voice = null, bool $bypassSwitches = false, bool $publish = true): array {
         try {
             if (!$bypassSwitches) {
                 $switchConfig = ConfigService::getConfig();
@@ -294,22 +360,46 @@ class VoiceService {
                 }
                 $callerWorkspaceId = (string)($actorContext['workspaceId'] ?? '');
                 if ($callerWorkspaceId !== '') {
-                    $callerRecord = self::findWorkspace($callerWorkspaceId);
+                    // VOICE_MAIL.md R13 (Forgejo #375): resolve the id first. An agent
+                    // once passed its workspace's DISPLAY NAME as the id; it matched no
+                    // record, the default `speak` applied, and a workspace set to Voice
+                    // mail played aloud, with its messages kept under the name. A name
+                    // that exactly one workspace has now resolves to that workspace's
+                    // real id, and a name that several share takes the quietest of
+                    // their modes, so a stored mode is never overridden by a default.
+                    $resolved = VoiceMailService::resolveWorkspace($callerWorkspaceId);
+                    $callerRecord = $resolved['record'];
+                    if ($callerRecord !== null) {
+                        $realId = (string)($callerRecord['id'] ?? $callerWorkspaceId);
+                        if ($realId !== '' && $realId !== $callerWorkspaceId) {
+                            $actorContext['workspaceId'] = $realId;
+                            if ((string)($actorContext['name'] ?? '') === '') {
+                                $actorContext['name'] = (string)($callerRecord['name'] ?? '');
+                            }
+                        }
+                        $callerMode = VoiceMailService::modeFor($callerRecord);
+                    } elseif ($resolved['matches'] !== []) {
+                        $callerMode = VoiceMailService::quietestModeOf($resolved['matches']);
+                    } else {
+                        $callerMode = VoiceMailService::MODE_SPEAK;
+                    }
                     // docs/specs/VOICE_MAIL.md: the old boolean is now a three-way
                     // mode. VoiceMailService::modeFor() reads `voice: false` as `off`,
                     // so a workspace muted before voice mail existed stays refused
                     // here exactly as it always was.
-                    if ($callerRecord !== null && VoiceMailService::modeFor($callerRecord) === VoiceMailService::MODE_OFF) {
+                    if ($callerMode === VoiceMailService::MODE_OFF) {
                         return [
                             'error'  => "Voice is off for this workspace. Turn it on from the workspace's ... menu.",
                             'mode'   => 'refused',
                             'reason' => 'workspace_off',
                         ];
                     }
-                    $voiceMode = $callerRecord !== null ? VoiceMailService::modeFor($callerRecord) : VoiceMailService::MODE_SPEAK;
+                    $voiceMode = $callerMode;
+                    $workspaceRecord = $callerRecord;
                 }
             }
             $voiceMode = $voiceMode ?? VoiceMailService::MODE_SPEAK;
+            $workspaceRecord = $workspaceRecord ?? null;
 
             $text = trim($text);
             if ($text === '') {
@@ -321,6 +411,10 @@ class VoiceService {
             $workspaceId = (string)($actorContext['workspaceId'] ?? '');
             $agentId     = (string)($actorContext['agentId'] ?? '');
             $name        = (string)($actorContext['name'] ?? '');
+            // VOICE_MAIL.md R14 (Forgejo #376): a fixed intro names the workspace,
+            // "<spoken name> says:". The operator's own Test click has none.
+            $intro = $bypassSwitches ? ''
+                : VoiceMailService::introFor(VoiceMailService::spokenNameFor($workspaceRecord, $name));
 
             $dir = self::dir();
             if (!is_dir($dir)) @mkdir($dir, 0777, true);
@@ -374,14 +468,23 @@ class VoiceService {
                 // workspace demoted to voice mail is genuinely silent; the message
                 // waits as unheard until the operator chooses to play it. Audio is
                 // produced only on replay, from the stored text.
+                // AGENT_VOICE.md R14 (Forgejo #377): the workspace's own voice wins
+                // over the agent's `voice`, which wins over the Settings default. It
+                // applies to the engine only; browser speech keeps the old rule.
+                $agentVoice = ($voice !== null && trim($voice) !== '') ? trim($voice) : '';
+                $workspaceVoice = ($ttsUrl !== '' && !$bypassSwitches) ? self::workspaceVoiceFor($workspaceRecord) : '';
                 if ($voiceMode === VoiceMailService::MODE_MAIL && !$bypassSwitches) {
-                    $mailId = VoiceMailService::record($text, $actorContext, VoiceMailService::MODE_MAIL,
-                        ($voice !== null && trim($voice) !== '') ? trim($voice) : null);
+                    // R14: Voice mail keeps the voice the message would have used,
+                    // so a replay sounds like the workspace's own voice.
+                    $keptVoice = $workspaceVoice !== '' ? $workspaceVoice : ($agentVoice !== '' ? $agentVoice : null);
+                    $mailId = VoiceMailService::record($text, $actorContext, VoiceMailService::MODE_MAIL, $keptVoice);
                     @touch($lastFile, $now);
                     self::recordResult(true, 'ok', 'mail');
                     return ['mode' => 'mail', 'chars' => $chars, 'voicemailId' => $mailId];
                 }
-                $voiceId = ($voice !== null && trim($voice) !== '') ? trim($voice) : (string)($config['tts_voice'] ?? 'af_heart');
+                // The voice without the workspace's own: the agent's, else the default.
+                $baseVoiceId = $agentVoice !== '' ? $agentVoice : (string)($config['tts_voice'] ?? 'af_heart');
+                $voiceId = $workspaceVoice !== '' ? $workspaceVoice : $baseVoiceId;
                 $speed = (string)($config['tts_speed'] ?? '1.0');
                 $excerpt = self::excerpt($text);
 
@@ -397,36 +500,69 @@ class VoiceService {
                 // a different voice from the one that actually spoke.
                 $voicemailId = null;
 
-                if ($ttsUrl === '') {
-                    // R4: browser mode.
+                // Keep the browser path in one place so an engine failure has the
+                // same payload, voice-mail behaviour and rate-limit bookkeeping as
+                // an intentionally empty tts_url. `$publish` is used only by the
+                // Settings switch confirmation, which plays the returned answer
+                // directly and must not also fan it out to every open tab.
+                $publishSpeech = function (bool $fallback = false, string $fallbackMessage = '') use (
+                    $text, $voiceId, $workspaceId, $agentId, $name, $chars, $excerpt,
+                    $actorContext, $bypassSwitches, $lastFile, $now, $publish, $intro
+                ): array {
                     $voicemailId = $bypassSwitches ? null
                         : VoiceMailService::record($text, $actorContext, VoiceMailService::MODE_SPEAK, $voiceId);
                     $payload = [
                         'voicemailId' => $voicemailId,
                         'mode'        => 'speech',
                         'text'        => $text,
+                        // R14: the page speaks `intro + " " + text`; '' = no intro.
+                        'intro'       => $intro,
                         'voice'       => $voiceId,
                         'workspaceId' => $workspaceId,
                         'agentId'     => $agentId,
                         'name'        => $name,
                         'chars'       => $chars,
-                        // Ledger-facing only (R9) — a browser reads the six fields
+                        // Ledger-facing only (R9) — a browser reads the fields
                         // above and ignores the rest.
                         'engine'      => 'browser',
                         'excerpt'     => $excerpt,
                     ];
-                    NchanService::publish('voice', $payload);
+                    if ($fallback) $payload['fallback'] = true;
+                    if ($publish) EventBus::publish('voice', [], $payload);
                     @touch($lastFile, $now);
-                    self::recordResult(true, 'ok', 'speech');
-                    return ['mode' => 'speech', 'chars' => $chars, 'voicemailId' => $voicemailId];
+                    self::recordResult(!$fallback, $fallback ? $fallbackMessage : 'ok', $fallback ? 'speech-fallback' : 'speech');
+                    $result = ['mode' => 'speech', 'chars' => $chars, 'voicemailId' => $voicemailId];
+                    if ($fallback) {
+                        $result['fallback'] = true;
+                        $result['message'] = $fallbackMessage;
+                    }
+                    return $result;
+                };
+
+                if ($ttsUrl === '') {
+                    // R4: browser mode.
+                    return $publishSpeech();
                 }
 
                 // R5: engine mode.
-                $synth = self::synthesize($dir, $ttsUrl, $text, $voiceId, $speed);
+                // R14: the engine says the intro and the message as one clip.
+                $spokenText = $intro !== '' ? $intro . ' ' . $text : $text;
+                $synth = self::synthesize($dir, $ttsUrl, $spokenText, $voiceId, $speed);
+                // R14: an engine that does not know the workspace's voice answers with
+                // an HTTP error. Try once more with the voice it would use without the
+                // workspace voice. A transport error or timeout is not retried.
+                if (($synth['status'] ?? '') !== 'ok' && $workspaceVoice !== ''
+                    && $baseVoiceId !== $voiceId && (int)($synth['httpStatus'] ?? 0) >= 400) {
+                    $retry = self::synthesize($dir, $ttsUrl, $spokenText, $baseVoiceId, $speed);
+                    if (($retry['status'] ?? '') === 'ok') {
+                        $synth = $retry;
+                        $voiceId = $baseVoiceId;
+                    }
+                }
                 if (($synth['status'] ?? '') !== 'ok') {
                     $message = (string)($synth['message'] ?? 'The voice engine failed.');
                     self::recordResult(false, $message, 'audio');
-                    return ['error' => $message];
+                    return $publishSpeech(true, $message);
                 }
                 $clipId = (string)$synth['clipId'];
                 $voicemailId = $bypassSwitches ? null
@@ -444,13 +580,21 @@ class VoiceService {
                     'agentId'     => $agentId,
                     'name'        => $name,
                     'chars'       => $chars,
+                    // Needed only if the browser cannot retrieve/play the clip
+                    // and must fall back to Web Speech. The server already caps
+                    // this text at MAX_TEXT_CHARS.
+                    'text'        => $text,
+                    // R14: the clip already holds the intro; a speech fallback adds it.
+                    'intro'       => $intro,
                     'engine'      => self::hostOf($ttsUrl),
                     'excerpt'     => $excerpt,
                 ];
-                NchanService::publish('voice', $payload);
+                if ($publish) EventBus::publish('voice', [], $payload);
                 @touch($lastFile, $now);
                 self::recordResult(true, 'ok', 'audio');
-                return ['mode' => 'audio', 'chars' => $chars, 'clipId' => $clipId, 'voicemailId' => $voicemailId];
+                $result = ['mode' => 'audio', 'chars' => $chars, 'clipId' => $clipId, 'voicemailId' => $voicemailId];
+                if ($publish === false) $result['url'] = '/plugins/unraid-aicliagents/AICliAjax.php?action=voice_clip&id=' . $clipId;
+                return $result;
             } finally {
                 @flock($lockHandle, LOCK_UN);
                 fclose($lockHandle);
@@ -771,11 +915,13 @@ class VoiceService {
      * Unlike AdminService::sendInput() (which pastes nothing at all while the
      * readiness gate is closed), the paste here is UNCONDITIONAL: the
      * operator spoke this text and must see it land, even while the agent is
-     * mid-task. Only the Enter that would SUBMIT it waits for the same
+     * mid-task. Only the Enter that would SUBMIT it waits for the
      * readiness gate `AdminService::sendInput()` uses
-     * (`TmuxService::paneAcceptsInput()`) — when the pane is busy, the text
-     * still lands, `sent` is false, and the caller learns `deferred:true,
-     * reason:'busy'`.
+     * (`TmuxService::paneAcceptsInput()`), through submitGate(): since
+     * 2026-09-29 that gate does not count the operator's own typed text in
+     * the input box as busy (`TmuxService::paneAcceptsTypedSubmit()`). When
+     * the pane is busy, the text still lands, `sent` is false, and the
+     * caller learns `deferred:true, reason:'busy'`.
      *
      * docs/specs/VOICE_INPUT.md R12: when $key is not null, this is a spoken
      * KEY command ("press tab", "delete that") instead of typed text — $text
@@ -836,7 +982,7 @@ class VoiceService {
             $sent = false;
             $deferred = false;
             if ($send) {
-                $gate = TmuxService::paneAcceptsInput($agentId, $workspaceId);
+                $gate = self::submitGate($agentId, $workspaceId);
                 if ($gate['ready'] === true) {
                     $enter = TmuxService::confirmEnterAfterPaste($agentId, $workspaceId, $text);
                     $sent = ($enter['status'] ?? '') === 'ok';
@@ -859,6 +1005,109 @@ class VoiceService {
                 $message = RedactionService::redact($message);
             }
             return ['error' => 'Dictation failed: ' . $message];
+        }
+    }
+
+    /**
+     * VOICE_INPUT.md, 2026-09-29: press Enter on the dictated text that is
+     * already typed in the workspace's input box, and type nothing.
+     *
+     * A stop with "Send when I stop talking" on and no text left to type
+     * calls this. Before, the page sent the last phrase again with send=1,
+     * and dictate() pasted that phrase a second time. This path runs the
+     * same idle gate as the send path of dictate() and presses Enter only
+     * when the agent is ready. When it is busy, nothing is pressed and the
+     * caller gets `deferred:true, reason:'busy'`, exactly as the send path.
+     * One `workspace.input` ledger row records the outcome.
+     *
+     * @return array{workspaceId?:string,delivered?:bool,sent?:bool,deferred?:bool,reason?:string,chars?:int,error?:string}
+     */
+    public static function dictateSubmit(string $workspaceId): array {
+        try {
+            $workspace = self::findWorkspace($workspaceId);
+            if ($workspace === null) {
+                return ['error' => "No workspace with id '$workspaceId' was found."];
+            }
+            $agentId = (string)($workspace['agentId'] ?? '');
+            $name = (string)($workspace['name'] ?? $workspaceId);
+            if ($agentId === '') {
+                return ['error' => "Workspace '$name' has no agent on record; cannot type into it."];
+            }
+            if (!ProcessManager::isRunning($workspaceId)) {
+                return ['error' => "Workspace '$name' is not running — start it before dictating into it."];
+            }
+
+            $sent = false;
+            $deferred = false;
+            $gate = self::submitGate($agentId, $workspaceId);
+            if ($gate['ready'] === true) {
+                $enter = self::submitEnter($agentId, $workspaceId);
+                $sent = ($enter['status'] ?? '') === 'ok';
+            } else {
+                $deferred = true;
+            }
+
+            self::recordDictateSubmitLedger($workspaceId, $agentId, $name, $sent);
+
+            $result = ['workspaceId' => $workspaceId, 'delivered' => true, 'sent' => $sent, 'chars' => 0];
+            if ($deferred) {
+                $result['deferred'] = true;
+                $result['reason'] = 'busy';
+            }
+            return $result;
+        } catch (\Throwable $e) {
+            $message = $e->getMessage();
+            if (class_exists('\\AICliAgents\\Services\\RedactionService')) {
+                $message = RedactionService::redact($message);
+            }
+            return ['error' => 'Dictation failed: ' . $message];
+        }
+    }
+
+    /**
+     * The idle gate before a dictation Enter. It is the Relay gate
+     * (TmuxService::paneAcceptsInput()) with one change: the operator's own
+     * typed text in the input box does not count as busy
+     * (TmuxService::paneAcceptsTypedSubmit()). The plain gate always said
+     * busy there, so "Send when I stop talking" could never press Enter.
+     *
+     * @return array{ready:bool,reason:string}
+     */
+    private static function submitGate(string $agentId, string $workspaceId): array {
+        $seam = self::$tmux['gate'] ?? null;
+        return $seam !== null ? $seam($agentId, $workspaceId) : TmuxService::paneAcceptsTypedSubmit($agentId, $workspaceId);
+    }
+
+    /**
+     * The Enter of dictateSubmit(). No paste happened in this call, so it is
+     * not confirmEnterAfterPaste() with a phrase: TmuxService::submitTypedInput()
+     * reads the text that is on the input line now and presses Enter until
+     * that text leaves the line (the same confirm ladder).
+     *
+     * @return array{status:string,message?:string,confirmed?:?bool}
+     */
+    private static function submitEnter(string $agentId, string $workspaceId): array {
+        $seam = self::$tmux['enter'] ?? null;
+        return $seam !== null ? $seam($agentId, $workspaceId) : TmuxService::submitTypedInput($agentId, $workspaceId);
+    }
+
+    /**
+     * 2026-09-29: the ledger row of a submit-only dictation (dictateSubmit()).
+     * Same `workspace.input` kind and `source:'voice'` as the other dictation
+     * rows, with `submit:true` and whether Enter was pressed.
+     */
+    private static function recordDictateSubmitLedger(string $workspaceId, string $targetAgentId, string $name, bool $sent): void {
+        if (!class_exists('\\AICliAgents\\Services\\EventLedger')) return;
+        try {
+            $summary = $sent ? "submitted dictation in $name" : "held dictation Enter in $name (busy)";
+            EventLedger::append(
+                'workspace.input',
+                ['workspaceId' => $workspaceId, 'agentId' => $targetAgentId],
+                $summary,
+                ['source' => 'voice', 'submit' => true, 'sent' => $sent]
+            );
+        } catch (\Throwable $e) {
+            // Best-effort — a ledger failure must never undo a pressed Enter.
         }
     }
 
@@ -917,20 +1166,23 @@ class VoiceService {
      * queue cap applies, and nothing is published or recorded again: the one tab
      * that asked plays the clip. The stored voice is used when it looks like an
      * engine voice id; a message kept in browser mode falls back to tts_voice.
+     * $intro (VOICE_MAIL.md R14, "<spoken name> says:") is spoken first when given.
      *
      * @return array{mode:string,clipId?:string,message?:string}
      */
-    public static function replayClip(string $text, ?string $voice = null): array {
+    public static function replayClip(string $text, ?string $voice = null, string $intro = ''): array {
         try {
             $config = ConfigService::getConfig();
             $ttsUrl = trim((string)($config['tts_url'] ?? ''));
             if ($ttsUrl === '' || trim($text) === '') return ['mode' => 'speech'];
-            $voiceId = ($voice !== null && preg_match('/^[a-z][a-z0-9_]{0,63}$/', $voice))
+            $voiceId = ($voice !== null && self::isValidVoiceId($voice))
                 ? $voice : (string)($config['tts_voice'] ?? 'af_heart');
             $dir = self::dir();
             if (!is_dir($dir)) @mkdir($dir, 0777, true);
             self::sweepOldClips($dir);
-            $synth = self::synthesize($dir, $ttsUrl, self::capText($text), $voiceId, (string)($config['tts_speed'] ?? '1.0'));
+            // VOICE_MAIL.md R14: a replay starts with the same intro as the live message.
+            $spoken = trim($intro) !== '' ? trim($intro) . ' ' . self::capText($text) : self::capText($text);
+            $synth = self::synthesize($dir, $ttsUrl, $spoken, $voiceId, (string)($config['tts_speed'] ?? '1.0'));
             if (($synth['status'] ?? '') !== 'ok') {
                 return ['mode' => 'speech', 'message' => (string)($synth['message'] ?? 'The voice engine failed.')];
             }
@@ -944,7 +1196,7 @@ class VoiceService {
     // Engine transport (R5, R6)
     // ------------------------------------------------------------------
 
-    /** @return array{status:string,clipId?:string,message?:string} */
+    /** @return array{status:string,clipId?:string,message?:string,httpStatus?:int} */
     private static function synthesize(string $dir, string $ttsUrl, string $text, string $voiceId, string $speed): array {
         $headers = ['Content-Type: application/json'];
         $key = self::apiKey();
@@ -973,7 +1225,7 @@ class VoiceService {
             return ['status' => 'error', 'message' => "Could not reach the voice engine at $host."];
         }
         if ($status < 200 || $status > 299) {
-            return ['status' => 'error', 'message' => "The voice engine at $host returned HTTP $status."];
+            return ['status' => 'error', 'message' => "The voice engine at $host returned HTTP $status.", 'httpStatus' => $status];
         }
         $bytes = (string)($result['body'] ?? '');
         if ($bytes === '') {

@@ -27,6 +27,11 @@ BUS_PID="$RTDIR/bus.pid"
 DAEMON_PID="$RTDIR/daemon.pid"
 LOG="$RTDIR/daemon.log"
 
+# #337: the shared spawn helper — new session, stdin /dev/null, own log, no
+# inherited descriptor. Both daemons below outlive this script.
+# shellcheck source=src/scripts/aicli-detach.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts/aicli-detach.sh"
+
 [ -x "$DAEMON" ] || { echo "secret-service: daemon binary missing or not executable: $DAEMON" >&2; exit 1; }
 command -v dbus-daemon >/dev/null 2>&1 || { echo "secret-service: dbus-daemon not on PATH" >&2; exit 1; }
 
@@ -78,7 +83,9 @@ _alive "$BUS_PID" && kill "$(cat "$BUS_PID" 2>/dev/null)" 2>/dev/null
 rm -f "$SOCK" "$BUS_PID" "$DAEMON_PID" 2>/dev/null
 
 # Private session bus at a fixed, predictable address.
-dbus-daemon --session --address="$ADDR" --nopidfile --fork --print-pid >"$BUS_PID" 2>/dev/null 9>&-
+# dbus-daemon forks itself; run it with every inherited fd above 2 closed so
+# the forked bus keeps none of the caller's descriptors (#337).
+aicli_run_closed dbus-daemon --session --address="$ADDR" --nopidfile --fork --print-pid >"$BUS_PID" 2>/dev/null
 _i=0
 while [ ! -S "$SOCK" ] && [ "$_i" -lt 25 ]; do sleep 0.2; _i=$((_i + 1)); done
 [ -S "$SOCK" ] || { echo "secret-service: session bus did not start" >&2; exit 1; }
@@ -87,8 +94,7 @@ while [ ! -S "$SOCK" ] && [ "$_i" -lt 25 ]; do sleep 0.2; _i=$((_i + 1)); done
 # reused by the user's next agent launch. It writes DAEMON_PID once it owns
 # org.freedesktop.secrets, which doubles as the readiness signal below.
 mkdir -p "$(dirname "$STORE")" 2>/dev/null
-( cd / && DBUS_SESSION_BUS_ADDRESS="$ADDR" exec setsid "$DAEMON" --store "$STORE" --pidfile "$DAEMON_PID" >>"$LOG" 2>&1 ) 9>&- &
-disown 2>/dev/null || true
+DBUS_SESSION_BUS_ADDRESS="$ADDR" aicli_detach --log "$LOG" -- "$DAEMON" --store "$STORE" --pidfile "$DAEMON_PID" >/dev/null
 
 _i=0
 while [ "$_i" -lt 25 ]; do

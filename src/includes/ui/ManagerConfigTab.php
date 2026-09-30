@@ -25,6 +25,15 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Choose No to hide the AI Cli Agents tab from Unraid's top menu without removing the plugin.</div>
                         </dd>
 
+                        <dt>Persistence engine</dt>
+                        <dd>
+                            <select name="storage_backend_mode" aria-label="Persistence engine" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_backend_mode'] ?? 'layering', 'layering', _('SquashFS layers + zram (recommended)'))?>
+                                <?=mk_option($config['storage_backend_mode'] ?? 'layering', 'passthrough', _('Plain directories (advanced)'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">One setting applies to every installed agent and home. Changing it migrates all existing storage. Plain directories write directly to the selected path; removable/USB targets require an acknowledgement and SquashFS + zram is recommended to reduce wear.</div>
+                        </dd>
+
                         <dt>Logging Level</dt>
                         <dd>
                             <select name="log_level" aria-label="Logging Level" style="width: 100%;" <?=$autoSave?>>
@@ -57,12 +66,12 @@ $autoSave = 'onchange="autoSaveConfig()"';
 
                         <dt>Workspace working directory</dt>
                         <dd>
-                            <?php $cwdMode = (string)($config['workspace_cwd'] ?? 'share'); ?>
+                            <?php $cwdMode = (string)($config['workspace_cwd'] ?? 'auto'); if ($cwdMode === 'share') $cwdMode = 'auto'; ?>
                             <select name="workspace_cwd" aria-label="Workspace working directory" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($cwdMode, 'share', _('Share path (/mnt/user/…) — default'))?>
-                                <?=mk_option($cwdMode, 'pool', _('Pool path (/mnt/<pool>/…) when the share is cache-only'))?>
+                                <?=mk_option($cwdMode, 'auto', _('Automatic safe path (direct pool for cache-only shares)'))?>
+                                <?=mk_option($cwdMode, 'pool', _('Pool path when the share is cache-only (legacy explicit mode)'))?>
                             </select>
-                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The share path, the default, keeps the array from stopping while a workspace is open; the pool path runs the agent directly on the pool of a cache-only share, so the array can stop and small files are faster. Only new or reopened sessions change, and an agent that keeps a history per folder, such as Claude Code, starts a fresh history after you switch.</div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The workspace still displays and stores its /mnt/user identity, but new or reopened sessions run directly on the pool when Unraid confirms the share is cache-only. Array, mixed, remote and unresolved paths stay on their real user-share location. Existing sessions are never moved underfoot.</div>
                         </dd>
 
                         <dt>Version Check Schedule</dt>
@@ -124,6 +133,30 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <?=mk_option($autoContinue, "0", _('Off'))?>
                             </select>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">When on, a workspace continues its work by itself after a restart, upgrade, or reload it detects, never after a plain page load; on by default.</div>
+                        </dd>
+
+                        <!-- TRANSIENT_ERROR_AUTO_CONTINUE.md (#312). Same autoSaveConfig()/`save`
+                             path as the select above. -->
+                        <dt>Continue after a model error</dt>
+                        <dd>
+                            <select name="transient_error_continue" aria-label="Continue after a temporary model error" style="width: 100%;" <?=$autoSave?>>
+                                <?php $transientMode = \AICliAgents\Services\TransientErrorService::settings($config)['mode']; ?>
+                                <?=mk_option($transientMode, "recommended", _('Verified agents (default)'))?>
+                                <?=mk_option($transientMode, "all", _('All agents'))?>
+                                <?=mk_option($transientMode, "off", _('Off'))?>
+                            </select>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">When a model call fails with a temporary provider error (for example "503 overloaded") and the agent stops at its prompt, the workspace types a short Continue by itself. Verified agents: OpenCode, Kilo Code, Claude Code, Codex CLI, Gemini CLI and Qwen Code. To stop one planned continue, cancel the clock tag on the workspace.</div>
+                        </dd>
+
+                        <dt>Model error: wait and limit</dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="text" name="transient_error_backoff_minutes" aria-label="Minutes to wait before each automatic continue" value="<?=htmlspecialchars((string)($config['transient_error_backoff_minutes'] ?? '1,5,15'), ENT_QUOTES, 'UTF-8')?>" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">min, at most</span>
+                                <input type="number" name="transient_error_max_continues" aria-label="Automatic continues per error before it needs you" value="<?=htmlspecialchars((string)($config['transient_error_max_continues'] ?? '3'), ENT_QUOTES, 'UTF-8')?>" min="0" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">times</span>
+                            </div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">The wait before the first, second and third automatic continue for the same error. After the last one, the Activity tray shows that the workspace needs you.</div>
                         </dd>
 
                         <dt>Terminal User</dt>
@@ -355,8 +388,10 @@ $autoSave = 'onchange="autoSaveConfig()"';
                  `voice_enabled` through save_voice_settings and, when it
                  turns voice ON, calls window.aicliVoice.enable() (voice.js,
                  loaded once by both .page files) inside the same click so
-                 this device is unlocked and says "Voice on" — it never goes
-                 through this form's autoSaveConfig()/action=save path. The
+                 this device is unlocked; after the save, voice.js tries the
+                 configured API for the confirmation and falls back to the
+                 browser. It never goes through this form's
+                 autoSaveConfig()/action=save path. The
                  endpoint/voice/speed/key fields load and save through their
                  own get_voice_settings / save_voice_settings AJAX actions
                  (VoiceHandler), the same way the SSH Keys card above uses its
@@ -377,6 +412,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         server instead.
                     </p>
                     <dl>
+                        <?php /* AGENT_VOICE.md "#323 guided setup": the "Set up natural voice" row. */ require __DIR__ . '/VoiceSetupCard.php'; ?>
                         <dt>Voice (all devices)</dt>
                         <dd>
                             <button type="button" id="aicli-voice-toggle" class="aicli-btn-slim" onclick="aicliVoiceToggleGlobal()">
@@ -414,7 +450,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dd>
                             <div class="input-row">
                                 <input type="password" id="aicli-voice-tts-key" aria-label="Text-to-speech API key" onchange="aicliVoiceSaveField('tts_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
-                                <button type="button" id="aicli-voice-key-clear" onclick="aicliVoiceClearKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
+                                <button type="button" id="aicli-voice-key-clear" class="aicli-btn-slim" onclick="aicliVoiceClearKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Key status: <strong id="aicli-voice-key-status">unknown</strong>. Only needed when the endpoint requires one; the stored key is never shown here.</div>
                         </dd>
@@ -487,7 +523,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         <dd>
                             <div class="input-row">
                                 <input type="password" id="aicli-voice-stt-key" aria-label="Transcription API key" onchange="aicliVoiceSaveField('stt_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
-                                <button type="button" id="aicli-voice-stt-key-clear" onclick="aicliVoiceClearSttKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
+                                <button type="button" id="aicli-voice-stt-key-clear" class="aicli-btn-slim" onclick="aicliVoiceClearSttKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
                             </div>
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Key status: <strong id="aicli-voice-stt-key-status">unknown</strong>. Only needed when the endpoint requires one; the stored key is never shown here.</div>
                         </dd>
@@ -622,8 +658,9 @@ $autoSave = 'onchange="autoSaveConfig()"';
 
                 // The one global Voice switch (VOICE_SWITCHES.md R3). Turning it
                 // ON runs window.aicliVoice.enable() synchronously inside this
-                // click, so this device is unlocked and says "Voice on" — the
-                // save below is what changes the setting; every open tab
+                // click so this device is unlocked. After the save succeeds,
+                // confirm() tries the configured API voice for this tab only;
+                // the browser voice is its bounded fallback. Every open tab
                 // (including this one) repaints from the `state` message the
                 // save triggers, via applySettings()'s setState() above.
                 window.aicliVoiceToggleGlobal = function () {
@@ -632,7 +669,11 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     if (turningOn && v) v.enable();
                     aicliVoicePost('save_voice_settings', { voice_enabled: turningOn ? '1' : '0' }).then(function (r) {
                         applySettings(r);
-                        if (!(r && r.status === 'ok')) swal('Error', (r && r.message) || 'Failed to save voice settings.', 'error');
+                        if (!(r && r.status === 'ok')) {
+                            swal('Error', (r && r.message) || 'Failed to save voice settings.', 'error');
+                        } else if (turningOn && v && v.confirm) {
+                            v.confirm();
+                        }
                     }).catch(function () { swal('Error', 'Network error — could not save voice settings.', 'error'); });
                 };
 
@@ -726,6 +767,12 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     var sttUrl = ($('#aicli-voice-stt-url').val() || '').trim();
                     var sttLanguage = ($('#aicli-voice-stt-language').val() || '').trim();
                     var done = false;
+                    var timerStarted = false;
+                    // R11 live typing: voice.js sends each finished phrase at
+                    // once as {state:'recording', phrase}, and the last idle
+                    // event's `text` holds only the words still in progress.
+                    // So the result is every phrase plus that last text.
+                    var heard = [];
                     box.css('color', '').text('Listening… 3 s');
                     var onEvt = function (e) {
                         var d = (e && e.detail) || {};
@@ -733,17 +780,25 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             done = true;
                             window.removeEventListener('aicli-voice-input', onEvt);
                             box.css('color', '#f87171').text(d.error || 'Test failed.');
+                        } else if (d.state === 'recording') {
+                            if (typeof d.phrase === 'string' && d.phrase.trim()) heard.push(d.phrase.trim());
+                            // The 3 s start when the microphone really records
+                            // (after a permission prompt), not at the click.
+                            if (!timerStarted) {
+                                timerStarted = true;
+                                setTimeout(function () {
+                                    if (!done) api.stopInput();
+                                }, 3000);
+                            }
                         } else if (d.state === 'idle' && typeof d.text === 'string') {
                             done = true;
                             window.removeEventListener('aicli-voice-input', onEvt);
-                            box.css('color', '').text(d.text ? d.text : 'Nothing was recognised.');
+                            if (d.text.trim()) heard.push(d.text.trim());
+                            box.css('color', '').text(heard.length ? heard.join(' ') : 'Nothing was recognised.');
                         }
                     };
                     window.addEventListener('aicli-voice-input', onEvt);
                     api.startInput({ workspaceId: 'manager', sttUrl: sttUrl, sttLanguage: sttLanguage });
-                    setTimeout(function () {
-                        if (!done) api.stopInput();
-                    }, 3000);
                 };
 
                 window.addEventListener('aicli-voice-state', syncToggle);
@@ -756,6 +811,27 @@ $autoSave = 'onchange="autoSaveConfig()"';
                 });
             }());
             </script>
+
+            <!-- AUTO_CONTINUE_PATTERNS.md: the operator's own auto-continue patterns.
+                 Rendered by ManagerAutoContinueScripts.php through its own AJAX
+                 actions (AutoContinueHandler), like the Agent voice card. No control
+                 here has a `name`, so the settings form never saves them. -->
+            <div class="aicli-card" id="acp-card">
+                <div class="aicli-card-header"><i class="fa fa-repeat text-orange-500" aria-hidden="true"></i> Auto-continue patterns</div>
+                <div class="aicli-card-body acp-body">
+                    <p class="acp-help">The screen messages that let a workspace continue by itself: a temporary model error, or a usage quota with a retry time. Add your own pattern when an agent stops on a message the plugin does not know yet. Each change is saved at once.</p>
+                    <div class="acp-toolbar">
+                        <h3 class="acp-h" id="acp-mine-h">Your patterns</h3>
+                        <button type="button" class="aicli-btn-slim" id="acp-add"><i class="fa fa-plus" aria-hidden="true"></i> Add pattern</button>
+                    </div>
+                    <div id="acp-status" class="acp-status" aria-live="polite"></div>
+                    <ul id="acp-list" class="acp-list" aria-labelledby="acp-mine-h"></ul>
+                    <details id="acp-builtins" class="acp-details">
+                        <summary>Built-in patterns (read-only)</summary>
+                        <div id="acp-builtin-list" class="acp-builtin-list"></div>
+                    </details>
+                </div>
+            </div>
 
             <!-- PLUGIN_MANAGEMENT_TOOLS.md Phase 1: the one master switch for the
                  read-only admin MCP tool catalogue (AdminMcpTools). Saves through
@@ -937,7 +1013,24 @@ $autoSave = 'onchange="autoSaveConfig()"';
                 '.aicli-cmd-cp{all:unset !important;flex-shrink:0 !important;cursor:pointer !important;color:rgba(255,255,255,.3) !important;padding:2px 6px !important;border:0 !important;border-radius:3px !important;font-size:12px !important;background:transparent !important;transition:color .15s !important;}',
                 '.aicli-cmd-cp:hover{color:rgba(255,255,255,.8) !important;}',
                 '.aicli-help-path{font-family:monospace;font-size:11px;padding:6px 10px;background:var(--mild-background-color,#f7f9f9);border-radius:4px;border:1px solid var(--border-color,#ddd);color:var(--text-color,#333);word-break:break-all;}',
-                '.aicli-help-note{font-size:10px;color:var(--alt-text-color,#888);margin-top:12px;line-height:1.6;padding:8px 10px;border-radius:4px;border:1px solid var(--border-color,rgba(128,128,128,.15));background:var(--mild-background-color,rgba(128,128,128,.03));}'
+                '.aicli-help-note{font-size:10px;color:var(--alt-text-color,#888);margin-top:12px;line-height:1.6;padding:8px 10px;border-radius:4px;border:1px solid var(--border-color,rgba(128,128,128,.15));background:var(--mild-background-color,rgba(128,128,128,.03));}',
+                // Epic #307: at phone size every control is a 44 px touch target,
+                // the dialog scrolls instead of being cut off, and a long command
+                // wraps so the whole line can be read. Desktop is unchanged.
+                '@media (max-width:600px){',
+                '.aicli-help-backdrop{padding:12px;align-items:flex-start;overflow-y:auto;}',
+                '.aicli-help-x,.aicli-cmd-cp{min-width:44px !important;min-height:44px !important;box-sizing:border-box !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;}',
+                '.aicli-help-tab{min-height:44px !important;}',
+                '.aicli-cmd-blk{padding:0 0 0 12px;}',
+                '.aicli-cmd-txt{white-space:normal;word-break:break-all;padding:8px 0;}',
+                // Readable text: the grey and orange-on-grey labels were below
+                // the 4.5:1 contrast minimum. Orange stays on the icon and tab line.
+                '.aicli-help-hdr-title,.aicli-help-slabel,.aicli-help-note,.aicli-help-tab,.aicli-help-tab.ah-active{color:var(--text-color,#222) !important;}',
+                '.aicli-help-hdr-title i{color:var(--orange,#e68a00);}',
+                '.aicli-help-note{font-size:12px;}',
+                '.aicli-cmd-prompt{opacity:1;}',
+                '.aicli-cmd-cp{color:rgba(255,255,255,.8) !important;}',
+                '}'
             ].join('');
             document.head.appendChild(st);
         }
@@ -977,6 +1070,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
             cpBtn.type = 'button';
             cpBtn.className = 'aicli-cmd-cp';
             cpBtn.title = 'Copy';
+            cpBtn.setAttribute('aria-label', 'Copy command');
             var cpIcon = document.createElement('i');
             cpIcon.className = 'fa fa-copy';
             cpBtn.appendChild(cpIcon);
@@ -1011,7 +1105,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
         var hdrText = document.createElement('span'); hdrText.textContent = 'SSH Key Setup';
         hdrTitle.appendChild(hdrText);
         hdr.appendChild(hdrTitle);
-        var xBtn = document.createElement('button'); xBtn.type = 'button'; xBtn.className = 'aicli-help-x'; xBtn.title = 'Close';
+        var xBtn = document.createElement('button'); xBtn.type = 'button'; xBtn.className = 'aicli-help-x'; xBtn.title = 'Close'; xBtn.setAttribute('aria-label', 'Close');
         var xIcon = document.createElement('i'); xIcon.className = 'fa fa-times'; xBtn.appendChild(xIcon);
         xBtn.addEventListener('click', function () { backdrop.remove(); });
         hdr.appendChild(xBtn);
@@ -1092,8 +1186,11 @@ $autoSave = 'onchange="autoSaveConfig()"';
     }
 
     var WARN_LABEL = {
-        via_user_share:    'FUSE user share',
-        user_share:        'FUSE overhead',
+        // Bug #297: plain words, not the internal warning code. The full
+        // explanation is userShareAdvice() below — this chip is just the label.
+        via_user_share:    'on /mnt/user — see advice below',
+        user_share:        'on /mnt/user — see advice below',
+        resolved_via_share_config: 'stored on the pool, not /mnt/user',
         array_rotational:  'HDD — spins on every persist',
         posix_none:        'no symlinks/xattrs',
         facts_uncertain:   'device facts uncertain',
@@ -1104,8 +1201,11 @@ $autoSave = 'onchange="autoSaveConfig()"';
         probe_unavailable: 'probe unavailable'
     };
 
+    // Epic #307: --chip-fg carries the hue so the phone-size rule in
+    // ManagerStyles.php (.aicli-sp-chip) can mix it toward the theme's text
+    // colour for readable contrast; desktop still paints fg as before.
     function chip(text, fg, bg) {
-        return '<span style="display:inline-block; font-size:9px; padding:1px 6px; border-radius:8px; margin:1px 3px 1px 0; color:' + fg + '; background:' + bg + '; white-space:nowrap;">' + esc(text) + '</span>';
+        return '<span class="aicli-sp-chip" style="--chip-fg:' + fg + '; display:inline-block; font-size:9px; padding:1px 6px; border-radius:8px; margin:1px 3px 1px 0; color:' + fg + '; background:' + bg + '; white-space:nowrap;">' + esc(text) + '</span>';
     }
     function warnChips(warnings) {
         var html = '';
@@ -1116,6 +1216,29 @@ $autoSave = 'onchange="autoSaveConfig()"';
     }
     function errBox(msg) {
         return '<div style="padding:8px 10px; font-size:11px; color:#f87171; background:rgba(248,113,113,0.08); border-radius:4px;"><i class="fa fa-exclamation-circle"></i> ' + esc(msg) + '</div>';
+    }
+
+    /**
+     * Bug #297: the plain-English advice for a target that stays on
+     * /mnt/user (Unraid's shared-folder layer, "shfs") — shown ONLY when the
+     * path is NOT already resolved onto a direct pool path (a resolved path
+     * carries its own "will be stored as…" note instead, since its data
+     * never touches shfs). John's direction: /mnt/user stays a valid choice
+     * — this explains why to avoid it when another path is available, and
+     * says plainly that it is fine when it is the only option.
+     */
+    function userShareAdvice() {
+        return '<div style="font-size:10px; margin-top:3px; padding:6px 8px; border-radius:4px; background:rgba(234,179,8,0.10); border:1px solid rgba(234,179,8,0.35);">'
+            + '<i class="fa fa-info-circle"></i> This path uses <code>/mnt/user</code>, Unraid\'s shared-folder layer ("shfs"). '
+            + 'Heavy save or merge activity through shfs can slow down or freeze the whole server. '
+            + 'Prefer a pool path (<code>/mnt/cache/…</code>), an Unassigned Device path (<code>/mnt/disks/…</code>), '
+            + 'or a single-disk path (<code>/mnt/diskN/…</code>) when one of those is available. '
+            + '<code>/mnt/user</code> is fine to use when no other path is available to you.'
+            + '</div>';
+    }
+    /** True when $t is a genuinely still-FUSE /mnt/user target (unresolved). */
+    function isUnresolvedUserShare(t) {
+        return (t.warnings || []).indexOf('via_user_share') !== -1 && !t.note;
     }
 
     window.aicliToggleStoragePicker = function (kind) {
@@ -1140,6 +1263,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                  + chip(fmtBytes(t.free_bytes) + ' free', 'var(--alt-text-color, #888)', 'rgba(128,128,128,0.10)')
                  + warnChips(t.warnings);
         var note = t.note ? '<div style="font-size:10px; opacity:.6; margin-top:1px;"><i class="fa fa-link"></i> ' + esc(t.note) + '</div>' : '';
+        var advice = isUnresolvedUserShare(t) ? userShareAdvice() : '';
         return '<label style="display:flex; gap:8px; align-items:flex-start; padding:6px 8px; border:1px solid var(--border-color, rgba(128,128,128,0.25)); border-radius:4px; margin-bottom:4px; cursor:' + (t.refuse ? 'not-allowed' : 'pointer') + ';' + (t.refuse ? ' opacity:.55;' : '') + '">'
             + '<input type="radio" name="aicli-target-' + kind + '" value="' + esc(t.path) + '" data-picked-via="' + esc(t.picked_via || '') + '" style="margin-top:3px;"' + disabled + (t.current && !t.refuse ? ' checked' : '') + '>'
             + '<div style="flex:1; min-width:0;">'
@@ -1147,6 +1271,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
             +   '<div style="font-family:monospace; font-size:10px; opacity:.75; word-break:break-all;">' + esc(t.path) + '</div>'
             +   note
             +   '<div style="margin-top:2px;">' + meta + '</div>'
+            +   advice
             + '</div></label>';
     }
 
@@ -1198,7 +1323,13 @@ $autoSave = 'onchange="autoSaveConfig()"';
             state[kind] = { resolved: resolved };
             var html = '<span style="color:#22c55e;"><i class="fa fa-check-circle"></i> Valid target</span> ' + warnChips(warns);
             if (resolved) {
-                html += '<div style="opacity:.7; margin-top:2px;"><i class="fa fa-link"></i> Exclusive share — will be stored as <code>' + esc(resolved) + '</code></div>';
+                // Bug #297: this share's data is on one pool (either the
+                // OS-level exclusive-share bypass, or the share's own
+                // useCache="only" config) — the resolved pool path never
+                // touches /mnt/user, so no ADVICE box is needed here.
+                html += '<div style="opacity:.7; margin-top:2px;"><i class="fa fa-link"></i> This share\'s data is on one pool — will be stored as <code>' + esc(resolved) + '</code></div>';
+            } else if (warns.indexOf('via_user_share') !== -1) {
+                html += userShareAdvice();
             }
             box.html(html);
         }).fail(function () {

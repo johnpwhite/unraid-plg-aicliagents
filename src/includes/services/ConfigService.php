@@ -28,14 +28,19 @@ class ConfigService {
             'debug_logging' => '0',
             'home_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
             'agent_storage_path' => '/boot/config/plugins/unraid-aicliagents/persistence',
+            // One global storage engine for all agents and homes.  SquashFS +
+            // zram is the safe default on the boot device and removable media;
+            // changing this setting runs an explicit all-entity migration.
+            'storage_backend_mode' => 'layering',
             // #153: the former sync_interval_hours/mins keys were removed — no
             // scheduler ever read them. The automatic-save cadence is
             // bake_schedule_minutes (below), which the Configuration tab now exposes.
             'write_protect_agents' => '1',
-            // #110: where a session RUNS: 'share' (= the workspace path, today's
-            // behaviour) or 'pool' (the pool path when the share is cache-only, so
-            // the agent's cwd never holds the /mnt/user FUSE mount open).
-            'workspace_cwd' => 'share',
+            // #272/#110: automatic safe launch. The workspace identity remains
+            // the configured /mnt/user path, but cache-only shares launch from
+            // their direct pool path so agent I/O never needs shfs. The old
+            // 'share' and 'pool' values remain accepted by PoolPathService.
+            'workspace_cwd' => 'auto',
             'storage_opt_last_run' => '0',
             'enable_tab' => '1',
             'version_check_schedule' => '0 6 * * *',
@@ -103,6 +108,15 @@ class ConfigService {
             // location (including an explicit "0") is migrated the first time
             // autoContinueOnRestart() runs — see that method.
             'auto_continue_on_restart'             => '1',
+            // TRANSIENT_ERROR_AUTO_CONTINUE.md (#312): continue a workspace by itself
+            // after a TEMPORARY model/API error (5xx, overloaded, stream reset).
+            // 'recommended' = only agents whose error shape is verified
+            // (TransientErrorService::RECOMMENDED_AGENTS); 'all' | 'off'.
+            'transient_error_continue'             => 'recommended',
+            // Wait before each automatic continue of one incident, in minutes.
+            'transient_error_backoff_minutes'      => '1,5,15',
+            // Automatic continues per incident before the tray says "needs you".
+            'transient_error_max_continues'        => '3',
             // RELAY_WAITING_PILL.md (2026-09-09) Part 2/3: capture-on-deliver. Off by
             // default — the operator turns it on deliberately in Settings > Session &
             // Environment. When on, clicking Deliver on a waiting-message pill records
@@ -168,10 +182,13 @@ class ConfigService {
 
         $merged = array_merge($defaults, $config);
 
-        // Migrate legacy key: persistence_base → home_storage_path
+        // Migrate the legacy path only when the modern home key is absent. The
+        // old cfg entry may still be present on disk after an upgrade, but it is
+        // not an active setting and must not leak into settings/admin output.
         if (isset($config['persistence_base']) && !isset($config['home_storage_path'])) {
             $merged['home_storage_path'] = $config['persistence_base'];
         }
+        unset($merged['persistence_base']);
 
         return $merged;
     }
@@ -278,6 +295,12 @@ class ConfigService {
      */
     public static function saveConfig($newConfig, $notify = true) {
         LogService::log("Initiating plugin configuration update...", LogService::LOG_INFO, "ConfigService");
+
+        if (isset($newConfig['storage_backend_mode'])) {
+            $newConfig['storage_backend_mode'] = StorageBackendPolicyService::normalizeMode(
+                $newConfig['storage_backend_mode']
+            );
+        }
 
         $config = self::getConfig();
         $oldAgentPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
@@ -487,8 +510,9 @@ class ConfigService {
         // freezes and the wrapper can even hang on the dead pipe (zombie child +
         // "operation continues in background" banner). Running it detached, a few
         // seconds later, lets the wrapper finish streaming and reap cleanly first.
-        // fd 9 (the install flock) is closed so the detached child can't inherit it.
-        exec("setsid bash -c 'sleep 3; /etc/rc.d/rc.nginx reload' > /dev/null 2>&1 < /dev/null 9>&- &");
+        // #337: the shared spawn helper also closes every other inherited fd
+        // (the install flock fd 9, the installer's output pipe fd 4).
+        UtilityService::spawnDetached(['/bin/bash', '-c', 'sleep 3; /etc/rc.d/rc.nginx reload']);
         LogService::log("Nginx configuration updated; reload scheduled (detached).", LogService::LOG_DEBUG, "ConfigService");
     }
 
@@ -908,14 +932,14 @@ class ConfigService {
      * WORKSPACE_LIFECYCLE_EVENTS.md R2: publish created/updated/removed on
      * the `workspaces` channel from the diff, AFTER the write this call
      * describes has already landed on disk. Best-effort — a publish failure
-     * must never surface as a save failure; NchanService::publish() itself
+     * must never surface as a save failure; EventBus::publish() itself
      * never throws.
      */
     private static function publishWorkspaceDiff(array $beforeSessions, array $afterSessions, array $removedIds): void {
-        if (!class_exists('\\AICliAgents\\Services\\NchanService')) return;
+        if (!class_exists('\\AICliAgents\\Services\\EventBus')) return;
         $diff = self::diffWorkspaceSnapshot($beforeSessions, $afterSessions, $removedIds);
         foreach ($diff['created'] as $record) {
-            NchanService::publish('workspaces', [
+            EventBus::publish('workspace', [], [
                 'event'     => 'created',
                 'id'        => (string)($record['id'] ?? ''),
                 'agentId'   => (string)($record['agentId'] ?? ''),
@@ -925,10 +949,10 @@ class ConfigService {
             ]);
         }
         foreach ($diff['updated'] as $id => $fields) {
-            NchanService::publish('workspaces', ['event' => 'updated', 'id' => $id, 'fields' => $fields]);
+            EventBus::publish('workspace', [], ['event' => 'updated', 'id' => $id, 'fields' => $fields]);
         }
         foreach ($diff['removed'] as $id) {
-            NchanService::publish('workspaces', ['event' => 'removed', 'id' => $id]);
+            EventBus::publish('workspace', [], ['event' => 'removed', 'id' => $id]);
         }
     }
 
@@ -992,6 +1016,16 @@ class ConfigService {
                 }
                 if (!array_key_exists('createdAt', $session) && array_key_exists('createdAt', $prior)) {
                     $session['createdAt'] = $prior['createdAt'];
+                }
+                // VOICE_MAIL.md R14: a page loaded before the spoken name existed
+                // resends the record without it. Keep the stored value; a clear
+                // sends the key with ''.
+                if (!array_key_exists('spoken_name', $session) && array_key_exists('spoken_name', $prior)) {
+                    $session['spoken_name'] = $prior['spoken_name'];
+                }
+                // AGENT_VOICE.md R14: the same rule for the workspace's own voice.
+                if (!array_key_exists('tts_voice', $session) && array_key_exists('tts_voice', $prior)) {
+                    $session['tts_voice'] = $prior['tts_voice'];
                 }
             } else {
                 // A genuinely new workspace — stamp it now if the caller did not.
@@ -1413,6 +1447,49 @@ class ConfigService {
     private static function getAgentAutoLaunchFilePath(): string
     {
         return self::getUserStatePath() . "/autolaunch_agents.json";
+    }
+
+    /** SCHEDULED_CONTINUE.md (#234): per-workspace scheduled-continue sidecar,
+     *  keyed by session id, mirroring the auto-launch sidecar so a stale browser
+     *  workspaces.json save can never clobber a server-set schedule. */
+    private static function getScheduledContinueFilePath(): string
+    {
+        return self::getUserStatePath() . "/scheduled_continue.json";
+    }
+
+    /** @return array<string,array{at:int,repeat:string,message?:string,source?:string,created_at?:int,last_fired_at?:int}> */
+    public static function getScheduledContinueMap(): array
+    {
+        $file = self::getScheduledContinueFilePath();
+        if (!file_exists($file)) return [];
+        $data = json_decode((string)file_get_contents($file), true);
+        return is_array($data) ? $data : [];
+    }
+
+    /** The schedule for one workspace, or null when none is set. */
+    public static function getScheduledContinue(string $sessionId): ?array
+    {
+        $entry = self::getScheduledContinueMap()[$sessionId] ?? null;
+        return is_array($entry) ? $entry : null;
+    }
+
+    /** Upsert one workspace's schedule. Persists the whole map atomically. */
+    public static function setScheduledContinue(string $sessionId, array $entry): bool
+    {
+        if ($sessionId === '') return false;
+        $map = self::getScheduledContinueMap();
+        $map[$sessionId] = $entry;
+        return AtomicWriteService::writeJson(self::getScheduledContinueFilePath(), $map);
+    }
+
+    /** Remove one workspace's schedule. No-op if absent. */
+    public static function clearScheduledContinue(string $sessionId): void
+    {
+        if ($sessionId === '') return;
+        $map = self::getScheduledContinueMap();
+        if (!array_key_exists($sessionId, $map)) return;
+        unset($map[$sessionId]);
+        AtomicWriteService::writeJson(self::getScheduledContinueFilePath(), $map);
     }
 
     /**

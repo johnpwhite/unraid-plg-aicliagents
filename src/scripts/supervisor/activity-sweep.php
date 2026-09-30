@@ -23,7 +23,7 @@
 
 declare(strict_types=1);
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 
 \AICliAgents\Services\EventActor::$override = ['type' => 'system'];
 
@@ -62,7 +62,7 @@ exit(0);
 function aicliSweepStaleUploadParts(): void
 {
     if (!class_exists('\AICliAgents\Handlers\UtilityHandler')) {
-        require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/UtilityHandler.php';
+        require_once dirname(__DIR__, 2) . '/includes/handlers/UtilityHandler.php';
     }
     $swept = \AICliAgents\Handlers\UtilityHandler::sweepStaleUploadPartsFromIndex();
     if ($swept > 0) {

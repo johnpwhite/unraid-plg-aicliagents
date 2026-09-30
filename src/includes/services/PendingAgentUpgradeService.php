@@ -101,6 +101,13 @@ class PendingAgentUpgradeService
             'type' => 'install', 'label' => "Upgrade queued for $agentId",
             'step' => $message, 'progress' => 1,
         ]);
+        // A queued request has no install worker yet. It can legitimately wait
+        // beyond the install watchdog's hard cap while its final legacy session
+        // reaches a safe boundary, so represent that fact with ActivityService's
+        // explicit no-deadline state rather than leaving this entry `running`.
+        // wait() also repairs an activity a previous watchdog pass had already
+        // marked failed; processReady will relaunch it once the sessions are gone.
+        ActivityService::wait("install_$agentId", $message, 1);
     }
 
     /**

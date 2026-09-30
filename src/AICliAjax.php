@@ -26,28 +26,39 @@ register_shutdown_function(function() {
     }
 });
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/ValidationService.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/TerminalHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/StorageHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AgentHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/UtilityHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/TmuxHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/ArgsHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AutoLaunchHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/EnvHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/SshKeyService.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/SshHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/ActivityHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/HubHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/GitHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/DiagnosticsHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/WorkspaceBundleService.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/BundleHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AssetsHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/AgentRelayHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/VoiceHandler.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/handlers/FavouritesHandler.php';
+// Forgejo #367: pin this request to ONE plugin generation. `src` is a link
+// that an update repoints at any moment. Resolve it once, here, and load every
+// file through the result. Two includes through the link can land in two
+// generations and declare a class twice (a fatal "Cannot redeclare class").
+// clearstatcache drops a stale cached answer for the link (PHP keeps resolved
+// paths for up to 120 s in a php-fpm worker).
+if (!defined('AICLI_GEN_SRC')) {
+    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+}
+require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
+require_once AICLI_GEN_SRC . '/includes/services/ValidationService.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/TerminalHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/StorageHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/AgentHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/UtilityHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/TmuxHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/ArgsHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/AutoLaunchHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/EnvHandler.php';
+require_once AICLI_GEN_SRC . '/includes/services/SshKeyService.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/SshHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/ActivityHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/HubHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/GitHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/DiagnosticsHandler.php';
+require_once AICLI_GEN_SRC . '/includes/services/WorkspaceBundleService.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/BundleHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/AssetsHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/AgentRelayHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/VoiceHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/FavouritesHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/AutoContinueHandler.php';
 use AICliAgents\Services\ValidationService;
 
 if (isset($_GET['action'])) {
@@ -56,7 +67,7 @@ if (isset($_GET['action'])) {
     // It must bypass CSRF only for this one dedicated endpoint.
     if ($action === 'relay_http_mcp') {
         ob_end_clean();
-        require '/usr/local/emhttp/plugins/unraid-aicliagents/src/AICliRelayMcp.page';
+        require AICLI_GEN_SRC . '/AICliRelayMcp.page';
         exit;
     }
     if ($action !== 'filetree') {
@@ -134,7 +145,7 @@ if (isset($_GET['action'])) {
         // line at all at the default log level. continue_session additionally
         // records who asked (TerminalHandler::recordContinue).
         $milestones = ['start', 'stop', 'restart', 'install_agent', 'uninstall_agent', 'consolidate_storage', 'persist_home', 'repair_agent_storage', 'repair_home_storage', 'save', 'wipe_storage',
-            'continue_session', 'graceful_close', 'restart_fresh', 'reload_onto_current', 'refresh_bridge', 'workspace_export'];
+            'continue_session', 'graceful_close', 'restart_fresh', 'reload_onto_current', 'refresh_bridge', 'workspace_export', 'stop_unreachable', 'view_unreachable'];
         $logLvl = in_array($action, $milestones) ? AICLI_LOG_INFO : AICLI_LOG_DEBUG;
         aicli_log("Handling AJAX Request: $action ($id)", $logLvl, "AICliAjax");
 
@@ -214,6 +225,7 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\AgentRelayHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\VoiceHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\FavouritesHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\AutoContinueHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
 
             ob_end_clean();

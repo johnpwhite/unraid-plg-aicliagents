@@ -68,12 +68,18 @@ class FilePathConventionProjector extends InstructionProjector {
      * reuses it verbatim for its fence-free dedicated file).
      */
     const BODY = <<<'MD'
-**Referring to files in this workspace**
-Always write a file's **workspace-relative path**, never a bare name, so the
-Unraid terminal can make it a clickable link that opens in Unraid's editor:
-- Root-level file → prefix with `./` (e.g. `./README.md`, `./package.json`).
-- File in a subdirectory → relative path (e.g. `docs/specs/feature.md`,
-  `src/index.ts`).
+**Referring to files**
+Always write a path the Unraid terminal can turn into a clickable link that
+opens in Unraid's editor. Never write a bare file name, and never shorten a
+name with `…`.
+- File INSIDE this workspace → its **workspace-relative path**:
+  - Root-level file → prefix with `./` (e.g. `./README.md`, `./package.json`).
+  - File in a subdirectory → relative path (e.g. `docs/specs/feature.md`,
+    `src/index.ts`).
+- File OUTSIDE this workspace (another repository, your home folder, a system
+  file) → its **full absolute path** (e.g. `/mnt/user/other-repo/README.md`),
+  or `~/…` for a file under your home (e.g. `~/.claude/CLAUDE.md`). A path that
+  is relative to any other folder does not resolve, so it is not clickable.
 This applies to casual mentions too, not only files you create for the user.
 MD;
 

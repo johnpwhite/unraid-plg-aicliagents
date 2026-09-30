@@ -17,11 +17,12 @@
  *     dispatcher"), does not repeat that check itself. REVIEW_2026-09-13_
  *     EVENTS_AND_SECURITY.md E1: every browser-path add/update/remove/touch
  *     also publishes {kind, id} on the 'favourites' Nchan channel via
- *     NchanService::publish() — the SAME call AdminService's Tier 2 tools
- *     would need for a live UI update, so a favourite change made from EITHER
- *     surface now reaches every open tab. The publish's own tee (NchanService
- *     -> EventLedger::kindForChannel('favourites', ...)) is the ledger append;
- *     this handler never calls EventLedger::append() a second time.</constraints>
+ *     EventBus::publish('favourite', ...) — the SAME call AdminService's Tier
+ *     2 tools would need for a live UI update, so a favourite change made
+ *     from EITHER surface now reaches every open tab. The publish's own tee
+ *     (NchanService -> EventLedger::kindForChannel('favourites', ...)) is the
+ *     ledger append; this handler never calls EventLedger::append() a second
+ *     time.</constraints>
  * </module_context>
  */
 
@@ -30,10 +31,10 @@ namespace AICliAgents\Handlers;
 use AICliAgents\Services\AgentRegistry;
 use AICliAgents\Services\ConfigService;
 use AICliAgents\Services\FavouritesService;
-use AICliAgents\Services\NchanService;
+use AICliAgents\Services\EventBus;
 
 require_once __DIR__ . '/../services/FavouritesService.php';
-require_once __DIR__ . '/../services/NchanService.php';
+require_once __DIR__ . '/../services/EventBus.php';
 
 class FavouritesHandler
 {
@@ -133,18 +134,19 @@ class FavouritesHandler
     /**
      * REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E1: publish {kind, id} on the
      * 'favourites' Nchan channel for every successful browser-path change.
-     * NchanService::publish() stamps `ts` and, via its own tee
-     * (EventLedger::kindForChannel('favourites', ...)), appends the SAME
-     * ledger row AdminService::emitEvent() would append for its own Tier 2
-     * favourite tools — one code path, whichever surface made the change.
-     * Best-effort: a publish failure must never turn a successful favourite
-     * change into an error response (NchanService::publish() already never
-     * throws; this wrapper is belt-and-braces for a future change to that).
+     * EventBus::publish() stamps `ts` (via NchanService) and, through the
+     * same tee (EventLedger::kindForChannel('favourites', ...)), appends the
+     * SAME ledger row AdminService::emitEvent() would append for its own
+     * Tier 2 favourite tools — one code path, whichever surface made the
+     * change. Best-effort: a publish failure must never turn a successful
+     * favourite change into an error response (EventBus::publish() already
+     * never throws; this wrapper is belt-and-braces for a future change to
+     * that).
      */
     private static function publishChange(string $kind, string $id): void
     {
         try {
-            NchanService::publish('favourites', ['kind' => $kind, 'id' => $id]);
+            EventBus::publish('favourite', [], ['kind' => $kind, 'id' => $id]);
         } catch (\Throwable $e) {
             // Best-effort — see doc comment above.
         }

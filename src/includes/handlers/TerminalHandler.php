@@ -19,7 +19,7 @@ class TerminalHandler {
             case 'start':            return self::start($id);
             case 'emergency_start':  return self::emergencyStart($id);
             case 'stop':             return self::stop($id);
-            case 'graceful_close':   return self::gracefulClose($id);
+            case 'graceful_close':   return self::gracefulCloseSerialized($id);
             case 'restart':          return self::restart($id);
             case 'restart_fresh':    return self::restartFresh($id);
             case 'reload_onto_current': return self::reloadOntoCurrent($id);
@@ -30,20 +30,25 @@ class TerminalHandler {
             case 'get_asset_version': return self::getAssetVersion();
             case 'refresh_bridge':   return self::refreshBridge($id);
             case 'reconnect_stale_bridges': return self::reconnectStaleBridges();
+            case 'attach_bridge':    return self::attachBridge($id);
             case 'continue_session': return self::continueSession($id);
+            case 'set_scheduled_continue': return self::setScheduledContinueAction($id);
+            case 'clear_scheduled_continue': return self::clearScheduledContinueAction($id);
             case 'get_resume_id':    return self::getResumeId();
             case 'log':              return self::log();
             case 'get_log':          return self::getLog();
             case 'get_log_contexts': return self::getLogContexts();
             case 'clear_log':        return self::clearLog();
             case 'list_sessions_for_agent': return self::listSessionsForAgent();
+            case 'view_unreachable': return self::viewUnreachable($id);
+            case 'stop_unreachable': return self::stopUnreachable($id);
             default:                 return null;
         }
     }
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'restart_fresh', 'reload_onto_current', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_sessions_running', 'get_asset_version', 'refresh_bridge', 'reconnect_stale_bridges', 'continue_session', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent'];
+        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'restart_fresh', 'reload_onto_current', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_sessions_running', 'get_asset_version', 'refresh_bridge', 'reconnect_stale_bridges', 'attach_bridge', 'continue_session', 'set_scheduled_continue', 'clear_scheduled_continue', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent', 'view_unreachable', 'stop_unreachable'];
     }
 
     /**
@@ -69,6 +74,13 @@ class TerminalHandler {
             $result = ['status' => 'error', 'message' => 'Unknown workspace session'];
         } elseif (!\AICliAgents\Services\ProcessManager::isRunning($id)) {
             $result = ['status' => 'error', 'message' => 'That workspace is not running.'];
+        } elseif ($trigger === 'auto_restart' && \AICliAgents\Services\ContinueHold::isHeld($id)) {
+            // #349 (2026-09-29): the operator restarted this workspace with "do not
+            // continue" (Switch to the installed version). Every open page — each tab,
+            // each device — runs its own auto-continue and asks here when it sees the
+            // workspace run again; the server says no for all of them. The menu
+            // Continue ('menu') is not held: a click is always the operator's choice.
+            $result = ['status' => 'ok', 'delivered' => false, 'deferred' => true, 'reason' => 'held-after-switch'];
         } elseif (self::continueOnCooldown($id)) {
             // REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E3: the push guard (an
             // event handler) and the poll guard (DrawerPanel's own timer) can
@@ -89,6 +101,31 @@ class TerminalHandler {
         }
         self::recordContinue($id, $agentId, $trigger, $result);
         return $result;
+    }
+
+    /**
+     * SCHEDULED_CONTINUE.md (#234): the browser "Schedule…" dialog sets/clears a
+     * timed Continue. Reuses AdminService's validated setter/clearer (the same
+     * one the admin tool + CLI use), so the readiness-gated supervisor tick, the
+     * validation and the sidecar storage are single-sourced. `at` is a unix epoch
+     * the browser computes from the datetime picker.
+     */
+    private static function setScheduledContinueAction($id): array {
+        $at = (int)($_REQUEST['at'] ?? 0);
+        $repeat = (string)($_REQUEST['repeat'] ?? 'none');
+        $message = (string)($_REQUEST['message'] ?? '');
+        $source = (string)($_REQUEST['source'] ?? 'user');
+        $r = \AICliAgents\Services\AdminService::setScheduledContinue((string)$id, $at, $repeat, $message, $source);
+        return isset($r['error'])
+            ? ['status' => 'error', 'message' => (string)$r['error']]
+            : array_merge(['status' => 'ok'], $r);
+    }
+
+    private static function clearScheduledContinueAction($id): array {
+        $r = \AICliAgents\Services\AdminService::clearScheduledContinue((string)$id);
+        return isset($r['error'])
+            ? ['status' => 'error', 'message' => (string)$r['error']]
+            : array_merge(['status' => 'ok'], $r);
     }
 
     /** tmpfs directory holding one per-session cooldown marker file. */
@@ -188,7 +225,10 @@ class TerminalHandler {
             $running[$id] = \AICliAgents\Services\ProcessManager::isRunning($id);
             if (!$running[$id]) continue; // a stopped session picks up current code when it starts
             $launched = \AICliAgents\Services\ProcessManager::sessionLaunchGeneration($id);
-            if (\AICliAgents\Services\ProcessManager::generationIsStale($launched, $active)) {
+            // Forgejo #364: stale = the BRIDGE code differs, the same test the
+            // reconnect sweep uses, so the dot and the sweep never disagree and
+            // a generation with identical bridge code shows no dot.
+            if (\AICliAgents\Services\ProcessManager::bridgeIsStale($launched, $active)) {
                 $stale[$id] = true;
             }
         }
@@ -230,9 +270,60 @@ class TerminalHandler {
                 }
             }
         } catch (\Throwable $e) { /* a poll must never break on this */ }
+        // #234: pending scheduled-continue per workspace, so the drawer can show a
+        // clock tag on a workspace that will continue on its own at a set time.
+        $scheduledContinue = [];
+        try { $scheduledContinue = \AICliAgents\Services\ConfigService::getScheduledContinueMap(); }
+        catch (\Throwable $e) { /* a poll must never break on this */ }
+        // #349: workspaces whose automatic Continue is held after an operator
+        // switch, so every open page skips it by itself as well.
+        $continueHeld = [];
+        try { $continueHeld = \AICliAgents\Services\ContinueHold::heldMap(array_keys($running)); }
+        catch (\Throwable $e) { /* a poll must never break on this */ }
+        // 2026-09-29 (DRAWER_ACTIVE_STATE_RECONCILE.md, "unreachable copies"):
+        // a second tmux server for a workspace, or one with no socket, is
+        // invisible to the ttyd scan above. Read /proc only; never fatal.
+        $unreachable = [];
+        try { $unreachable = self::unreachableCopies(); }
+        catch (\Throwable $e) { /* a poll must never break on this */ }
         return ['status' => 'ok', 'running' => $running, 'stale' => $stale, 'generation' => $active,
-                'orphans' => $orphans, 'auto_continue' => $autoContinue,
-                'agent_version_differs' => $otherVersion, 'agent_installed_versions' => $agentVersions];
+                'orphans' => $orphans, 'unreachable' => $unreachable, 'auto_continue' => $autoContinue, 'continue_held' => $continueHeld,
+                'agent_version_differs' => $otherVersion, 'agent_installed_versions' => $agentVersions,
+                'scheduled_continue' => $scheduledContinue];
+    }
+
+    /**
+     * 2026-09-29: the unreachable tmux servers (TmuxDuplicateService::scan()),
+     * each with the workspace name and whether the workspace is in the drawer.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private static function unreachableCopies(): array {
+        $rows = \AICliAgents\Services\TmuxDuplicateService::scan();
+        if ($rows === []) return [];
+        $names = [];
+        foreach (\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            if (is_array($w) && ($w['id'] ?? '') !== '') $names[(string)$w['id']] = (string)($w['name'] ?? '');
+        }
+        foreach ($rows as &$r) {
+            $r['inDrawer'] = isset($names[$r['sessionId']]);
+            $r['name'] = $names[$r['sessionId']] ?? '';
+        }
+        unset($r);
+        return $rows;
+    }
+
+    /** 2026-09-29: "Show screen" of an unreachable copy (read-only capture). */
+    private static function viewUnreachable($id): array {
+        return \AICliAgents\Services\TmuxDuplicateService::view((string)$id, (int)($_GET['serverPid'] ?? 0));
+    }
+
+    /**
+     * 2026-09-29: "Stop this copy". A drawer action only (CSRF, the operator's
+     * click); deliberately not an admin or Relay tool.
+     */
+    private static function stopUnreachable($id): array {
+        return \AICliAgents\Services\TmuxDuplicateService::stop((string)$id, (int)($_GET['serverPid'] ?? 0));
     }
 
     /**
@@ -265,7 +356,21 @@ class TerminalHandler {
             }
         }
         $result = \AICliAgents\Services\ProcessManager::restartAllStaleBridges($running);
+        // TERMINAL_BACKGROUND_WARM.md R2: start the new bridges now, in the
+        // background, instead of one by one on each workspace's next switch.
+        if ($result['ids'] !== []) {
+            \AICliAgents\Services\BridgeWarmService::spawnRespawn($result['ids']);
+        }
         return ['status' => 'ok', 'reconnected' => $result['reconnected'], 'ids' => $result['ids']];
+    }
+
+    /**
+     * TERMINAL_BACKGROUND_WARM.md: the page's background warm-up. Attaches the
+     * web bridge of a workspace whose agent already runs; never starts an agent
+     * and never waits for the workspace lock (BridgeWarmService::attach).
+     */
+    private static function attachBridge($id): array {
+        return \AICliAgents\Services\BridgeWarmService::attach((string)$id);
     }
 
     /**
@@ -673,6 +778,41 @@ class TerminalHandler {
             }
         }
         return $s;
+    }
+
+    /**
+     * Forgejo #352: the graceful_close action, serialised with every start and
+     * restart of the same workspace (SessionLaunchLock). The close removes the
+     * session's runfiles and its tmux socket folder; a start that ran at the same
+     * time lost its socket, and its agent ran on with no way to reach it.
+     */
+    private static function gracefulCloseSerialized($id): array {
+        $busy = self::takeLaunchLock((string)$id, 'gracefulClose');
+        if ($busy !== null) return $busy;
+        try {
+            return self::gracefulClose($id);
+        } finally {
+            \AICliAgents\Services\SessionLaunchLock::release((string)$id);
+        }
+    }
+
+    /**
+     * Forgejo #352 (2026-09-29): take the workspace's SessionLaunchLock for a
+     * close or a restart. Returns null when this request holds the lock (the
+     * caller must release it), or the 'busy' response when a start, close or
+     * restart of the same workspace did not finish in time. Nothing is closed
+     * or started on the busy path. See docs/specs/WORKSPACE_RELOAD_ONTO_CURRENT.md.
+     *
+     * @return array<string,mixed>|null
+     */
+    private static function takeLaunchLock(string $id, string $action): ?array {
+        if (\AICliAgents\Services\SessionLaunchLock::acquire($id, \AICliAgents\Services\SessionLaunchLock::CLOSE_WAIT_SECONDS)) {
+            return null;
+        }
+        aicli_log("$action: refused for session=$id: another start, close or restart of this workspace did not finish in time; nothing was closed or started",
+            AICLI_LOG_WARN, "TerminalHandler");
+        return ['status' => 'busy', 'reason' => 'launch_in_progress',
+            'message' => 'This workspace is still starting, closing or restarting. Try again in a moment.'];
     }
 
     private static function gracefulClose($id) {
@@ -1198,22 +1338,32 @@ class TerminalHandler {
     }
 
     private static function restart($id) {
-        // Restart is a continue-current-conversation action. Reuse the same
-        // quiesce + pane/disk capture pipeline as Close before replacing the
-        // terminal, so agents whose id is not present in browser state still
-        // resume precisely. `_fresh_` belongs exclusively to Start New Session
-        // and is deliberately converted to auto-resume here.
-        self::gracefulClose($id);
-        // gracefulClose persisted the authoritative pane/disk capture for this
-        // workspace. Resolve it through ConfigService at launch rather than
-        // trusting a browser-held id that may predate an in-TUI /resume switch.
-        $chatId = self::restartChatId($_GET['chatId'] ?? null);
-        // Never default the agent: relaunching a workspace as a different agent
-        // than it was created with is a silent, destructive surprise.
-        $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
-        if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('restart', (string)$id, (string)($_GET['path'] ?? ''));
-        startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $agentId);
-        return self::startedResponse($id);
+        // Forgejo #352: hold the workspace's launch lock from the close until the
+        // new agent runs. An open page sees the agent stop and sends `start`; that
+        // start now waits here and then attaches to the new session, instead of
+        // launching a second agent on the same conversation.
+        $busy = self::takeLaunchLock((string)$id, 'restart');
+        if ($busy !== null) return $busy;
+        try {
+            // Restart is a continue-current-conversation action. Reuse the same
+            // quiesce + pane/disk capture pipeline as Close before replacing the
+            // terminal, so agents whose id is not present in browser state still
+            // resume precisely. `_fresh_` belongs exclusively to Start New Session
+            // and is deliberately converted to auto-resume here.
+            self::gracefulClose($id);
+            // gracefulClose persisted the authoritative pane/disk capture for this
+            // workspace. Resolve it through ConfigService at launch rather than
+            // trusting a browser-held id that may predate an in-TUI /resume switch.
+            $chatId = self::restartChatId($_GET['chatId'] ?? null);
+            // Never default the agent: relaunching a workspace as a different agent
+            // than it was created with is a silent, destructive surprise.
+            $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
+            if ($agentId === '') return \AICliAgents\Services\ConfigService::agentIdUnresolvedError('restart', (string)$id, (string)($_GET['path'] ?? ''));
+            startAICliTerminal($id, $_GET['path'] ?? null, $chatId, $agentId);
+            return self::startedResponse($id);
+        } finally {
+            \AICliAgents\Services\SessionLaunchLock::release((string)$id);
+        }
     }
 
     /**
@@ -1241,6 +1391,29 @@ class TerminalHandler {
      * @return array<string,mixed>
      */
     private static function reloadOntoCurrent($id): array {
+        // Forgejo #352 (2026-09-29): hold the workspace's launch lock for the
+        // checks AND the restart. A second switch (another tab or device) then
+        // waits, and its own checks run after the first switch is done: the
+        // workspace is no longer behind, so it is refused as 'not_stale' instead
+        // of a second close and resume. reloadOntoCurrentLocked() frees the lock
+        // as soon as the new agent runs, so the Continue ladder never holds it.
+        $busy = self::takeLaunchLock((string)$id, 'reloadOntoCurrent');
+        if ($busy !== null) return $busy;
+        try {
+            return self::reloadOntoCurrentLocked((string)$id);
+        } finally {
+            if (\AICliAgents\Services\SessionLaunchLock::heldHere((string)$id)) {
+                \AICliAgents\Services\SessionLaunchLock::release((string)$id);
+            }
+        }
+    }
+
+    /**
+     * reloadOntoCurrent() body. Runs while this request holds the workspace's SessionLaunchLock.
+     *
+     * @return array<string,mixed>
+     */
+    private static function reloadOntoCurrentLocked(string $id): array {
         // `continue=0` suppresses the post-reload nudge. Moving a workspace onto
         // a different agent version is a deliberate, self-contained action the
         // operator chose — it is NOT the plugin recovering a workspace after an
@@ -1365,7 +1538,22 @@ class TerminalHandler {
         // than guessing an agent (ConfigService::agentIdUnresolvedError()).
         $_GET['path'] = $path;
         $_GET['agentId'] = $agentId;
+        // #349 (2026-09-29): hold the automatic Continue BEFORE the restart. An open
+        // page sees the workspace stop and run again while restart() is still busy
+        // (the live log showed its continue_session one second after the relaunch,
+        // before this request returned), so a hold set after restart() is too late.
+        if (!$sendContinue) {
+            \AICliAgents\Services\ContinueHold::hold($id);
+        }
         $result = self::restart($id);
+        // The new agent runs (or the restart failed): free the launch lock now.
+        // A page's `start` that waited for this switch attaches at once, and the
+        // Continue ladder below (up to 32 s) does not keep it waiting.
+        \AICliAgents\Services\SessionLaunchLock::release($id);
+        if (!$sendContinue && ($result['status'] ?? '') !== 'ok') {
+            // No launch followed, so there is nothing to hold.
+            \AICliAgents\Services\ContinueHold::clear($id);
+        }
 
         // 7. Nudge it back to work once it reaches idle. Mirrors DrawerPanel's
         // auto-continue retry ladder (CONTINUE_ON_RESTART.md): up to 8 attempts
@@ -1442,17 +1630,24 @@ class TerminalHandler {
                     'message' => 'Upgrade in progress — this workspace cannot be restarted until it finishes.'];
         }
         aicli_log("restartFresh: START session=$safeId agent=$agentId workspace=" . ($path !== '' ? $path : 'unknown'), AICLI_LOG_INFO, "TerminalHandler");
-        self::gracefulClose($id);
-        if ($path !== '') {
-            \AICliAgents\Services\ConfigService::clearResumeId($path, $agentId, (string)$id);
-            aicli_log("restartFresh: cleared saved resume id for (workspace=$path, agent=$agentId)", AICLI_LOG_INFO, "TerminalHandler");
+        // Forgejo #352: one lock from the close until the new agent runs.
+        $busy = self::takeLaunchLock((string)$id, 'restartFresh');
+        if ($busy !== null) return $busy;
+        try {
+            self::gracefulClose($id);
+            if ($path !== '') {
+                \AICliAgents\Services\ConfigService::clearResumeId($path, $agentId, (string)$id);
+                aicli_log("restartFresh: cleared saved resume id for (workspace=$path, agent=$agentId)", AICLI_LOG_INFO, "TerminalHandler");
+            }
+            $relay = [];
+            if (class_exists('\AICliAgents\Services\AgentRelayService')) {
+                try { $relay = \AICliAgents\Services\AgentRelayService::markConversationRestart($safeId, $agentId, $path); }
+                catch (\Throwable $e) { $relay = ['status' => 'error', 'message' => $e->getMessage()]; }
+            }
+            startAICliTerminal($id, $path !== '' ? $path : null, '_fresh_', $agentId);
+        } finally {
+            \AICliAgents\Services\SessionLaunchLock::release((string)$id);
         }
-        $relay = [];
-        if (class_exists('\AICliAgents\Services\AgentRelayService')) {
-            try { $relay = \AICliAgents\Services\AgentRelayService::markConversationRestart($safeId, $agentId, $path); }
-            catch (\Throwable $e) { $relay = ['status' => 'error', 'message' => $e->getMessage()]; }
-        }
-        startAICliTerminal($id, $path !== '' ? $path : null, '_fresh_', $agentId);
         aicli_log("restartFresh: DONE session=$safeId started fresh (relay=" . (string)($relay['status'] ?? 'n/a') . ")", AICLI_LOG_INFO, "TerminalHandler");
         return self::startedResponse($id, ['fresh' => true, 'relay' => $relay]);
     }

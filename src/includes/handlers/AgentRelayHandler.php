@@ -1,6 +1,7 @@
 <?php
 namespace AICliAgents\Handlers;
 use AICliAgents\Services\AgentRelayService;
+use AICliAgents\Services\RelayPeerService;
 class AgentRelayHandler {
     public static function handle($action, $id) {
         $session = $id !== 'default' ? $id : (string)($_REQUEST['session_id'] ?? '');
@@ -29,7 +30,8 @@ class AgentRelayHandler {
             case 'pane_input_save_rules': $layer=json_decode((string)($_POST['rules'] ?? '{}'),true); return \AICliAgents\Services\PaneInputRules::saveOverlay(is_array($layer)?$layer:[]);
             case 'pane_input_probe': $aid=(string)($_REQUEST['agent_id'] ?? ''); return preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/',$aid) && preg_match('/^[A-Za-z0-9_-]{1,128}$/',$session) ? array_merge(['status'=>'ok'], \AICliAgents\Services\TmuxService::paneAcceptsInput($aid,$session)) : ['status'=>'error','message'=>'Choose a running workspace.'];
             // RELAY_REMOTE_CLIENTS.md: a table of remotes, each with its own token.
-            case 'relay_get_http_clients': return ['status'=>'ok','clients'=>AgentRelayService::httpClients()];
+            // Phase 2 (#299): request_topics feeds the remote Permissions dialog.
+            case 'relay_get_http_clients': return ['status'=>'ok','clients'=>AgentRelayService::httpClients(),'request_topics'=>AgentRelayService::requestableTopics()];
             case 'relay_create_http_client': {
                 // Legacy `rotate=1` (single-client Manager) rotates row one.
                 $rotateId = (string)($_POST['rotate_id'] ?? '');
@@ -42,6 +44,27 @@ class AgentRelayHandler {
             case 'relay_get_http_client': return ['status'=>'ok','client'=>AgentRelayService::httpClientPreview()];
             // Returns the secret itself, for the Manager's copy action only (row one when no id).
             case 'relay_reveal_http_token': return AgentRelayService::httpClientToken((string)($_REQUEST['id'] ?? ''));
+            // RELAY_LINKED_BOXES.md (#309): linked boxes. Every change here is a
+            // Manager action (CSRF-gated by AICliAjax.php, like the rest).
+            case 'relay_get_peers': return RelayPeerService::overview();
+            case 'relay_set_peer_links': return AgentRelayService::setPeerLinksEnabled(($_POST['enabled'] ?? '0') === '1');
+            case 'relay_create_pairing_code': return RelayPeerService::createPairingCode(trim((string)($_POST['url'] ?? '')));
+            case 'relay_cancel_pairing_code': return RelayPeerService::cancelPairingCode();
+            case 'relay_preview_pairing_code': return RelayPeerService::previewPairingCode((string)($_POST['code'] ?? ''));
+            case 'relay_redeem_pairing_code': return RelayPeerService::redeemPairingCode((string)($_POST['code'] ?? ''), trim((string)($_POST['url'] ?? '')), (string)($_POST['replace_id'] ?? ''));
+            case 'relay_rename_peer': return RelayPeerService::rename((string)($_POST['id'] ?? ''), (string)($_POST['name'] ?? ''));
+            case 'relay_test_peer': return RelayPeerService::test((string)($_POST['id'] ?? ''));
+            case 'relay_rotate_peer': return RelayPeerService::rotate((string)($_POST['id'] ?? ''));
+            case 'relay_unlink_peer': return RelayPeerService::unlink((string)($_POST['id'] ?? ''));
+            case 'relay_set_grants': {
+                // One Permissions dialog for remotes and peers (spec §6). Both
+                // services re-normalise the posted map: the client is never trusted.
+                $g = json_decode((string)($_POST['grants'] ?? '{}'), true);
+                $kind = (string)($_POST['kind'] ?? 'peer');
+                if ($kind === 'remote') return AgentRelayService::setRemoteGrants((string)($_POST['id'] ?? ''), is_array($g) ? $g : [], $_POST['rate_per_min'] ?? null);
+                if ($kind !== 'peer') return ['status'=>'error','message'=>'Unknown kind of Relay principal.'];
+                return RelayPeerService::setGrants((string)($_POST['id'] ?? ''), is_array($g) ? $g : [], $_POST['rate_per_min'] ?? null);
+            }
             case 'relay_get_status': return ['status'=>'ok','relay'=>AgentRelayService::statusSummary()];
             case 'relay_get_http_listener': return ['status'=>'ok','listener'=>AgentRelayService::httpListenerSettings()];
             case 'relay_set_http_listener': return AgentRelayService::saveHttpListener(

@@ -575,6 +575,45 @@ class LayerManifestService {
         return (strpos($filename, '_consolidated_') !== false) ? 'consolidated' : 'delta';
     }
 
+    /**
+     * #338: the sort key of a layer name — "<seq10>_<dt>" for the current
+     * grammar ({type}_{id}_{kind}_{seq10}_{dt}.sqsh), so a byte-order sort is
+     * chronological whatever the kind; "0000000000_<name>" (below every current
+     * name) for any older grammar. Mirrors bash common.sh _layer_sort_key.
+     * A plain sort of whole names is NOT chronological: "_consolidated_" sorts
+     * before "_delta_", so a newer base would sort below an older delta.
+     */
+    public static function layerSortKey(string $filename): string {
+        $bn = basename($filename);
+        if (preg_match('/_(?:delta|consolidated)_(\d{10})_(\d{8}T\d{6}Z)\.sqsh$/', $bn, $m)) {
+            return $m[1] . '_' . $m[2];
+        }
+        return '0000000000_' . $bn;
+    }
+
+    /**
+     * #338 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-26 — #338 agent
+     * layer retention"): the layers ONE agent mount stacks, newest first — the
+     * newest layer and each older one down to and including the newest base
+     * (a "_consolidated_" layer holds the complete agent tree). A layer below
+     * that base is not part of the view. No base → every layer. PHP mirror of
+     * bash common.sh _layer_stack_cut; keep the two in step.
+     *
+     * @param array<int,string> $names layer basenames or paths, any order
+     * @return array<int,string> the stacked entries (as given), newest first
+     */
+    public static function agentStack(array $names): array {
+        usort($names, static fn($a, $b) => strcmp(self::layerSortKey((string)$b), self::layerSortKey((string)$a)));
+        $stack = [];
+        foreach ($names as $n) {
+            $stack[] = $n;
+            if (self::classifyLayerKind(basename((string)$n)) === 'consolidated') {
+                break;
+            }
+        }
+        return $stack;
+    }
+
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------

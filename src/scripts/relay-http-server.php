@@ -18,6 +18,11 @@ require_once __DIR__ . '/../includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\AgentRelayService;
 use AICliAgents\Services\RelayHttpService;
+use AICliAgents\Services\RelayPeerService;
+
+// RELAY_LINKED_BOXES.md §2: the listener never calls out to another box. Two
+// single-threaded listeners that call each other could wait for each other.
+RelayPeerService::$inListener = true;
 
 $bind = (string)($argv[1] ?? '0.0.0.0');
 $port = (int)($argv[2] ?? 8237);
@@ -27,6 +32,10 @@ $port = (int)($argv[2] ?? 8237);
 // told to skip verification.
 $profile = AgentRelayService::unraidSslProfile();
 $cert = (string)$profile['cert'];
+// Test seam for the linked-box twin harness: a second instance serves its own
+// certificate. Unset in production.
+$certOverride = getenv('AICLI_RELAY_TLS_CERT');
+if ($certOverride !== false && $certOverride !== '') { $cert = $certOverride; $profile['source'] = 'override'; }
 if ($cert === '') {
     fwrite(STDERR, "relay-http: no usable certificate+key bundle in /boot/config/ssl/certs — refusing to serve in plaintext\n");
     exit(1);
@@ -52,13 +61,15 @@ function relayHttpRead($conn): array {
     $raw = '';
     while (!str_contains($raw, "\r\n\r\n")) {
         $chunk = @fread($conn, 8192);
-        if ($chunk === false || $chunk === '') return ['', [], ''];
+        if ($chunk === false || $chunk === '') return ['', '/', [], ''];
         $raw .= $chunk;
         if (strlen($raw) > RelayHttpService::MAX_BODY_BYTES * 2) break;
     }
     [$head, $body] = array_pad(explode("\r\n\r\n", $raw, 2), 2, '');
     $lines = explode("\r\n", $head);
-    $method = strtok((string)array_shift($lines), ' ') ?: '';
+    $requestLine = explode(' ', (string)array_shift($lines));
+    $method = (string)($requestLine[0] ?? '');
+    $path = (string)($requestLine[1] ?? '/');
     $headers = [];
     foreach ($lines as $line) {
         $pos = strpos($line, ':');
@@ -73,7 +84,7 @@ function relayHttpRead($conn): array {
         if ($chunk === false || $chunk === '') break;
         $body .= $chunk;
     }
-    return [$method, $headers, $body];
+    return [$method, $path, $headers, $body];
 }
 
 while (true) {
@@ -84,16 +95,22 @@ while (true) {
     stream_set_timeout($conn, 10);
     if (@stream_socket_enable_crypto($conn, true, STREAM_CRYPTO_METHOD_TLS_SERVER) !== true) { @fclose($conn); continue; }
 
-    [$method, $headers, $body] = relayHttpRead($conn);
+    [$method, $path, $headers, $body] = relayHttpRead($conn);
     $peer = strtok((string)$peerName, ':') ?: 'unknown';
 
     $result = $method === ''
         ? ['status' => 400, 'body' => json_encode(['error' => 'malformed request'])]
-        : RelayHttpService::handleRequest($method, $headers, $body, $peer);
+        : RelayHttpService::handleRequest($method, $headers, $body, $peer, $path);
 
     $payload = (string)$result['body'];
+    // Linked-box responses carry a signature header (RELAY_LINKED_BOXES.md §3).
+    $extra = '';
+    foreach ((array)($result['headers'] ?? []) as $hk => $hv) {
+        if (preg_match('/^[A-Za-z0-9-]{1,64}$/', (string)$hk) && preg_match('/^[\x20-\x7E]{0,256}$/', (string)$hv)) $extra .= "$hk: $hv\r\n";
+    }
     @fwrite($conn, "HTTP/1.1 {$result['status']}\r\n"
         . "Content-Type: application/json\r\n"
+        . $extra
         . "Content-Length: " . strlen($payload) . "\r\n"
         . "Connection: close\r\n\r\n" . $payload);
     @fclose($conn);

@@ -93,6 +93,20 @@ class PaneInputRules {
                 ['id' => 'do-you-want',     're' => '/\bdo you want to\b/i'],
                 ['id' => 'proceed',         're' => '/\bproceed\?/i'],
                 ['id' => 'pager',           're' => '/\(END\)|--More--/'],
+                // Claude Code owns this automatic quota wait. A scheduled or manual
+                // plugin Continue must remain queued while this provider-owned state is
+                // visible; otherwise the plugin can race Claude's own wake-up and send
+                // a duplicate nudge. This must precede modal-overlay because Claude's
+                // exact wait line ends with "Press esc to cancel the wait".
+                ['id' => 'claude-native-continue', 're' => '/\bClaude Code will continue automatically at\b/i'],
+                // OpenCode/Kilo own this wait the same way: after a usage quota (or a
+                // provider error) the status line under the input box counts down
+                // "… [retry in 1h 21m attempt #1]" and OpenCode retries by itself.
+                // The input box looks idle, so without this rule a Relay notice or a
+                // Continue would be typed into a session that is about to resume. The
+                // TUI wraps the line ("[retry" / "in 1h 21m attempt #1]", real capture
+                // on .4 2026-09-26), so the second branch matches the wrapped row.
+                ['id' => 'opencode-retry-wait', 're' => '/\[\s*retry(?:ing)?\s+in\s+\d+\s*[dhms]|^\s*in\s+\d+\s*[dhms](?:\s+\d+\s*[dhms]){0,3}\s+attempt\s+#\d+\]/imu'],
                 // A dismissable full-screen overlay — settings/config/menu/help — shows an
                 // "… Esc to close/cancel/exit" footer. A paste+Enter lands IN the overlay
                 // (2026-08-22: a Relay notice typed into a Config settings search box).

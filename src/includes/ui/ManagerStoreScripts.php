@@ -60,21 +60,23 @@ function installVersionAgent(id, btn, explicitVersion) {
             // them. Default FALSE so an older backend, or any error, keeps the
             // cautious old behaviour rather than silently promising safety.
             var sideBySide = !!(data && data.side_by_side);
-            _showInstallConfirm(id, version, btn, label, sessions, sideBySide);
+            var waitReason = (data && typeof data.wait_reason === 'string')
+                ? data.wait_reason : '';
+            _showInstallConfirm(id, version, btn, label, sessions, sideBySide, waitReason);
         });
 }
 
 // Single consolidated confirm modal. Shows the appropriate title + body for
 // install / upgrade / downgrade / reinstall. With active sessions the safe
 // default queues the change; destructive force-close is an explicit opt-in.
-function _showInstallConfirm(id, version, btn, label, sessions, sideBySide) {
+function _showInstallConfirm(id, version, btn, label, sessions, sideBySide, waitReason) {
     // An install that cannot affect the operator's sessions must not ask them
     // about their sessions. Treat them as absent for every decision below.
     var relevantSessions = sideBySide ? [] : sessions;
     // WP #964 (slice): an upgrade gets the richer keep-a-copy overlay — it
     // offers a rollback backup of the current version before replacing it.
     if (label === 'Upgrade') {
-        _showUpgradeBackupOverlay(id, version, btn, relevantSessions, sideBySide, sessions.length);
+        _showUpgradeBackupOverlay(id, version, btn, relevantSessions, sideBySide, sessions.length, waitReason);
         return;
     }
     var isInstall = !label || label === 'Install';
@@ -107,6 +109,10 @@ function _showInstallConfirm(id, version, btn, label, sessions, sideBySide) {
             return '• ' + _escAttr(p) + '  (' + _escAttr((s.id || '').slice(0, 8)) + ')';
         }).join('<br>');
         body = '<div style="text-align:left;line-height:1.5">'
+             + ((!sideBySide && waitReason)
+                ? '<div style="margin-bottom:10px;color:#7a4b00"><b>Why this upgrade must wait:</b> '
+                  + _escAttr(waitReason) + '</div>'
+                : '')
              + relevantSessions.length + ' active session' + (relevantSessions.length === 1 ? '' : 's')
              + ' will remain running:<br>' + lines
              + '<br><br><b>The change will queue safely and start after all sessions close naturally.</b>'
@@ -247,7 +253,7 @@ function _aicliBackupDestChanged() {
     }, 400);
 }
 
-function _showUpgradeBackupOverlay(id, version, btn, sessions, sideBySide, openCount) {
+function _showUpgradeBackupOverlay(id, version, btn, sessions, sideBySide, openCount, waitReason) {
     // `sessions` is already empty for a side-by-side agent (the caller strips
     // them), so every branch below that warns about sessions or offers to close
     // them simply does not run. openCount is the REAL number still open, used
@@ -274,12 +280,17 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions, sideBySide, openC
                 + (openCount === 1 ? 'it' : 'them') + ' over.'
                 + '</div>';
         }
+        if (!sideBySide && waitReason) {
+            sessionHtml += '<div style="text-align:left;line-height:1.5;margin-bottom:10px;color:#7a4b00">'
+                + '<b>Why this upgrade must wait:</b> ' + _escAttr(waitReason)
+                + '</div>';
+        }
         if (sessions.length > 0) {
             var lines = sessions.map(function(s) {
                 return '• ' + _escAttr(s.path || '<no workspace>')
                      + '  (' + _escAttr((s.id || '').slice(0, 8)) + ')';
             }).join('<br>');
-            sessionHtml =
+            sessionHtml +=
                 '<div style="margin-bottom:10px;">'
               + sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
               + ' will remain running:<br>' + lines
@@ -305,7 +316,10 @@ function _showUpgradeBackupOverlay(id, version, btn, sessions, sideBySide, openC
           + '</label>'
           + '<div style="margin-bottom:8px;">'
           +   '<div style="opacity:0.7; margin-bottom:3px;">Backup destination</div>'
-          +   '<input type="text" id="aicli-bk-dest" value="' + _escAttr(destVal) + '"'
+          // swal-input-show: Unraid's sweet-alert CSS hides every text input
+          // in a dialog that is not a swal "input" dialog; this class is
+          // Unraid's own opt-out. Without it the field never showed (#307).
+          +   '<input type="text" id="aicli-bk-dest" class="swal-input-show" aria-label="Backup destination" value="' + _escAttr(destVal) + '"'
           +     ' oninput="_aicliBackupDestChanged()"'
           +     ' style="width:100%; box-sizing:border-box; padding:5px 8px;">'
           + '</div>'
@@ -398,11 +412,10 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
         status.text('Preparing installation…');
     }
     progress.removeAttr('style').addClass('active');
-    // Only an explicitly forced install enters terminal holding before AJAX,
-    // because that backend path may begin closure inside the request. Ordinary
-    // installs wait for the authoritative response: it may safely queue after
-    // detecting a terminal-start race.
-    if (forceNow) _broadcastInstall('install-start', id, { at: 'doInstall-force' });
+    // Nothing is announced to other tabs from here (EVENT_STREAM_MULTIPLEX.md R5).
+    // A forced install writes its install marker on the server before it closes
+    // any session; that marker's progress message reaches every device's
+    // Terminal tab, which then reads list_active_installs and holds its terminals.
 
     var url = '/plugins/unraid-aicliagents/AICliAjax.php?action=install_agent&agentId=' + id + '&csrf_token=' + csrf;
     if (version) url += '&version=' + encodeURIComponent(version);
@@ -415,32 +428,23 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
     $.getJSON(url, function(r) {
         if (r.status === 'error') {
             swal('Error', r.message, 'error');
-            // Roll back the panel state + restore the click-source + tell
-            // every other tab the upgrade is off so they clear the overlay.
+            // Roll back the panel state + restore the click-source. A refused
+            // install never wrote an install marker, so no other tab holds anything.
             progress.removeClass('active');
             _showButtons(buttons);
             $(btn).prop('disabled', false);
             if (!isSelect) $(btn).html(originalContent);
-            _broadcastInstall('install-complete', id, { success: false, message: r.message || 'install refused' });
             return;
         }
         if (r.status === 'queued') {
             bar.css('width', '1%');
             status.text(r.message || 'Upgrade queued safely — waiting for active sessions to close');
             _showCancelQueued(id);
-        } else if (!forceNow && !(sideBySide || r.side_by_side)) {
-            // The backend acquired admission, raised its barrier, and started.
-            //
-            // This broadcast is what hides every terminal for this agent behind
-            // "Upgrading… session will resume automatically". That is honest
-            // ONLY when the install will really interrupt those sessions. A
-            // side-by-side install does not touch them — it writes into its own
-            // layer and the running version keeps serving — so hiding them
-            // there blocked the operator for no reason and told them their
-            // session was being resumed when it had never stopped.
-            // docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md
-            _broadcastInstall('install-start', id, { at: 'install-admitted' });
         } else if (sideBySide || r.side_by_side) {
+            // The Terminal tab decides what to hide from the server's own list:
+            // list_active_installs marks this install `interrupts: false`, so it
+            // hides nothing; an interrupting install is marked true and holds
+            // that agent's terminals (#243, docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md).
             _sideBySideInstalls[id] = (r.open_sessions || sessionsToClose || 0);
         }
         startInstallPolling(id, progress, bar, status, buttons, btn, originalContent);
@@ -450,7 +454,6 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
         _showButtons(buttons);
         $(btn).prop('disabled', false);
         if (!isSelect) $(btn).html(originalContent);
-        _broadcastInstall('install-complete', id, { success: false, message: xhr.statusText || 'network error' });
     });
 }
 
@@ -459,22 +462,13 @@ function installAgent(id, isUpdate, btn) {
     installVersionAgent(id, btn);
 }
 
-// Cross-context broadcast for install lifecycle. The Terminal tab (TSX)
-// subscribes to the same channel and reacts in real-time — adding the
-// agent to its upgradingAgentIds set on 'install-start' (so the holding
-// overlay appears immediately for any session using that agent), and
-// removing + bumping session lastActive on 'install-complete' (so the
-// iframe re-mounts with fresh ttyd). BroadcastChannel is same-origin and
-// supported in every evergreen browser. Falls back silently to the
-// existing 2s poll on list_active_installs if the API is unavailable.
-var _aicliInstallBC = null;
-try { if (typeof BroadcastChannel === 'function') _aicliInstallBC = new BroadcastChannel('aicli-install-events'); }
-catch (_e) { _aicliInstallBC = null; }
-function _broadcastInstall(type, agentId, extra) {
-    if (!_aicliInstallBC) return;
-    try { _aicliInstallBC.postMessage(Object.assign({ type: type, agentId: agentId, at: Date.now() }, extra || {})); }
-    catch (_err) { /* best-effort */ }
-}
+// EVENT_STREAM_MULTIPLEX.md R5: there is no cross-tab install broadcast any
+// more. The Terminal tab learns install state from the server alone: the
+// `install_<id>` / `activity` messages of its event stream prompt one read of
+// list_active_installs, whose `interrupts` flag (#243) says whether the install
+// may hide that agent's terminals. A side-by-side install never does
+// (docs/specs/UPGRADE_WITHOUT_INTERRUPTION.md) — that rule now lives on the
+// server, where every device sees it, not in which tab happened to broadcast.
 
 // #71 (cancel): let the user abandon a QUEUED upgrade (waiting for sessions to
 // close) before it auto-fires. Poll handles are tracked per agent so Cancel can
@@ -488,10 +482,10 @@ function _showCancelQueued(id) {
     var b = document.createElement('button');
     b.id = 'cancel-upg-' + id;
     b.type = 'button';
-    b.className = 'aicli-cancel-queued';
+    b.className = 'aicli-btn-slim aicli-cancel-queued';
     b.textContent = 'Cancel';
     b.title = 'Cancel this queued upgrade — it will not start';
-    b.style.cssText = 'margin-left:8px;padding:1px 8px;font-size:11px;cursor:pointer;';
+    b.style.cssText = 'margin-left:8px;cursor:pointer;';
     b.onclick = function() { cancelQueuedUpgrade(id); };
     status.parentNode.appendChild(b);
 }
@@ -506,9 +500,14 @@ function cancelQueuedUpgrade(id) {
         if (r && r.status === 'ok') {
             if (_aicliInstallControls[id]) { try { _aicliInstallControls[id].stop(); } catch (_e) {} delete _aicliInstallControls[id]; }
             _hideCancelQueued(id);
-            $('#progress-' + id).removeClass('active');
+            $('#progress-' + id).removeClass('active').css('width', '0%');
+            $('#status-text-' + id).text('');
             _showButtons($('#buttons-' + id));
-            _broadcastInstall('install-complete', id, { success: false, message: 'upgrade cancelled' });
+            // Reconcile the card with the server now that both the pending
+            // upgrade and its waiting activity have been cleared. Without this
+            // reload a stale render can leave the primary button disabled as
+            // WAIT... until the next full page refresh.
+            setTimeout(function() { safeReload(); }, 0);
         } else {
             swal('Could not cancel', (r && r.message) || 'The upgrade may have already started.', 'warning');
             if (b) { b.disabled = false; b.textContent = 'Cancel'; }
@@ -519,10 +518,8 @@ function cancelQueuedUpgrade(id) {
 }
 
 function startInstallPolling(id, progress, bar, status, buttons, btn, originalContent) {
-    // install-start already broadcast at doInstall entry so the Terminal tab
-    // reacts immediately on confirm, not ~2 s later after the AJAX. No-op
-    // here; install-complete still fires below on completion / server-side
-    // error status.
+    // Nothing is announced to other tabs from here: the Terminal tab follows the
+    // install from the server (EVENT_STREAM_MULTIPLEX.md R5), on every device.
     var isSelectBtn = btn && btn.tagName && btn.tagName.toLowerCase() === 'select';
     function handleProgress(d) {
         if (d.status === 'error') {
@@ -532,7 +529,6 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
             _hideCancelQueued(id);
             swal("Failed", d.message, "error");
             progress.removeClass('active'); _showButtons(buttons);
-            _broadcastInstall('install-complete', id, { success: false, message: d.message || '' });
             if (btn) {
                 $(btn).prop('disabled', false);
                 if (!isSelectBtn) $(btn).html(originalContent);
@@ -561,7 +557,6 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
             delete _aicliInstallControls[id];
             _hideCancelQueued(id);
             status.text("Finalizing...");
-            _broadcastInstall('install-complete', id, { success: d.status !== 'error' });
             // A side-by-side install finishes with the operator's workspaces
             // still running the OLD version, and nothing on screen would say so.
             // That is the one thing they need to know, and the only moment it is
@@ -616,12 +611,32 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
 // --- Version Picker Population ---
 
 var _versionPollTimer = null;
+var _versionCacheRequestSeq = 0;
+
+// The picker data is the durable server truth. Reconcile the visible radio
+// after every cache response so a failed or superseded channel write cannot
+// leave the Store card claiming a channel the server did not save.
+function syncChannelControl(agentId, channel) {
+    channel = ['stable', 'beta', 'pinned'].indexOf(channel) >= 0 ? channel : 'stable';
+    var control = document.querySelector('input[name="ch-' + agentId + '"][value="' + channel + '"]');
+    if (control) control.checked = true;
+}
+
 function loadVersionCache() {
+    var requestSeq = ++_versionCacheRequestSeq;
+    if (_versionPollTimer) {
+        clearInterval(_versionPollTimer);
+        _versionPollTimer = null;
+    }
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_version_cache&csrf_token=' + csrf, function(r) {
+        // A channel change starts a newer request. Do not let the older
+        // stable response arrive later and repaint the Beta picker.
+        if (requestSeq !== _versionCacheRequestSeq) return;
         if (r.status !== 'ok' || !r.dropdowns) return;
 
         var allHaveData = true;
         $.each(r.dropdowns, function(id, data) {
+            syncChannelControl(id, data.channel);
             populateVersionPicker(id, data);
             updateAgentBadge(id, data);
             // Check if this agent's select exists (installed) but has no version data
@@ -636,12 +651,19 @@ function loadVersionCache() {
             if (!_versionPollTimer) {
                 var _pollCount = 0;
                 _versionPollTimer = setInterval(function() {
+                    if (requestSeq !== _versionCacheRequestSeq) {
+                        clearInterval(_versionPollTimer);
+                        _versionPollTimer = null;
+                        return;
+                    }
                     _pollCount++;
                     if (_pollCount > 20) { clearInterval(_versionPollTimer); _versionPollTimer = null; return; } // Max 60s
                     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_version_cache&csrf_token=' + csrf, function(r2) {
+                        if (requestSeq !== _versionCacheRequestSeq) return;
                         if (r2.status !== 'ok' || !r2.dropdowns) return;
                         var nowAllHaveData = true;
                         $.each(r2.dropdowns, function(id, data) {
+                            syncChannelControl(id, data.channel);
                             populateVersionPicker(id, data);
                             updateAgentBadge(id, data);
                             if (document.getElementById('version-select-' + id) && (!data.versions || data.versions.length === 0)) {
@@ -867,18 +889,12 @@ function onVersionSelect(select) {
     // when the <select> is rebuilt after a refresh and fires a synthetic change).
     if (version === installed) return;
 
-    // Save the channel hint (latest/beta) inferred from the option's tag so
-    // subsequent update checks consult the right dist-tag.
-    var selectedOpt = select.options[select.selectedIndex];
-    var text = selectedOpt ? selectedOpt.textContent : '';
-    var tagMatch = text.match(/\[(\w+)\]/);
-    var channel = tagMatch ? tagMatch[1] : 'stable';
-    // `latest` is a release tag, not the user-facing Stable channel. Older
-    // builds conflated the two and could install a newer, less-tested release.
-    if (channel === 'latest') channel = 'stable';
-    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=set_agent_channel&agentId='
-              + encodeURIComponent(id) + '&channel=' + encodeURIComponent(channel)
-              + '&csrf_token=' + csrf);
+    // Choosing one explicit version is an install decision, not a release
+    // channel decision. The radio is the only control allowed to persist
+    // Stable / Beta / Pinned. In particular, never infer a channel from a
+    // cached response or a version's upstream tag: an older cache can describe
+    // Stable while the operator has deliberately selected Beta, and writing
+    // that inference back would silently undo their preference.
 
     // Use the picker itself as the click-source for button-state UI. Works
     // on both v2 cards (.av2-card) and the legacy card layout.
@@ -993,8 +1009,8 @@ function uninstallAgent(id, btn) {
 function setAgentFilter(filter, el) {
     agentFilter = filter;
     localStorage.setItem('aicli_agent_filter', filter);
-    $('.filter-btn').removeClass('active');
-    $(el).addClass('active');
+    $('.filter-btn').removeClass('active').attr('aria-pressed', 'false');
+    $(el).addClass('active').attr('aria-pressed', 'true');
     filterAgents();
 }
 
@@ -1020,13 +1036,21 @@ $(function() {
         this.dataset.userTyped = this.value;
     });
 
+    // AGENT_STORE_FILTER (2026-09-29): with no agent installed (a first install)
+    // the store opens on All. The saved filter lives in this browser, so it can
+    // come from an earlier install or another server at the same address, and
+    // "Installed" or "Updates" would then show an empty store.
+    if (agentFilter !== 'all' && $('.av2-card[data-installed="1"]').length === 0) {
+        agentFilter = 'all';
+        try { localStorage.setItem('aicli_agent_filter', 'all'); } catch (e) { /* private mode */ }
+    }
     // Restore filter button visual state (agentFilter itself is already seeded
     // from localStorage in ManagerGlobalState.php on page load).
     if (agentFilter !== 'all') {
-        $('.filter-btn').removeClass('active');
+        $('.filter-btn').removeClass('active').attr('aria-pressed', 'false');
         $('.filter-btn').each(function() {
             var m = ($(this).attr('onclick') || '').match(/setAgentFilter\('([^']+)'/);
-            if (m && m[1] === agentFilter) { $(this).addClass('active'); return false; }
+            if (m && m[1] === agentFilter) { $(this).addClass('active').attr('aria-pressed', 'true'); return false; }
         });
     }
     // Restore search input — set userTyped so killAutofill won't clear it.
@@ -1204,14 +1228,22 @@ function av2SaveAgentSetting(el) {
 // populateVersionPicker(). This is the required channel-change dropdown
 // refresh (WP #264 Task 4): no separate re-fetch step is needed.
 function av2SetChannel(agentId, channel) {
-    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=set_agent_channel&agentId=' + encodeURIComponent(agentId) + '&channel=' + encodeURIComponent(channel) + '&csrf_token=' + csrf, function(r) {
+    var request = $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=set_agent_channel&agentId=' + encodeURIComponent(agentId) + '&channel=' + encodeURIComponent(channel) + '&csrf_token=' + csrf);
+    request.done(function(r) {
         if (r && r.status === 'ok') {
             // Re-fetch version cache so dropdown options reflect the new channel's
             // available versions (server-side filter in getAvailableVersions).
             if (typeof loadVersionCache === 'function') loadVersionCache();
-        } else if (r && r.message) {
-            swal('Error', r.message, 'error');
+            return;
         }
+        // The endpoint returns its last durable value on a write/readback error.
+        // Apply it immediately, then reconcile every card from the cache response.
+        if (r && r.channel) syncChannelControl(agentId, r.channel);
+        if (typeof loadVersionCache === 'function') loadVersionCache();
+        if (r && r.message) swal('Error', r.message, 'error');
+    }).fail(function() {
+        if (typeof loadVersionCache === 'function') loadVersionCache();
+        swal('Error', 'Could not save the release channel. The saved setting was restored.', 'error');
     });
 }
 
@@ -1446,8 +1478,10 @@ function av2LoadTmuxPanel(agentId, panel) {
                 'aria-label': tipBody,
                 tabindex: '0',
             }, ['i']);
+            // Epic #307 (axe label / select-name): tie the key label to its field.
+            field.id = 'av2-tmux-' + String(agentId).replace(/[^a-zA-Z0-9_-]/g, '_') + '-' + key;
             const row = av2mkel('div', {class: 'av2-row' + (isMod ? ' modified' : ''), 'data-builtin': b}, [
-                av2mkel('label', {}, [key]),
+                av2mkel('label', {'for': field.id}, [key]),
                 av2mkel('div', {}, [field]),
                 infoIcon,
             ]);
@@ -1615,9 +1649,13 @@ function av2LoadAutoLaunchSection(agentId, panelBody) {
                 av2mkel('span', {}, ['Restart all saved workspaces']),
             ]));
 
+            // Epic #307: the label WRAPS the check box, so the whole label is
+            // the touch target on a phone (a bare check box is 13 px).
             row.appendChild(av2mkel('div', {class: 'av2-al-fresh'}, [
-                chkFresh,
-                av2mkel('label', {'for': uid + '-fresh'}, ['Start fresh if no resume']),
+                av2mkel('label', {'for': uid + '-fresh'}, [
+                    chkFresh,
+                    av2mkel('span', {}, ['Start fresh if no resume']),
+                ]),
             ]));
 
             chkAuto.addEventListener('change', function() {

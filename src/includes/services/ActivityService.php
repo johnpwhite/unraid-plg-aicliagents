@@ -488,6 +488,6 @@ class ActivityService {
         // docs/specs/ACTIVITY_TRAY.md
         $redirected = getenv('AICLI_ACTIVITY_DIR');
         if ($redirected !== false && $redirected !== '') return;
-        NchanService::publish(self::CHANNEL, $data);
+        EventBus::publish('activity', [], $data);
     }
 }

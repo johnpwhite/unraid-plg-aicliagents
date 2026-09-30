@@ -20,9 +20,11 @@
 namespace AICliAgents\Services;
 
 class PoolPathService {
-    /** Config value that keeps today's behaviour. */
+    /** Automatic safe launch mode (the default for new installations). */
+    const MODE_AUTO  = 'auto';
+    /** Legacy config value; it now receives the same safe automatic behavior. */
     const MODE_SHARE = 'share';
-    /** Config value that launches into the pool path when the share is cache-only. */
+    /** Explicit legacy mode; retained for backwards-compatible config files. */
     const MODE_POOL  = 'pool';
     const CONFIG_KEY = 'workspace_cwd';
 
@@ -40,11 +42,17 @@ class PoolPathService {
 
     /**
      * The directory a session should launch in for $workspacePath under $config.
-     * Returns $workspacePath unchanged unless the operator chose MODE_POOL AND
-     * the path resolves to a pool path (see resolvePoolPath).
+     * The returned path is the launch-only cwd. A cache-only user share is
+     * automatically routed through its real pool path in every supported mode;
+     * the configured workspace path remains the identity shown by the UI and
+     * stored in workspace records. Non-cache-only and non-user-share paths are
+     * deliberately left untouched.
      */
     public static function launchDirectory(string $workspacePath, array $config): string {
-        if ((string)($config[self::CONFIG_KEY] ?? self::MODE_SHARE) !== self::MODE_POOL) return $workspacePath;
+        $mode = (string)($config[self::CONFIG_KEY] ?? self::MODE_AUTO);
+        if (!in_array($mode, [self::MODE_AUTO, self::MODE_SHARE, self::MODE_POOL], true)) {
+            return $workspacePath;
+        }
         return self::resolvePoolPath($workspacePath) ?? $workspacePath;
     }
 

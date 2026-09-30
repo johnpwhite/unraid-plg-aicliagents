@@ -1,0 +1,65 @@
+# docs/specs/AUTO_CONTINUE_PATTERNS.md, part C. The plugin's Settings page
+# (Auto-continue patterns -> Report this pattern) opens this form with every
+# field below prefilled from the URL (?template=autocontinue-pattern.yml&<id>=...).
+# Keep each field id in step with AutoContinueRules::reportUrl().
+name: Auto-continue pattern
+description: Share a screen pattern that lets the plugin continue an agent by itself.
+title: "Auto-continue pattern: "
+labels: ["auto-continue-pattern"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. This pattern was written on your own server and works there already.
+        Check that the sample below holds no private data before you submit.
+  - type: input
+    id: agent
+    attributes:
+      label: Agent
+      description: The agent id, or "all agents".
+    validations:
+      required: true
+  - type: input
+    id: agent_version
+    attributes:
+      label: Agent version
+  - type: input
+    id: provider_model
+    attributes:
+      label: Provider / model
+      description: As shown on the screen, when it was visible.
+  - type: input
+    id: kind
+    attributes:
+      label: Kind
+      description: error, quota, busy or chrome.
+    validations:
+      required: true
+  - type: textarea
+    id: regex
+    attributes:
+      label: Regular expression
+      description: PCRE, written as /body/flags.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: retry_group
+    attributes:
+      label: Retry-time group
+      description: For a quota pattern, the capture group that holds the retry time.
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+  - type: textarea
+    id: sample
+    attributes:
+      label: Matched screen lines
+      description: Only the lines the pattern matches. Paths under /mnt and token-shaped strings are masked.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else that helps (what the agent was doing, how often it happens).

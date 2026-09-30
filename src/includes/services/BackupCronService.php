@@ -4,10 +4,10 @@
  *     <name>BackupCronService</name>
  *     <description>HOME_BACKUP.md R1: owns the plugin's home-backup cron file,
  *       the same way ConfigService owns the agent-check and health-check
- *       crons. Turns the `backup_schedule` cfg key ('off' | 'daily:HH:MM' |
- *       'weekly:D:HH:MM') into one cron line per user with a home, each
+ *       crons. Turns each home's OWN `schedule` (HomeBackupSettingsService,
+ *       #287; 'off' | 'daily:HH:MM' | 'weekly:D:HH:MM') into one cron line per home, each
  *       calling `admin-agent.php backup-home --user=<user> --scheduled`.</description>
- *     <dependencies>ConfigService, StorageMetricsService, LogService</dependencies>
+ *     <dependencies>ConfigService, StorageMetricsService, HomeBackupSettingsService, LogService</dependencies>
  *     <constraints>Read-only against ConfigService/StorageMetricsService — this
  *       class never edits those files, only calls their public methods (both are
  *       owned by concurrent HOME_BACKUP.md backend work).</constraints>
@@ -57,9 +57,10 @@ class BackupCronService {
     }
 
     /**
-     * Every user this cron should back up — the SAME set the Storage tab's
-     * Home backup card shows (HOME_BACKUP.md R12: "the card shows one row
-     * per user"), so the cron file never drifts from what the operator sees.
+     * Every user this cron may back up — the SAME set the Storage tab draws
+     * Home cards for (HOME_BACKUP.md R12; each card has its own Backup
+     * button since #287), so the cron file never drifts from what the
+     * operator sees.
      *
      * @return string[]
      */
@@ -75,50 +76,65 @@ class BackupCronService {
     }
 
     /**
-     * Reconcile the home-backup cron file with the current config. Idempotent
-     * and safe to call on every settings save, plugin install, and finalize —
-     * it always rewrites (or removes) the whole file rather than patching it.
+     * Reconcile the home-backup cron file with every home's OWN schedule
+     * (HOME_BACKUP.md #287: per-home settings). Idempotent and safe to call on
+     * every settings save, plugin install, and finalize — it always rewrites
+     * (or removes) the whole file rather than patching it. A home whose
+     * schedule is 'off' gets no line; a home with no settings file yet
+     * inherits the old global backup_schedule once (HomeBackupSettingsService).
      *
-     * @param array<string,mixed>|null $config Pass the already-loaded config to
-     *                                          avoid a second read; omit to read
-     *                                          it fresh via getAICliConfig().
+     * @param array<string,mixed>|null $config Kept for the existing callers;
+     *                                          the schedule now comes per home.
      */
     public static function sync(?array $config = null): void {
-        $config = $config ?? (\function_exists('getAICliConfig') ? getAICliConfig() : ConfigService::getConfig());
-        $schedule = trim((string)($config['backup_schedule'] ?? ''));
-        $cronExpr = self::parseScheduleToCron($schedule);
-
-        if ($cronExpr === null) {
-            if ($schedule !== '' && $schedule !== 'off') {
-                LogService::log("Refused an unsafe or malformed backup_schedule ('$schedule'); the home-backup cron is left unchanged.", LogService::LOG_ERROR, 'BackupCronService');
-            } else {
-                @unlink(self::CRON_FILE);
-                LogService::log('Home backup schedule disabled.', LogService::LOG_INFO, 'BackupCronService');
-                @exec('/usr/local/sbin/update_cron 2>/dev/null');
-            }
-            return;
-        }
-
         $users = array_values(array_filter(array_map(
             static fn($u): string => (string)preg_replace('/[^A-Za-z0-9_.-]/', '', (string)$u),
             self::usersWithHome()
         ), static fn(string $u): bool => $u !== ''));
 
-        if (empty($users)) {
-            // A schedule with nobody to back up yet: remove any stale file
-            // rather than write a cron line for a user that no longer exists.
+        $lines = self::cronLines($users, static function (string $user): string {
+            return (string)(HomeBackupSettingsService::get($user)['schedule'] ?? 'off');
+        });
+
+        if (empty($lines)) {
             @unlink(self::CRON_FILE);
-            LogService::log('Home backup schedule is set, but no user currently has a home — cron not installed.', LogService::LOG_INFO, 'BackupCronService');
+            LogService::log('Home backup schedule: no home has a schedule — cron not installed.', LogService::LOG_INFO, 'BackupCronService');
             @exec('/usr/local/sbin/update_cron 2>/dev/null');
             return;
         }
 
-        $content = "# AICliAgents: home backup schedule\n";
-        foreach ($users as $user) {
-            $content .= "$cronExpr /usr/bin/php " . self::ADMIN_AGENT_SCRIPT . " backup-home --user=$user --scheduled &> /dev/null\n";
-        }
+        $content = "# AICliAgents: home backup schedule (one line per home, each with its own schedule)\n" . implode('', $lines);
         @file_put_contents(self::CRON_FILE, $content);
         @exec('/usr/local/sbin/update_cron 2>/dev/null');
-        LogService::log("Home backup cron updated: $cronExpr for " . count($users) . ' user(s).', LogService::LOG_INFO, 'BackupCronService');
+        LogService::log('Home backup cron updated for ' . count($lines) . ' home(s).', LogService::LOG_INFO, 'BackupCronService');
+    }
+
+    /**
+     * Pure: the cron lines for $users, each from its own schedule. A home
+     * whose schedule is off, malformed or unsafe gets no line.
+     *
+     * @param string[] $users
+     * @param callable(string):string $scheduleFor
+     * @return string[]
+     */
+    public static function cronLines(array $users, callable $scheduleFor): array {
+        $lines = [];
+        foreach ($users as $user) {
+            if (!preg_match('/^[A-Za-z0-9_.-]+$/', $user)) continue;
+            try {
+                $schedule = trim((string)$scheduleFor($user));
+            } catch (\Throwable $e) {
+                continue;
+            }
+            $cronExpr = self::parseScheduleToCron($schedule);
+            if ($cronExpr === null) {
+                if ($schedule !== '' && $schedule !== 'off') {
+                    LogService::log("Refused an unsafe or malformed backup schedule ('$schedule') for $user; no cron line for this home.", LogService::LOG_ERROR, 'BackupCronService');
+                }
+                continue;
+            }
+            $lines[] = "$cronExpr /usr/bin/php " . self::ADMIN_AGENT_SCRIPT . " backup-home --user=$user --scheduled &> /dev/null\n";
+        }
+        return $lines;
     }
 }

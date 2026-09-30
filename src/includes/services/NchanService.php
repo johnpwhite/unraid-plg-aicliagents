@@ -19,6 +19,13 @@
 namespace AICliAgents\Services;
 
 require_once __DIR__ . '/EventLedger.php';
+// EventBus.php is required BEFORE the class body below because CHANNELS is
+// declared FROM its constant — a class-constant expression is resolved when
+// this class is compiled, so EventBus must already be declared by then.
+// EventBus.php itself requires this file back, AFTER its own class is
+// declared, so neither file ever needs the other's class before it exists —
+// see the require_once at the foot of EventBus.php.
+require_once __DIR__ . '/EventBus.php';
 
 class NchanService {
 
@@ -31,27 +38,14 @@ class NchanService {
      * gap does not need a full reconcile. Snapshot channels only ever need the
      * newest message. A key ending in `_` matches any channel with that prefix
      * (e.g. `install_` matches `install_claude-code`, one channel per agent).
+     *
+     * docs/specs/EVENT_STREAM_MULTIPLEX.md R4: this is now an ALIAS of
+     * EventBus::CHANNEL_DEPTHS — EventBus's registry is the one list; this
+     * constant exists only because NchanService is the public, long-lived
+     * name every caller and test already uses. EventBusTest pins that the
+     * two agree.
      */
-    public const CHANNELS = [
-        'activity'         => 20,
-        'workspaces'       => 20,
-        'storage_status'   => 1,
-        'deploy'           => 1,
-        'migrate_progress' => 1,
-        'install_'         => 1,
-        // AGENT_VOICE.md R4/R5: one clip/utterance at a time — a replay on
-        // reconnect would speak an old message again, so depth stays 1.
-        'voice'            => 1,
-        // REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E1: a favourite change is a
-        // one-off notice ({kind, id, ts}), never a state to replay — the SPA
-        // refetches the whole list on the message, the payload is only a hint.
-        'favourites'       => 1,
-        // docs/specs/VOICE_MAIL.md R10: an unheard-count changed. Like favourites it
-        // is a hint, not a state — every subscriber re-reads voicemail_list — so only
-        // the newest matters, and replaying older ones on reconnect would just cause
-        // redundant re-reads.
-        'voicemail'        => 1,
-    ];
+    public const CHANNELS = EventBus::CHANNEL_DEPTHS;
 
     /** Test seam: (string $url, string $body): array{errno:int,error:string,status:int}. Real curl when null. */
     public static $transport = null;
@@ -239,17 +233,9 @@ class NchanService {
         aicli_log("Nchan publish to channel '$channel' failed. Reason: $reason.", AICLI_LOG_WARN, 'NchanService');
     }
 
-    /**
-     * Publish install progress for an agent.
-     */
-    public static function publishInstallProgress(string $agentId, int $progress, string $step, string $reason = ''): void {
-        self::publish("install_$agentId", [
-            'agentId' => $agentId,
-            'progress' => $progress,
-            'step' => $step,
-            'completed' => $progress >= 100,
-            'reason' => $reason,
-            'timestamp' => time()
-        ]);
-    }
+    // publishInstallProgress() moved to EventBus::publishInstallProgress()
+    // (docs/specs/EVENT_STREAM_MULTIPLEX.md R4) — it now resolves the
+    // install_<agentId> channel through the ONE registry instead of building
+    // the channel string inline. NchanService::publish() remains the single
+    // transport every publish (including install progress) still goes through.
 }

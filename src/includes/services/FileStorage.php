@@ -64,6 +64,13 @@ trait FileStorageExitResultTrait
     public bool $deferred = false;
     public ?string $deferReason = null;
     public int $exit = 1;
+    /**
+     * #357: the changes are on durable storage. Exit 0, or exit 2 with a reason
+     * that still wrote the layer (mount_busy, busy_cooldown). An exit 2 with a
+     * reason in FileStorage::NOT_SAVED_DEFER_REASONS wrote NOTHING: ok stays
+     * true (the entity is usable, nothing broke) but saved is false.
+     */
+    public bool $saved = false;
 
     public static function fromExit(int $exit, ?string $deferReason): self
     {
@@ -72,6 +79,7 @@ trait FileStorageExitResultTrait
         $r->deferReason = $deferReason;
         $r->ok = ($exit === 0 || $exit === 2);
         $r->deferred = ($exit === 2);
+        $r->saved = FileStorage::bakeResultSaved($exit, $deferReason);
         return $r;
     }
 }
@@ -118,6 +126,7 @@ final class FileStorageStatus
     public string $backend = 'flash';
     public bool $supportsBake = true;          // emitted by the seam
     public bool $supportsConsolidate = true;   // emitted by the seam
+    public bool $supportsSideBySide = false;  // emitted for agent generation activation
     public ?array $consolidate = null;         // emitted by the seam (home status)
     public ?array $layers = null;              // emitted by the seam; flash-only, null on passthrough
     // additive (UI superset) — emitted by the seam's mount{} object
@@ -156,6 +165,9 @@ final class FileStorageStatus
         $s->backend = (string)($j['backend'] ?? 'flash');
         $s->supportsBake = array_key_exists('supportsBake', $j) ? (bool)$j['supportsBake'] : ($s->backend === 'flash');
         $s->supportsConsolidate = array_key_exists('supportsConsolidate', $j) ? (bool)$j['supportsConsolidate'] : ($s->backend === 'flash');
+        $s->supportsSideBySide = array_key_exists('supportsSideBySide', $j)
+            ? (bool)$j['supportsSideBySide']
+            : false;
 
         $mount = is_array($j['mount'] ?? null) ? $j['mount'] : [];
         $s->merged = (string)($mount['merged'] ?? '');
@@ -185,6 +197,7 @@ final class FileStorageStatus
             'isDurable' => $this->isDurable,
             'supportsBake' => $this->supportsBake,
             'supportsConsolidate' => $this->supportsConsolidate,
+            'supportsSideBySide' => $this->supportsSideBySide,
             'dirtyBytes' => $this->dirtyBytes,
             'mounted' => $this->mounted,
             'merged' => $this->merged,
@@ -200,6 +213,29 @@ final class FileStorageStatus
 final class FileStorage
 {
     private const STORAGECTL = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh';
+
+    /**
+     * #357 (HOME_STORAGE_LIFECYCLE.md "a save that meets a non-bake lock holder"):
+     * the bake defer reasons that mean NO layer was written. bake_lock_held = the
+     * bake waited its limit for another storage operation (a reconcile check, a
+     * consolidate swap) and gave up; sqlite_backup_deferred = a database copy was
+     * locked before the layer was packed; no_space (#374, as an exit 2) = the
+     * file system of the SQLite stage folder had no room for the database
+     * copies, so nothing was staged. KEEP IN SYNC with
+     * AICLI_NOT_SAVED_DEFER_REASONS in src/scripts/storage/common.sh.
+     */
+    public const NOT_SAVED_DEFER_REASONS = ['bake_lock_held', 'sqlite_backup_deferred', 'no_space'];
+
+    /**
+     * #357: does a bake result mean the changes are on durable storage? Exit 0,
+     * or exit 2 with a reason that still wrote the layer. Pure.
+     */
+    public static function bakeResultSaved(int $exit, ?string $deferReason): bool
+    {
+        if ($exit === 0) return true;
+        if ($exit !== 2) return false;
+        return !in_array((string)$deferReason, self::NOT_SAVED_DEFER_REASONS, true);
+    }
 
     /**
      * Parse an "type/id" entity string into ['type'=>..., 'id'=>...].
@@ -247,6 +283,32 @@ final class FileStorage
         }
         $flash = ($backend === 'flash');
         return $memo[$persistPath] = ['backend' => $backend, 'supportsBake' => $flash, 'supportsConsolidate' => $flash];
+    }
+
+    /**
+     * #372 (docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount
+     * wins"): the upper mode ('zram' | 'disk') for a NEW mount on this persist
+     * path — the storage_backend_mode policy first, then the device test. It is
+     * bash `entity_upper_mode` itself (`detect_backend.sh --upper-mode`), so PHP
+     * and bash decide the mode in ONE place. A mounted entity keeps the upper the
+     * kernel shows; callers read that first (StorageMountService::resolveHomeUpperPath).
+     * Any failure gives 'zram' (the wear-safe answer, the same bias as bash).
+     * AICLI_DETECT_BACKEND_SH: test-only script-path override.
+     */
+    public static function upperModeForPath(string $persistPath): string
+    {
+        static $memo = [];
+        if (array_key_exists($persistPath, $memo)) {
+            return $memo[$persistPath];
+        }
+        $script = getenv('AICLI_DETECT_BACKEND_SH') ?: dirname(self::STORAGECTL) . '/detect_backend.sh';
+        $mode = 'zram';
+        if ($persistPath !== '' && is_file($script)) {
+            // nosemgrep: php.lang.security.exec-use.exec-use
+            $out = trim((string) @shell_exec('bash ' . escapeshellarg($script) . ' --upper-mode ' . escapeshellarg($persistPath) . ' 2>/dev/null'));
+            if ($out === 'zram' || $out === 'disk') { $mode = $out; }
+        }
+        return $memo[$persistPath] = $mode;
     }
 
     /**
@@ -524,12 +586,18 @@ final class FileStorage
             $deferred = false;
             $consolidated = StorageMountService::consolidate($type, $id, $deferred);
             $bakeRc = 0;
+            $bakeReason = null;
             if (!$consolidated && $deferred) {
-                [$bakeRc, ] = self::seam('bake', $type, $id, $persist);
+                [$bakeRc, $bakeJson] = self::seam('bake', $type, $id, $persist);
+                // #357: an exit 2 can mean "not saved" (bake_lock_held after the
+                // lock wait) — pass the reason so the mapping can tell.
+                $bakeReason = ((int)$bakeRc === 2)
+                    ? (($bakeJson['defer_reason'] ?? null) ?: self::peekDeferReason($type, $id))
+                    : null;
             }
-            $exit = StorageMountService::mapAgentCommitResult($consolidated, $deferred, (int)$bakeRc);
+            $exit = StorageMountService::mapAgentCommitResult($consolidated, $deferred, (int)$bakeRc, $bakeReason);
             if ($exit === 1 && !$consolidated && $deferred) {
-                LogService::log("Agent $id: consolidation deferred AND fallback delta bake failed (rc=$bakeRc) — data remains in ZRAM only.", LogService::LOG_ERROR, "FileStorage");
+                LogService::log("Agent $id: consolidation deferred AND fallback delta bake did not save (rc=$bakeRc, reason=" . ($bakeReason ?? 'none') . ") — data remains in ZRAM only.", LogService::LOG_ERROR, "FileStorage");
             } elseif ($exit === 2) {
                 LogService::log("Agent $id: consolidation deferred; delta bake succeeded — data is safe on Flash, consolidation deferred to next install.", LogService::LOG_WARN, "FileStorage");
             }
@@ -551,12 +619,19 @@ final class FileStorage
         LogService::log("Initiating SquashFS persistence bake for $type $id ($dirtyMB MB dirty)...", LogService::LOG_INFO, "FileStorage");
         LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'FileStorage', 'bake_start', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'persist_path' => $persist]);
 
-        [$exit, ] = self::seam('bake', $type, $id, $persist);
-        $reason = ($exit === 2) ? self::peekDeferReason($type, $id) : null;
+        [$exit, $bakeJson] = self::seam('bake', $type, $id, $persist);
+        $reason = ($exit === 2)
+            ? (($bakeJson['defer_reason'] ?? null) ?: self::peekDeferReason($type, $id))
+            : null;
 
         if ($exit === 0) {
             LogService::log("Successfully persisted $dirtyMB MB of RAM storage to Flash disk for $type $id.", LogService::LOG_INFO, "FileStorage");
             LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'FileStorage', 'bake_ok', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'result' => 0]);
+        } elseif ($exit === 2 && !self::bakeResultSaved($exit, $reason)) {
+            // #357: no layer was written (another storage operation held the lock
+            // past the wait, or a database copy was locked). Never "Backed up".
+            LogService::log("NOT saved: $dirtyMB MB for $type $id stay in RAM (reason=" . ($reason ?? 'unknown') . "); the next save captures them.", LogService::LOG_WARN, "FileStorage");
+            LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, 'FileStorage', 'bake_not_saved', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'reason' => $reason ?? 'unknown']);
         } elseif ($exit === 2) {
             LogService::log("Backed up $dirtyMB MB to Flash for $id, RAM flush deferred (reason=" . ($reason ?? 'unknown') . ").", LogService::LOG_INFO, "FileStorage");
             LifecycleLogService::log(LifecycleLogService::LEVEL_INFO, 'FileStorage', 'bake_deferred', ['type' => $type, 'id' => $id, 'dirty_mb' => $dirtyMB, 'reason' => $reason ?? 'unknown']);
@@ -620,6 +695,60 @@ final class FileStorage
         // L6 (WP#1333): $j is already the decoded seam array — build from it directly
         // (no json_encode→json_decode round-trip).
         return FileStorageStatus::fromArray(is_array($j) ? $j : []);
+    }
+
+    /**
+     * Whether an agent's current storage backend can stage and bake a successor
+     * without changing the generation in service. This deliberately uses the
+     * raw seam result rather than the status DTO: a missing or failed status
+     * response must not be treated as permission to write beside live sessions.
+     * Both layering and plain-directory agent storage expose a versioned
+     * activation path; homes continue to use their normal close/flush boundary.
+     */
+    public static function agentStorageSupportsSideBySide(string $agentId): bool
+    {
+        if ($agentId === '') {
+            return false;
+        }
+        try {
+            ['type' => $type, 'id' => $id] = self::parseEntity('agent/' . $agentId);
+        } catch (\InvalidArgumentException $e) {
+            return false;
+        }
+        $persist = self::persistPathFor($type, $id);
+        [$exit, $j] = self::seam('status', $type, $id, $persist);
+        return $exit === 0
+            && (($j['supportsSideBySide'] ?? false) === true
+                || (($j['backend'] ?? null) === 'flash' && ($j['supportsBake'] ?? false) === true));
+    }
+
+    /** Run one crash-safe per-entity storage-engine conversion. */
+    public static function migrateBackend(string $type, string $id, string $target, bool $forceDirect = false): array
+    {
+        if (!in_array($type, ['agent', 'home'], true) || $id === '') {
+            return ['exit' => 64, 'outcome' => 'failed', 'reason' => 'invalid_entity'];
+        }
+        $target = StorageBackendPolicyService::normalizeMode($target);
+        $persist = self::persistPathFor($type, $id);
+        $extra = ['--target' => $target];
+        if ($forceDirect) $extra['--force-direct'] = null;
+        [$exit, $json] = self::seam('backend-migrate', $type, $id, $persist, $extra);
+        $json['exit'] = $exit;
+        return $json;
+    }
+
+    /** Bracket the all-entity engine migration with the same crash marker used by path migration. */
+    public static function migrateBackendPolicy(string $from, string $to, callable $work): FileStorageMigrationResult
+    {
+        self::writeMigrationMarker(['trigger' => 'backend', 'from' => $from, 'to' => $to, 'phase' => 'running']);
+        try {
+            $ok = (bool)$work();
+        } catch (\Throwable $e) {
+            self::clearMigrationMarker();
+            return FileStorageMigrationResult::make(false, 'failed', $e->getMessage());
+        }
+        self::clearMigrationMarker();
+        return FileStorageMigrationResult::make($ok, $ok ? 'migrated' : 'failed');
     }
 
     // ---- Migration: the TWO bounded triggers (Epic #1310 #1321/#1322) ---------
@@ -781,6 +910,8 @@ final class FileStorage
         @unlink("/tmp/unraid-aicliagents/.consolidate_marker_home_{$id}");
         @unlink("/var/run/aicli-bake-home-{$safeId}.lock");
         @unlink("/var/run/aicli-bake-home-{$id}.lock");
+        // #357: the lock owner record next to the lock.
+        @unlink("/var/run/aicli-bake-home-{$safeId}.lock.owner");
         // Work dir (contains merge mountpoint, upper, work subdirs when not in use).
         $workDir = "/tmp/unraid-aicliagents/work/{$id}";
         if (is_dir($workDir)) {

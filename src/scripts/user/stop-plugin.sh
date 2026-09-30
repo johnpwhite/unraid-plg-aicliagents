@@ -177,29 +177,42 @@ if [ -d "$PERSIST_PATH" ] && [ -r "$PERSIST_PATH" ]; then
     }
 
     # Bake dirty home layers (home only — see header).
-    if [ -d "$ZRAM_UPPER/homes" ]; then
-        for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
-            [ -d "$upper_dir" ] || continue
-            has_real_files "$upper_dir" || continue
-            user=$(basename "$(dirname "$upper_dir")")
-            home_path=$(home_persist_path "$user" 2>/dev/null || echo "$PERSIST_PATH")
-            status "Baking home delta for $user..."
-            DELTA_NAME=$(atomic_write_layer "home" "$user" "$home_path" "$upper_dir" "delta" 2>>"$LOG_FILE")
-            if [ -n "$DELTA_NAME" ]; then
-                BAKED=$((BAKED + 1))
-                status "  Saved $DELTA_NAME for $user."
-                # Follow-on 3: track the shutdown delta in the manifest IMMEDIATELY
-                # (mirror op_bake Step 7a) instead of leaving it untracked-until-
-                # reconcile. LEAN — bake + manifest record only, no refresh/reclaim
-                # (wrong under the shutdown budget). addLayer is idempotent + upserts.
-                # F6 (WP#1331): the SINGLE manifest writer.
-                manifest_record_layer "home" "$user" "$home_path" "$DELTA_NAME" \
-                    || warn "  Manifest record failed for $DELTA_NAME (reconcile will recover)."
-            else
-                warn "Home delta bake failed for $user."
-            fi
+    # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"): bake
+    # the upper each home's mount REALLY uses (zram or disk), not only the zram
+    # folders — a home mounted on a disk upper was skipped here. RAM uppers go
+    # first (home_uppers_shutdown_order). Fallback without resolve_paths.sh: the
+    # zram folders, as before.
+    _stop_home_uppers() {
+        if declare -f home_uppers_shutdown_order >/dev/null 2>&1; then
+            home_uppers_shutdown_order
+            return 0
+        fi
+        local _d _u
+        for _d in "$ZRAM_UPPER/homes"/*/upper; do
+            [ -d "$_d" ] || continue
+            _u="${_d%/upper}"; printf '%s\t%s\n' "${_u##*/}" "$_d"
         done
-    fi
+    }
+    while IFS=$'\t' read -r user upper_dir; do
+        [ -n "$user" ] && [ -d "$upper_dir" ] || continue
+        has_real_files "$upper_dir" || continue
+        home_path=$(home_persist_path "$user" 2>/dev/null || echo "$PERSIST_PATH")
+        status "Baking home delta for $user..."
+        DELTA_NAME=$(atomic_write_layer "home" "$user" "$home_path" "$upper_dir" "delta" 2>>"$LOG_FILE")
+        if [ -n "$DELTA_NAME" ]; then
+            BAKED=$((BAKED + 1))
+            status "  Saved $DELTA_NAME for $user."
+            # Follow-on 3: track the shutdown delta in the manifest IMMEDIATELY
+            # (mirror op_bake Step 7a) instead of leaving it untracked-until-
+            # reconcile. LEAN — bake + manifest record only, no refresh/reclaim
+            # (wrong under the shutdown budget). addLayer is idempotent + upserts.
+            # F6 (WP#1331): the SINGLE manifest writer.
+            manifest_record_layer "home" "$user" "$home_path" "$DELTA_NAME" \
+                || warn "  Manifest record failed for $DELTA_NAME (reconcile will recover)."
+        else
+            warn "Home delta bake failed for $user."
+        fi
+    done < <(_stop_home_uppers)
     [ "$BAKED" -gt 0 ] && status "Persisted $BAKED home delta(s) to Flash." || status "No dirty home data to persist."
 else
     warn " Storage path $PERSIST_PATH not accessible. Skipping final sync."

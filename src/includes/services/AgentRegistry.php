@@ -3,7 +3,7 @@
  * <module_context>
  *     <name>AgentRegistry</name>
  *     <description>Management of the AI agent manifest and installation logic.</description>
- *     <dependencies>LogService, ConfigService</dependencies>
+ *     <dependencies>LogService, ConfigService, AtomicWriteService</dependencies>
  *     <constraints>Under 150 lines. Handles versioning and discovery.</constraints>
  * </module_context>
  */
@@ -28,6 +28,53 @@ class AgentRegistry {
      */
     private const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/';
 
+    /** Resolve the override once per operation so tests and live writes share the same path. */
+    private static function versionsPath(): string {
+        return getenv('AICLI_VERSIONS_FILE') ?: self::VERSIONS_FILE;
+    }
+
+    /**
+     * Serialize the versions.json read/modify/write transaction.
+     *
+     * A temp-file rename prevents torn JSON, but it does not prevent a stale
+     * reader from replacing a newer channel selection. The channel selector,
+     * install discovery, and self-heal paths all use this lock so they merge
+     * their change with the current file contents before writing.
+     */
+    private static function withVersionsLock(callable $callback) {
+        $path = self::versionsPath();
+        $lockPath = $path . '.lock';
+        $dir = dirname($lockPath);
+        if (!is_dir($dir)) @mkdir($dir, 0755, true);
+
+        $fp = @fopen($lockPath, 'c');
+        if ($fp === false || !@flock($fp, LOCK_EX)) {
+            if (is_resource($fp)) @fclose($fp);
+            LogService::log("Unable to lock versions file: $lockPath", LogService::LOG_WARN, "AgentRegistry");
+            return null;
+        }
+
+        try {
+            return $callback();
+        } finally {
+            @flock($fp, LOCK_UN);
+            @fclose($fp);
+        }
+    }
+
+    /** Apply one read/modify/write mutation while holding the versions lock. */
+    private static function mutateVersions(callable $mutator): bool {
+        return self::withVersionsLock(function () use ($mutator): bool {
+            $versions = self::getVersions();
+            $mutator($versions);
+            if (!AtomicWriteService::writeJson(self::versionsPath(), $versions)) {
+                LogService::log("Unable to save versions file", LogService::LOG_WARN, "AgentRegistry");
+                return false;
+            }
+            return true;
+        }) === true;
+    }
+
     /**
      * STRUCTURAL RULE (docs/specs/AGENT_SELF_UPDATE_SUPPRESSION.md, 2026-09-10):
      * every agent this plugin defines must have a self-update decision — EITHER
@@ -47,6 +94,8 @@ class AgentRegistry {
     const SELF_UPDATE_SUPPRESSED = [
         'claude-code', 'opencode', 'kilocode', 'pi-coder', 'codex-cli',
         'factory-cli', 'antigravity-cli', 'grok-build', 'kimi-code',
+        // 2026-09-24: COPILOT_AUTO_UPDATE=false, verified in the binary itself.
+        'gh-copilot',
         // Suppressed through `default_settings` (a settings.json key) rather than
         // an env var or CLI flag — see AgentSettingsSeedService.
         'gemini-cli', 'qwen-code',
@@ -60,12 +109,6 @@ class AgentRegistry {
      * @var array<string,string> agentId => reason
      */
     const SELF_UPDATE_EXEMPT = [
-        'gh-copilot' => 'No verified mechanism for the CLI BINARY\'s own self-update. '
-            . 'COPILOT_AUTO_UPDATE/autoUpdate only gate first-party PLUGIN '
-            . 'auto-update per the official docs, not the copilot binary. A '
-            . '--no-auto-update flag appears only in an unofficial GitHub '
-            . 'Discussion workaround with no maintainer confirmation and no entry '
-            . 'in the official CLI command reference; not applied unverified.',
         'nanocoder' => 'No self-update mechanism exists to suppress — the published '
             . 'npm package.json (registry.npmjs.org, checked 2026-09-10) ships no '
             . 'update-notifier or auto-updater dependency of any kind.',
@@ -155,6 +198,29 @@ class AgentRegistry {
             throw new \InvalidArgumentException("AgentRegistry::agentInstallPath: invalid agent id '$agentId'");
         }
         return self::$installRootOverride ?? self::agentPath($agentId);
+    }
+
+    /**
+     * The registry binary as the install sees it: remapped into the staging root
+     * while a side-by-side install is in progress, unchanged otherwise.
+     *
+     * 2026-09-24 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "record the version
+     * that was installed"): every source's version probe must use this. The
+     * registry `binary` names the STABLE path, which during a staged install is
+     * still the version in service. GithubReleaseSource probed that path, so a
+     * goose downgrade 1.52.0 -> 1.51.0 recorded 1.52.0 (the old binary) while
+     * the new generation ran 1.51.0 — the record lagged one change behind.
+     */
+    public static function installBinaryPath(string $agentId, string $binary): string {
+        $stable = self::agentPath($agentId);
+        $install = self::agentInstallPath($agentId);
+        if ($install === $stable || $binary === '') return $binary;
+        if ($binary === $stable) return $install;
+        $prefix = $stable . '/';
+        if (strncmp($binary, $prefix, strlen($prefix)) === 0) {
+            return $install . substr($binary, strlen($stable));
+        }
+        return $binary;
     }
 
     /**
@@ -280,9 +346,6 @@ class AgentRegistry {
             }
         }
 
-        $versions = self::getVersions();
-        $versionsChanged = false;
-
         $config = ConfigService::getConfig();
         $persistPath = $config['agent_storage_path'] ?? "/boot/config/plugins/unraid-aicliagents";
 
@@ -320,8 +383,16 @@ class AgentRegistry {
             // D-312/R2: 'is_installed' = binary OR sqsh OR a real version in versions.json.
             // The third arm covers passthrough-storage agents (e.g. codex-cli) where the
             // binary may be stale/absent but versions.json records the installed release.
+            // Forgejo #303: that third arm must not keep a record that no stored
+            // content can back. The heal runs only when the binary is missing AND
+            // no layer exists AND a real version is recorded (rare), so the
+            // common render costs nothing extra.
+            if (!$binExists && !$sqshExists && $hasVersion
+                && self::healPhantomInstallRecord($id, $binExists, $sqshExists, $persistPath)) {
+                $agent['version'] = self::getInstalledVersion($id);
+            }
             $agent['is_installed'] = self::computeIsInstalled($binExists, $sqshExists, $id);
-            
+
             // D-326: Also consider 'installed' if a background installation is currently running
             // This prevents the 'INSTALL' button from reappearing if the user refreshes during install.
             if (!$agent['is_installed']) {
@@ -348,22 +419,15 @@ class AgentRegistry {
                 $v = self::discoverVersion($id, $agent);
                 // Only save if we got a real version (not 'unknown' — that means sqsh isn't mounted yet)
                 if ($v && $v !== 'unknown') {
-                    $existing = $versions[$id] ?? null;
-                    if (is_array($existing)) {
-                        $existing['installed'] = $v;
-                        $versions[$id] = $existing;
-                    } else {
-                        $versions[$id] = ['installed' => $v, 'channel' => 'stable', 'pinned' => null];
-                    }
+                    // Merge the discovered version with the current file under
+                    // the versions lock. Do not write the snapshot captured at
+                    // the start of getRegistry(), because a concurrent Beta
+                    // selection must not be overwritten by this self-heal.
+                    self::saveVersion($id, $v);
                     $agent['version'] = $v;
-                    $versionsChanged = true;
                     LogService::log("Restored version for $id: $v", LogService::LOG_INFO, "AgentRegistry");
                 }
             }
-        }
-
-        if ($versionsChanged) {
-            self::saveVersions($versions);
         }
 
         return $registry;
@@ -573,23 +637,19 @@ class AgentRegistry {
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'GH_COPILOT',
                 'changelog_url' => 'https://github.com/github/copilot-cli/releases',
-                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): NO VERIFIED
-                // mechanism found for disabling the Copilot CLI BINARY's own
-                // self-update. `COPILOT_AUTO_UPDATE=false` / the `autoUpdate`
-                // setting DO exist in the official CLI plugin reference
-                // (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference)
-                // but that page explicitly scopes them to "First-party plugins ...
-                // automatically update at the start of each session" — plugin
-                // auto-update, NOT the copilot binary itself. Searched the official
-                // CLI command reference
-                // (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
-                // for a binary-self-update flag: it documents `copilot update` and
-                // `copilot version` only, no disable flag. A `--no-auto-update` flag
-                // appears ONLY in a user's own unofficial workaround in a GitHub
-                // Discussion (github/copilot-cli#1199) with no maintainer
-                // confirmation, and the binary isn't installed on this box to probe
-                // via --help. Not applying an unverified flag — see
-                // AgentRegistry::SELF_UPDATE_EXEMPT.
+                // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-24): the Copilot CLI
+                // native binary runs the NEWEST package it finds in its package
+                // cache (~/.cache/copilot/pkg/<platform>/<version>, also
+                // $COPILOT_PKG_CACHE_HOME / $COPILOT_CACHE_HOME / ~/.copilot/pkg),
+                // not the one npm installed, unless auto-update is off. Verified
+                // in the 1.0.87-0 binary's own code: auto-update is enabled
+                // unless argv has --no-auto-update / --prefer-version or
+                // COPILOT_AUTO_UPDATE is "false". Live on .4 (2026-09-24): a
+                // downgrade to 1.0.87-0 still ran 1.0.88 from a HOME that had run
+                // 1.0.88 once; with COPILOT_AUTO_UPDATE=false it ran 1.0.87-0.
+                // Without this, a downgrade or a pinned version never takes
+                // effect for a user whose managed HOME ever ran a newer copilot.
+                'default_envs' => ['COPILOT_AUTO_UPDATE' => 'false'],
             ],
             'codex-cli' => [
                 'id' => 'codex-cli',
@@ -631,7 +691,15 @@ class AgentRegistry {
                 // (redirects to https://learn.chatgpt.com/docs/config-file/config-reference).
                 // Applied as a `-c` override alongside the sandbox flags above so it
                 // always wins over any user workspace arg, same rationale.
-                'plugin_args' => '-c sandbox_mode=danger-full-access -c approval_policy=on-request -c check_for_update_on_startup=false',
+                //
+                // TERMINAL_MOBILE_COPY_PASTE.md (2026-09-29): --no-alt-screen keeps
+                // Codex on the normal screen (inline mode). Codex 0.153 drew inline
+                // by default; 0.158.0 starts in the full-screen (alternate) mode,
+                // where tmux keeps no history, so a phone swipe could not scroll
+                // back and Latest had nothing to return from. The flag exists in
+                // every Codex this plugin installs (checked on 0.153.4 and 0.158.0:
+                // an unknown flag exits 2, this one does not).
+                'plugin_args' => '--no-alt-screen -c sandbox_mode=danger-full-access -c approval_policy=on-request -c check_for_update_on_startup=false',
                 // Codex 0.144.1 grammar is `codex [OPTIONS] resume [SESSION_ID]`.
                 // Keep user and plugin global options before the subcommand;
                 // a plain Codex invocation starts a new conversation.
@@ -803,6 +871,8 @@ class AgentRegistry {
                     // archived builds to install. Unraid is always x86_64, so
                     // the linux_amd64 manifest is hard-referenced.
                     'manifest_url' => 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json',
+                    // Shared user state (#270). Sources: SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 4.
+                    'captive_state' => ['home/.gemini/antigravity-cli'],
                 ],
                 'binary' => "$agentBase/antigravity-cli/home/.local/bin/agy",
                 // Resume flags per `agy --help`: --conversation <id> resumes a
@@ -844,6 +914,19 @@ class AgentRegistry {
                     // TARGET="$1"), so a pinned/channel-resolved target is honoured.
                     'version_args' => ['{version}'],
                     'timeout_s' => 900,
+                    // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 4 — 2026-09-23 (#270).
+                    // https://x.ai/cli/install.sh reads ~/.grok/auth.json (the
+                    // `grok login` credential), writes the [cli] block of
+                    // ~/.grok/config.toml, and writes managed_config.toml and
+                    // requirements.toml for a deployment key. Sessions live in
+                    // ~/.grok/sessions (https://docs.x.ai/build/cli/headless-scripting).
+                    'captive_state' => [
+                        'home/.grok/auth.json',
+                        'home/.grok/config.toml',
+                        'home/.grok/managed_config.toml',
+                        'home/.grok/requirements.toml',
+                        'home/.grok/sessions',
+                    ],
                 ],
                 'binary' => "$agentBase/grok-build/home/.grok/bin/grok",
                 // Grok otherwise self-updates the plugin-owned binary. Keep the
@@ -885,6 +968,26 @@ class AgentRegistry {
                     // killed the download mid-way.
                     'version_env' => 'KIMI_VERSION',
                     'timeout_s' => 900,
+                    // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 4 — 2026-09-23 (#270).
+                    // The install folder and the data folder are the SAME
+                    // ~/.kimi-code by default (install.sh: KIMI_INSTALL_DIR and
+                    // KIMI_CODE_HOME), and install.sh writes the region marker
+                    // there. The user-state entries below are the ones listed at
+                    // https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/data-locations.html
+                    // (bin/, logs/ and updates/ are payload or scratch).
+                    'captive_state' => [
+                        'home/.kimi-code/region',
+                        'home/.kimi-code/config.toml',
+                        'home/.kimi-code/tui.toml',
+                        'home/.kimi-code/mcp.json',
+                        'home/.kimi-code/AGENTS.md',
+                        'home/.kimi-code/credentials',
+                        'home/.kimi-code/sessions',
+                        'home/.kimi-code/session_index.jsonl',
+                        'home/.kimi-code/user-history',
+                        'home/.kimi-code/skills',
+                        'home/.kimi-code/plugins',
+                    ],
                 ],
                 'binary' => "$agentBase/kimi-code/home/.kimi-code/bin/kimi",
                 'resume_cmd' => '{binary} {args} --session {chatId}',
@@ -911,9 +1014,10 @@ class AgentRegistry {
     }
 
     public static function getVersions() {
-        $path = getenv('AICLI_VERSIONS_FILE') ?: self::VERSIONS_FILE;
+        $path = self::versionsPath();
         if (file_exists($path)) {
-            return json_decode(file_get_contents($path), true) ?: [];
+            $versions = json_decode(file_get_contents($path), true);
+            return is_array($versions) ? $versions : [];
         }
         return [];
     }
@@ -962,8 +1066,11 @@ class AgentRegistry {
     }
 
     public static function saveVersions($versions) {
-        $path = getenv('AICLI_VERSIONS_FILE') ?: self::VERSIONS_FILE;
-        file_put_contents($path, json_encode($versions, JSON_PRETTY_PRINT));
+        self::withVersionsLock(function () use ($versions): void {
+            if (!AtomicWriteService::writeJson(self::versionsPath(), $versions)) {
+                LogService::log("Unable to save versions file", LogService::LOG_WARN, "AgentRegistry");
+            }
+        });
     }
 
     /**
@@ -972,29 +1079,29 @@ class AgentRegistry {
      * support mtime-throttled self-heal (maybeRefreshVersion).
      */
     public static function saveVersion($agentId, $version, ?int $probedMtime = null) {
-        $versions = self::getVersions();
-        $existing = $versions[$agentId] ?? null;
+        self::mutateVersions(function (array &$versions) use ($agentId, $version, $probedMtime): void {
+            $existing = $versions[$agentId] ?? null;
 
-        if (is_array($existing)) {
-            // Preserve channel/pinned, update installed
-            $existing['installed'] = $version;
-            if ($probedMtime !== null) {
-                $existing['probed_mtime'] = $probedMtime;
+            if (is_array($existing)) {
+                // Preserve channel/pinned, update installed
+                $existing['installed'] = $version;
+                if ($probedMtime !== null) {
+                    $existing['probed_mtime'] = $probedMtime;
+                }
+                $versions[$agentId] = $existing;
+            } else {
+                // Migrate from old string format to new object format
+                $entry = [
+                    'installed' => $version,
+                    'channel' => 'stable',
+                    'pinned' => null,
+                ];
+                if ($probedMtime !== null) {
+                    $entry['probed_mtime'] = $probedMtime;
+                }
+                $versions[$agentId] = $entry;
             }
-            $versions[$agentId] = $existing;
-        } else {
-            // Migrate from old string format to new object format
-            $entry = [
-                'installed' => $version,
-                'channel' => 'stable',
-                'pinned' => null,
-            ];
-            if ($probedMtime !== null) {
-                $entry['probed_mtime'] = $probedMtime;
-            }
-            $versions[$agentId] = $entry;
-        }
-        self::saveVersions($versions);
+        });
     }
 
     /**
@@ -1068,16 +1175,16 @@ class AgentRegistry {
             LogService::log("maybeRefreshVersion: $agentId -> $v (mtime=$mtime)", LogService::LOG_INFO, "AgentRegistry");
         } else {
             // Discovery failed — still record the mtime so we don't hammer the binary.
-            $versions = self::getVersions();
-            $existing = $versions[$agentId] ?? null;
-            if (is_array($existing)) {
-                $existing['probed_mtime'] = $mtime;
-                $versions[$agentId] = $existing;
-            } else {
-                $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
-                $versions[$agentId] = ['installed' => $installed, 'channel' => 'stable', 'pinned' => null, 'probed_mtime' => $mtime];
-            }
-            self::saveVersions($versions);
+            self::mutateVersions(function (array &$versions) use ($agentId, $mtime): void {
+                $existing = $versions[$agentId] ?? null;
+                if (is_array($existing)) {
+                    $existing['probed_mtime'] = $mtime;
+                    $versions[$agentId] = $existing;
+                } else {
+                    $installed = is_string($existing) ? $existing : '0.0.0';
+                    $versions[$agentId] = ['installed' => $installed, 'channel' => 'stable', 'pinned' => null, 'probed_mtime' => $mtime];
+                }
+            });
             LogService::log("maybeRefreshVersion: $agentId discovery yielded '$v' (mtime recorded=$mtime)", LogService::LOG_WARN, "AgentRegistry");
         }
     }
@@ -1085,31 +1192,29 @@ class AgentRegistry {
     /**
      * Set the channel (and optionally pinned version) for an agent.
      */
-    public static function setChannel(string $agentId, string $channel, ?string $pinned = null): void {
+    public static function setChannel(string $agentId, string $channel, ?string $pinned = null): bool {
         $channel = self::normalizeChannel($channel);
-        $versions = self::getVersions();
-        $existing = $versions[$agentId] ?? null;
-        $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
+        return self::mutateVersions(function (array &$versions) use ($agentId, $channel, $pinned): void {
+            $existing = $versions[$agentId] ?? null;
+            $installed = is_string($existing) ? $existing : ($existing['installed'] ?? '0.0.0');
 
-        $probedMtime = is_array($existing) ? ($existing['probed_mtime'] ?? null) : null;
-        $entry = [
-            'installed' => $installed,
-            'channel' => $channel,
-            'pinned' => $pinned,
-        ];
-        if ($probedMtime !== null) {
-            $entry['probed_mtime'] = $probedMtime;
-        }
-        $versions[$agentId] = $entry;
-        self::saveVersions($versions);
+            $probedMtime = is_array($existing) ? ($existing['probed_mtime'] ?? null) : null;
+            $entry = [
+                'installed' => $installed,
+                'channel' => $channel,
+                'pinned' => $pinned,
+            ];
+            if ($probedMtime !== null) {
+                $entry['probed_mtime'] = $probedMtime;
+            }
+            $versions[$agentId] = $entry;
+        });
     }
 
     public static function removeVersion($agentId) {
-        $versions = self::getVersions();
-        if (isset($versions[$agentId])) {
+        self::mutateVersions(function (array &$versions) use ($agentId): void {
             unset($versions[$agentId]);
-            self::saveVersions($versions);
-        }
+        });
     }
 
     /**
@@ -1131,6 +1236,148 @@ class AgentRegistry {
      */
     public static function computeIsInstalled(bool $binExists, bool $sqshExists, string $id): bool {
         return $binExists || $sqshExists || self::hasRealInstalledVersion($id);
+    }
+
+    /** Where op_mount keeps an agent's writable layer when the upper is in zram. */
+    const ZRAM_UPPER_BASE = '/tmp/unraid-aicliagents/zram_upper';
+
+    /**
+     * Forgejo #303 (docs/specs/AGENT_VERSION_DRIFT_SELF_HEAL.md, 2026-09-23):
+     * true when the storage engine holds ANY content for this agent, so a
+     * mount can show something. It is the PHP mirror of what op_mount can
+     * assemble, and it is deliberately broad (fail safe):
+     *
+     *  1. A SquashFS layer. The glob is the engine's own `_entity_has_layers`
+     *     glob (`agent_<id>_*.sqsh`), not the stricter registry regex.
+     *  2. An un-baked writable layer (the zram upper or the disk upper) that
+     *     is not empty. An install writes here first.
+     *  3. A plain directory under `passthrough/agents/<id>` that is not empty,
+     *     under every policy. Since #304 (2026-09-23) `effective_backend` keeps
+     *     a never-converted plain directory bound under the "layering" policy
+     *     too, so it can always supply the binary. $policy is kept in the
+     *     signature for callers and logs; it no longer changes the answer.
+     *
+     * Pure filesystem reads (no mount, no process). $policy is the RAW value
+     * from the cfg file ('' when the key is absent — the engine then decides
+     * by device, so the plain directory counts).
+     */
+    public static function agentHasStoredContent(string $id, string $persistPath, string $policy, string $zramBase = self::ZRAM_UPPER_BASE): bool {
+        if (!preg_match(self::AGENT_ID_RE, $id)) return true;   // unknown shape: never heal it
+        $persist = rtrim($persistPath, '/');
+        if (glob($persist . '/agent_' . $id . '_*.sqsh') ?: []) return true;
+        $nonEmpty = static function (string $dir): bool {
+            if (!is_dir($dir)) return false;
+            $entries = @scandir($dir);
+            if ($entries === false) return true;   // unreadable: assume content
+            return count(array_diff($entries, ['.', '..'])) > 0;
+        };
+        if ($nonEmpty(rtrim($zramBase, '/') . "/agents/$id/upper")) return true;
+        if ($nonEmpty("$persist/_upper/agents/$id")) return true;
+        if ($nonEmpty("$persist/passthrough/agents/$id")) return true; // #304: bound under every policy
+        return false;
+    }
+
+    /**
+     * Forgejo #303: the pure decision. Clear the recorded version only when
+     * ALL of these are true: the registry binary is missing, no layer exists,
+     * a real version is recorded, the storage engine has no content for the
+     * agent, and nothing is in progress for it ($busy).
+     */
+    public static function shouldClearPhantomInstall(bool $binExists, bool $sqshExists, bool $hasRealVersion, bool $hasStoredContent, bool $busy): bool {
+        return !$binExists && !$sqshExists && $hasRealVersion && !$hasStoredContent && !$busy;
+    }
+
+    /** The RAW storage_backend_mode from the cfg file ('' when absent), as bash `_rp_read_cfg` reads it. */
+    public static function rawStorageBackendPolicy(): string {
+        $path = ConfigService::CONFIG_PATH;
+        if (!is_file($path)) return '';
+        $cfg = @parse_ini_file($path);
+        return is_array($cfg) ? (string)($cfg['storage_backend_mode'] ?? '') : '';
+    }
+
+    /**
+     * Forgejo #303: true when the persist path can be trusted to show its
+     * content. A path under /mnt/<name>/ needs /mnt/<name> in the mount table:
+     * an unmounted pool leaves an empty directory on the root filesystem, and
+     * an empty glob there must never read as "nothing is stored" (op_mount
+     * defers the same case with target_not_mounted).
+     */
+    public static function persistRootMounted(string $persistPath, ?string $mounts = null): bool {
+        if (!preg_match('#^/mnt/([^/]+)(/|$)#', $persistPath, $m)) return true;
+        $mounts = $mounts ?? (@file_get_contents('/proc/mounts') ?: '');
+        return StorageMountService::mountTableHasTarget($mounts, '/mnt/' . $m[1]);
+    }
+
+    /**
+     * Forgejo #303: true when a heal must NOT run now for this agent. Fail
+     * safe: any doubt (a check that cannot run) counts as busy.
+     */
+    private static function phantomHealBlocked(string $id, string $persistPath): bool {
+        if (class_exists(StorageMountService::class)) {
+            if (StorageMountService::isMigrationInProgress()) return true;
+            if (!StorageMountService::isPathAvailable($persistPath)) return true;
+            if (!self::persistRootMounted($persistPath)) return true;
+        } elseif (!is_dir($persistPath)) {
+            return true;
+        }
+        if (class_exists(HaltService::class) && HaltService::isHalted('agent', $id)) return true;   // the halt card owns recovery
+        if (class_exists(LayerManifestService::class)) {
+            $entity = LayerManifestService::getEntity("agent/$id");
+            if (is_array($entity) && !empty($entity['layers'])) return true;   // expected layers are gone: total_loss, not ours
+        }
+        if (!class_exists(\AICliAgents\Handlers\AgentHandler::class)) {
+            // A page render does not load the handler. It has no side effects
+            // on include, so load it: it owns the one "install in progress" test.
+            $handler = __DIR__ . '/../handlers/AgentHandler.php';
+            if (is_file($handler)) require_once $handler;
+        }
+        if (!class_exists(\AICliAgents\Handlers\AgentHandler::class)) return true;   // cannot see an install: do not guess
+        return \AICliAgents\Handlers\AgentHandler::isInstallInProgress($id);
+    }
+
+    /**
+     * Forgejo #303: clear a recorded version that no stored content can back.
+     *
+     * The state: versions.json claims a version, the registry binary is
+     * missing, and the storage engine has nothing to mount (no layer, an empty
+     * writable layer, no usable plain directory). The Store card then showed
+     * the agent as installed and every launch printed "[Agent Binary Missing]".
+     * After this heal the card shows the Install button.
+     *
+     * Only "installed" and "probed_mtime" are removed. The channel and the pin
+     * stay, so a reinstall keeps the user's choice. The write re-checks the
+     * recorded value under the versions lock, so a concurrent install that
+     * records a new version wins. Returns true when the record was cleared.
+     */
+    public static function healPhantomInstallRecord(string $id, bool $binExists, bool $sqshExists, string $persistPath, string $zramBase = self::ZRAM_UPPER_BASE): bool {
+        if ($id === 'terminal' || $binExists || $sqshExists) return false;   // cheap exits first
+        $recorded = self::getInstalledVersion($id);
+        if (!self::hasRealInstalledVersion($id)) return false;
+        $hasContent = self::agentHasStoredContent($id, $persistPath, self::rawStorageBackendPolicy(), $zramBase);
+        if ($hasContent) return false;
+        $busy = self::phantomHealBlocked($id, $persistPath);
+        if (!self::shouldClearPhantomInstall(false, false, true, false, $busy)) return false;
+
+        $cleared = false;
+        self::mutateVersions(function (array &$versions) use ($id, $recorded, &$cleared): void {
+            $entry = $versions[$id] ?? null;
+            $now = is_array($entry) ? ($entry['installed'] ?? null) : (is_string($entry) ? $entry : null);
+            if ($now !== $recorded) return;   // changed under us: leave it
+            if (is_array($entry)) {
+                unset($entry['installed'], $entry['probed_mtime']);
+                $versions[$id] = $entry;
+            } else {
+                unset($versions[$id]);
+            }
+            $cleared = true;
+        });
+        if ($cleared) {
+            LogService::log("Install record cleared for $id: versions.json recorded $recorded, but the binary is missing and storage holds no layer, no writable-layer data and no usable plain directory. The Store card now offers Install.", LogService::LOG_WARN, "AgentRegistry");
+            if (class_exists(LifecycleLogService::class)) {
+                LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, 'agent_registry', 'agent_install_record_cleared', ['agent' => $id, 'recorded' => $recorded]);
+            }
+        }
+        return $cleared;
     }
 
     /**
@@ -1251,6 +1498,13 @@ class AgentRegistry {
                     $sqshExists = true;
                     break;
                 }
+            }
+            // Forgejo #303: a recorded version that no stored content backs is
+            // drift too — the drift toward "nothing is installed". Clear it
+            // here as well, so "Check updates" never compares against it.
+            if (self::healPhantomInstallRecord($id, $binExists, $sqshExists, $persistPath)) {
+                $skipped++;
+                continue;
             }
             if (!self::computeIsInstalled($binExists, $sqshExists, $id)) {
                 // Not installed by any signal — nothing to recover.

@@ -73,13 +73,45 @@ aicli-repair
 
 After running `aicli-repair`, you can simply reinstall the plugin from the Unraid "Plugins" tab, and your data will be automatically restored.
 
+### Where to put agent and home storage
+
+The plugin can store two kinds of data off the Flash drive: agent data (the
+AI tool itself) and home data (your chat history and files). Both use the
+same Storage picker, in the Configuration tab.
+
+**Pick a location in this order:**
+1. **A cache pool path**, for example `/mnt/cache/appdata/aicliagents`. This
+   is the fastest and safest choice. The picker recommends a path like this
+   first, when one is available.
+2. **An Unassigned Device path**, for example `/mnt/disks/mydrive`. Use this
+   when you have a spare drive that is not part of the array or a pool.
+3. **A single array disk**, for example `/mnt/disk1`. This works, but an
+   array disk spins up on every save.
+4. **`/mnt/user`** (a "user share"). Use this only when none of the paths
+   above is open to you — for example, you have no cache pool, no spare
+   drive, and your share spans more than one disk.
+
+**Why the order matters.** Paths 1 to 3 write straight to a disk. `/mnt/user`
+sends every write through Unraid's shared-folder layer, called shfs. Shfs
+has only about 10 worker threads. Heavy save or merge activity through shfs
+can slow down or freeze the whole server, not only the plugin.
+
+The Storage picker still lets you choose a `/mnt/user` path. The plugin does
+not block it, because some setups genuinely have no other option — it shows
+a plain warning instead, so you know the tradeoff before you move your data.
+
+When your `/mnt/user/<share>` path already lives on one pool — because the
+share's "Use cache pool" setting is "Only" — the plugin stores the direct
+pool path instead. Your data then never passes through shfs, even though you
+picked a `/mnt/user` path in the list.
+
 ### Custom Storage Location:
 By default, your AI history is saved to your Unraid Flash drive (`/boot/config/plugins/unraid-aicliagents/persistence`). 
 
 To improve drive longevity or if you have massive amounts of data, you can move this to your main Array or a Cache pool:
 1. Go to the **Session Profile** card in settings.
 2. Click **Change** next to the **Storage Backend** field.
-3. Select your new path (e.g., `/mnt/user/appdata/aicli-persistence`) and click **Migrate Data Now**.
+3. Select your new path (e.g., `/mnt/cache/appdata/aicliagents`) and click **Migrate Data Now**.
 
 **The "Flash vs. Array" Tradeoff:**
 - **Flash (Default)**: Slower, but your AI agents are available even if the array is stopped.

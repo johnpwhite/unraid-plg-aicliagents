@@ -250,7 +250,7 @@ class InitService {
                 @unlink("/tmp/unraid-aicliagents/install-status"); // stale global status
 
                 // Notify UI to reload via Nchan
-                NchanService::publish('storage_status', [
+                EventBus::publish('storage.status', [], [
                     'home_available' => true,
                     'agents_available' => true,
                     'emergency_mode' => false,

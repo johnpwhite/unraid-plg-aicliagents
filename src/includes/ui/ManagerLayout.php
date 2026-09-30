@@ -7,19 +7,25 @@
  * </module_context>
  */
 ?>
-<div id="migration-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.95); z-index:20000; flex-direction:column; align-items:center; justify-content:center; color:#fff; text-align:center; padding:20px;">
+<?php /* Epic #307: body.aicli-mgr scopes the phone-size sweet-alert rules in
+   ManagerStyles.php to this page, so Unraid's shared dialog is not restyled
+   anywhere else. */ ?>
+<script>document.body.classList.add('aicli-mgr');</script>
+<?php /* Epic #307: box-sizing keeps the 20 px padding inside the screen (it
+   was 40 px wider than a phone); the bar is 300 px or the screen width less the padding. */ ?>
+<div id="migration-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; box-sizing:border-box; overflow-y:auto; background:rgba(0,0,0,0.95); z-index:20000; flex-direction:column; align-items:center; justify-content:center; color:#fff; text-align:center; padding:20px;">
     <i class="fa fa-database fa-spin" style="font-size:60px; margin-bottom:20px; color:var(--orange, #ff8c00);"></i>
     <h1 style="margin:0 0 10px 0;">Storage Migration in Progress</h1>
     <p id="migration-status-text" style="opacity:0.8; max-width:500px; line-height:1.5;">Preparing storage conversion...</p>
     
     <div style="margin-top:30px; display:flex; flex-direction:column; align-items:center; gap:15px;">
-        <div style="width:300px; height:6px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden;">
+        <div style="width:300px; max-width:calc(100vw - 40px); height:6px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden;">
             <div id="migration-bar" style="width:0%; height:100%; background:var(--orange, #ff8c00);"></div>
         </div>
         <?php /* WP #903: ring via inset box-shadow (not border) — .aicli-btn-slim
            now uses transparent block borders as its 44px touch-target hit area,
            so a real border would paint at the enlarged hit box, not the pill. */ ?>
-        <button type="button" class="aicli-btn-slim" onclick="openMigrationLog()" style="background:var(--title-header-background-color, #444); color:var(--text-color, #fff); box-shadow:inset 0 0 0 1px var(--border-color, #666);"><i class="fa fa-file-text-o"></i> View Migration Log</button>
+        <button type="button" class="aicli-btn-slim" onclick="openMigrationLog()"><i class="fa fa-file-text-o"></i> View Migration Log</button>
     </div>
 </div>
 

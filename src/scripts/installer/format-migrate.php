@@ -14,8 +14,8 @@
  * argv[1] = new plugin version (the .plg $VERSION).
  */
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/FileStorage.php';
+require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__, 2) . '/includes/services/FileStorage.php';
 
 use AICliAgents\Services\FileStorage;
 

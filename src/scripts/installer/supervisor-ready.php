@@ -8,6 +8,6 @@
  * gate. Exit status is the installer contract: zero means ready.
  */
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 
 exit(\AICliAgents\Services\SupervisorService::ensureReady(10000) ? 0 : 1);

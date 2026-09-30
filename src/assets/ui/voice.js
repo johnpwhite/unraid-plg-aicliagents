@@ -28,10 +28,10 @@
  *   in the value it read on its own config load through `setState(bool)`,
  *   so a fresh tab knows the state before the first `state` message arrives.
  *   Unlock gesture: the first click anywhere in the page runs a silent
- *   unlock (no sound), and the drawer/Settings toggle's own click, when it
- *   turns voice on, also speaks an audible "Voice on" so the click itself
- *   confirms the device can speak. Either satisfies Chrome/Safari's
- *   gesture-then-forever autoplay rule for the rest of the page's life.
+ *   unlock (no sound). The drawer/Settings toggle unlocks synchronously and
+ *   then asks the same server-side test path used by the Settings card, so a
+ *   configured TTS engine supplies the confirmation and browser speech is the
+ *   bounded fallback.
  *   Input (docs/specs/VOICE_INPUT.md): the reverse direction — the operator
  *   dictates INTO a workspace. `startInput(opts)`/`stopInput()`/`inputState()`
  *   own the microphone, the recognizer or recorder, and a 5-minute auto-stop.
@@ -79,6 +79,13 @@
 
     var MAX_QUEUE = 3;
     var MAX_SPOKEN_CHARS = 500;
+    // A stalled engine clip must never wedge the voice queue. This is a startup
+    // watchdog; once play() reports that playback has started, the clip may run
+    // for its full duration.
+    var AUDIO_START_TIMEOUT_MS = 12000;
+    // VOICE_SWITCHES.md: the confirmation sentence when voice is turned on. The
+    // server picks the same fixed text for purpose=switch (VoiceHandler).
+    var VOICE_CONFIRM_TEXT = 'Voice enabled.';
     var pageLoadTs = Date.now();
 
     // ---- global on/off state (server-side voice_enabled) ------------------
@@ -127,10 +134,16 @@
         return true;
     }
 
-    /** Workspace-name-prefixed, length-capped text for speechSynthesis. */
+    /** Intro-prefixed (VOICE_MAIL.md R14), length-capped text for speechSynthesis. */
     function speechTextFor(msg) {
         var text = String(msg.text == null ? '' : msg.text).replace(/^\s+|\s+$/g, '');
-        var full = msg.name ? (msg.name + ': ' + text) : text;
+        var full;
+        if (typeof msg.intro === 'string') {
+            var intro = msg.intro.replace(/^\s+|\s+$/g, '');
+            full = intro ? (intro + ' ' + text) : text;
+        } else {
+            full = msg.name ? (msg.name + ': ' + text) : text;
+        }
         if (full.length <= MAX_SPOKEN_CHARS) return full;
         return full.slice(0, MAX_SPOKEN_CHARS - 1) + '…';
     }
@@ -160,10 +173,60 @@
         return null;
     }
 
+    // ---- what is playing, and stop (docs/specs/VOICE_MAIL.md R15) ---------
+    // The drawer shows a voice-wave stop button on the row of the workspace that
+    // is speaking. It learns which one from the `aicli-voice-playing` event (and
+    // playingWorkspace()), and stops it with stop(). `currentFinish` settles the
+    // clip in flight; `currentAudio` is the element to pause.
+    var playingWorkspaceId = null;
+    var currentFinish = null;
+    var currentAudio = null;
+    function setPlayingWorkspace(id) {
+        var next = id ? String(id) : null;
+        if (next === playingWorkspaceId) return;
+        playingWorkspaceId = next;
+        try {
+            window.dispatchEvent(new CustomEvent('aicli-voice-playing', { detail: { workspaceId: playingWorkspaceId } }));
+        } catch (e) { /* noop */ }
+    }
+
     function finishPlaying() {
         if (playingTimer) { clearTimeout(playingTimer); playingTimer = null; }
         currentUtt = null;
+        currentFinish = null;
+        currentAudio = null;
         playing = false;
+        setPlayingWorkspace(null);
+    }
+
+    /**
+     * The operator's own click on the row's stop button. Ends the clip at once:
+     * no speech fallback, never "heard". Queued clips of the SAME workspace are
+     * dropped; other workspaces still play. Returns true when something stopped.
+     */
+    function stopPlaying(workspaceId) {
+        if (!playing) return false;
+        var ws = playingWorkspaceId;
+        if (workspaceId && ws !== String(workspaceId)) return false;
+        if (ws) {
+            for (var i = _queue.length - 1; i >= 0; i--) {
+                if (_queue[i] && String(_queue[i].workspaceId || '') === ws) _queue.splice(i, 1);
+            }
+        }
+        var finish = currentFinish;
+        var audio = currentAudio;
+        currentFinish = null;
+        try { if (audio && typeof audio.pause === 'function') audio.pause(); } catch (e) { /* noop */ }
+        // Cancel BEFORE the finish: the finish starts the next queued clip at
+        // once, and a later cancel() would silence that one too. The cancelled
+        // utterance reports 'interrupted' asynchronously, after the finish has
+        // already settled it, so that report is ignored.
+        if (!audio) {
+            try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) { /* noop */ }
+        }
+        if (finish) finish('stopped');
+        else { finishPlaying(); pump(); }
+        return true;
     }
 
     // `done(outcome)` — outcome is 'ended' only when the utterance or clip
@@ -179,6 +242,8 @@
             if (v) utt.voice = v;
             var ended = false;
             var finish = function (outcome) { if (ended) return; ended = true; done(outcome); };
+            currentFinish = finish;
+            currentAudio = null;
             utt.onend = function () { finish('ended'); };
             utt.onerror = function (evt) {
                 var code = evt && evt.error ? String(evt.error) : '';
@@ -217,13 +282,94 @@
         try {
             var audio = new Audio(url);
             var settled = false;
-            var finish = function (outcome) { if (settled) return; settled = true; done(outcome); };
+            var started = false;
+            var finish = function (outcome) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(startupTimer);
+                done(outcome);
+            };
+            var startupTimer = setTimeout(function () {
+                if (started || settled) return;
+                try { if (typeof audio.pause === 'function') audio.pause(); } catch (e) { /* noop */ }
+                finish('timeout');
+            }, AUDIO_START_TIMEOUT_MS);
+            var markStarted = function () {
+                if (started) return;
+                started = true;
+                clearTimeout(startupTimer);
+            };
             audio.onended = function () { finish('ended'); };
             audio.onerror = function () { finish('error'); };
+            audio.onplaying = markStarted;
+            currentFinish = finish;
+            currentAudio = audio;
             var p = audio.play();
-            if (p && typeof p.catch === 'function') p.catch(function () { finish('error'); });
+            if (p && typeof p.then === 'function') {
+                p.then(markStarted).catch(function () { finish('error'); });
+            }
         } catch (e) {
             done('error');
+        }
+    }
+
+    function csrfToken() {
+        if (window.csrf_token) return String(window.csrf_token);
+        var el = document.querySelector('input[name="csrf_token"]');
+        return el ? String(el.value || '') : '';
+    }
+
+    /**
+     * Confirm the switch through the configured TTS engine. The request is
+     * deliberately `direct=1`: test_voice returns the one clip to this tab
+     * without publishing a duplicate live event to every other tab. A slow or
+     * failed request falls back to browser speech after a bounded 12 seconds.
+     */
+    function confirmAloud() {
+        var fallbackItem = { mode: 'speech', text: VOICE_CONFIRM_TEXT };
+        var settled = false;
+        var timer = null;
+        var fallback = function () {
+            if (settled) return;
+            settled = true;
+            if (timer) { clearTimeout(timer); timer = null; }
+            playSpeech(fallbackItem, function () {});
+        };
+        try {
+            var token = csrfToken();
+            var controller = typeof AbortController === 'function' ? new AbortController() : null;
+            timer = setTimeout(function () {
+                if (controller) { try { controller.abort(); } catch (e) { /* noop */ } }
+                fallback();
+            }, AUDIO_START_TIMEOUT_MS);
+            var url = '/plugins/unraid-aicliagents/AICliAjax.php?action=test_voice&direct=1&purpose=switch&csrf_token=' + encodeURIComponent(token);
+            var request = fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ csrf_token: token, direct: '1', purpose: 'switch' }).toString(),
+                signal: controller ? controller.signal : undefined
+            });
+            request.then(function (response) {
+                if (!response || !response.ok) throw new Error('voice test failed');
+                return response.json();
+            }).then(function (data) {
+                if (settled) return;
+                if (timer) { clearTimeout(timer); timer = null; }
+                settled = true;
+                var item = { mode: 'speech', text: data && data.text ? String(data.text) : VOICE_CONFIRM_TEXT };
+                if (data && data.status === 'ok' && data.mode === 'audio' && data.url) {
+                    playAudio(String(data.url), function (outcome) {
+                        if (outcome !== 'ended') playSpeech(item, function () {});
+                    });
+                    return;
+                }
+                // Browser mode is a successful, intentional response. An
+                // error response (including an engine failure) uses the same
+                // browser fallback, so the switch still gives feedback.
+                playSpeech(item, function () {});
+            }).catch(function () { fallback(); });
+        } catch (e) {
+            fallback();
         }
     }
 
@@ -232,7 +378,21 @@
         var item = queueNext();
         if (!item) return;
         playing = true;
-        var done = function () { finishPlaying(); pump(); };
+        setPlayingWorkspace(item.workspaceId || null);
+        var done = function (outcome) {
+            // Audio events intentionally carry the capped text so a failed or
+            // stalled clip can still be heard through the browser voice. A clip
+            // the operator STOPPED gets no fallback: stop means silence now.
+            if (item.mode === 'audio' && outcome !== 'ended' && outcome !== 'stopped' && (item.text || item.fallbackText)) {
+                playSpeech({ mode: 'speech', text: item.text || item.fallbackText, name: item.name, intro: item.intro, voice: item.voice }, function () {
+                    finishPlaying();
+                    pump();
+                });
+                return;
+            }
+            finishPlaying();
+            pump();
+        };
         if (item.mode === 'audio' && item.url) {
             playAudio(item.url, done);
         } else {
@@ -261,9 +421,17 @@
             var el = document.createElement('button');
             el.type = 'button';
             el.textContent = 'Voice: click to allow speech in this tab';
-            el.setAttribute('style', 'position:fixed;right:12px;bottom:12px;z-index:10002;padding:8px 12px;' +
-                'font:12px/1.4 sans-serif;background:#1f2937;color:#ffffff;border:1px solid #f59e0b;' +
-                'border-radius:6px;cursor:pointer;min-width:0;min-height:32px;');
+            // Epic #307: a 44 px touch target, kept above the phone's home bar
+            // and never wider than the screen. margin/text-transform/letter-
+            // spacing undo Unraid's theme rule for every <button>.
+            el.setAttribute('data-testid', 'voice-allow-notice');
+            // SIDEBAR_THEME_LAYOUT.md: never under Unraid's fixed side menu
+            // (--aicli-content-left/-right are 0px on the top-menu themes).
+            el.setAttribute('style', 'position:fixed;right:calc(12px + var(--aicli-content-right, 0px));bottom:calc(12px + env(safe-area-inset-bottom, 0px));' +
+                'z-index:10002;padding:8px 14px;margin:0;max-width:calc(100vw - 24px - var(--aicli-content-left, 0px) - var(--aicli-content-right, 0px));box-sizing:border-box;' +
+                'font:13px/1.4 sans-serif;text-transform:none;letter-spacing:normal;white-space:normal;text-align:left;' +
+                'background:#1f2937;color:#ffffff;border:1px solid #f59e0b;' +
+                'border-radius:6px;cursor:pointer;min-width:44px;min-height:44px;touch-action:manipulation;');
             document.body.appendChild(el);
             noticeEl = el;
         } catch (e) { /* the document click listener still works without it */ }
@@ -296,19 +464,6 @@
     // fetching anything or making a sound.
     var SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABmYWN0BAAAAAAAAABkYXRhAAAAAA==';
 
-    // Spoken synchronously inside the operator's own click on the toggle.
-    // It is the speech-unlock gesture AND the confirmation that this device
-    // can speak at all: a device that stays silent here has a local cause
-    // (ringer switch, no voices, a browser without Web Speech).
-    function confirmAloud() {
-        try {
-            if (!window.speechSynthesis) return;
-            var u = new SpeechSynthesisUtterance('Voice on');
-            try { window.speechSynthesis.resume(); } catch (e) { /* noop */ }
-            window.speechSynthesis.speak(u);
-        } catch (e) { /* best-effort */ }
-    }
-
     var unlocked = false;
     function unlock() {
         if (unlocked) return;
@@ -325,8 +480,8 @@
     // in the page before the browser lets it speak — the toggle click that
     // turned voice on elsewhere was a different tab's gesture. This listener
     // catches the FIRST click anywhere in this page and unlocks silently
-    // (no "Voice on" — that phrase is reserved for the operator's own click
-    // on the toggle, VOICE_SWITCHES.md "Unlock"), then removes itself.
+    // (no spoken confirmation — the toggle's private test request owns that),
+    // then removes itself.
     document.addEventListener('click', function onFirstClick() {
         document.removeEventListener('click', onFirstClick, true);
         unlock();
@@ -365,21 +520,33 @@
     }
     // ---- subscription --------------------------------------------------
 
+    function onVoiceMessage(data) {
+        if (!data || !data.mode) return;
+        if (data.mode !== 'state' && !claimForThisBrowser(data)) return;
+        // State fan-out (VOICE_SWITCHES.md R7/R8): report the value,
+        // never play it.
+        if (data.mode === 'state') { applyState(data.enabled); return; }
+        if (!shouldPlay(data)) return;
+        queuePush(data);
+        pump();
+    }
+
     function connect() {
+        // EVENT_STREAM_MULTIPLEX.md R2: `voice` rides the page's ONE multiplexed
+        // stream (aicli-events.js). shouldPlay() still drops the replayed,
+        // older-than-this-page message, exactly as it did on its own stream.
+        if (window.aicliEvents && typeof window.aicliEvents.on === 'function') {
+            window.aicliEvents.on('voice', function (evt) { onVoiceMessage(evt.data); });
+            return;
+        }
+        // Fallback: a page shell without aicli-events.js.
         if (typeof EventSource === 'undefined') return;
         try {
             var es = new EventSource('/sub/aicli_voice');
             es.onmessage = function (evt) {
                 var data;
                 try { data = JSON.parse(evt.data); } catch (e) { return; }
-                if (!data || !data.mode) return;
-                if (data.mode !== 'state' && !claimForThisBrowser(data)) return;
-                // State fan-out (VOICE_SWITCHES.md R7/R8): report the value,
-                // never play it.
-                if (data.mode === 'state') { applyState(data.enabled); return; }
-                if (!shouldPlay(data)) return;
-                queuePush(data);
-                pump();
+                onVoiceMessage(data);
             };
             // No onerror handling beyond EventSource's own auto-reconnect: a
             // clip missed while this tab was disconnected is a missed clip —
@@ -400,6 +567,10 @@
     // never discarded (the saas-acta lesson named in the spec's Edge Cases).
 
     var INPUT_MAX_MS = 300000; // R11: 5 minutes (was 60 s before live typing)
+    // #345: iOS Safari/WebKit does not always fire the recogniser's onend
+    // after stop(). If it has not ended this long after a stop, abort it
+    // (which releases the microphone) and finish the recording ourselves.
+    var INPUT_STOP_GRACE_MS = 1500;
     // R11 engine-mode piece cutting: a pause this long, following speech,
     // ends a piece; a piece is cut regardless after this many ms of audio.
     var ENGINE_SILENCE_MS = 700;
@@ -410,6 +581,14 @@
     // counts as silence. A heuristic, not a calibrated voice-activity
     // detector — good enough to find a pause between phrases.
     var ENGINE_SILENCE_RMS = 0.01;
+    // 2026-09-29 "Send when I stop talking": the caller can pass
+    // opts.stopOnSilenceMs (the SPA passes SILENCE_SEND_MS, 2000, only when
+    // that preference is on). After the operator has spoken, this much
+    // silence ends the recording as a normal stop. Before anything is heard,
+    // silence never ends it (the 5 min cap still applies).
+    var inputSilenceStopTimer = null; // browser mode: re-armed on each result
+    var inputHeardThisRecording = false; // any speech this recording (both modes)
+    var inputQuietSince = 0; // engine mode: 0 while loud; else when the silence began
 
     var _inputState = 'idle'; // idle | recording | transcribing | refused
     var inputRecogniser = null;
@@ -463,6 +642,27 @@
     function clearInputTimers() {
         if (inputSecondsTimer) { clearInterval(inputSecondsTimer); inputSecondsTimer = null; }
         if (inputAutoStopTimer) { clearTimeout(inputAutoStopTimer); inputAutoStopTimer = null; }
+        if (inputSilenceStopTimer) { clearTimeout(inputSilenceStopTimer); inputSilenceStopTimer = null; }
+    }
+
+    /** The stop-on-silence time for this recording in ms, or 0 when it is off. */
+    function stopOnSilenceMs() {
+        var ms = Number(inputOpts.stopOnSilenceMs || 0);
+        return ms > 0 ? ms : 0;
+    }
+
+    /** Browser mode: (re)start the silence timer after each recogniser
+     *  result. When it fires and something was heard this recording, stop
+     *  as if the operator tapped Stop. */
+    function armBrowserSilenceStop(gen) {
+        var ms = stopOnSilenceMs();
+        if (!ms || !inputHeardThisRecording) return;
+        if (inputSilenceStopTimer) clearTimeout(inputSilenceStopTimer);
+        inputSilenceStopTimer = setTimeout(function () {
+            inputSilenceStopTimer = null;
+            if (gen !== inputGeneration || _inputState !== 'recording') return;
+            stopInput();
+        }, ms);
     }
 
     function inputCsrf() {
@@ -505,6 +705,9 @@
     /** Stop flush: whatever interim text had not yet become final. */
     function finishBrowserInput(gen) {
         if (gen !== inputGeneration) return;
+        // #345: once only. The stop watchdog (stopInput) and a late onend can
+        // both arrive; the second must not report a second, empty stop.
+        if (_inputState !== 'recording') return;
         clearInputTimers();
         var leftover = inputInterim.replace(/^\s+|\s+$/g, '');
         inputInterim = '';
@@ -533,13 +736,15 @@
                     if (r.isFinal) {
                         // R11: type this phrase AT ONCE — do not wait for stop.
                         var phrase = String((r[0] && r[0].transcript) || '').replace(/^\s+|\s+$/g, '');
-                        if (phrase) dispatchInput({ state: 'recording', phrase: phrase });
+                        if (phrase) { inputHeardThisRecording = true; dispatchInput({ state: 'recording', phrase: phrase }); }
                     } else {
                         interim += (r[0] && r[0].transcript) || '';
                     }
                 }
                 inputInterim = interim;
+                if (interim.replace(/\s+/g, '')) inputHeardThisRecording = true;
                 setInputState('recording', { interim: interim, seconds: inputSeconds });
+                armBrowserSilenceStop(gen);
             };
             rec.onerror = function (evt) {
                 var code = evt && evt.error ? String(evt.error) : '';
@@ -598,13 +803,22 @@
             sumSq += v * v;
         }
         var rms = Math.sqrt(sumSq / inputRmsData.length);
+        var now = Date.now();
         if (rms >= ENGINE_SILENCE_RMS) {
             inputHeardSpeech = true;
             inputSilenceSince = 0;
+            inputHeardThisRecording = true;
+            inputQuietSince = 0;
             return;
         }
+        // "Send when I stop talking": this silence clock runs over the whole
+        // recording, not one piece, so a piece cut does not reset it.
+        var silenceStop = stopOnSilenceMs();
+        if (silenceStop && inputHeardThisRecording) {
+            if (!inputQuietSince) inputQuietSince = now;
+            else if (now - inputQuietSince >= silenceStop) { inputHeardThisRecording = false; stopInput(); return; }
+        }
         if (!inputHeardSpeech) return; // silence before any speech: not a pause to cut on
-        var now = Date.now();
         if (!inputSilenceSince) { inputSilenceSince = now; return; }
         if (now - inputSilenceSince >= ENGINE_SILENCE_MS) cutEnginePiece(gen);
     }
@@ -763,7 +977,9 @@
      * or absent stays in browser mode. `opts.sttLanguage` only applies in
      * browser mode (`SpeechRecognition.lang`); `opts.sttModel` is carried by
      * the caller's own settings load and does not need to travel here — the
-     * server already knows it from `stt_model`.
+     * server already knows it from `stt_model`. `opts.stopOnSilenceMs`
+     * (a number above 0) ends the recording after that much silence that
+     * follows speech ("Send when I stop talking"); absent or 0 turns it off.
      */
     function startInput(opts) {
         opts = opts || {};
@@ -776,6 +992,8 @@
         }
         var gen = ++inputGeneration;
         inputSeconds = 0;
+        inputHeardThisRecording = false;
+        inputQuietSince = 0;
         clearInputTimers();
         inputSecondsTimer = setInterval(function () {
             if (gen !== inputGeneration) return;
@@ -793,8 +1011,17 @@
     /** Stop now. Always delivers whatever was captured — never discards it. */
     function stopInput() {
         if (_inputState !== 'recording') return;
+        // One stop only: a silence timer must not fire a second stop.
+        if (inputSilenceStopTimer) { clearTimeout(inputSilenceStopTimer); inputSilenceStopTimer = null; }
         if (inputRecogniser) {
-            try { inputRecogniser.stop(); } catch (e) { finishBrowserInput(inputGeneration); }
+            var rec = inputRecogniser;
+            var gen = inputGeneration;
+            try { rec.stop(); } catch (e) { finishBrowserInput(gen); return; }
+            setTimeout(function () {
+                if (gen !== inputGeneration || _inputState !== 'recording') return;
+                try { rec.abort(); } catch (e) { /* noop */ }
+                finishBrowserInput(gen);
+            }, INPUT_STOP_GRACE_MS);
             return;
         }
         if (inputPieceRecorder) {
@@ -823,14 +1050,15 @@
         // internally (see connect() above).
         setState: function (on) { applyState(on); },
         // The operator's own click on the drawer icon or Settings toggle,
-        // run synchronously inside that click, when it turns voice ON.
-        // Unlocks this device and says "Voice on" so the click itself
-        // confirms the device can speak. Writes nothing and changes no
-        // state on its own — the caller saves `voice_enabled`, and every
-        // tab (including this one) learns the new value from the `state`
-        // message the save triggers.
+        // run synchronously inside that click, when it turns voice ON. This
+        // only unlocks autoplay; the caller invokes confirm() after the server
+        // saves the switch, so the configured API voice is tried first.
         enable: function () {
             unlock();
+        },
+        // Test the configured voice for this tab only. The returned engine
+        // clip is played directly; failures fall back to browser speech.
+        confirm: function () {
             confirmAloud();
         },
         // Clears whatever is queued and dismisses the gesture-recovery
@@ -851,6 +1079,12 @@
             queuePush({ mode: 'speech', text: text });
             pump();
         },
+        // VOICE_MAIL.md R15: the workspace id whose clip plays now, or null.
+        // Changes are also sent as the `aicli-voice-playing` window event.
+        playingWorkspace: function () { return playingWorkspaceId; },
+        // Stop the clip in flight at once (optionally only when it belongs to
+        // `workspaceId`). Returns true when something stopped.
+        stop: function (workspaceId) { return stopPlaying(workspaceId); },
         // ---- input (docs/specs/VOICE_INPUT.md) ----------------------------
         // Begin dictating — see startInput() above for `opts`. No-op while
         // already recording or transcribing.

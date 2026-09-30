@@ -15,6 +15,8 @@ class EnvService {
     private const KEY_REGEX  = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/';
     private const VALUE_MAX  = 4096; // bytes
     private const SIDECAR_KEYS_LIST = '__seeded_keys';
+    /** Vault keys with this prefix are Relay credentials and never enter an agent's environment. */
+    public const RELAY_SECRET_PREFIX = 'AICLI_RELAY_';
 
     /**
      * Names the user MUST NOT set — anything our launch path manages internally.
@@ -185,6 +187,11 @@ class EnvService {
 
         // Tier 2: agent secrets vault (global flat secrets.cfg)
         foreach (SecretService::getAgentSecrets() as $k => $v) {
+            // RELAY_LINKED_BOXES.md §7: Relay credentials (remote bearer tokens,
+            // linked-box link keys, the one-time pairing secret) share this
+            // vault, but no agent needs them. An agent reads untrusted DM text,
+            // so it must never hold a key that lets it sign as this box.
+            if (strpos((string)$k, self::RELAY_SECRET_PREFIX) === 0) continue;
             $env[$k] = $v;
         }
 

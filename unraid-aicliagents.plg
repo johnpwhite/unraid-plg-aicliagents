@@ -1,8 +1,123 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.09.15.08" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.09.30.04" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.09.30.04
+
+**Agents that keep working on their own**
+
+- **Feat: a workspace continues by itself after a temporary model error.** When a provider is overloaded, rate-limits you or drops the connection, the plugin waits 1, 5 and then 15 minutes and tells the agent to continue. After three tries the Activity tray asks you to look. It only types when the agent is idle at its prompt. Turn it off or change the waits in Settings.
+- **Feat: schedule a Continue for any workspace.** The workspace menu has Continue now and Schedule, with an optional daily or weekly repeat. A small clock next to the workspace name shows the schedule; click it to change or cancel it. When Claude Code or Codex reports a usage limit, the plugin schedules the Continue for the reset time by itself. An agent can also schedule one with its plugin tools.
+
+- **Feat: your own auto-continue patterns.** Settings has a new Auto-continue patterns section. See the built-in screen patterns for each agent, and add, edit, switch off or delete your own for a model error, a usage limit with a retry time, a busy marker or a status line. Each pattern must match a sample and is checked for safety before it is saved, and "Test against a workspace screen" shows which lines match. After a save you can report a pattern: a preview with secrets masked opens a prefilled GitHub issue that you submit with your own login. Agents with plugin tools can read a workspace's screen (plain text, secrets masked, every read logged) and propose a pattern for you to approve.
+- **Fix: auto-continue recognises the OpenCode and Kilo message "usage exceeded … retry in 1h 21m"** and continues after the stated wait.
+
+**Voice (new and improved)**
+
+- **Feat: set up the natural voice from Settings.** Settings &gt; Agent voice has a Set up natural voice button. It checks that Docker runs, prepares the Kokoro template, opens Unraid's own Add Container page for you to apply, and then connects to the voice engine by itself.
+- **Fix: the natural voice setup works on the default settings.** The voice engine container no longer stops at once with "Permission denied"; it uses the voice model inside its image. If an engine made by an earlier test version stops with that error, remove its Model cache path in the container settings.
+- **Fix: the dictation Test button in Settings shows what you said** instead of always "Nothing was recognised".
+- **Improve: dictation on a phone is a small bar above the terminal's key row** instead of a bubble over the terminal output. It has a Stop/Close button (Escape works too) and an Enter button that stops listening, types the last words and presses Enter without opening the keyboard. Closing frees the microphone, and the phone keyboard opens again on the next tap.
+- **Feat: "Send when I stop talking".** When it is on, two seconds of silence after you speak ends the dictation and presses Enter. It replaces "Send on stop" and keeps your choice.
+- **Fix: dictation presses Enter reliably.** "Send on stop" never pressed Enter in Claude Code, Codex, OpenCode or Kilo, because the dictated words looked like typing in progress; Enter is still held when a menu or a question is on screen, and the notice about it now also shows after you close the bar. The last phrase is no longer typed twice, and dictation from the iPhone keyboard's own microphone no longer types every guess again.
+- **Fix: a workspace set to voice mail stays silent.** When an agent named its workspace by the display name instead of its id, the message played aloud and was kept apart from the workspace's other voice mail.
+- **Feat: you hear which workspace speaks.** Each message starts with a short "&lt;name&gt; says:", live and when you play it later. Give a workspace a spoken name (workspace menu &gt; Voice &gt; Spoken name) when its display name reads badly aloud.
+- **Improve: stop a message with one click.** While a workspace speaks, its play button shows a moving voice wave; click it to stop at once. The unheard count shows up to 99 (then 99+) instead of 9+.
+- **Feat: a different voice for each workspace.** The voice on the Settings page stays the default; choose another one for a workspace in its menu (Voice &gt; Voice…), with a Test button. The Spoken name dialog has a Test button too. Switching voice on now says "Voice enabled."
+
+**Linked boxes (new)**
+
+- **Feat: workspaces on two Unraid boxes can message each other.** Pair two boxes once with a one-time code in Settings &gt; Agent Relay. Workspaces on the other box then appear as contacts (for example "mvp-dmoe @ tower"), messages arrive like local ones, wait while the other box is offline, and replies go back to the right workspace. Nothing is shared until you turn it on and pair; both boxes need this version.
+
+**Unraid sidebar themes**
+
+- **Fix: the plugin now fits Unraid's sidebar themes (Azure and Gray, with the menu down the left side).** The terminal, the workspace drawer and the pop-ups now start beside the menu instead of underneath it; the Top-menu themes look the same as before. On the sidebar themes the menu shows the plugin's logo instead of cut-off text, and a menu label you hover shows over the workspace drawer.
+- **Improve: the plugin's buttons look like Unraid's own buttons** in every theme (white, black, azure and gray), for example in Settings, the Agent Store and the workspace drawer. Their text is a shade stronger than Unraid's own so it is easy to read, and all text in the drawer and on the Settings page meets the readability standard in every theme.
+
+**Phones and tablets**
+
+- **Improve: the terminal works properly with touch.** A one-finger swipe scrolls back through the session history with momentum, and the page no longer pulls to refresh. A key row under the terminal adds Esc, Tab, Ctrl-C, the arrow keys, Paste and Select. Tap and hold for a Paste / Select menu; Select shows the history as plain text for normal phone selection and Copy. The terminal stays above the on-screen keyboard while you type.
+- **Improve: every Settings tab fits a phone.** Configuration, Agent Store, Home Storage, Config Hub, Agent Relay and the Debug Console no longer run past the screen edge: card headers wrap, row buttons sit under their row, labels sit above full-width fields, the tab bar shows whole labels, and every control is large enough to tap, with field text that does not make iOS zoom in.
+- **Improve: on a phone the workspace drawer's pull tab is short** (workspace list, microphone and a More button), so it no longer covers the start of the terminal lines. More shows the other actions for five seconds. The tab never covers Unraid's header.
+- **Fix: a phone swipe scrolls back through Codex output again** (Codex 0.158 started in full-screen mode; the plugin now starts it inline).
+- **Improve: every dialog, menu and panel fits a phone.** Buttons are large enough to tap, nothing runs off the screen, text is easier to read, and the file editor keeps its tools on one row. Confirm dialogs such as "Discard changes?" now open on top of the editor and the drawer instead of behind them.
+- **Fix: pasting an image from the Paste button works on iPhone and iPad** in Safari and Chrome. Tap Paste, then the Paste bubble iOS shows. A small preview of a pasted image now appears briefly so you can see the right picture reached the agent.
+- **Fix: a swipe on OpenCode on a touch screen scrolls the conversation** instead of moving its cursor (seen on a Windows tablet), and tapping Latest after a fast swipe always returns to the live screen.
+- **Fix: with the terminal page open on two computers, each keeps the workspace you chose on it.** Before, a click on one could switch the other a few seconds later.
+- **Fix: opening the terminal page on a phone or a second browser no longer shrinks the terminals of all your workspaces.** Only the workspaces you open there are resized.
+
+**Agent installs and upgrades**
+
+- **Fix: after an upgrade or downgrade, new workspaces run the version the Store shows.** Some agents kept running the old version, or recorded the wrong one, and GitHub Copilot could run its own newer cached copy. An upgrade whose files cannot be saved now fails and keeps the current version instead of reporting success.
+- **Fix: opening a workspace a few seconds after an agent install no longer shows Agent Binary Missing.** The plugin now waits briefly while its storage check holds the agent, instead of giving up.
+- **Fix: an agent is never replaced by an empty package** (reported on the Unraid forum for Antigravity CLI: "Agent Binary Missing" after every update). An install, update, storage move or storage engine switch packed a link to the agent's folder instead of the folder itself; it now always packs the real folder, and an empty package is refused. An agent with nothing stored no longer shows as installed.
+- **Improve: upgrades beside running workspaces cover more agents and explain themselves.** Grok Build, Kimi Code and Antigravity CLI keep their sign-in in one place shared by every version. Switching a workspace to the new version reconnects its terminal in place instead of reloading the page, open terminals stay usable during an upgrade, and a queued upgrade can be cancelled. The Store counts every running workspace, also those with no browser open.
+- **Improve: agents installed as plain folders (such as Grok Build, Kimi Code, Codex and Antigravity CLI) now upgrade side by side, also while their workspaces run.** A new workspace gets the new version at once, running workspaces keep theirs and offer "Switch to the installed version", and your sign-in is shared by every version. A failed switch-over waits longer between tries and stops after six instead of retrying every few seconds. Older versions are now removed from the flash drive: the plugin keeps the current and the previous version, and any version a workspace still uses. Uninstalling an agent now also removes its kept versions, and restoring an older version no longer damages the current one.
+- **Fix: agent updates no longer fill the USB flash drive.** Each new agent version is now stored as one fresh copy instead of another layer on top of all the old ones, and old copies that nothing uses are removed (the current and the previous version are kept). Agents that already piled up layers are tidied once when they are idle. An install that would not fit on the flash drive is refused with a clear reason instead of failing half-way.
+- **Fix: an agent install no longer fails when the vendor's server sends its install script compressed** (seen with Antigravity CLI), and a failed install now says whether the vendor or a full flash drive was the cause.
+- **Fix: release channels keep the Stable, Beta or pinned setting you chose**, and the version picker lists every available version.
+- **Fix: the install progress window no longer appears to stop at the tmux step.**
+
+**Home backups**
+
+- **Fix: home backup settings now save.** Before, a change to the backup folder, mode, how many backups to keep, the schedule or the other options showed "Saved" but was not kept. Each home now has its own backup settings behind a **Backup…** button on its card on the Storage page. Pick the folder with the normal folder browser, which can now also create a new folder; every change saves at once and stays after a reload. Each backup can now be deleted as well as restored, and when earlier backups are found but no folder is set, the dialog offers that folder with one click. The card shows when the home was last backed up, and a running backup shows its progress there. A home keeps the settings you had before until you change them.
+- **Fix: a warm home backup no longer fails at "Verifying the copy" while agents run.** Files that change during the copy count as live changes and the card shows how many; a backup fails only when an unchanged file differs, and the Debug Console log then lists the files. A database that changed during the copy is copied again safely.
+
+**Storage and stability**
+
+- **Fix: on Unraid 7.3.2, saving a home takes a clean copy of each database again.** The database backup silently did nothing, so a save could store a live database file mid-write, and merging a home's saved layers failed.
+- **Fix: a home whose storage place changed while it was open is saved again.** After an upgrade on a pool or a non-USB boot device, a save of such a home could read an empty folder, save nothing and still report success. Each save and the shutdown save now use the folder the open home really uses, a remount never covers unsaved changes, and the home moves to the new place by itself when no session uses it.
+- **Fix: saving a home with large agent databases no longer fills the server's memory.** The copies of the databases now go to the same drive as the home's changes, only when it has room, and are always removed when the save ends. A save that cannot complete waits before the next automatic try (2 minutes, growing to 30 minutes) instead of trying again every few seconds. A home that is always in use can be saved again while its agents run.
+- **Fix: storage moves are safer.** Before you move agent or home storage to a /mnt/user share, the plugin explains the risk (heavy writes through Unraid's shared-folder layer can freeze the server) and suggests better places; /mnt/user stays allowed when you have no other choice, and a share that lives on one pool is used directly. A storage move no longer closes Unraid's own web terminal or other plugins' terminals.
+- **Fix: new workspaces no longer run agent work through /mnt/user by default, and the folder browser no longer scans large shares in full**, both of which could slow the whole server.
+- **Improve: the Storage page shows what is saved and what is not.** Unsaved changes have their own tile, a running save or merge shows on the home card and locks its buttons, and the figures are correct on disk and flash pools. One global storage setting now applies to every home.
+- **Fix: saving and merging homes is more reliable.** Memory held by an old copy is released after a merge, a queued save no longer gets stuck, a closed session comes back after a merge, a second OpenCode workspace no longer fails with a missing cache folder during a save, and a noisy kernel warning at every refresh is gone.
+- **Fix: a reboot with many workspaces no longer hangs**, because the plugin always keeps time to release its storage mounts at shutdown. After a reboot, a workspace opened before the array started now opens by itself once the array is up.
+- **Fix: Persist, a backup or an agent install no longer reports "saved" when nothing was saved.** A save that meets the plugin's own storage check waits for it and then saves, or says it did not save.
+- **New: an agent, or you from a shell, can save or merge a home without the WebUI** (the persist-home and consolidate-home commands and tools; a merge waits for your approval in the Activity tray).
+
+**Agent Relay**
+
+- **Feat: let a trusted external system send requests to named topics.** On a remote's row in Settings &gt; Agent Relay, the new Permissions button lets you allow that remote to send requests to the topics you choose and to follow their progress; nothing is allowed until you turn it on. A remote can cancel its own open requests when you also allow cancel, repeated requests with the same client id are recognised, and removing a permission cancels that remote's open requests. Every grant change and request is recorded.
+- **Fix: a request to an archived topic is refused, and a topic actor is reminded of a request it acknowledged but has not finished.**
+- **Security: the Relay no longer opens a network listener or creates a key until you turn it on**, and it no longer keeps running old plugin code after an update. A listener left behind by an older plugin version is now found and stopped, even when the listener is switched off.
+- **Fix: updating the plugin no longer hangs** when the Relay listener is switched on, and the listener starts again by itself if it stops.
+- **Fix: after an update, agents' Relay and admin tools use the new plugin code without a workspace restart.** (A workspace started before this version needs one restart for this to take effect.)
+- **Fix: a message to a linked box is sent at once when that box is online**, instead of waiting for the next automatic send, and the contact list no longer shows test workspaces or long-closed sessions.
+- **Fix: Relay messages to an idle OpenCode workspace are no longer held back** by the grey hint text in its input box.
+- **Fix: a Relay notice that was typed into an agent's input box but not sent is now finished automatically** within a few seconds, also in OpenCode. If it still does not go, the plugin stops after three tries and shows one Activity item, instead of pressing Enter again and again; it reads only the real input box and never presses Enter over your own typing, and other Relay messages are no longer held back behind it. The Activity tray no longer calls it an open menu, and its button now just presses Enter instead of typing the notice a second time.
+
+**Workspaces and terminals**
+
+- **Improve: switching between workspaces is fast, also right after a plugin update.** Open terminals no longer drop when the plugin updates: a terminal connection is renewed only when its own code changed. The plugin reconnects every running workspace's terminal in the background, and on a desktop the terminal page keeps up to 10 of them ready while hidden, so a switch shows the live terminal at once instead of after two to three seconds. Nothing is started or typed by this; a phone keeps only the open terminal.
+- **Fix: "Switch to the installed version" does what it says.** It starts the agent once, not twice, and sends no Continue when it says it will not. A Continue or Relay notice is never typed into a workspace before its agent has drawn its screen, and a Continue whose Enter did not take is no longer reported as sent.
+- **Feat: the drawer shows unreachable copies of a workspace's agent** (for example after a double start), with Show screen (read only) and Stop this copy; the visible workspace keeps running.
+- **Improve: the Debug Console header is one compact row** with the log tabs, filters, icon buttons and a Support menu for the support bundle, forum post, GitHub issue and known issues, so the log shows more lines.
+
+**Other fixes and improvements**
+
+- **Security: a workspace agent no longer shows its secrets on the process command line**, where any local user could read them.
+- **Fix: OpenCode follows your Claude global instructions and rule files again.**
+- **Fix: a workspace continues by itself again after a model error whose message wrapped over two lines** (seen with an NVIDIA overload in a narrow terminal).
+- **Improve: the Store and the workspace list respond faster when many terminals are open.**
+- **Fix: on a phone, the open Activity panel is no longer partly covered by the workspace drawer's buttons.**
+- **Improve: the storage maintenance notice can be minimised to a small chip and no longer covers the terminal; on a phone the Activity pill shrinks to a dot and a count and sits above the terminal's key row, and Unraid's scroll arrows no longer cover the Select key.**
+- **Fix: on a phone, the drawer's pull tab can no longer be dragged up onto Unraid's header.**
+- **Fix: the Activity pill no longer sits on top of the Relay Permissions and storage halt dialogs, so their buttons can be tapped**, and the Running label in a workspace's details is easier to read on the white theme.
+- **Fix: on a phone, the Create button in the new-folder box of the workspace picker no longer stays greyed out** after you type a name.
+- **Fix: the first-run setup and the terminal page load reliably**, and Unraid's own top-bar Terminal button works on the plugin's page again (the page now keeps one live connection instead of up to eight).
+- **Fix: clicking a file path in the terminal opens the file in the editor again**, and the plugin's built-in "write clickable file paths" rule restores itself if its file is lost; it now also covers files outside the workspace.
+- **Fix: after the plugin updates itself, a terminal no longer shrinks to a small box.**
+- **Fix: a shell an agent opens (or the SSH quick-connect) keeps the workspace folder and the agent's tools.**
+- **Fix: the Config Hub's optional settings backup works again.**
+- **Fix: the file editor's Close button stays in the top-right corner on a desktop screen.**
+- **Improve: the workspace menu is shorter, voice mail plays unheard messages oldest first, and the Unattached sessions list reads more clearly.**
+- **Fix: the Agent Store opens on All on a first install**, also when this browser saved another filter earlier.
+- **Fix: old agent versions are also removed from the flash drive after the storage engine was switched to layers** (the current and the previous version are kept).
+- **Improve: screen readers read the workspace drawer's list as a proper list.**
+- **Fix: a page or action no longer fails with an error at the moment the plugin updates.** Each process keeps using one version of the plugin code, and an update no longer removes code that a running process still uses.
+
 ## 2026.09.15.08
 
 **Agent Relay — agents that coordinate with each other (new)**
@@ -361,53 +476,53 @@
 
 
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/cleanup.sh</URL>
-<SHA256>a236e315cb60ef221c44ceadddc50e2e7e9e48537603ca8519fa1130475ab5e4</SHA256>
+<SHA256>dcd3c4210f29de4989e618dd166ccf59b77f2acc69ffa573d2316aac2de51277</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/migrate-from-geminicli.sh</URL>
 <SHA256>2b9bedd8ec730e00f0dadd62b2c87c11a0792505f83742f857c22bc87b0dc24b</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/runtime.sh</URL>
-<SHA256>f3fa182e37671c4d527a4bea08f2e221fd22f0e7bef4f9f9026a1b23220ad9df</SHA256>
+<SHA256>659ba6d77a91c98c08e24f0b4bdd7fad65da0ec19b3c57c71d6c802c02f5f231</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/ui-assets.sh</URL>
 <SHA256>61ae68743a6da42aa8c33996b932e0ec8fc5fc8033fcd11ec420579c2e8a2474</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-storage-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-storage-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/storage.sh</URL>
 <SHA256>2a6881ef5d717523f4d5c64baf1c031c1e543a621b89c2b40b18ead7a07d0a96</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
-<SHA256>fe9a638f27f785e71f0649fc311f2d4324bb144c995eba165aa4b5681552a867</SHA256>
+<SHA256>fb5d7bab4f03ca9c485e72ed6bbaea5e92468477abba491e39a8cd2077d621be</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
 <SHA256>80eb4eadb27f0538b4c477873555a20904fc23958c48a956c1f7d0ff0eeabaac</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/stop-plugin.sh</URL>
-<SHA256>400893091a480e904e1db0f7884cf08eb914a28a1ec2e47c1ace23792e018b3e</SHA256>
+<SHA256>452edca40141b70def7d685271368d49254cdbcd20fd926bcb723a6676c3bc0c</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.09.15.08.page">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.09.30.04.page">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>
-<SHA256>41507f80eba4f6c1e74f69c826e6875efdc8c3c61ac9144675122fb41ab0efd8</SHA256>
+<SHA256>55b193a4def06bbffd681c88fa2d681b55b9cda4d64d391c6c440faea6974f35</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-src-2026.09.15.08.tar.gz">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-src-2026.09.30.04.tar.gz">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src.tar.gz</URL>
-<SHA256>d8bc4dbb7c2e02e704d27e5c1e825b2ef810f13f4fb70d78a27cb58316c4d807</SHA256>
+<SHA256>e3fec81a2062aa5a904abf2d719790a14be82e0aba6ec7cd5494b23f093f2fb2</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/install-engine.sh</URL>
-<SHA256>8f19d34233ca34b277b36b78bdf1d9c807638b204aa15df4d50bf9216772b73d</SHA256>
+<SHA256>b439a52dcee56486387effb4dce7a5331e27081d393f0a13751bd99cef1394d7</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.09.15.08.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.09.30.04.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/uninstaller/uninstall-engine.sh</URL>
-<SHA256>eaa4aa327669fe466ec0c43c012fd9f81f4d4f325a02440756b9f873ab4aef7e</SHA256>
+<SHA256>2e8f8648b202538754db48820a087e038c1770bca8483e4ff9257a302df497d4</SHA256>
 </FILE>
 
 <!-- MAIN INSTALL ENGINE -->
@@ -416,7 +531,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.09.15.08"
+export VERSION="2026.09.30.04"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -456,12 +571,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.09.15.08" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.09.30.04" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.09.15.08" | sort -V | tail -1)
-        if [ "$_newest" = "2026.09.15.08" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.09.30.04" | sort -V | tail -1)
+        if [ "$_newest" = "2026.09.30.04" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.09.15.08)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.09.30.04)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done
@@ -473,6 +588,13 @@ log_step()   { echo "" &gt;&amp;4 2&gt;/dev/null; echo "  [>] $1" &gt;&amp;4 2&g
 log_ok()     { echo "  [OK] $1" &gt;&amp;4 2&gt;/dev/null; echo "[$(get_ts)] [AICliAgents] INFO:   [OK] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
 log_warn()   { echo "  [!!] $1" &gt;&amp;4 2&gt;/dev/null; echo "[$(get_ts)] [AICliAgents] WARN:   [!!] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
 log_fail()   { echo "  [FAIL] $1" &gt;&amp;4 2&gt;/dev/null; echo "[$(get_ts)] [AICliAgents] ERROR:   [FAIL] $1" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null; }
+# Forgejo #292 (2026-09-23): FD 3 carries only a bare "PROGRESS: NN" number
+# for the progress bar, never human-readable text, and it can go away mid
+# install (the browser drops the connection, a proxy times out). Any modular
+# script (aicli-runtime.sh and friends) that prints a status line for a person
+# must call log_status/log_step/log_ok/log_warn/log_fail below, never write to
+# FD 3 directly — those are the only writes guarded against a dead descriptor,
+# and they also keep a copy in install.log when the live UI cannot be reached.
 log_progress() { echo "PROGRESS: $1" &gt;&amp;3 2&gt;/dev/null; }
 
 export -f log_status log_step log_ok log_warn log_fail log_progress get_ts
@@ -488,12 +610,12 @@ export -f log_status log_step log_ok log_warn log_fail log_progress get_ts
 # exists — on EVERY invocation, including a CA "Check for Updates" upgrade and a
 # reinstall — and no checksum is declared, so a FIXED cache name would serve the
 # first-ever installed payload forever. Every cached file therefore carries the
-# plugin version in its name (aicli-src-2026.09.15.08.tar.gz, aicli-engine-2026.09.15.08.sh,
+# plugin version in its name (aicli-src-2026.09.30.04.tar.gz, aicli-engine-2026.09.30.04.sh,
 # …): a new version is a new name that has never existed on flash, so it MUST be
 # fetched; the same version (reboot, reinstall) is a hit and stays network-free.
 # The version suffix is stripped here so every path the engine uses is unchanged.
 LOCAL_CACHE="/boot/config/plugins/unraid-aicliagents"
-CACHE_VERSION="2026.09.15.08"
+CACHE_VERSION="2026.09.30.04"
 for f in "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".sh "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".page "$LOCAL_CACHE"/aicli-src-"$CACHE_VERSION".tar.gz; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
@@ -539,15 +661,20 @@ else
     exit 1
 fi
 
+# #337: EVERY background process this installer starts goes through the shared
+# spawn helper: a new session, stdin from /dev/null, output to its own log, and
+# no inherited descriptor. Unraid's `plugin` command reads this script's output
+# until EOF, so one process that keeps any of our descriptors (fd 4 is the UI
+# pipe) holds the install open forever after this script has exited.
+AICLI_DETACH=/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/aicli-detach.sh
+
 # Phase 6: Storage Migration (Background)
 # D-308: Moved OUTSIDE subshell/pipe to prevent installer hang.
-# Full detachment ensured with &lt; /dev/null
 if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/migrate-btrfs-to-squashfs.sh ]; then
     log_status "Initiating background storage migration (Btrfs -&gt; SquashFS)..."
     mkdir -p /tmp/unraid-aicliagents
     touch /tmp/unraid-aicliagents/migration.lock
-    nohup bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/migrate-btrfs-to-squashfs.sh &gt; /tmp/unraid-aicliagents/migration.log 2&gt;&amp;1 &lt; /dev/null 4&gt;&amp;- 9&gt;&amp;- &amp;
-    disown
+    bash "$AICLI_DETACH" --log /tmp/unraid-aicliagents/migration.log --truncate -- bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/installer/migrate-btrfs-to-squashfs.sh &gt;/dev/null
 fi
 
 # Phase 3: Start the Storage Durability Supervisor daemon.
@@ -600,8 +727,7 @@ if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicl
 
     log_status "Starting storage durability supervisor..."
     mkdir -p /tmp/unraid-aicliagents
-    setsid nohup bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start &gt;/tmp/unraid-aicliagents/supervisor.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- 9&gt;&amp;- &amp;
-    disown
+    bash "$AICLI_DETACH" --log /tmp/unraid-aicliagents/supervisor.log --truncate -- bash /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/aicli-supervisor.sh start &gt;/dev/null
 fi
 
 # Fix B: Populate the available-version cache for ALL agents (installed AND
@@ -609,26 +735,24 @@ fi
 # uninstalled agents show "vunknown available" until the user clicks
 # "Check for Updates" or the daily 06:00 cron fires. version-check-bg.php
 # holds an advisory flock so concurrent calls are safe (extras return cached
-# results immediately without racing). setsid+nohup+4&gt;&amp;- so this never
+# results immediately without racing). Started through the spawn helper (#337), so this never
 # blocks the installer regardless of invocation method (SSH, rc.local, UI).
 if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php ]; then
     log_status "Running background agent version-cache refresh..."
-    setsid nohup /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php &gt;/tmp/unraid-aicliagents/version-check.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- 9&gt;&amp;- &amp;
-    disown
+    bash "$AICLI_DETACH" --log /tmp/unraid-aicliagents/version-check.log --truncate -- /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/version-check-bg.php &gt;/dev/null
 fi
 
 # Bug 521 - autolaunch sweep on plugin upgrade. Sessions were evicted by
 # cleanup.sh at the start of the upgrade; flagged workspaces should resume
-# in the background BEFORE the user opens the tab. setsid+nohup so this
-# never blocks the installer; 4 close prevents any inherited progress pipe
-# from holding the install hostage.
+# in the background BEFORE the user opens the tab. Started through the spawn helper (#337), so this
+# never blocks the installer: no inherited progress pipe can hold
+# the install hostage.
 if [ -f /usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php ]; then
     log_status "Running auto-launch sweep for flagged workspaces..."
-    setsid nohup /usr/bin/php -r "
+    bash "$AICLI_DETACH" --log /tmp/unraid-aicliagents/debug.log -- /usr/bin/php -r "
         require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
         \AICliAgents\Services\AutoLaunchService::launchAllPending(null, 'plugin_upgrade');
-    " &gt;&gt;/tmp/unraid-aicliagents/debug.log 2&gt;&amp;1 &lt;/dev/null 4&gt;&amp;- 9&gt;&amp;- &amp;
-    disown
+    " &gt;/dev/null
 
     # Backfill versions.json for installed agents stuck at the 0.0.0 sentinel.
     # 2026-05-09 production bug: agents installed by older plugin versions, or

@@ -124,7 +124,11 @@ if [ "$nginx_changed" -eq 1 ] \
     # dialog freezes at [4/5] and the wrapper hangs on the dead pipe (zombie
     # child + "operation continues in background" banner). Detached + a few
     # seconds later, the wrapper finishes streaming [5/5] and reaps cleanly first.
-    setsid bash -c 'sleep 3; /etc/rc.d/rc.nginx reload >/dev/null 2>&1' >/dev/null 2>&1 </dev/null 9>&- &
+    # #337: the shared helper also closes the wrapper's output fd 3, which a
+    # plain `setsid ... &` kept open until the reload finished.
+    if ! bash "$EMHTTP_DEST/src/scripts/aicli-detach.sh" -- bash -c 'sleep 3; /etc/rc.d/rc.nginx reload >/dev/null 2>&1' >/dev/null 2>&1; then
+        setsid bash -c 'sleep 3; /etc/rc.d/rc.nginx reload >/dev/null 2>&1' >/dev/null 2>&1 </dev/null 3>&- 4>&- 9>&- &
+    fi
 fi
 
 # Phase 5: runtime and deployed UI/source removal. Config + persistence remain.

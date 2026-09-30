@@ -14,13 +14,26 @@
 // tmux rejects. Child processes the plugin spawns inherit this env var.
 putenv('TMUX_TMPDIR=/tmp/unraid-aicliagents/tmux');
 
+// Forgejo #367 (docs/specs/RUNNING_AGENT_SAFE_UPDATES.md, 2026-09-29): pin this
+// process to ONE plugin generation. PHP gives __DIR__ as the real generation
+// path, so AICLI_GEN_SRC names the generation this file came from. Load every
+// later file through AICLI_GEN_SRC or __DIR__, never through the stable
+// `src` link: an update can repoint the link while this process runs, and a
+// second copy of a class from the other generation is a fatal "Cannot
+// redeclare class". An entry point that is not inside a generation (the root
+// AICliAjax.php and the .page files) defines the constant first.
+defined('AICLI_GEN_SRC') || define('AICLI_GEN_SRC', dirname(__DIR__));
+
 // 1. Include Atomic Services
 require_once __DIR__ . '/services/LogService.php';
 require_once __DIR__ . '/services/AtomicWriteService.php';
+require_once __DIR__ . '/services/StorageBackendPolicyService.php';
+require_once __DIR__ . '/services/StorageBackendMigrationService.php';
 require_once __DIR__ . '/services/ConfigService.php';
 require_once __DIR__ . '/services/InitService.php';
 require_once __DIR__ . '/services/PermissionService.php';
 require_once __DIR__ . '/services/AgentRegistry.php';
+require_once __DIR__ . '/services/AgentCaptiveStateService.php'; // #270 — version-independent captive state store
 require_once __DIR__ . '/services/ProcessManager.php';
 require_once __DIR__ . '/services/StoragePathResolver.php';
 require_once __DIR__ . '/services/LifecycleLogService.php';
@@ -44,10 +57,21 @@ require_once __DIR__ . '/services/AutoLaunchService.php';
 require_once __DIR__ . '/services/UpgradeRelaunchService.php';
 require_once __DIR__ . '/services/ConsolidateState.php';   // HOME_CONSOLIDATE_INPROGRESS_GUARD — per-user consolidate marker
 require_once __DIR__ . '/services/AutoLaunchSuppression.php';   // Fix 2026-09-12 — an explicit close suppresses auto-launch
+require_once __DIR__ . '/services/ContinueHold.php';   // #349 — an operator switch holds the automatic Continue
+require_once __DIR__ . '/services/SessionLaunchLock.php';   // #352 — one start/close/restart at a time for each workspace
+require_once __DIR__ . '/services/BridgeWarmService.php';   // TERMINAL_BACKGROUND_WARM.md — attach a bridge to a running workspace, never start one
+require_once __DIR__ . '/services/TmuxSocketRecovery.php';   // 2026-09-29 — recovery socket for an unreachable tmux server
+require_once __DIR__ . '/services/TmuxDuplicateService.php'; // 2026-09-29 — unreachable copies in the drawer
 require_once __DIR__ . '/services/UtilityService.php';
 require_once __DIR__ . '/services/PendingAgentUpgradeService.php';   // #71 — non-destructive pre-install queue
 require_once __DIR__ . '/services/AgentUpgradeAdmissionService.php'; // #71 — closes terminal-start/install race
 require_once __DIR__ . '/services/NchanService.php';
+// EVENT_STREAM_MULTIPLEX.md R4 — the one publish facade every publisher below
+// this line calls instead of NchanService::publish() directly. NchanService.php
+// (just above) already requires this file itself (its own CHANNELS constant is
+// declared FROM EventBus::CHANNEL_DEPTHS), so this line is a no-op in practice —
+// it is kept explicit so the load order reads correctly on its own.
+require_once __DIR__ . '/services/EventBus.php';
 require_once __DIR__ . '/services/ActivityService.php';
 require_once __DIR__ . '/services/VersionClassifier.php';
 require_once __DIR__ . '/services/VersionCheckService.php';
@@ -78,6 +102,13 @@ require_once __DIR__ . '/services/StorageStateAuditService.php';
 require_once __DIR__ . '/services/WorkspaceBundleService.php';
 require_once __DIR__ . '/services/AgentRelayService.php';
 require_once __DIR__ . '/services/RelayMcpTools.php';   // #113 — one tool table for both Relay transports
+// Linked boxes (#309, docs/specs/RELAY_LINKED_BOXES.md): one grant model, the
+// pure crypto, the flash/vault store, the pinned client, then the service.
+require_once __DIR__ . '/services/RelayGrants.php';
+require_once __DIR__ . '/services/RelayPeerCrypto.php';
+require_once __DIR__ . '/services/RelayPeerStore.php';
+require_once __DIR__ . '/services/RelayPeerClient.php';
+require_once __DIR__ . '/services/RelayPeerService.php';
 // Plugin management: AdminService (Tier 1 read + Tier 2 change) reads/writes the
 // state; AdminMcpTools is the one tool table shared by the MCP adapter and the CLI,
 // the same split the Relay uses. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
@@ -94,8 +125,14 @@ require_once __DIR__ . '/services/SecretPaths.php'; // FILE_VIEWER_SECRET_DROP.m
 require_once __DIR__ . '/services/VoiceMailService.php';
 require_once __DIR__ . '/services/ClaudeSessionNameResolver.php';
 require_once __DIR__ . '/services/VoiceService.php';
+require_once __DIR__ . '/services/VoiceEngineSetupService.php';
 require_once __DIR__ . '/services/AdminService.php';
+require_once __DIR__ . '/services/QuotaDetectionService.php'; // #281 — all-running-session quota polling
+require_once __DIR__ . '/services/TransientErrorService.php'; // #312 — auto-continue after a temporary model error
+require_once __DIR__ . '/services/AutoContinueRules.php'; // AUTO_CONTINUE_PATTERNS.md — the operator's own auto-continue patterns
+require_once __DIR__ . '/services/WorkspaceScreenService.php'; // AUTO_CONTINUE_PATTERNS.md — masked, logged screen read
 require_once __DIR__ . '/services/AdminMcpTools.php';
+require_once __DIR__ . '/services/HomeBackupSettingsService.php'; // HOME_BACKUP.md #287 — per-home backup settings
 require_once __DIR__ . '/services/BackupCronService.php'; // HOME_BACKUP.md R1 — owns the backup cron file
 // PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11) — per-session event
 // subscription + cursor store, used by AdminService's subscribeEvents()/
@@ -123,6 +160,7 @@ require_once __DIR__ . '/services/hub/CodexProjector.php';
 require_once __DIR__ . '/services/hub/GrokProjector.php'; // same fenced mcp_servers TOML grammar
 require_once __DIR__ . '/services/hub/KimiCodeProjector.php';
 require_once __DIR__ . '/services/hub/GooseProjector.php';
+require_once __DIR__ . '/services/hub/OpencodeClaudeInstructionsProjector.php'; // #311: OpenCode `instructions` entries for the user's Claude files
 // Config Hub phase 2 (OP #1363 / H-02 — instruction-file projection)
 require_once __DIR__ . '/services/hub/InstructionProjector.php';
 require_once __DIR__ . '/services/hub/RulesFileInstructionProjector.php'; // extends InstructionProjector (Kilo + Claude rules dir)

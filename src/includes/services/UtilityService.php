@@ -28,11 +28,47 @@ class UtilityService {
     }
 
     /**
-     * Executes a command in the background.
+     * Executes a command in the background, fully detached (#337).
+     * $cmd is a shell command line; it runs under `bash -c`.
      */
     public static function execBg($cmd) {
         LogService::log("Spawning background process: $cmd", LogService::LOG_DEBUG, "UtilityService");
-        exec("nohup $cmd > /dev/null 2>&1 &");
+        self::spawnDetached(['/bin/bash', '-c', (string)$cmd]);
+    }
+
+    /** The shared spawn helper of THIS plugin generation (#337). */
+    public static function detachHelperPath(): string {
+        return dirname(__DIR__, 2) . '/scripts/aicli-detach.sh';
+    }
+
+    /**
+     * #337: start a long-lived background process fully detached from this PHP
+     * process: a new session, stdin from /dev/null, stdout/stderr to $log, and
+     * no inherited descriptor (every fd above 2 is closed). A plain
+     * `nohup ... &` keeps every descriptor PHP holds; during `plugin install`
+     * one of them is the installer's output pipe, and Unraid's plugin command
+     * waits for EOF on it forever. Every PHP spawn site uses this method.
+     *
+     * @param string[] $argv the command and its arguments (not a shell line)
+     * @return int the pid of the started process, or 0 when none was reported
+     */
+    public static function spawnDetached(array $argv, string $log = '/dev/null', bool $truncate = false): int {
+        $args = implode(' ', array_map('escapeshellarg', array_map('strval', $argv)));
+        $helper = self::detachHelperPath();
+        if (is_file($helper)) {
+            $line = 'bash ' . escapeshellarg($helper) . ' --log ' . escapeshellarg($log)
+                . ($truncate ? ' --truncate' : '') . ' -- ' . $args . ' 2>/dev/null';
+        } else {
+            // Degraded fallback (helper missing from a broken tree): still a new
+            // session and no installer descriptors.
+            $line = 'setsid nohup ' . $args . ' </dev/null ' . ($truncate ? '>' : '>>') . escapeshellarg($log)
+                . ' 2>&1 3>&- 4>&- 9>&- & echo $!';
+        }
+        $out = []; $rc = 0;
+        // nosemgrep: php.lang.security.exec-use.exec-use — every argument is escapeshellarg()-quoted
+        @exec($line, $out, $rc);
+        $pid = trim((string)($out[0] ?? ''));
+        return ctype_digit($pid) ? (int)$pid : 0;
     }
 
     /**
@@ -168,7 +204,7 @@ class UtilityService {
         @file_put_contents($file, json_encode($status));
         // D-402: Publish install progress via Nchan for real-time UI updates
         if (!empty($agentId)) {
-            NchanService::publishInstallProgress($agentId, $progress, $message, $reason);
+            EventBus::publishInstallProgress($agentId, $progress, $message, $reason);
             // T-08 (ACTIVITY_TRAY.md): mirror every install step into the activity
             // registry. This is the single choke point all install/upgrade/emergency
             // steps flow through, so the heartbeat refreshes per step — the legacy

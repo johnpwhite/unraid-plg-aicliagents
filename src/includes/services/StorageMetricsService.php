@@ -213,8 +213,15 @@ class StorageMetricsService {
         // probes). probeTarget is memoised per path per request.
         require_once __DIR__ . '/StorageTargetService.php';
         $config = (isset($config) && is_array($config)) ? $config : [];
-        $homeWear  = (string)(FileStorage::probeTarget($homePath)['wear'] ?? 'wear_normal');
-        $agentWear = (string)(FileStorage::probeTarget($agentPath)['wear'] ?? 'wear_normal');
+        $homeProbe  = FileStorage::probeTarget($homePath);
+        $agentProbe = FileStorage::probeTarget($agentPath);
+        $homeWear  = (string)($homeProbe['wear'] ?? 'wear_normal');
+        $agentWear = (string)($agentProbe['wear'] ?? 'wear_normal');
+        // Forgejo #251: `backend=flash` describes the layered engine, not where
+        // its writable upper lives. An existing layered entity on a ZFS pool
+        // remains a flash-backend entity while its upper is durable on disk.
+        $homeUpperMode  = (string)($homeProbe['upper_mode'] ?? ($homeDev === 'flash' ? 'zram' : 'disk'));
+        $agentUpperMode = (string)($agentProbe['upper_mode'] ?? ($agentDev === 'flash' ? 'zram' : 'disk'));
         // Only bother enumerating targets when the device side could possibly
         // qualify (genuine USB flash) — saves the target probe sweep on the
         // common durable-box case where the offer is moot anyway.
@@ -228,15 +235,44 @@ class StorageMetricsService {
         // StorageHandler::backupStatusFor() returns, so the Storage tab and
         // the backup_status AJAX action can never disagree.
         require_once __DIR__ . '/../handlers/StorageHandler.php';
+        require_once __DIR__ . '/HomeBackupSettingsService.php';
+        // HOME_STORAGE_CARD_JOB_STATE.md (#247): `job` — the supervisor job that is
+        // queued, running or deferred for this home, or null. The card shows the
+        // state and locks its buttons from THIS field, so every device agrees.
+        require_once __DIR__ . '/SupervisorService.php';
+        $_jobs = SupervisorService::listJobs(true);
         foreach ($homes as $_u => $_st)  {
             $_hasLayers = (($_st['layers'] ?? 0) > 0);
+            // HOME_BACKUP.md #287: the Home card's backup strip needs the home's
+            // OWN settings summary and its last run (ok/failed) — from the same
+            // backupStatusFor() object as last_backup, so the surfaces agree.
+            $_bk = \AICliAgents\Handlers\StorageHandler::backupStatusFor((string)$_u);
+            $_bkSummary = null;
+            try {
+                // peek(): the 30 s status sweep never writes a settings file.
+                $_bkS = HomeBackupSettingsService::peek((string)$_u);
+                $_bkSummary = ['configured' => $_bkS['target'] !== '', 'target' => $_bkS['target'],
+                               'schedule' => $_bkS['schedule'], 'quiesce' => $_bkS['quiesce'],
+                               // HOME_BACKUP.md 2026-09-24 follow-up: where the home's
+                               // earlier snapshots are when it has no folder of its own.
+                               'earlier_target' => (string)($_bk['earlier_target'] ?? '')];
+            } catch (\Throwable $e) {
+                $_bkSummary = null;
+            }
             $homes[$_u] = array_merge($_st, FileStorage::effectiveBackendCaps($homeDev, $_hasLayers),
+                ['upper_mode' => $homeUpperMode,
+                 'percent' => self::upperPercent((int)($_st['dirty_mb'] ?? 0), $homeUpperMode)],
                 ['can_graduate' => FileStorage::canGraduate($homeDev, $homeWear, $_hasLayers, $homeHasTarget)],
-                ['last_backup' => \AICliAgents\Handlers\StorageHandler::backupStatusFor((string)$_u)['last_backup'] ?? null]);
+                ['last_backup' => $_bk['last_backup'] ?? null,
+                 'last_backup_run' => $_bk['last_run'] ?? null,
+                 'backup' => $_bkSummary],
+                ['job' => SupervisorService::activeJobFor('home/' . (string)$_u, $_jobs)]);
         }
         foreach ($agents as $_a => $_st) {
             $_hasLayers = (($_st['layers'] ?? 0) > 0);
             $agents[$_a] = array_merge($_st, FileStorage::effectiveBackendCaps($agentDev, $_hasLayers),
+                ['upper_mode' => $agentUpperMode,
+                 'percent' => self::upperPercent((int)($_st['dirty_mb'] ?? 0), $agentUpperMode)],
                 ['can_graduate' => FileStorage::canGraduate($agentDev, $agentWear, $_hasLayers, $agentHasTarget)]);
         }
 
@@ -311,6 +347,36 @@ class StorageMetricsService {
     }
 
     /**
+     * Resolves the REAL upperdir for a home or agent entity, for dirty-RAM
+     * reporting (Forgejo #232). Reuses the same canonical resolvers the mount
+     * pipeline itself uses, rather than re-deriving or guessing a path, so
+     * this can never disagree with where the entity actually writes:
+     *   - home: StorageMountService::resolveHomeUpperPath (its own
+     *     flash-vs-disk backend branch).
+     *   - agent: the CURRENT generation's recorded upper (generationUpperPath
+     *     against liveGenerationId) for a versioned agent; null for a
+     *     legacy/non-versioned one, which falls back to the plain ZRAM guess
+     *     below (its upper has always lived there).
+     * Never throws; returns null (caller then falls back / reports 0) rather
+     * than let a resolver failure abort the whole metrics response.
+     */
+    private static function resolveUpperPathForMetrics($type, $id): ?string {
+        if ($type === 'home') {
+            require_once __DIR__ . '/StorageMountService.php';
+            return StorageMountService::resolveHomeUpperPath((string)$id);
+        }
+        if ($type === 'agent') {
+            $live = self::liveGenerationId((string)$id);
+            if ($live !== null) {
+                $upper = self::generationUpperPath((string)$id, $live);
+                if ($upper !== null) return $upper;
+            }
+        }
+        $legacy = "/tmp/unraid-aicliagents/zram_upper/{$type}s/{$id}/upper";
+        return is_dir($legacy) ? $legacy : null;
+    }
+
+    /**
      * Retrieves metrics for a specific SquashFS-backed entity.
      * Focuses on ZRAM usage (Dirty data) vs Physical footprint.
      */
@@ -319,9 +385,17 @@ class StorageMetricsService {
         $dirtyMB = 0;
         $zramTotal = 4096; // 4GB Virtual ZRAM limit
 
-        // D-309: Calculate 'Dirty' RAM usage (size of the upperdir in ZRAM)
-        $upperDir = "/tmp/unraid-aicliagents/zram_upper/{$type}s/{$id}/upper";
-        if (is_dir($upperDir)) {
+        // D-309 / Forgejo #232: measure the upperdir this entity is ACTUALLY
+        // using, not a hardcoded ZRAM-only guess. A disk-backed home/agent
+        // (StorageMountService::resolveHomeUpperPath's non-flash branch, or a
+        // versioned agent generation bound to a disk upper) writes its upper
+        // under $persistPath/_upper/..., which the old hardcoded
+        // "/tmp/.../zram_upper/..." path never matched — is_dir() silently
+        // failed, $dirtyMB stayed 0, and the Storage card showed "Synced"
+        // with zero visibility into however much real dirty data sat there
+        // (confirmed live 2026-09-16: 1206 MB unreported for home/root).
+        $upperDir = self::resolveUpperPathForMetrics($type, $id);
+        if ($upperDir !== null && is_dir($upperDir)) {
             $dirtyMB = self::getDirSize($upperDir);
         }
 
@@ -382,5 +456,12 @@ class StorageMetricsService {
     private static function getDirSize($path) {
         $io = shell_exec("du -sm " . escapeshellarg($path) . " 2>/dev/null | cut -f1");
         return (int)trim($io);
+    }
+
+    /** ZRAM has a real 4 GiB capacity; a disk upper has no honest bar denominator. */
+    private static function upperPercent(int $upperMB, string $upperMode): ?int {
+        return $upperMode === 'zram'
+            ? min(100, (int)round(($upperMB / 4096) * 100))
+            : null;
     }
 }

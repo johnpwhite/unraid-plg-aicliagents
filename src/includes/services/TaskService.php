@@ -39,13 +39,18 @@ class TaskService {
         }
 
         FileStorage::ensureReady("home/$username");   // Epic #1310: facade intent
-        $res = FileStorage::persist("home/$username")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
+        $result = FileStorage::persist("home/$username");   // Epic #1310: facade intent (delegates to commitChanges)
+        $res = $result->exit;
 
         flock($fp, LOCK_UN);
         fclose($fp);
 
         if ($res === 0) {
             return ['status' => 'ok', 'message' => 'Persistence successful'];
+        } elseif ($res === 2 && !$result->saved) {
+            // #357: nothing was written (the storage lock stayed busy, or a
+            // database copy was locked). Never report this as saved.
+            return ['status' => 'not_saved', 'message' => self::deferReasonMessage('home', $username)];
         } elseif ($res === 2) {
             return ['status' => 'busy', 'message' => self::deferReasonMessage('home', $username)];
         } else {
@@ -74,10 +79,11 @@ class TaskService {
             @unlink($marker);
         }
         switch ($reason) {
+            // #357: both reasons mean NO layer was written — say so plainly.
             case 'sqlite_backup_deferred':
-                return 'Data persisted to Flash, but a SQLite database backup deferred (DB locked or backup timed out). The bake will retry automatically on the next cycle.';
+                return 'Not saved yet: a database in this home was busy (locked, or its backup timed out), so no new layer was written. Your changes are still in RAM; the next save captures them.';
             case 'bake_lock_held':
-                return 'Data persisted to Flash, but a concurrent bake is in flight. The current operation will retry automatically on the next cycle.';
+                return 'Not saved yet: another storage operation on this home (a check or a merge) held its lock for too long, so no new layer was written. Your changes are still in RAM; try Persist again, or the next save captures them.';
             case 'bake_landed_during_consolidate':
                 return 'Consolidation deferred: a new delta bake landed mid-flight and took priority. The consolidate will retry automatically on the next cycle.';
             case 'target_not_mounted':
@@ -86,6 +92,9 @@ class TaskService {
             case 'fat32_size_cap':
                 // S-09 (#1352): exit-4 precondition, surfaced when a caller maps it here.
                 return 'Operation refused: the projected layer size is approaching the FAT32 4 GiB per-file limit on the persistence target. Move persistence to a POSIX pool (see the Storage tab).';
+            case 'no_space':
+                // #338: a bake or agent pack is not started when its result cannot fit.
+                return 'Not started: there is not enough free space on the storage device for the new layer. Free some space (the Storage tab lists what uses it); nothing was changed.';
             case 'upper_not_empty':
                 // S-10 (#1354): graduate found unflushed writes after its flush+consolidate.
                 return 'Graduation deferred: new writes landed during the flush. The migration will retry automatically once the home is idle.';
@@ -116,12 +125,25 @@ class TaskService {
         switch ($reason) {
             case 'mount_busy':
             case 'busy_cooldown':
+                // Forgejo #231: mount_busy for a bake/consolidate fires AFTER the
+                // new layer is already written to disk — only the live-mount
+                // refresh that frees the old copy's RAM is what's waiting on
+                // open sessions. The old wording ("it will $verb automatically")
+                // read as if nothing had been saved yet, which isn't true and
+                // worried a user who'd just watched the Storage card go green.
+                // For $op values other than bake/consolidate (e.g. graduate) no
+                // new layer write is implied, so keep the plain "waiting" framing.
+                if ($op === 'bake' || $op === 'consolidate') {
+                    return "Your data is already saved to disk. Freeing the RAM used by the previous copy is waiting for every open session on this home to close — it happens automatically the moment they do.";
+                }
                 return "Waiting for this home's open agent session(s) to close — it will $verb automatically the moment you close the session.";
             case 'bake_lock_held':
             case 'bake_landed_during_consolidate':
                 return "Waiting for another storage operation on this home to finish — it will $verb automatically on the next cycle.";
             case 'target_not_mounted':
                 return 'Waiting for the storage device to mount (is the Unassigned Device attached?) — it will retry automatically.';
+            case 'no_space':
+                return 'Not started: the storage device does not have room for the new layer. Nothing was changed.';
             case 'upper_not_empty':
                 return 'Flushing pending writes first — it will continue automatically once this home is idle.';
             case 'sqlite_backup_deferred':
@@ -156,12 +178,16 @@ class TaskService {
         }
 
         FileStorage::ensureReady("home/$username");   // Epic #1310: facade intent
-        $res = FileStorage::persist("home/$username")->exit;   // Epic #1310: facade intent (delegates to commitChanges)
+        $result = FileStorage::persist("home/$username");   // Epic #1310: facade intent (delegates to commitChanges)
 
         flock($fp, LOCK_UN);
         fclose($fp);
 
-        return ($res === 0 || $res === 2) ? ['status' => 'ok'] : ['status' => 'error'];
+        // #357: an exit 2 that wrote no layer is "skipped" (data safe in RAM,
+        // the next cycle saves it), never "ok".
+        if ($result->saved) return ['status' => 'ok'];
+        if ($result->exit === 2) return ['status' => 'skipped', 'message' => 'Not saved yet: the storage lock was busy. Data safe in RAM; the next save captures it.'];
+        return ['status' => 'error'];
     }
 
 }

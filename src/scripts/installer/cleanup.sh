@@ -214,12 +214,25 @@ if [ "$UPGRADE_MODE" = "1" ]; then
     if ! declare -f atomic_write_layer >/dev/null 2>&1; then
         source "$EMHTTP_DEST_CLEANUP/src/scripts/storage/atomic_write_layer.sh" 2>/dev/null || true
     fi
-    if [ -d "$ZRAM_UPPER/homes" ] && declare -f atomic_write_layer >/dev/null 2>&1; then
+    # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"): bake
+    # the upper each home's mount REALLY uses (zram first, then disk). Without
+    # the new resolve_paths.sh (an older deployed copy): the zram folders.
+    _cleanup_home_uppers() {
+        if declare -f home_uppers_shutdown_order >/dev/null 2>&1; then
+            home_uppers_shutdown_order
+            return 0
+        fi
+        local _d _u
+        for _d in "$ZRAM_UPPER/homes"/*/upper; do
+            [ -d "$_d" ] || continue
+            _u="${_d%/upper}"; printf '%s\t%s\n' "${_u##*/}" "$_d"
+        done
+    }
+    if declare -f atomic_write_layer >/dev/null 2>&1; then
         lifecycle_log "info" "installer_cleanup" "installer_cleanup_start" "{}" 2>/dev/null || true
-        for upper_dir in "$ZRAM_UPPER/homes"/*/upper; do
-            [ -d "$upper_dir" ] || continue
+        while IFS=$'\t' read -r user upper_dir; do
+            [ -n "$user" ] && [ -d "$upper_dir" ] || continue
             [ -z "$(find "$upper_dir" -type f 2>/dev/null | head -1)" ] && continue
-            user=$(basename "$(dirname "$upper_dir")")
             PERSIST_DIR=$(home_persist_path "$user" 2>/dev/null || echo "")
             [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}"
             log_status "      [ZRAM] Baking home delta for $user..."
@@ -230,7 +243,7 @@ if [ "$UPGRADE_MODE" = "1" ]; then
             else
                 log_status "      [!!] Delta bake failed for $user."
             fi
-        done
+        done < <(_cleanup_home_uppers)
     fi
 
 fi

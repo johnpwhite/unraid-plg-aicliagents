@@ -21,6 +21,6 @@
 
 declare(strict_types=1);
 
-require_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php';
+require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 
 \AICliAgents\Services\SupervisorService::syncJobActivities();

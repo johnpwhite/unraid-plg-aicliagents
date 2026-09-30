@@ -4,20 +4,25 @@
  * <module_context>
  *     <name>event-publish</name>
  *     <description>CLI entry so a shell publisher (src/event/stopping,
- *     src/event/stopping_array) can publish through the SAME
- *     NchanService::publish() every PHP publisher uses, instead of curling
+ *     src/event/stopping_array, generation.sh, migrate-btrfs-to-squashfs.sh)
+ *     can publish through the SAME EventBus::publish() every PHP publisher
+ *     uses (docs/specs/EVENT_STREAM_MULTIPLEX.md R4), instead of curling
  *     Nchan directly (docs/specs/REVIEW_2026-09-13_EVENTS_AND_SECURITY.md,
  *     finding E2). A raw shell curl carries no `ts` and, for `storage_status`,
  *     only the handful of fields the shell script already happened to know —
- *     this entry always stamps `ts` (NchanService::publish() does it) and,
- *     for `storage_status`, builds the FULL snapshot the browser's own
- *     reconcile read sees, the same way
- *     src/scripts/supervisor/publish-storage-status.php does.</description>
- *     <dependencies>AICliAgentsManager.php (pulls in NchanService, EventActor);
- *     StorageHandler.php + StorageMetricsService (the storage_status snapshot,
- *     EVENT_FIRST_RECONCILIATION.md 1b.4 — the SAME shared statics
- *     publish-storage-status.php calls, so this never re-derives a second
- *     copy).</dependencies>
+ *     this entry always stamps `ts` (NchanService::publish(), EventBus's
+ *     transport, does it) and, for `storage_status`, builds the FULL
+ *     snapshot the browser's own reconcile read sees, the same way
+ *     src/scripts/supervisor/publish-storage-status.php does. The CLI
+ *     contract (channel name as argv[1], same exit codes, same stdout JSON)
+ *     is unchanged from before EventBus existed — only what happens
+ *     internally moved from NchanService::publish() to
+ *     EventBus::publish().</description>
+ *     <dependencies>AICliAgentsManager.php (pulls in EventBus, NchanService,
+ *     EventActor); StorageHandler.php + StorageMetricsService (the
+ *     storage_status snapshot, EVENT_FIRST_RECONCILIATION.md 1b.4 — the SAME
+ *     shared statics publish-storage-status.php calls, so this never
+ *     re-derives a second copy).</dependencies>
  *     <constraints>CLI-only. Every field of the payload passed on the command
  *     line arrives as a JSON string ($argv), never string-interpolated into a
  *     shell command — the caller (nchan_notify() in the event/stopping
@@ -60,6 +65,7 @@ require_once __DIR__ . '/../includes/handlers/StorageHandler.php';
 
 use AICliAgents\Handlers\StorageHandler;
 use AICliAgents\Services\EventActor;
+use AICliAgents\Services\EventBus;
 use AICliAgents\Services\NchanService;
 use AICliAgents\Services\StorageMetricsService;
 
@@ -107,7 +113,7 @@ try {
         $maintenance = StorageHandler::forceReclaimState();
         unset($maintenance['status'], $maintenance['now']);
         $snapshot['maintenance'] = $maintenance;
-        NchanService::publish('storage_status', $snapshot);
+        EventBus::publish('storage.status', [], $snapshot);
     } elseif ($channel === 'workspaces') {
         $data = $raw !== '' ? json_decode($raw, true) : null;
         if (!is_array($data) || !isset($data['type'], $data['id']) || (string)$data['type'] === '' || (string)$data['id'] === '') {
@@ -118,14 +124,24 @@ try {
         if (isset($data['reason'])) {
             $payload['reason'] = (string)$data['reason'];
         }
-        NchanService::publish('workspaces', $payload);
+        EventBus::publish('workspace', [], $payload);
     } else {
         $data = $raw !== '' ? json_decode($raw, true) : [];
         if (!is_array($data)) {
             echo json_encode(['status' => 'error', 'message' => 'Payload must be a JSON object.']), PHP_EOL;
             exit(2);
         }
-        NchanService::publish($channel, $data);
+        // The channel was already validated by aicliEventPublishChannelKnown()
+        // above (registered in NchanService::CHANNELS / EventBus::CHANNEL_DEPTHS),
+        // so kindForChannel() should always resolve here — but never publish
+        // blind if the two lists ever disagreed.
+        $kind = EventBus::kindForChannel($channel);
+        if ($kind === null) {
+            echo json_encode(['status' => 'error', 'message' => "Unknown channel: $channel"]), PHP_EOL;
+            exit(2);
+        }
+        $subject = ($kind === 'install') ? ['agentId' => substr($channel, strlen('install_'))] : [];
+        EventBus::publish($kind, $subject, $data);
     }
 } catch (\Throwable $e) {
     echo json_encode(['status' => 'error', 'message' => 'event-publish failed: ' . $e->getMessage()]), PHP_EOL;

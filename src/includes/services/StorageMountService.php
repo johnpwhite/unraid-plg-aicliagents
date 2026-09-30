@@ -148,6 +148,91 @@ class StorageMountService {
     }
 
     /**
+     * 2026-09-25 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "a mount waits out
+     * a short storage-lock hold"): mount deferrals that end by themselves within
+     * seconds. bake_lock_held = another storage operation holds the entity's
+     * lock; the supervisor's reconcile pass takes it for a few seconds per entity
+     * on every pass. A deferral for any other reason (target_not_mounted: the
+     * disk is not mounted) is not retried.
+     */
+    public const TRANSIENT_MOUNT_DEFER_REASONS = ['bake_lock_held'];
+
+    /** Total time a mount call may spend on transient deferrals, retries included. */
+    public const MOUNT_DEFER_BUDGET_S = 30;
+
+    /** Pause between two attempts after a transient deferral. */
+    public const MOUNT_DEFER_RETRY_PAUSE_S = 2;
+
+    /** The defer_reason of a storagectl result (its JSON line in the output), or null. */
+    public static function mountDeferReason(array $out): ?string {
+        for ($i = count($out) - 1; $i >= 0; $i--) {
+            $line = trim((string)$out[$i]);
+            if ($line === '' || $line[0] !== '{') continue;
+            $j = json_decode($line, true);
+            if (is_array($j) && array_key_exists('defer_reason', $j)) {
+                $r = $j['defer_reason'];
+                return is_string($r) && $r !== '' ? $r : null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Run one storagectl mount, and retry it within a bounded budget when it
+     * DEFERS for a transient reason and left no live overlay. Before, a single
+     * such deferral made ensureReady report the agent as unavailable, and the
+     * workspace showed "[Agent Binary Missing]" for an agent that was installed.
+     * A real failure (any exit other than 2) and a non-transient deferral return
+     * at once, with no retry.
+     *
+     * @param callable(int):array{0:int,1:array} $attempt runs storagectl mount;
+     *        its argument is the lock wait (seconds) storagectl may spend.
+     * @param callable():bool $isMounted whether the target is mounted now.
+     * @param string $label "agent <id>" / "home <user>" for the log line.
+     * @param callable|null $sleep  test seam: fn(int $seconds).
+     * @param callable|null $now    test seam: fn(): float seconds.
+     * @return array{res:int, out:array, usable:bool, attempts:int, defer_reason:?string}
+     */
+    public static function runMountWithTransientRetry(
+        callable $attempt, callable $isMounted, string $label,
+        ?callable $sleep = null, ?callable $now = null
+    ): array {
+        $sleep = $sleep ?? static function (int $s): void { sleep($s); };
+        $now = $now ?? static function (): float { return microtime(true); };
+        $deadline = $now() + self::MOUNT_DEFER_BUDGET_S;
+        $attempts = 0;
+        while (true) {
+            $remaining = (int)floor($deadline - $now());
+            // storagectl waits for the lock itself; never past this call's budget.
+            [$res, $out] = $attempt(max(0, min(20, $remaining)));
+            $attempts++;
+            $res = (int)$res;
+            $reason = ($res === 2) ? self::mountDeferReason($out) : null;
+            $usable = self::mountResultIsUsable($res) && !($res === 2 && !$isMounted());
+            if ($usable || $res !== 2 || !in_array($reason, self::TRANSIENT_MOUNT_DEFER_REASONS, true)) {
+                return ['res' => $res, 'out' => $out, 'usable' => $usable, 'attempts' => $attempts, 'defer_reason' => $reason];
+            }
+            $remaining = $deadline - $now();
+            if ($remaining < self::MOUNT_DEFER_RETRY_PAUSE_S) {
+                LogService::log("Mount of $label still deferred ($reason) after $attempts attempt(s) within " . self::MOUNT_DEFER_BUDGET_S . "s — giving up for now.", LogService::LOG_WARN, "StorageMountService");
+                return ['res' => $res, 'out' => $out, 'usable' => false, 'attempts' => $attempts, 'defer_reason' => $reason];
+            }
+            LogService::log("Mount of $label deferred ($reason: another storage operation holds its lock) with no live overlay — retrying in " . self::MOUNT_DEFER_RETRY_PAUSE_S . "s (attempt " . ($attempts + 1) . ").", LogService::LOG_INFO, "StorageMountService");
+            $sleep(self::MOUNT_DEFER_RETRY_PAUSE_S);
+        }
+    }
+
+    /** exec one `storagectl mount` with the given lock wait; returns [exit, output lines]. */
+    private static function execStoragectlMount(string $args, int $lockWaitS): array {
+        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
+        $out = [];
+        $res = 1;
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        exec(TraceContext::shellPrefix() . "AICLI_MOUNT_LOCK_WAIT_S=" . (int)$lockWaitS . " bash " . escapeshellarg($script) . " mount " . $args . " 2>&1", $out, $res);
+        return [(int)$res, $out];
+    }
+
+    /**
      * Ensures the agent binary storage is mounted for a specific agent.
      *
      * Mounts are only considered healthy if the registered binary path is actually
@@ -217,7 +302,33 @@ class StorageMountService {
         $mnt = AgentRegistry::agentPath($agentId);
 
         if (self::isMounted($mnt)) {
-            if (self::isAgentMountHealthy($agentId)) { $exit = 0; return true; }
+            if (self::isAgentMountHealthy($agentId)) {
+                // 2026-09-24 (SIDE_BY_SIDE_AGENT_INSTALLS.md "plain-directory
+                // activation"): a plain-directory agent's bind can be healthy AND
+                // show the previous version — an upgrade moved the stable name to a
+                // new generation, but this mount still binds the old directory.
+                // Route it through storagectl: _pt_mount rebinds it when nothing
+                // holds it, and keeps it (exit 2, usable) while a session does.
+                // #317: an agent still on the old one-mount layout is converted to the
+                // side-by-side layout at the first launch nothing holds it (a busy
+                // bind stays in place and is usable: storagectl exits 2).
+                if (!self::passthroughBindStale($agentId) && !self::passthroughLayoutNeedsConversion($agentId)) { $exit = 0; return true; }
+                LogService::log("Agent '$agentId': the plain-directory mount still shows the previous version (installed: " . (self::passthroughStableGeneration($agentId) ?? '?') . "). Rebinding it; a mount that a running session holds is kept.", LogService::LOG_INFO, "StorageMountService");
+                return self::runAgentMount($agentId, $mnt, $exit);
+            }
+            // Forgejo #303: the binary is missing, but the storage engine holds
+            // NOTHING for this agent (no layer, an empty writable layer, no usable
+            // plain directory). A teardown and remount can only assemble the same
+            // empty stack again, and it re-binds the same writable layer (the
+            // kernel logged "upperdir is in-use" on each such remount). Keep the
+            // mount and stop. The workspace shell then prints its existing
+            // "reinstall via the Store card" message, and the Store card shows
+            // Install (AgentRegistry::healPhantomInstallRecord).
+            if (self::agentRemountCannotHelp($agentId)) {
+                LogService::log("Agent '$agentId' binary is missing and storage holds no content for it (no layer, empty writable layer, no usable plain directory). Remount skipped: it cannot restore the binary. Reinstall the agent from its Store card.", LogService::LOG_WARN, "StorageMountService");
+                $exit = 0;
+                return true;
+            }
             // F5 (WP#1328): the THIRD copy-up-poison site WP#1309 missed (homes were
             // fixed at the ensureHomeMounted comment below). A PHP `umount -l` of a
             // stale/phantom agent overlay (agent uppers ARE writable) followed by an
@@ -230,6 +341,16 @@ class StorageMountService {
             // fall through to op_mount below — the arbiter handles the stale mount.
         }
 
+        return self::runAgentMount($agentId, $mnt, $exit);
+    }
+
+    /**
+     * The storagectl `mount` half of ensureAgentMounted: dispatch op_mount (or the
+     * plain-directory _pt_mount) and map its exit code. Split out 2026-09-24 so
+     * the stale plain-directory bind can take the same path.
+     */
+    private static function runAgentMount(string $agentId, string $mnt, int &$exit): bool {
+        $exit = 1;
         $persistPath = StoragePathResolver::agentPersistPath();
 
         if (!self::isPathAvailable($persistPath)) {
@@ -241,29 +362,125 @@ class StorageMountService {
 
         // Phase 5: route through the storagectl dispatcher (op_mount) instead of
         // the mount_stack.sh shim. Exit code is unchanged (0 ok / non-0 fail).
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
-        // R-06: TraceContext::shellPrefix() prepends AICLI_TRACE_ID=<id> (validated
-        // [a-z0-9]{4,16} at setId, so safe to interpolate) — joins this exec's shell
-        // log lines to the originating AJAX request.
-        // nosemgrep: php.lang.security.exec-use.exec-use
-        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " mount --type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
+        // R-06: execStoragectlMount prepends TraceContext::shellPrefix()
+        // (AICLI_TRACE_ID=<id>, validated [a-z0-9]{4,16} at setId) — joins this
+        // exec's shell log lines to the originating AJAX request.
+        $args = "--type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath);
 
         // WP #1309: exit 2 = deferred-busy (the live overlay is kept) → usable.
         // S-02 (#1352): that contract assumes a LIVE overlay was kept (mount_busy).
         // A target_not_mounted defer (UD device / pool not yet mounted) exits 2
         // BEFORE any overlay exists — verify the mount is actually present before
         // treating the defer as usable.
+        // 2026-09-25: a TRANSIENT deferral with no overlay (bake_lock_held) is
+        // retried within a bounded budget instead of failing at once.
+        $r = self::runMountWithTransientRetry(
+            static function (int $wait) use ($args): array { return self::execStoragectlMount($args, $wait); },
+            static function () use ($mnt): bool { return self::isMounted($mnt); },
+            "agent $agentId"
+        );
+        $res = $r['res'];
+        $out = $r['out'];
         $exit = (int)$res;
-        $usable = self::mountResultIsUsable((int)$res);
-        if ($usable && (int)$res === 2 && !self::isMounted($mnt)) {
-            $usable = false;
-            LogService::log("Agent mount for $agentId deferred with NO live overlay (target not mounted yet?) — treating as unavailable.", LogService::LOG_WARN, "StorageMountService");
+        $usable = $r['usable'];
+        if (!$usable && (int)$res === 2) {
+            LogService::log("Agent mount for $agentId deferred with NO live overlay (" . ($r['defer_reason'] ?? 'no reason') . ") — treating as unavailable.", LogService::LOG_WARN, "StorageMountService");
         }
         if (!$usable) {
             LogService::log("Mount script FAILED for agent $agentId: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
         }
 
         return $usable;
+    }
+
+    /**
+     * The generation a plain-directory agent's stable name points at
+     * (persistence/passthrough/agents/<id> -> .versions/<id>/<generation>), or
+     * null when the agent is not a versioned plain directory.
+     */
+    public static function passthroughStableGeneration(string $agentId, ?string $persistPath = null): ?string {
+        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/', $agentId)) return null;
+        $persistPath = $persistPath ?? StoragePathResolver::agentPersistPath();
+        $stable = rtrim($persistPath, '/') . "/passthrough/agents/$agentId";
+        if (!is_link($stable)) return null;
+        $target = (string)@readlink($stable);
+        return $target === '' ? null : basename($target);
+    }
+
+    /**
+     * 2026-09-24 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "plain-directory
+     * activation"): true when the plain-directory agent's mount shows a different
+     * directory than the one its stable name points at: an upgrade promoted a new
+     * generation, but the bind at agents/<id> still shows the previous one.
+     *
+     * Evidence (.4, 2026-09-24): grok-build 1.0.13 -> 1.0.41 and kimi-code
+     * 0.42.0 -> 2.1.0 promoted a new generation, versions.json recorded the new
+     * version, and every new workspace kept running the old binary until a
+     * remount, because the healthy-mount fast path never looked at the bind.
+     *
+     * Compares device + inode, the same test storagectl _pt_mount uses. Pure
+     * stat: it does not check that $mountPoint IS mounted (callers do).
+     */
+    public static function passthroughBindStale(string $agentId, ?string $persistPath = null, ?string $mountPoint = null): bool {
+        if (self::passthroughStableGeneration($agentId, $persistPath) === null) return false;
+        $persistPath = $persistPath ?? StoragePathResolver::agentPersistPath();
+        $stable = rtrim($persistPath, '/') . "/passthrough/agents/$agentId";
+        $mnt = $mountPoint ?? AgentRegistry::agentPath($agentId);
+        if (is_link($mnt)) {
+            // #317: the side-by-side layout. agents/<id> is a symlink to
+            // .versions/<id>/<gen>. It is stale when it names a plain-directory
+            // generation that is not the active one. A layered (overlay)
+            // generation name has no plain-directory twin: never stale here.
+            $linkGen = self::versionLinkGeneration($agentId, (string)@readlink($mnt));
+            if ($linkGen === null) return false;
+            $persistVersions = rtrim($persistPath, '/') . "/passthrough/agents/.versions/$agentId";
+            if (!is_dir("$persistVersions/$linkGen")) return false;
+            return $linkGen !== self::passthroughStableGeneration($agentId, $persistPath);
+        }
+        $want = @stat($stable);                   // follows the symlink
+        $have = @stat($mnt);
+        if ($want === false || $have === false) return false;
+        return !($want['dev'] === $have['dev'] && $want['ino'] === $have['ino']);
+    }
+
+    /** The <gen> of a ".versions/<id>/<gen>" link target, or null. */
+    private static function versionLinkGeneration(string $agentId, string $target): ?string {
+        $prefix = ".versions/$agentId/";
+        if (strncmp($target, $prefix, strlen($prefix)) !== 0) return null;
+        $gen = substr($target, strlen($prefix));
+        return ($gen === '' || strpos($gen, '/') !== false || $gen[0] === '.') ? null : $gen;
+    }
+
+    /**
+     * #317 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-24 (#317, #318)"):
+     * true when a versioned plain-directory agent is still on the old layout,
+     * where agents/<id> is a real directory with ONE bind. On that layout a
+     * session holding the bind keeps every new workspace on its version too.
+     * storagectl mount converts it (one bind per version, agents/<id> a
+     * symlink) when nothing holds the bind. Pure stat/readlink.
+     */
+    public static function passthroughLayoutNeedsConversion(string $agentId, ?string $persistPath = null, ?string $mountPoint = null): bool {
+        if (self::passthroughStableGeneration($agentId, $persistPath) === null) return false;
+        try {
+            $mnt = $mountPoint ?? AgentRegistry::agentPath($agentId);
+        } catch (\InvalidArgumentException $e) {
+            return false;
+        }
+        return !is_link($mnt) && is_dir($mnt);
+    }
+
+    /**
+     * True while a plain-directory agent has a promoted generation that its live
+     * mount does not show yet: the activation is still to do. False when the
+     * agent is not mounted (the next mount binds the new generation anyway).
+     */
+    public static function passthroughActivationPending(string $agentId): bool {
+        try {
+            $mnt = AgentRegistry::agentPath($agentId);
+        } catch (\InvalidArgumentException $e) {
+            return false;
+        }
+        return self::isMounted($mnt) && self::passthroughBindStale($agentId);
     }
 
     /**
@@ -359,13 +576,18 @@ class StorageMountService {
 
         // Phase 5: route through the storagectl dispatcher (op_mount) instead of
         // the mount_stack.sh shim. Exit code unchanged.
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
         // Bug #1054: pass $user as --owner so op_mount chowns the OverlayFS
         // upperdir to the agent user -- otherwise the home overlay mounts but is
         // effectively read-only for non-root agents.
         // R-06: trace env prefix (see ensureAgentMounted).
-        // nosemgrep: php.lang.security.exec-use.exec-use
-        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " mount --type home --id " . escapeshellarg($user) . " --persist " . escapeshellarg($persistPath) . " --owner " . escapeshellarg($user) . " 2>&1", $out, $res);
+        $args = "--type home --id " . escapeshellarg($user) . " --persist " . escapeshellarg($persistPath) . " --owner " . escapeshellarg($user);
+        $r = self::runMountWithTransientRetry(
+            static function (int $wait) use ($args): array { return self::execStoragectlMount($args, $wait); },
+            static function () use ($mnt): bool { return self::isMounted($mnt); },
+            "home $user"
+        );
+        $res = $r['res'];
+        $out = $r['out'];
 
         // WP #1309: exit 2 = deferred-busy. op_mount kept the LIVE overlay (the
         // upper holds all data; only the lower refresh waits for idle) — that is
@@ -436,25 +658,105 @@ class StorageMountService {
     }
 
     /**
-     * Resolves the OverlayFS upperdir path for a home overlay. Mirrors
-     * mount_stack.sh fstype branching (vfat -> ZRAM, else -> persist disk).
+     * Resolves the OverlayFS upperdir path for a home overlay. #372: the live
+     * mount wins (its own upperdir); when not mounted, the policy mode from
+     * bash entity_upper_mode, or the other-mode upper when only that one holds
+     * data — the same rules as bash common.sh _entity_paths_live. The optional
+     * arguments are test seams (mount table, persist path, mode, zram base).
+     * Public: StorageMetricsService reads this to find the REAL upper to
+     * measure for dirty-RAM reporting (Forgejo #232) — it previously
+     * hardcoded the ZRAM path unconditionally and silently read 0 for any
+     * home whose persist path resolves to the disk-upper branch here.
      */
-    private static function resolveHomeUpperPath(string $user): ?string {
-        $persistPath = StoragePathResolver::homePersistPath($user);
+    public static function resolveHomeUpperPath(
+        string $user,
+        ?string $mounts = null,
+        ?string $persistPath = null,
+        ?string $policyMode = null,
+        string $zramBase = StoragePathResolver::ZRAM_BASE
+    ): ?string {
+        // #372 (docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount
+        // wins"): the SAME three rules as bash common.sh _entity_paths_live.
+        // 1. Mounted: the kernel's own upperdir, whatever the policy says now.
+        //    The old code recalculated the mode and, after a policy change, named
+        //    an empty upper while the real changes sat in the live one.
+        $mnt = rtrim(UtilityService::getWorkDir($user) . '/home', '/');
+        if ($mounts === null) {
+            $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
+        }
+        $live = self::overlayOptionAt($mounts, $mnt, 'upperdir');
+        if ($live !== null) return $live;
+
+        $persistPath = $persistPath ?? StoragePathResolver::homePersistPath($user);
         if (empty($persistPath)) return null;
         $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
-        // #1322/#1313a: drive the zram-vs-disk upper-mode from the GENUINE device test
-        // (FileStorage::backendForPath -> detect_backend.sh removable/USB), NOT a
-        // vfat-fstype replica — flash device (wear) -> ZRAM upper; durable -> disk
-        // upper. Both PHP and bash _entity_paths now key on the SAME single source
-        // (backend_for), so the upper a mount reads can never diverge from where a bake
-        // writes (a vfat-formatted SSD is no longer mis-treated as a wear-limited stick).
-        require_once __DIR__ . '/FileStorage.php';
-        $backend = FileStorage::backendForPath($persistPath)['backend'];
-        if ($backend === 'flash') {
-            return "/tmp/unraid-aicliagents/zram_upper/homes/$safeUser/upper";
+        // 2. Not mounted: the mode a NEW mount gets — policy, then the device test —
+        //    decided by bash entity_upper_mode (FileStorage::upperModeForPath).
+        if ($policyMode !== 'zram' && $policyMode !== 'disk') {
+            require_once __DIR__ . '/FileStorage.php';
+            $policyMode = FileStorage::upperModeForPath($persistPath);
+        }
+        $otherMode = ($policyMode === 'zram') ? 'disk' : 'zram';
+        $policyUpper = self::homeUpperForMode($safeUser, $persistPath, $policyMode, $zramBase);
+        $otherUpper  = self::homeUpperForMode($safeUser, $persistPath, $otherMode, $zramBase);
+        // 3. The policy upper holds no data and the other-mode upper does: that is
+        //    where the changes are (op_mount adopts it on the next mount).
+        if (!self::upperHoldsData($policyUpper) && self::upperHoldsData($otherUpper)) {
+            return $otherUpper;
+        }
+        return $policyUpper;
+    }
+
+    /** #372: the home upper path for one mode — mirrors bash _entity_upper_for_mode. */
+    public static function homeUpperForMode(string $safeUser, string $persistPath, string $mode, string $zramBase = StoragePathResolver::ZRAM_BASE): string {
+        if ($mode === 'zram') {
+            return rtrim($zramBase, '/') . "/homes/$safeUser/upper";
         }
         return rtrim($persistPath, '/') . "/_upper/homes/$safeUser";
+    }
+
+    /**
+     * #372: the value of one option (upperdir, workdir) of the overlay mounted at
+     * exactly $target in a /proc/mounts-style table; the last row wins (the top
+     * of a stack). Null when no overlay is mounted there. Mirrors bash
+     * common.sh _overlay_opt_at.
+     */
+    public static function overlayOptionAt(string $mounts, string $target, string $option): ?string {
+        $found = null;
+        foreach (preg_split('/\r?\n/', $mounts) ?: [] as $line) {
+            $fields = preg_split('/\s+/', trim($line));
+            if (!isset($fields[3]) || $fields[2] !== 'overlay') continue;
+            $mountedAt = str_replace(['\\040', '\\011', '\\012', '\\134'], [' ', "\t", "\n", '\\'], $fields[1]);
+            if ($mountedAt !== $target) continue;
+            $value = null;
+            foreach (explode(',', $fields[3]) as $opt) {
+                if (strpos($opt, $option . '=') === 0) $value = substr($opt, strlen($option) + 1);
+            }
+            $found = ($value !== null && $value !== '') ? $value : null;
+        }
+        return $found;
+    }
+
+    /**
+     * #372: true when $dir holds any entry that is not a directory (a file, a
+     * symlink, a whiteout). Mirrors bash common.sh _upper_holds_data. An
+     * unreadable tree counts as holding data (fail safe).
+     */
+    public static function upperHoldsData(string $dir): bool {
+        if (!is_dir($dir)) return false;
+        try {
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($it as $entry) {
+                /** @var \SplFileInfo $entry */
+                if ($entry->isLink() || !$entry->isDir()) return true;
+            }
+        } catch (\Throwable $e) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -551,6 +853,22 @@ class StorageMountService {
     }
 
     /**
+     * Forgejo #303: true when a remount of this agent cannot show a binary,
+     * because the storage engine holds no content for it. Uses the same
+     * predicate as the install-record heal (AgentRegistry::agentHasStoredContent),
+     * so "not installed" and "do not remount" can never disagree. The stale-mount
+     * repair still runs whenever content exists (the case it was built for: an
+     * overlay that HAS lower layers but lost its view).
+     */
+    public static function agentRemountCannotHelp(string $agentId, ?string $persistPath = null, ?string $policy = null, string $zramBase = AgentRegistry::ZRAM_UPPER_BASE): bool {
+        $persistPath = $persistPath ?? StoragePathResolver::agentPersistPath();
+        // Cannot trust what storage shows: keep the old behaviour (remount).
+        if (!self::isPathAvailable($persistPath) || !AgentRegistry::persistRootMounted($persistPath)) return false;
+        $policy = $policy ?? AgentRegistry::rawStorageBackendPolicy();
+        return !AgentRegistry::agentHasStoredContent($agentId, $persistPath, $policy, $zramBase);
+    }
+
+    /**
      * Unconditionally remount the agent overlay via op_mount, bypassing the
      * isAgentMountHealthy fast-path. Used by forceAgentRefresh (R3 verify-live)
      * to swap a stale lowerdir for the newest baked layer after a deferred
@@ -573,14 +891,18 @@ class StorageMountService {
             LogService::log("remountAgent($agentId): storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
             return false;
         }
-        $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh";
-        // nosemgrep: php.lang.security.exec-use.exec-use
-        exec(TraceContext::shellPrefix() . "bash " . escapeshellarg($script) . " mount --type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath) . " 2>&1", $out, $res);
+        $args = "--type agent --id " . escapeshellarg($agentId) . " --persist " . escapeshellarg($persistPath);
         $mnt = AgentRegistry::agentPath($agentId);
-        $usable = self::mountResultIsUsable((int)$res);
-        if ($usable && (int)$res === 2 && !self::isMounted($mnt)) {
-            $usable = false;
-            LogService::log("Agent mount for $agentId deferred with NO live overlay (target not mounted yet?) — treating as unavailable.", LogService::LOG_WARN, "StorageMountService");
+        $r = self::runMountWithTransientRetry(
+            static function (int $wait) use ($args): array { return self::execStoragectlMount($args, $wait); },
+            static function () use ($mnt): bool { return self::isMounted($mnt); },
+            "agent $agentId"
+        );
+        $res = $r['res'];
+        $out = $r['out'];
+        $usable = $r['usable'];
+        if (!$usable && (int)$res === 2) {
+            LogService::log("Agent mount for $agentId deferred with NO live overlay (" . ($r['defer_reason'] ?? 'no reason') . ") — treating as unavailable.", LogService::LOG_WARN, "StorageMountService");
         }
         if (!$usable) {
             LogService::log("remountAgent($agentId): storagectl mount failed (exit $res): " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
@@ -611,6 +933,7 @@ class StorageMountService {
      */
     public static function stageAgentInstall(string $agentId): ?string
     {
+        self::$lastStageRefusal = '';
         $persistPath = StoragePathResolver::agentPersistPath();
         if (!self::isPathAvailable($persistPath)) {
             LogService::log("stageAgentInstall($agentId): storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
@@ -623,7 +946,9 @@ class StorageMountService {
             . " stage --type agent --id " . escapeshellarg($agentId)
             . " --persist " . escapeshellarg($persistPath) . " 2>/dev/null", $out, $res);
         if ((int)$res !== 0) {
-            LogService::log("stageAgentInstall($agentId): staging failed (exit $res)", LogService::LOG_WARN, "StorageMountService");
+            self::$lastStageRefusal = self::stageRefusalFromJson(implode("\n", $out));
+            LogService::log("stageAgentInstall($agentId): staging failed (exit $res"
+                . (self::$lastStageRefusal !== '' ? ', reason ' . self::$lastStageRefusal : '') . ')', LogService::LOG_WARN, "StorageMountService");
             return null;
         }
         $mount = self::stagedMountFromJson(implode("\n", $out));
@@ -633,6 +958,28 @@ class StorageMountService {
         }
         LogService::log("Staged install for $agentId at $mount", LogService::LOG_INFO, "StorageMountService");
         return $mount;
+    }
+
+    /** Why the last stageAgentInstall() refused ('' = no refusal, or no reason given). */
+    private static string $lastStageRefusal = '';
+
+    public static function lastStageRefusal(): string
+    {
+        return self::$lastStageRefusal;
+    }
+
+    /**
+     * The defer reason of a failed storagectl `stage` response ('' when none).
+     * 'no_space': the persist drive has no room for the new version — the
+     * installer then fails the install instead of writing into the live tree.
+     * Pure.
+     */
+    public static function stageRefusalFromJson(string $json): string
+    {
+        $data = json_decode(trim($json), true);
+        if (!is_array($data)) return '';
+        $r = $data['defer_reason'] ?? '';
+        return (is_string($r) && preg_match('/^[a-z_]{1,40}$/', $r)) ? $r : '';
     }
 
     /**
@@ -726,14 +1073,18 @@ class StorageMountService {
      *   not deferred (real fail)-> 1  (fatal)
      *   deferred + bake 0 or 2  -> 2  (non-fatal; data reached Flash)
      *   deferred + bake failed  -> 1  (fatal; data NOT on Flash)
+     *   deferred + bake 2 with a NOT-saved reason (#357: bake_lock_held,
+     *   sqlite_backup_deferred) -> 1 (fatal; no layer was written)
      */
-    public static function mapAgentCommitResult(bool $consolidated, bool $deferred, int $bakeRc): int {
+    public static function mapAgentCommitResult(bool $consolidated, bool $deferred, int $bakeRc, ?string $bakeDeferReason = null): int {
         if ($consolidated) return 0;
         if (!$deferred)     return 1;          // genuine consolidation failure
         // storagectl bake exit 2 means the delta reached durable storage but the
         // busy live mount could not be refreshed/reclaimed yet. Both 0 and 2 are
-        // therefore safe, non-fatal install outcomes.
-        return ($bakeRc === 0 || $bakeRc === 2) ? 2 : 1;
+        // therefore safe, non-fatal install outcomes — EXCEPT an exit 2 whose
+        // reason says no layer was written (#357): then the data is NOT on Flash.
+        require_once __DIR__ . '/FileStorage.php';
+        return FileStorage::bakeResultSaved($bakeRc, $bakeDeferReason) ? 2 : 1;
     }
 
     // L5 (WP#1333): commitChanges() was DELETED — its persist consumer-policy (the

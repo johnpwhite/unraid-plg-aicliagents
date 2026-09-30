@@ -81,6 +81,13 @@ STORAGE_TARGET_WAIT_S="${storage_target_wait_s:-300}"
 # after a graduate-to-passthrough migration (the rollback copies). Reaped by
 # _op_reconcile once older than this. cfg key: graduated_retention_days.
 GRADUATED_RETENTION_DAYS="${graduated_retention_days:-14}"
+# #374 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the SQLite stage folder"): an
+# automatic bake (schedule, dirty pressure) of an entity whose last bake did
+# not save waits before the next try: BAKE_BACKOFF_BASE_S after the first miss,
+# doubled after each further miss, at most BAKE_BACKOFF_CAP_S. cfg keys:
+# bake_backoff_base_seconds, bake_backoff_cap_seconds.
+BAKE_BACKOFF_BASE_S="${bake_backoff_base_seconds:-120}"
+BAKE_BACKOFF_CAP_S="${bake_backoff_cap_seconds:-1800}"
 # PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): the event ledger's
 # circular-log cap, in EVENTS (not chunks — the ledger writes 1 000-event
 # chunks; see EventLedger::CHUNK_SIZE). Reaped by _op_reconcile via
@@ -130,7 +137,26 @@ else
     home_persist_path() { echo "/boot/config/plugins/unraid-aicliagents/persistence"; }
     manifest_path() { echo "/boot/config/plugins/unraid-aicliagents/layer_manifest.json"; }
     zram_upper() { echo "/tmp/unraid-aicliagents/zram_upper/${1}s/${2}/upper"; }
+    home_live_upper() { zram_upper home "${1:-root}"; }
+    home_uppers_live() {
+        local d u
+        for d in /tmp/unraid-aicliagents/zram_upper/homes/*/upper; do
+            [ -d "$d" ] || continue
+            u="${d%/upper}"; printf '%s\t%s\n' "${u##*/}" "$d"
+        done
+    }
 fi
+
+# _entity_upper_for_supervisor <type> <id> — #372: the upper a bake of this
+# entity will read. A home: the upper of its LIVE mount (zram or disk; the
+# policy mode is only for a new mount). An agent: its zram upper, as before.
+_entity_upper_for_supervisor() {
+    if [ "${1:-}" = "home" ]; then
+        home_live_upper "${2:-}"
+    else
+        zram_upper "${1:-}" "${2:-}"
+    fi
+}
 
 # F6 (WP#1331): the SINGLE manifest writer (reconcile's recovered-layer record).
 # shellcheck source=../storage/manifest_write.sh
@@ -531,6 +557,77 @@ _verify_layer_sha256() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# Verified-layer cache (#337 follow-up, smoke 49)
+# ---------------------------------------------------------------------------
+# _op_reconcile runs on EVERY 5 s tick, and it used to re-hash every flash layer
+# every time. With 95 layers (7 GB) on .4 that took ~20 s, so the supervisor
+# spent most of its life in sha256sum and a queued job waited ~20 s behind it —
+# the release gate's 20 s drain window (smoke 49) failed. A layer is immutable
+# once written: re-hash it only when its identity (device, inode, size, mtime,
+# ctime) or its expected hash changed, or when its last full verification is
+# older than LAYER_VERIFY_MAX_AGE (default 24 h, which still catches silent
+# media corruption once a day). The cache lives on tmpfs (cleared at boot), so
+# a supervisor restart does not re-hash everything either. Only a VERIFIED
+# result (rc 0) is ever cached; a mismatch or an inconclusive read is re-checked
+# on the next tick exactly as before.
+LAYER_VERIFY_CACHE="${AICLI_LAYER_VERIFY_CACHE:-${SUPERVISOR_DIR}/layer-verify.cache}"
+LAYER_VERIFY_MAX_AGE="${AICLI_LAYER_VERIFY_MAX_AGE:-86400}"
+declare -A _LAYER_VERIFIED=()
+_LAYER_VERIFY_CACHE_LOADED=0
+
+_layer_verify_cache_load() {
+    [ "$_LAYER_VERIFY_CACHE_LOADED" = "1" ] && return 0
+    _LAYER_VERIFY_CACHE_LOADED=1
+    [ -f "$LAYER_VERIFY_CACHE" ] || return 0
+    local exp ident epoch path
+    while IFS=$'\t' read -r exp ident epoch path; do
+        [ -n "$path" ] && [ -n "$exp" ] || continue
+        _LAYER_VERIFIED["$path"]="$exp"$'\t'"$ident"$'\t'"$epoch"
+    done < "$LAYER_VERIFY_CACHE"
+}
+
+_layer_verify_cache_save() {
+    local tmp="${LAYER_VERIFY_CACHE}.tmp.$$" p
+    mkdir -p "$(dirname "$LAYER_VERIFY_CACHE")" 2>/dev/null || true
+    {
+        for p in "${!_LAYER_VERIFIED[@]}"; do
+            printf '%s\t%s\n' "${_LAYER_VERIFIED[$p]}" "$p"
+        done
+    } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LAYER_VERIFY_CACHE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    return 0
+}
+
+# _verify_layer_cached <path> <expected_sha256> — same return codes as
+# _verify_layer_sha256; returns 0 without reading the file when a fresh
+# verification of this exact identity and expected hash is cached.
+_verify_layer_cached() {
+    local path="${1:-}" expected="${2:-}" ident entry now
+    _layer_verify_cache_load
+    ident=$(stat -Lc '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null) || ident=""
+    now=$(date +%s)
+    entry="${_LAYER_VERIFIED[$path]:-}"
+    if [ -n "$ident" ] && [ -n "$entry" ]; then
+        local c_exp c_ident c_epoch
+        IFS=$'\t' read -r c_exp c_ident c_epoch <<<"$entry"
+        if [ "$c_exp" = "$expected" ] && [ "$c_ident" = "$ident" ] \
+           && [ $(( now - ${c_epoch:-0} )) -lt "$LAYER_VERIFY_MAX_AGE" ]; then
+            _LAYER_VERIFY_ACTUAL="$expected"
+            _LAYER_VERIFY_IDENTITY="$ident"
+            return 0
+        fi
+    fi
+    _verify_layer_sha256 "$path" "$expected"
+    local rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$_LAYER_VERIFY_IDENTITY" ]; then
+        _LAYER_VERIFIED["$path"]="$expected"$'\t'"$_LAYER_VERIFY_IDENTITY"$'\t'"$now"
+        _layer_verify_cache_save
+    else
+        unset '_LAYER_VERIFIED[$path]'
+    fi
+    return "$rc"
+}
+
 # _manifest_last_known_good <entity>
 _manifest_last_known_good() {
     local entity="${1:-}"
@@ -890,6 +987,14 @@ _op_reconcile() {
                 "{\"entity\":\"$entity\"}"
             continue
         fi
+        # #357: say who holds the lock. A bake that meets this lock reads the
+        # owner record: "reconcile" is not a bake, so the bake WAITS for this
+        # short check and then saves, instead of skipping and reporting success.
+        # The check keeps the lock for the whole entity body (the untracked-layer
+        # quarantine below must not see a bake's half-written layer set), so a
+        # shorter or shared lock would reopen that race.
+        printf 'op=reconcile pid=%s since=%s\n' "$$" "$(date +%s)" \
+            > "/var/run/aicli-bake-${type}-${_rec_lock_id}.lock.owner" 2>/dev/null || true
 
         # #99: the pass-wide snapshot predates this entity lock. Refresh it
         # now, while holding the same lock used by bake/consolidate/wipe. This
@@ -1122,7 +1227,7 @@ _op_reconcile() {
                 [ "$expected_sha256" = "smoke" ] && continue
                 [ "${#expected_sha256}" -lt 32 ] && continue
 
-                _verify_layer_sha256 "$full_path" "$expected_sha256"
+                _verify_layer_cached "$full_path" "$expected_sha256"
                 local verify_rc=$?
                 if [ "$verify_rc" -eq 1 ]; then
                     integrity_verdict=1
@@ -1263,6 +1368,9 @@ _op_reconcile() {
     # 1a.7 (PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md): unlink event-ledger
     # chunks beyond the configured cap.
     _events_ledger_sweep
+
+    # Forgejo #244: unlink expired busy-bake cooldown markers.
+    _bake_cooldown_marker_sweep
 }
 
 # ---------------------------------------------------------------------------
@@ -1283,7 +1391,7 @@ _op_bake() {
     fi
 
     local upper_dir
-    upper_dir="$(zram_upper "$type" "$id" 2>/dev/null)"
+    upper_dir="$(_entity_upper_for_supervisor "$type" "$id" 2>/dev/null)"   # #372: the live upper
 
     local max_dur
     max_dur=$(_bake_max_duration "$upper_dir")
@@ -1335,7 +1443,22 @@ _op_bake() {
     now=$(date +%s)
     _LAST_COMPLETED_AT="$now"
 
-    if [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 2 ]; then
+    # #357: an exit 2 whose defer reason says no layer was written is NOT a
+    # completed bake. Log it as bake_not_saved; _job_finalize reads the same
+    # marker and requeues a user Persist (bake_lock_held is in its retry set).
+    local _bk_reason=""
+    if [ "$exit_code" -eq 2 ]; then
+        local _bk_safe_id="${id//[^a-zA-Z0-9_-]/_}"
+        _bk_reason="$(head -1 "/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${_bk_safe_id}" 2>/dev/null | tr -d '\n')"
+    fi
+    # #374: record the result for the automatic-bake backoff (every caller;
+    # a saved result clears it).
+    _bake_backoff_record "$type" "$id" "$exit_code" "$_bk_reason"
+    if [ "$exit_code" -eq 2 ] && ! _bake_result_saved 2 "$_bk_reason"; then
+        log_warn "Bake NOT saved: $entity (exit=2, reason=$_bk_reason) — the changes stay in RAM until the next bake"
+        lifecycle_log "warn" "supervisor" "bake_not_saved" \
+            "{\"entity\":\"$entity\",\"exit_code\":$exit_code,\"defer_reason\":\"$_bk_reason\"}" 2>/dev/null || true
+    elif [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 2 ]; then
         log_info "Bake completed: $entity (exit=$exit_code)"
         lifecycle_log "info" "supervisor" "bake_ok" \
             "{\"entity\":\"$entity\",\"exit_code\":$exit_code}" 2>/dev/null || true
@@ -1551,6 +1674,142 @@ _mount_retry_delay() {
     esac
 }
 
+# ---- #350: upgrade activation retry state ------------------------------------
+# docs/specs/UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md "2026-09-29".
+# Before: an activation mount that FAILED (exit 1) parked no retry. The sweep
+# (_check_pending_agent_upgrades) queued it again on the next tick, so it ran
+# every 7-8 s with no backoff and logged three lines each time (codex-cli on
+# .4: 717 failures in 90 minutes). Now every try that does not succeed parks a
+# retry with a growing delay, the log shows one line per change of outcome, and
+# after UPGRADE_ACTIVATION_MAX_FAILURES failures in a row the activation halts.
+# A session close (UpgradeRelaunchService::nudgeActivation) or a new install
+# (schedulePendingActivation) arms it again. A defer (exit 2: the old version
+# is still held) never halts: holders can run for days.
+UPGRADE_ACTIVATION_MAX_FAILURES="${UPGRADE_ACTIVATION_MAX_FAILURES:-6}"
+
+# Delay before retry N: 15 → 30 → 60 → 120 → 300 → 600 s (capped). Pure.
+_upgrade_activation_retry_delay() {
+    case "${1:-1}" in
+        1) echo 15 ;;
+        2) echo 30 ;;
+        3) echo 60 ;;
+        4) echo 120 ;;
+        5) echo 300 ;;
+        *) echo 600 ;;
+    esac
+}
+
+# The state file for one activation job: key=value lines (tries, fails,
+# outcome, halted). It sits beside the job's .retry file; only *.retry files
+# are re-enqueued, so the pen never reads it as a job.
+_ua_state_file() { printf '%s/%s.activation' "$JOB_RETRY_DIR" "$1"; }
+_ua_state_get() {
+    local f; f="$(_ua_state_file "$1")"
+    [ -f "$f" ] || return 0
+    sed -n "s/^$2=//p" "$f" 2>/dev/null | head -1
+}
+# _ua_state_set <job_id> <tries> <fails> <outcome> <halted>
+_ua_state_set() {
+    local f tmp; f="$(_ua_state_file "$1")"; tmp="$f.tmp.$$"
+    mkdir -p "$JOB_RETRY_DIR" 2>/dev/null || true
+    printf 'tries=%s\nfails=%s\noutcome=%s\nhalted=%s\n' "$2" "$3" "$4" "$5" > "$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$f" 2>/dev/null
+}
+_ua_state_clear() { rm -f "$(_ua_state_file "$1")" 2>/dev/null || true; }
+
+# _ua_outcome <exit_code> <defer_reason> — the outcome word for one try.
+_ua_outcome() {
+    case "$1" in
+        0) echo "done" ;;
+        2) echo "deferred:${2:-unknown}" ;;
+        *) echo "failed:$1" ;;
+    esac
+}
+
+# _finalize_upgrade_activation <job_id> <type> <id> <exit_code> <defer> <priority> <trace>
+# Sets UA_STATE (done|deferred|failed) and UA_ATTEMPT for the job ledger.
+_finalize_upgrade_activation() {
+    local job_id="$1" type="$2" id="$3" rc="$4" defer="$5" priority="${6:-1}" trace="${7:-}"
+    local entity="${type}/${id}" outcome prev tries fails now delay
+    outcome="$(_ua_outcome "$rc" "$defer")"
+    prev="$(_ua_state_get "$job_id" outcome)"
+    tries="$(_ua_state_get "$job_id" tries)"; case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+    fails="$(_ua_state_get "$job_id" fails)"; case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
+    tries=$(( tries + 1 ))
+    UA_ATTEMPT="$tries"
+    if [ "$rc" -eq 0 ]; then
+        UA_STATE="done"
+        _ua_state_clear "$job_id"
+        return 0
+    fi
+    case "$outcome" in failed:*) fails=$(( fails + 1 )) ;; *) fails=0 ;; esac
+    if [ "$fails" -ge "$UPGRADE_ACTIVATION_MAX_FAILURES" ]; then
+        UA_STATE="failed"
+        _ua_state_set "$job_id" "$tries" "$fails" "$outcome" 1
+        rm -f "$JOB_RETRY_DIR/${job_id}.retry" 2>/dev/null || true
+        log_warn "Upgrade activation for $entity failed $fails times in a row ($outcome) — halted until a session of the agent closes or the agent is installed again"
+        lifecycle_log "warn" "supervisor" "upgrade_activation_halted" \
+            "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"attempt\":$tries,\"failures\":$fails,\"outcome\":\"$outcome\"}" 2>/dev/null || true
+        _supervisor_notify "warning" "AICliAgents: Agent update not activated" \
+            "The new version of $id is installed, but switching to it failed $fails times ($outcome). Workspaces keep the version they run. Close the workspaces of $id, or install the agent again, to try once more." \
+            "upgrade_activation_halted_${entity}" 3600
+        return 0
+    fi
+    [ "$rc" -eq 2 ] && UA_STATE="deferred" || UA_STATE="failed"
+    delay="$(_upgrade_activation_retry_delay "$tries")"
+    now=$(date +%s)
+    mkdir -p "$JOB_RETRY_DIR" 2>/dev/null || true
+    local trace_kv=""
+    [ -n "$trace" ] && trace_kv=",\"trace\":\"$trace\""
+    _atomic_json_write "$JOB_RETRY_DIR/${job_id}.retry" \
+        "$(printf '{"job_id":"%s","type":"%s","id":"%s","op":"mount","reason":"upgrade_relaunch","priority":%d,"retry_at":%d%s}' \
+            "$job_id" "$type" "$id" "$priority" "$(( now + delay ))" "$trace_kv")" || true
+    _ua_state_set "$job_id" "$tries" "$fails" "$outcome" 0
+    # One line per change of outcome, not one per try.
+    if [ "$outcome" != "$prev" ]; then
+        lifecycle_log "info" "supervisor" "upgrade_activation_requeued" \
+            "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"attempt\":$tries,\"retry_in_s\":$delay,\"outcome\":\"$outcome\",\"defer_reason\":\"$defer\"}" 2>/dev/null || true
+        log_info "Upgrade activation for $entity: $outcome — retry #$(( tries + 1 )) in ${delay}s (the delay grows to 600s; later tries with the same result are not logged)"
+    fi
+    return 0
+}
+
+# _ua_quiet_retry <job_id> — true when this activation try is a retry: its
+# start and a repeated outcome are then not logged again.
+_ua_quiet_retry() {
+    local t; t="$(_ua_state_get "$1" tries)"
+    case "$t" in ''|*[!0-9]*|0) return 1 ;; esac
+    return 0
+}
+
+# #350: the supervisor is a production daemon. A smoke test that restarts it
+# (bash aicli-supervisor.sh start) passes on its own environment, and the smoke
+# exports AICLI_ITEST_BACKEND=flash. effective_backend then read EVERY
+# plain-folder agent as a layer stack, and the activation mount of codex-cli
+# took the layer path ("No lower layers found ... empty stack") for hours.
+# Test hooks never apply to the daemon: drop them at start.
+# #353 (2026-09-29): the smoke harness also exports SMOKE_* (SMOKE_REPORT_JSON
+# and others). No production script reads SMOKE_*, so drop them too.
+# _SCRUBBED_TEST_HOOKS holds the number of variables dropped. The start command
+# uses it to re-exec the script: `unset` changes only what children inherit,
+# so /proc/<pid>/environ of the daemon, and every global that the script
+# computed from the environment while it was sourced, still show the test
+# values. A re-exec starts the daemon with a clean environment (same pid).
+_SCRUBBED_TEST_HOOKS=0
+_scrub_test_hook_env() {
+    local v
+    _SCRUBBED_TEST_HOOKS=0
+    for v in $(compgen -e); do
+        case "$v" in
+            AICLI_ITEST_*|SMOKE_*)
+                unset "$v"
+                _SCRUBBED_TEST_HOOKS=$((_SCRUBBED_TEST_HOOKS + 1))
+                ;;
+        esac
+    done
+    return 0
+}
+
 _op_mount() {
     local type="${1:-}"
     local id="${2:-}"
@@ -1595,16 +1854,32 @@ _op_mount() {
     local started_at
     started_at=$(date +%s)
 
-    log_info "Starting mount: $entity (reason=$reason)"
-    lifecycle_log "info" "supervisor" "mount_start" \
-        "{\"entity\":\"$entity\",\"reason\":\"$reason\"}" 2>/dev/null || true
+    # #350: an activation retry logs its start and its outcome only when the
+    # outcome changes (_finalize_upgrade_activation logs the change).
+    local ua_job="" ua_quiet=0 ua_prev=""
+    if [ "$type" = "agent" ] && [ "$reason" = "upgrade_relaunch" ]; then
+        ua_job="upgrade-agent-${id//[^A-Za-z0-9._-]/_}"
+        if _ua_quiet_retry "$ua_job"; then
+            ua_quiet=1
+            ua_prev="$(_ua_state_get "$ua_job" outcome)"
+        fi
+    fi
+
+    if [ "$ua_quiet" -ne 1 ]; then
+        log_info "Starting mount: $entity (reason=$reason)"
+        lifecycle_log "info" "supervisor" "mount_start" \
+            "{\"entity\":\"$entity\",\"reason\":\"$reason\"}" 2>/dev/null || true
+    fi
 
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake. op_mount defaults --owner to the id for homes,
     # so no owner threading is needed here.
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
-        exec bash "${STORAGE_DIR}/storagectl.sh" mount --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
+        # The probe above already found the lock free, and a mount job that
+        # defers is requeued with backoff: do not also wait inside storagectl
+        # and hold the work loop (AICLI_MOUNT_LOCK_WAIT_S=0 = probe once).
+        AICLI_MOUNT_LOCK_WAIT_S=0 exec bash "${STORAGE_DIR}/storagectl.sh" mount --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
 
@@ -1657,6 +1932,8 @@ _op_mount() {
         log_info "Mount completed: $entity"
         lifecycle_log "info" "supervisor" "mount_ok" \
             "{\"entity\":\"$entity\"}" 2>/dev/null || true
+    elif [ "$ua_quiet" -eq 1 ] && [ "$(_ua_outcome "$exit_code" "${_OP_DEFER_REASON:-}")" = "$ua_prev" ]; then
+        :   # #350: the same outcome as the last try — already logged once
     elif [ "$exit_code" -eq 2 ]; then
         log_info "Mount deferred: $entity (reason=${_OP_DEFER_REASON:-unknown})"
         lifecycle_log "info" "supervisor" "mount_deferred" \
@@ -1990,6 +2267,11 @@ _job_mark_running() {
         "$(job_ledger_field "$job_id" attempt 2>/dev/null)" \
         "$(job_ledger_field "$job_id" queued_at 2>/dev/null)" \
         "$(date +%s)" "" "$reason" "$trace" || true
+    # HOME_STORAGE_CARD_JOB_STATE.md (Forgejo #247): the job just turned RUNNING.
+    # Publish the snapshot now (not only at the outcome, 1b.3) so the home card
+    # shows "Saving…" and locks its buttons at once, on every device — also for
+    # a job nobody clicked (a scheduled or supervisor-started bake).
+    _publish_storage_status
 }
 
 # _job_finalize <job_id> <op> <type> <id> <reason> <trace> <priority>
@@ -2031,7 +2313,13 @@ _job_finalize() {
     case "$queued_at" in ''|*[!0-9]*) queued_at="$now" ;; esac
 
     local state="failed"
-    if [ "$exit_code" -eq 0 ]; then
+    if [ "$op" = "mount" ] && [ "$reason" = "upgrade_relaunch" ]; then
+        # #350: every try that does not succeed parks a retry with a growing
+        # delay; repeated failures halt. See _finalize_upgrade_activation.
+        UA_STATE="failed"; UA_ATTEMPT="$attempt"
+        _finalize_upgrade_activation "$job_id" "$type" "$id" "$exit_code" "$defer" "$priority" "$trace"
+        state="$UA_STATE"; attempt="$UA_ATTEMPT"
+    elif [ "$exit_code" -eq 0 ]; then
         state="done"
     elif [ "$exit_code" -eq 2 ]; then
         state="deferred"
@@ -2069,7 +2357,18 @@ _job_finalize() {
             fi
         elif { [ "$op" = "consolidate" ] || [ "$op" = "bake" ]; } \
              && { [ "$reason" = "user_consolidate" ] || [ "$reason" = "user_persist" ]; } \
-             && { [ "$defer" = "mount_busy" ] || [ "$defer" = "bake_lock_held" ] || [ "$defer" = "upper_not_empty" ]; }; then
+             && { [ "$defer" = "mount_busy" ] || [ "$defer" = "bake_lock_held" ] || [ "$defer" = "upper_not_empty" ] || [ "$defer" = "busy_cooldown" ]; }; then
+            # Forgejo #233: busy_cooldown (storage_ops.sh's bash_bake_busy_cooldown
+            # throttle — "still busy, and we already persisted within the last
+            # 30 min, so skip a redundant bake") was missing from this list. A
+            # job whose SECOND attempt deferred with busy_cooldown (common: the
+            # first attempt's mount-refresh hit mount_busy, and by the time the
+            # retry fires the cooldown window from that same persist is still
+            # open) matched none of this function's branches, fell through with
+            # no retry scheduled, and was stranded in state=deferred forever —
+            # confirmed live 2026-09-16: job bake-home-root-*-cc3dff sat dead for
+            # 35+ minutes, including a 9-minute stretch with every session on
+            # the home closed, because nothing was ever going to re-enqueue it.
             # OP#1381: a USER-INITIATED consolidate/bake that deferred because the
             # overlay is still held open (mount_busy / a racing bake's lock /
             # writes-during-bake) is a one-shot the user explicitly asked for — it
@@ -2078,13 +2377,32 @@ _job_finalize() {
             # mount/graduate): _check_job_retries re-enqueues it when retry_at
             # passes, and the session-close path re-enqueues immediately when the
             # last session for the entity closes. Backoff 15→60→120 s; total budget
-            # USER_CONSOLIDATE_WAIT_CAP_S (1 h), then FAILED + notify. A genuinely
+            # USER_CONSOLIDATE_WAIT_CAP_S (3 min default — deliberately short,
+            # #44/Fix 3b: a stuck consolidate gives up fast and restores
+            # sessions headlessly rather than leaving the user stranded),
+            # then FAILED + notify. A genuinely
             # still-busy entity just keeps deferring on each retry (no tight loop —
             # the backoff bounds the cadence).
             local uc_elapsed=$(( now - queued_at ))
             local uc_cap="$USER_CONSOLIDATE_WAIT_CAP_S"
             case "$uc_cap" in ''|*[!0-9]*) uc_cap=3600 ;; esac
-            if [ "$uc_elapsed" -ge "$uc_cap" ]; then
+            if [ "$uc_elapsed" -ge "$uc_cap" ] && [ "$op" = "bake" ] \
+               && { [ "$defer" = "busy_cooldown" ] || [ "$defer" = "mount_busy" ]; }; then
+                # Forgejo #248: a user Persist that kept deferring for these two
+                # reasons did NOT fail. busy_cooldown = this home was saved less
+                # than 30 min ago; mount_busy = the new layer is already on disk
+                # (#231). Only the release of the old copy's RAM waits for the open
+                # sessions, and the idle bake does that on its own. It used to end
+                # as FAILED with a warning notice and a tray line reading
+                # "storage job failed (exit 2), reason: busy_cooldown" (John,
+                # 2026-09-18). End it as DONE; defer_reason stays on the record so
+                # the tray can say, in plain words, that the data was already saved.
+                state="done"
+                exit_code=0
+                log_info "User $op job $job_id for $entity: data already saved; RAM release waits for idle ($defer, ${uc_elapsed}s) — done"
+                lifecycle_log "info" "supervisor" "user_persist_already_saved" \
+                    "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"elapsed_s\":$uc_elapsed,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
+            elif [ "$uc_elapsed" -ge "$uc_cap" ]; then
                 state="failed"
                 log_warn "User $op job $job_id for $entity kept deferring ($defer) past its ${uc_cap}s wait budget (${uc_elapsed}s) — failing"
                 _supervisor_notify "warning" "AICliAgents: Consolidation could not complete" \
@@ -2120,24 +2438,6 @@ _job_finalize() {
                     "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"op\":\"$op\",\"attempt\":$attempt,\"retry_in_s\":$uc_delay,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
                 log_info "User $op job $job_id deferred ($defer) — retry #$attempt in ${uc_delay}s (until overlay frees or ${uc_cap}s cap)"
             fi
-        elif [ "$op" = "mount" ] && [ "$reason" = "upgrade_relaunch" ]; then
-            # #72: a retained upgrade closed-set is a durable barrier, not a
-            # five-minute storage wait. Retry for as long as some process holds
-            # the old agent overlay; browser starts remain blocked by the
-            # manifest, so no retry can re-pin the stale binary.
-            local ur_delay ur_retry_at
-            ur_delay="$(_mount_retry_delay "$attempt")"
-            ur_retry_at=$(( now + ur_delay ))
-            mkdir -p "$JOB_RETRY_DIR" 2>/dev/null || true
-            local ur_trace_kv=""
-            [ -n "$trace" ] && ur_trace_kv=",\"trace\":\"$trace\""
-            _atomic_json_write "$JOB_RETRY_DIR/${job_id}.retry" \
-                "$(printf '{"job_id":"%s","type":"%s","id":"%s","op":"%s","reason":"%s","priority":%d,"retry_at":%d%s}' \
-                    "$job_id" "$type" "$id" "$op" "$reason" "$priority" "$ur_retry_at" "$ur_trace_kv")" || true
-            attempt=$(( attempt + 1 ))
-            lifecycle_log "info" "supervisor" "upgrade_activation_requeued" \
-                "{\"entity\":\"$entity\",\"job_id\":\"$job_id\",\"attempt\":$attempt,\"retry_in_s\":$ur_delay,\"defer_reason\":\"$defer\"}" 2>/dev/null || true
-            log_info "Upgrade activation for $entity deferred ($defer) — retry #$attempt in ${ur_delay}s"
         elif [ "$op" = "mount" ] && { [ "$defer" = "target_not_mounted" ] || [ "$defer" = "bake_lock_held" ]; }; then
             local elapsed=$(( now - queued_at ))
             local wait_cap="$STORAGE_TARGET_WAIT_S"
@@ -2278,6 +2578,12 @@ _check_deferred_consolidate_resume() {
         r_type="$(queue_read_field "$f" type 2>/dev/null)"
         r_id="$(queue_read_field "$f" id 2>/dev/null)"
         [ -n "$r_type" ] && [ -n "$r_id" ] || continue
+        # #350: only a WAIT (the old version still held) ends when the mount
+        # goes idle. A try that FAILED keeps its backoff: an idle mount does not
+        # make it succeed, and pulling it forward on every tick was the 7-8 s loop.
+        if [ "$r_kind" = "upgrade" ]; then
+            case "$(_ua_state_get "$(basename "$f" .retry)" outcome)" in failed:*) continue ;; esac
+        fi
 
         # Already mature? Leave it for _check_job_retries — nothing to pull forward.
         local r_retry_at
@@ -2353,6 +2659,34 @@ _reap_job_ledger() {
     fi
 }
 
+# _bake_cooldown_marker_sweep — Forgejo #244. storage_ops.sh writes
+# `.bake_busy_cooldown_<type>_<id>` (an epoch) when it persists a BUSY home, and
+# removes it only on that home's next idle bake. A home that is deleted first
+# (every smoke-test home, or an operator's deleted user home) never bakes again,
+# so its marker stayed until reboot — 52 of them on .4 on 2026-09-17.
+# A marker whose epoch is older than the cooldown means exactly the same to
+# storage_ops.sh as no marker at all (`now - last >= cooldown` either way), so
+# unlinking an EXPIRED one can never change a bake decision. A live one is kept.
+# $1 (test seam) overrides the directory. Called from _op_reconcile.
+_bake_cooldown_marker_sweep() {
+    local dir="${1:-/tmp/unraid-aicliagents}"
+    [ -d "$dir" ] || return 0
+    local cooldown="${AICLI_BUSY_BAKE_COOLDOWN_SEC:-1800}"
+    case "$cooldown" in ''|*[!0-9]*) cooldown=1800 ;; esac
+    local now f last
+    now=$(date +%s)
+    for f in "$dir"/.bake_busy_cooldown_*; do
+        [ -f "$f" ] || continue
+        last=$(cat "$f" 2>/dev/null || echo 0)
+        # storage_ops.sh reads a non-numeric marker as 0, i.e. as expired.
+        case "$last" in ''|*[!0-9]*) last=0 ;; esac
+        if [ $(( now - last )) -ge "$cooldown" ]; then
+            rm -f "$f"
+        fi
+    done
+    return 0
+}
+
 # _events_ledger_sweep — 1a.7 (PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md):
 # unlink the oldest event-ledger chunk(s) while more than the configured cap
 # remain. EventLedger writes 1 000-event chunks named by the seq of their
@@ -2411,28 +2745,23 @@ _check_dirty_pressure() {
     # supervisor). So the dirty-pressure walk is home-only — if dirt ever does
     # appear in an agent's upper, the supervisor should NOT paper over it by
     # enqueueing a delta-bake (that would re-introduce multi-layer agents).
-    local upper_root
-    # The single-item loop keeps this walk structurally parallel with the
-    # entity scans below while deliberately excluding the agents tree.
-    # shellcheck disable=SC2066
-    for upper_root in "$zram_base/homes"; do
-        [ -d "$upper_root" ] || continue
-        local entity_type="home"
-
-        local entity_dir
-        for entity_dir in "$upper_root"/*/; do
-            [ -d "$entity_dir" ] || continue
-            local entity_id
-            entity_id=$(basename "$entity_dir")
-            local upper_dir="${entity_dir}upper"
-            [ -d "$upper_dir" ] || continue
-            local du_bytes
-            du_bytes=$(du -sb "$upper_dir" 2>/dev/null | awk '{print $1}' || echo 0)
-            [ "$du_bytes" -gt 0 ] || continue
-            total_bytes=$(( total_bytes + du_bytes ))
-            entity_sizes+=("${du_bytes}:${entity_type}:${entity_id}")
-        done
-    done
+    # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"): walk
+    # the upper each home REALLY uses (home_uppers_live: the live mount's own
+    # upper, then unmounted zram uppers), not every zram folder. A zram folder
+    # whose home is mounted on a disk upper is not the live one, and measuring
+    # it read 0 while the real changes sat elsewhere. This is RAM pressure, so
+    # only an upper in zram counts; a disk upper uses no RAM and the scheduled
+    # bake (_check_schedule_trigger) saves it.
+    local entity_type="home" entity_id upper_dir du_bytes
+    while IFS=$'\t' read -r entity_id upper_dir; do
+        [ -n "$entity_id" ] && [ -n "$upper_dir" ] || continue
+        case "$upper_dir" in "$zram_base"/*) : ;; *) continue ;; esac
+        [ -d "$upper_dir" ] || continue
+        du_bytes=$(du -sb "$upper_dir" 2>/dev/null | awk '{print $1}' || echo 0)
+        [ "${du_bytes:-0}" -gt 0 ] || continue
+        total_bytes=$(( total_bytes + du_bytes ))
+        entity_sizes+=("${du_bytes}:${entity_type}:${entity_id}")
+    done < <(home_uppers_live 2>/dev/null)
 
     [ "$total_bytes" -gt 0 ] || return 0
 
@@ -2468,7 +2797,7 @@ _check_dirty_pressure() {
         sorted_entities=$(printf '%s\n' "${entity_sizes[@]:-}" | sort -t: -k1 -rn 2>/dev/null || true)
         while IFS=: read -r du_b etype eid; do
             [ -n "$etype" ] && [ -n "$eid" ] || continue
-            queue_enqueue 50 "$etype" "$eid" "bake" "dirty_pressure_critical" 2>/dev/null || true
+            _auto_bake_enqueue 50 "$etype" "$eid" "dirty_pressure_critical" || true
         done <<< "$sorted_entities"
 
     elif [ "$total_bytes" -ge "$hard_bytes" ]; then
@@ -2488,7 +2817,7 @@ _check_dirty_pressure() {
         sorted_entities=$(printf '%s\n' "${entity_sizes[@]:-}" | sort -t: -k1 -rn 2>/dev/null || true)
         while IFS=: read -r du_b etype eid; do
             [ -n "$etype" ] && [ -n "$eid" ] || continue
-            queue_enqueue 50 "$etype" "$eid" "bake" "dirty_pressure_hard" 2>/dev/null || true
+            _auto_bake_enqueue 50 "$etype" "$eid" "dirty_pressure_hard" || true
         done <<< "$sorted_entities"
 
     elif [ "$total_bytes" -ge "$soft_bytes" ]; then
@@ -2500,9 +2829,120 @@ _check_dirty_pressure() {
         sorted_entities=$(printf '%s\n' "${entity_sizes[@]:-}" | sort -t: -k1 -rn 2>/dev/null || true)
         while IFS=: read -r du_b etype eid; do
             [ -n "$etype" ] && [ -n "$eid" ] || continue
-            queue_enqueue 50 "$etype" "$eid" "bake" "dirty_pressure_soft" 2>/dev/null || true
+            _auto_bake_enqueue 50 "$etype" "$eid" "dirty_pressure_soft" || true
         done <<< "$sorted_entities"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# #374 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the SQLite stage folder"):
+# backoff for automatic bakes that do not save.
+#
+# On .4 (2026-09-30) the root home's scheduled bake ended without a save every
+# time, and the schedule enqueued it again on each tick (every 30 s to 3 min),
+# so each try copied 2.5 GB of databases again. Now a bake result that did not
+# save (a failure, or an exit 2 that wrote no layer) makes the AUTOMATIC
+# triggers (schedule, dirty pressure) wait: BAKE_BACKOFF_BASE_S, doubled after
+# each further miss, at most BAKE_BACKOFF_CAP_S. A saved result clears the
+# wait. The log says it once per state change: when the wait starts or its
+# reason changes, and when a save clears it. A person's Persist and the other
+# explicit callers are never held back.
+# ---------------------------------------------------------------------------
+
+# The bake defer reasons that wrote NO layer. KEEP IN SYNC with
+# AICLI_NOT_SAVED_DEFER_REASONS in src/scripts/storage/common.sh (the
+# supervisor does not source common.sh; tests/unit/stage_leak_test.sh checks).
+SUP_NOT_SAVED_DEFER_REASONS="bake_lock_held sqlite_backup_deferred no_space"
+
+# _bake_result_saved <exit> <defer_reason> — 0 when the changes are on durable
+# storage: exit 0, or exit 2 with a reason that still wrote the layer.
+_bake_result_saved() {
+    local ex="${1:-1}" reason="${2:-}"
+    [ "$ex" = "0" ] && return 0
+    [ "$ex" = "2" ] || return 1
+    case " $SUP_NOT_SAVED_DEFER_REASONS " in *" $reason "*) return 1 ;; esac
+    return 0
+}
+
+# _bake_backoff_file <type> <id> — the backoff state file ("<next_epoch>
+# <misses> <reason>"). Read at call time: tests move SUPERVISOR_DIR.
+_bake_backoff_file() {
+    printf '%s/bake-backoff/%s_%s\n' "$SUPERVISOR_DIR" "${1:-}" "$(printf '%s' "${2:-}" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
+# _bake_backoff_active <type> <id> [now] — 0 while the entity waits out a backoff.
+_bake_backoff_active() {
+    local f next now="${3:-}"
+    [ -n "$now" ] || now="$(date +%s)"
+    f="$(_bake_backoff_file "$1" "$2")"
+    [ -f "$f" ] || return 1
+    read -r next _ _ < "$f" 2>/dev/null || return 1
+    case "$next" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$now" -lt "$next" ]
+}
+
+# _bake_backoff_record <type> <id> <exit> <defer_reason> [now] — after each bake.
+_bake_backoff_record() {
+    local type="${1:-}" id="${2:-}" ex="${3:-1}" reason="${4:-}" now="${5:-}"
+    local f entity prev_misses=0 prev_reason="" misses wait base cap i
+    [ -n "$type" ] && [ -n "$id" ] || return 0
+    [ -n "$now" ] || now="$(date +%s)"
+    entity="$type/$id"
+    f="$(_bake_backoff_file "$type" "$id")"
+    [ -f "$f" ] && read -r _ prev_misses prev_reason < "$f" 2>/dev/null
+    case "$prev_misses" in ''|*[!0-9]*) prev_misses=0 ;; esac
+    if _bake_result_saved "$ex" "$reason"; then
+        if [ -f "$f" ]; then
+            rm -f "$f" 2>/dev/null || true
+            log_info "Automatic saves of $entity run on the normal schedule again: this save completed after $prev_misses save(s) that did not."
+            lifecycle_log "info" "supervisor" "bake_backoff_cleared" \
+                "{\"entity\":\"$entity\",\"misses\":$prev_misses}" 2>/dev/null || true
+        fi
+        return 0
+    fi
+    [ -n "$reason" ] || reason="exit_$ex"
+    base="$BAKE_BACKOFF_BASE_S"; cap="$BAKE_BACKOFF_CAP_S"
+    case "$base" in ''|*[!0-9]*) base=120 ;; esac
+    case "$cap" in ''|*[!0-9]*) cap=1800 ;; esac
+    [ "$base" -ge 1 ] || base=1
+    [ "$cap" -ge "$base" ] || cap="$base"
+    misses=$((prev_misses + 1))
+    wait="$base"
+    i=1
+    while [ "$i" -lt "$misses" ] && [ "$wait" -lt "$cap" ]; do
+        wait=$((wait * 2)); i=$((i + 1))
+    done
+    [ "$wait" -le "$cap" ] || wait="$cap"
+    mkdir -p "${f%/*}" 2>/dev/null || true
+    printf '%s %s %s\n' "$((now + wait))" "$misses" "$reason" > "$f" 2>/dev/null || true
+    if [ "$prev_misses" -eq 0 ] || [ "$reason" != "$prev_reason" ]; then
+        log_warn "Automatic saves of $entity wait ${wait}s: the last save did not complete (reason=$reason). While this repeats, the wait doubles up to ${cap}s."
+        lifecycle_log "warn" "supervisor" "bake_backoff" \
+            "{\"entity\":\"$entity\",\"reason\":\"$reason\",\"misses\":$misses,\"wait_s\":$wait,\"cap_s\":$cap}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# _auto_bake_queued <type> <id> — 0 when a bake of this entity is in the queue.
+_auto_bake_queued() {
+    local safe_id f
+    safe_id="$(printf '%s' "${2:-}" | tr '/ ' '__')"
+    for f in "${QUEUE_DIR}"/[0-9]*_[0-9]*_"${1:-}"_"${safe_id}"_bake.req; do
+        [ -f "$f" ] && return 0
+    done
+    return 1
+}
+
+# _auto_bake_enqueue <priority> <type> <id> <reason> — enqueue an AUTOMATIC
+# bake. Returns 1 (and enqueues nothing) while the entity waits out a backoff
+# or already has a bake in the queue.
+_auto_bake_enqueue() {
+    local prio="${1:-99}" type="${2:-}" id="${3:-}" reason="${4:-schedule}"
+    [ -n "$type" ] && [ -n "$id" ] || return 1
+    _bake_backoff_active "$type" "$id" && return 1
+    _auto_bake_queued "$type" "$id" && return 1
+    queue_enqueue "$prio" "$type" "$id" "bake" "$reason" 2>/dev/null || true
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2557,11 +2997,14 @@ _check_schedule_trigger() {
 
             # Check if there are any dirty bytes for this entity (only bake if needed)
             local upper_dir
-            upper_dir="$(zram_upper "$type" "$id" 2>/dev/null || true)"
+            upper_dir="$(_entity_upper_for_supervisor "$type" "$id" 2>/dev/null || true)"   # #372: the live upper (zram or disk)
+            # #374: _auto_bake_enqueue skips a home that waits out a backoff
+            # (its last bake did not save) or already has a bake in the queue.
             if [ -d "$upper_dir" ] && [ -n "$(ls -A "$upper_dir" 2>/dev/null)" ]; then
-                queue_enqueue 99 "$type" "$id" "bake" "schedule" 2>/dev/null || true
-                lifecycle_log "info" "supervisor" "schedule_bake_enqueued" \
-                    "{\"entity\":\"$entity\",\"age_s\":$age,\"threshold_s\":$schedule_interval}" 2>/dev/null || true
+                if _auto_bake_enqueue 99 "$type" "$id" "schedule"; then
+                    lifecycle_log "info" "supervisor" "schedule_bake_enqueued" \
+                        "{\"entity\":\"$entity\",\"age_s\":$age,\"threshold_s\":$schedule_interval}" 2>/dev/null || true
+                fi
             fi
         fi
     done <<< "$entity_data"
@@ -2799,7 +3242,20 @@ _relaunch_home_sessions() {
             );
         }
         if (method_exists("\AICliAgents\Services\UpgradeRelaunchService","relaunchHomeSet")) {
-            \AICliAgents\Services\UpgradeRelaunchService::relaunchHomeSet((string)getenv("AICLI_RELAUNCH_USER"));
+            // CONSOLIDATE_RELAUNCH_CLOSED_SET.md (2026-09-17): send one Continue to
+            // each resumed session that was working, exactly as an upgrade/reload
+            // relaunch does, when auto_continue_on_restart is on. Mirrors the
+            // backup relaunch (_backup_relaunch_home).
+            $nudger = null; $ready = null;
+            $cfg = function_exists("getAICliConfig") ? getAICliConfig() : [];
+            $continueOn = ((string)($cfg["auto_continue_on_restart"] ?? "1")) !== "0";
+            if ($continueOn && class_exists("\AICliAgents\Services\TmuxService")) {
+                $nudger = ["\AICliAgents\Services\TmuxService", "submitContinueNudge"];
+                $ready  = ["\AICliAgents\Services\TmuxService", "paneAcceptsInput"];
+            }
+            \AICliAgents\Services\UpgradeRelaunchService::relaunchHomeSet(
+                (string)getenv("AICLI_RELAUNCH_USER"), null, null, null, null, $nudger, $ready, null, "consolidate_relaunch"
+            );
         }
     ' ) 2>/dev/null || true
     # docs/specs/EVENT_FIRST_RECONCILIATION.md 1b.4: the consolidate marker
@@ -2992,6 +3448,8 @@ _check_pending_agent_upgrades() {
         safe="${id//[^A-Za-z0-9._-]/_}"
         job_id="upgrade-agent-$safe"
         [ -f "$JOB_RETRY_DIR/${job_id}.retry" ] && continue
+        # #350: a halted activation waits for a session close or a new install.
+        [ "$(_ua_state_get "$job_id" halted)" = "1" ] && continue
         if ls "$QUEUE_DIR"/*_agent_${safe}_mount.req >/dev/null 2>&1; then
             continue
         fi
@@ -3036,6 +3494,44 @@ _activity_sweep_tick() {
     ) || true
 }
 
+# SCHEDULED_CONTINUE.md (#234): fire due scheduled Continues. Same 30s cadence and
+# lock-drop + timeout wrapper as _activity_sweep_tick (never stall the queue).
+_SCHEDULED_CONTINUE_LAST=0
+_scheduled_continue_tick() {
+    [ "$(command -v php)" ] || return 0
+    local now; now=$(date +%s)
+    [ $(( now - _SCHEDULED_CONTINUE_LAST )) -ge 30 ] || return 0
+    _SCHEDULED_CONTINUE_LAST="$now"
+    local ticker="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/scheduled-continue.php"
+    [ -f "$ticker" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 20 php -d display_errors=0 "$ticker" >/dev/null 2>&1
+    ) || true
+}
+
+# SCHEDULED_CONTINUE.md / Forgejo #288: inspect every running terminal for a
+# verified provider quota message, not only the browser's selected workspace.
+# The PHP service has its own last-poll guard as well, so a duplicate wake or a
+# second supervisor invocation cannot turn this into a faster capture loop.
+_QUOTA_DETECT_LAST=0
+_quota_detect_tick() {
+    [ "$(command -v php)" ] || return 0
+    local now; now=$(date +%s)
+    [ $(( now - _QUOTA_DETECT_LAST )) -ge 30 ] || return 0
+    _QUOTA_DETECT_LAST="$now"
+    local detector="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/quota-detect.php"
+    [ -f "$detector" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 20 php -d display_errors=0 "$detector" >/dev/null 2>&1
+    ) || true
+}
+
 # ---------------------------------------------------------------------------
 # Superseded agent version sweep (SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3, R4)
 # ---------------------------------------------------------------------------
@@ -3052,24 +3548,45 @@ _activity_sweep_tick() {
 # process names, so an idle tick on a healthy box does nothing and costs one
 # /proc scan per installed agent.
 _AGENT_GEN_SWEEP_LAST=0
+_AGENT_GEN_SWEEP_PID=""
+# The sweep runs in the BACKGROUND (2026-09-24). Since #318 it also covers
+# plain-folder agents, whose release step is a real umount with its own
+# timeout, and it scans /proc once per agent. Run inline, the first sweep —
+# which fires on the first tick after a supervisor start — held the work loop
+# long enough that a queued job was not picked up within 20 s (release-gate
+# smoke 49, twice). A sweep still running when the next one is due is skipped.
 _agent_generation_sweep_tick() {
     local now; now=$(date +%s)
     [ $(( now - _AGENT_GEN_SWEEP_LAST )) -ge 300 ] || return 0
+    if [ -n "$_AGENT_GEN_SWEEP_PID" ] && kill -0 "$_AGENT_GEN_SWEEP_PID" 2>/dev/null; then
+        return 0
+    fi
     _AGENT_GEN_SWEEP_LAST="$now"
+    _agent_generation_sweep_run &
+    _AGENT_GEN_SWEEP_PID=$!
+    return 0
+}
+
+_agent_generation_sweep_run() {
+    # A background child must not keep the supervisor's singleton lock alive.
+    [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
 
     declare -f aicli_gc_agent_generations >/dev/null 2>&1 || return 0
     declare -f agent_base >/dev/null 2>&1 || return 0
 
-    local versions_root agent_dir agent_id persist
+    local versions_root agent_dir agent_id persist seen=" "
     versions_root="$(agent_base)/.versions"
-    [ -d "$versions_root" ] || return 0
     persist="$(agent_persist_path 2>/dev/null)" || return 0
     [ -n "$persist" ] || return 0
 
-    for agent_dir in "$versions_root"/*/; do
+    # 2026-09-24 (#318): a plain-directory agent on the old layout has version
+    # directories on flash but no agents/.versions/<id> yet; list both roots.
+    for agent_dir in "$versions_root"/*/ "$persist/passthrough/agents/.versions"/*/; do
         [ -d "$agent_dir" ] || continue
         agent_id="$(basename -- "${agent_dir%/}")"
         case "$agent_id" in .*) continue ;; esac
+        case "$seen" in *" $agent_id "*) continue ;; esac
+        seen="$seen$agent_id "
         # Called directly, in THIS shell. `timeout bash -c '...'` would start a
         # new shell with none of these functions defined: it would exit 127 and,
         # with the failure swallowed, the sweep would quietly never run. The
@@ -3077,6 +3594,37 @@ _agent_generation_sweep_tick() {
         # only step that can block.
         aicli_gc_agent_generations "$agent_id" "$persist" 0 >/dev/null 2>&1 || true
     done
+
+    # #338 (SIDE_BY_SIDE_AGENT_INSTALLS.md "2026-09-26 — #338 agent layer
+    # retention", migration 2): the one-time consolidation of an IDLE layered
+    # agent's long stack into one base. At most one agent per sweep — each is a
+    # full package write — and a failed one waits 6 hours before it is tried
+    # again (aicli_agent_rebase_wanted reads the marker).
+    declare -f aicli_agent_rebase_wanted >/dev/null 2>&1 || return 0
+    # Smallest package first (the largest layer of its stack estimates it), so
+    # each pack frees room for the next; storagectl itself refuses a pack whose
+    # base would not fit (exit 2, reason no_space) — that is not a failure.
+    local due="" est rc f b
+    for agent_dir in "$versions_root"/*/; do
+        [ -d "$agent_dir" ] || continue
+        agent_id="$(basename -- "${agent_dir%/}")"
+        case "$agent_id" in .*) continue ;; esac
+        aicli_agent_rebase_wanted "$agent_id" "$persist" >/dev/null 2>&1 || continue
+        est=0
+        for f in "$persist"/agent_"${agent_id}"_*.sqsh; do
+            [ -f "$f" ] || continue
+            b="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+            [ "$b" -gt "$est" ] 2>/dev/null && est="$b"
+        done
+        due="$due$est $agent_id"$'\n'
+    done
+    agent_id="$(printf '%s' "$due" | grep . | sort -n | head -1 | awk '{print $2}')"
+    [ -n "$agent_id" ] || return 0
+    timeout 1800 bash "${STORAGE_DIR}/storagectl.sh" rebase --type agent --id "$agent_id" --persist "$persist" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+        touch "/tmp/unraid-aicliagents/.agent_rebase_failed_${agent_id}" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -3127,6 +3675,66 @@ _relay_drain_tick() {
 }
 
 # ---------------------------------------------------------------------------
+# Relay linked boxes — send each peer's outbox, refresh hello + contacts
+# ---------------------------------------------------------------------------
+# docs/specs/RELAY_LINKED_BOXES.md §3. Does nothing until a box is paired: the
+# peer file on flash holds no "peer_" row. Network calls can take up to 10 s
+# each, so the sync runs in the background with a hard timeout, and a new run
+# starts only when the previous one has ended. It never stalls the work tick.
+_RELAY_PEER_LAST=0
+_RELAY_PEER_PID=""
+_relay_peer_tick() {
+    [ "$(command -v php)" ] || return 0
+    local peers="${AICLI_RELAY_PEERS_FILE:-/boot/config/plugins/unraid-aicliagents/relay-peers.json}"
+    [ -s "$peers" ] || return 0
+    grep -q '"peer_' "$peers" 2>/dev/null || return 0
+    local now; now=$(date +%s)
+    [ $(( now - _RELAY_PEER_LAST )) -ge 15 ] || return 0
+    if [ -n "$_RELAY_PEER_PID" ] && kill -0 "$_RELAY_PEER_PID" 2>/dev/null; then return 0; fi
+    _RELAY_PEER_LAST="$now"
+    timeout 60 php -d display_errors=0 \
+        "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php" peer-sync \
+        >/dev/null 2>&1 &
+    _RELAY_PEER_PID=$!
+}
+
+# ---------------------------------------------------------------------------
+# Relay HTTP listener ownership audit (#331)
+# ---------------------------------------------------------------------------
+# A listener from an older plugin generation kept 0.0.0.0:8237 open for 8 days
+# on .4 while the setting said "off", because only the listener named in the
+# pidfile was ever stopped. Every 30 s, relay-http-up.sh audit scans /proc for
+# this plugin's relay-http-server.php processes (any generation) and stops each
+# one that is not the current, wanted listener. It is bash only: with no
+# listener running it is one /proc scan. #337: when the listener is turned on
+# and none runs (it crashed, or someone stopped it), the audit starts it again,
+# detached, and logs the restart; a failed restart backs off for 5 minutes.
+# Exit 4 means the wanted state is not known yet (first tick after a boot or an
+# update from an older version), so the PHP reconcile reads the settings once
+# and records it. The lock fd is dropped first, as in
+# _check_saved_workspace_restarts; the spawn helper also closes every other
+# inherited fd, so a listener this starts holds none of the supervisor's.
+_RELAY_HTTP_AUDIT_LAST=0
+_relay_http_audit_tick() {
+    local now; now=$(date +%s)
+    [ $(( now - _RELAY_HTTP_AUDIT_LAST )) -ge 30 ] || return 0
+    _RELAY_HTTP_AUDIT_LAST="$now"
+    local up="${AICLI_RELAY_HTTP_UP_SCRIPT:-/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-http-up.sh}"
+    [ -f "$up" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 20 bash "$up" audit >/dev/null 2>&1
+        if [ "$?" = "4" ] && command -v php >/dev/null 2>&1; then
+            timeout 30 php -d display_errors=0 \
+                "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/relay-agent.php" http-listener-reconcile \
+                >/dev/null 2>&1
+        fi
+    ) || true
+}
+
+# ---------------------------------------------------------------------------
 # Work loop — one iteration, called every tick
 # ---------------------------------------------------------------------------
 _work_tick() {
@@ -3163,6 +3771,8 @@ _work_tick() {
     # Step 1d: EVENT_FIRST_RECONCILIATION.md — the activity watchdog sweep,
     # rate-limited to 30 s internally, runs with no browser open.
     _activity_sweep_tick
+    _scheduled_continue_tick
+    _quota_detect_tick
 
     # Step 1e: SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 — release superseded agent
     # versions once nothing is running them, rate-limited to 5 min internally.
@@ -3476,6 +4086,10 @@ _do_start() {
         [ -n "$_v" ] && GRADUATED_RETENTION_DAYS="$_v"
         _v=$(grep -oP '^event_ledger_max_events="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
         [ -n "$_v" ] && EVENT_LEDGER_MAX_EVENTS="$_v"
+        _v=$(grep -oP '^bake_backoff_base_seconds="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
+        [ -n "$_v" ] && BAKE_BACKOFF_BASE_S="$_v"
+        _v=$(grep -oP '^bake_backoff_cap_seconds="?\K[^"]*(?="?$)' "$cfg_file" 2>/dev/null | head -1)
+        [ -n "$_v" ] && BAKE_BACKOFF_CAP_S="$_v"
     fi
 
     log_info "Supervisor starting (pid $$, version $DAEMON_VERSION)"
@@ -3502,6 +4116,8 @@ _do_start() {
     while [ "$_STOPPING" -eq 0 ]; do
         _work_tick
         _relay_drain_tick
+        _relay_peer_tick
+        _relay_http_audit_tick
 
         # Reset the wake flag for THIS sleep window; a SIGUSR1 arriving during a
         # `sleep 1` runs the trap when that second elapses, sets _WAKE, and the
@@ -3640,10 +4256,21 @@ _do_flush() {
     local zram_base="${ZRAM_BASE:-/tmp/unraid-aicliagents/zram_upper}"
     local flushed_count=0
 
-    for upper_root in "$zram_base/homes" "$zram_base/agents"; do
+    # #372: a home is flushed from the upper its mount REALLY uses (zram or
+    # disk), so a home mounted on a disk upper is not skipped as "clean".
+    local _fl_id _fl_upper
+    while IFS=$'\t' read -r _fl_id _fl_upper; do
+        [ -n "$_fl_id" ] && [ -d "$_fl_upper" ] || continue
+        [ -n "$(ls -A "$_fl_upper" 2>/dev/null)" ] || continue
+        queue_enqueue 0 "home" "$_fl_id" "bake" "clean_shutdown" 2>/dev/null || true
+        flushed_count=$(( flushed_count + 1 ))
+        log_info "Flush: enqueued bake for home/${_fl_id} (upper $_fl_upper)"
+    done < <(home_uppers_live 2>/dev/null)
+
+    # shellcheck disable=SC2066
+    for upper_root in "$zram_base/agents"; do
         [ -d "$upper_root" ] || continue
-        local entity_type="home"
-        [ "$(basename "$upper_root")" = "agents" ] && entity_type="agent"
+        local entity_type="agent"
 
         for entity_dir in "$upper_root"/*/; do
             [ -d "$entity_dir" ] || continue
@@ -3808,6 +4435,9 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 
     case "$CMD" in
         start|"")
+            _scrub_test_hook_env
+            # #353: exec again without the test variables (see above).
+            [ "$_SCRUBBED_TEST_HOOKS" -gt 0 ] && exec bash "$0" start
             _do_cleanup_phantoms
             _do_start
             ;;

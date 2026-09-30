@@ -50,6 +50,16 @@
         return e;
     }
     function clearNode(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+    // MOBILE_OVERLAYS.md 2026-09-29: a row's action buttons sit in one wrapper.
+    // On a desktop the wrapper is display:contents, so the buttons lay out
+    // exactly as before; on a phone (ManagerStyles.php) it becomes a full-width
+    // line under the row content and the buttons share it.
+    function hubRowActions(row) {
+        var acts = el('span', 'display:contents;');
+        acts.className = 'hub-row-actions';
+        row.appendChild(acts);
+        return acts;
+    }
 
     // ---------- state ----------
 
@@ -98,7 +108,9 @@
         names.forEach(function (name) {
             var s = hubState.servers[name];
             var row = el('div', 'display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid rgba(128,128,128,0.25); border-radius:4px;');
+            row.className = 'hub-row hub-server-row';
             var info = el('div', 'flex:1; min-width:0;');
+            info.className = 'hub-row-info';
             var head = el('div', 'display:flex; align-items:center; gap:8px;');
             head.appendChild(el('span', 'font-size:12px; font-weight:700;', name));
             head.appendChild(el('span', 'font-size:10px; opacity:0.55; border:1px solid rgba(128,128,128,0.4); border-radius:3px; padding:0 5px;', s.transport));
@@ -106,8 +118,11 @@
             var summary = (s.transport === 'stdio')
                 ? (s.command + (s.args && s.args.length ? ' ' + s.args.join(' ') : ''))
                 : (s.url || '');
-            info.appendChild(el('div', 'font-size:10px; font-family:monospace; opacity:0.6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', summary));
+            var cmd = el('div', 'font-size:10px; font-family:monospace; opacity:0.6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', summary);
+            cmd.className = 'hub-row-cmd'; cmd.title = summary;
+            info.appendChild(cmd);
             var chips = el('div', 'display:flex; flex-wrap:wrap; gap:4px; margin-top:3px;');
+            chips.className = 'hub-row-chips';
             (s.enabledFor || []).forEach(function (id) {
                 chips.appendChild(el('span', 'font-size:9px; padding:1px 6px; border-radius:8px; background:rgba(255,140,0,0.15); border:1px solid rgba(255,140,0,0.4);', agentLabel(id)));
             });
@@ -116,18 +131,21 @@
             }
             info.appendChild(chips);
             row.appendChild(info);
+            var acts = hubRowActions(row);
 
             var editBtn = el('button', 'flex-shrink:0;');
             editBtn.type = 'button'; editBtn.className = 'aicli-btn-slim'; editBtn.title = 'Edit';
+            editBtn.setAttribute('aria-label', 'Edit ' + name);
             editBtn.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-pencil' }));
             editBtn.addEventListener('click', function () { window.hubOpenEditor(name); });
-            row.appendChild(editBtn);
+            acts.appendChild(editBtn);
 
             var delBtn = el('button', 'flex-shrink:0;');
             delBtn.type = 'button'; delBtn.className = 'aicli-btn-slim'; delBtn.title = 'Delete';
+            delBtn.setAttribute('aria-label', 'Delete ' + name);
             delBtn.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-trash-o' }));
             delBtn.addEventListener('click', function () { hubDeleteServer(name); });
-            row.appendChild(delBtn);
+            acts.appendChild(delBtn);
 
             list.appendChild(row);
         });
@@ -268,21 +286,26 @@
         names.forEach(function (name) {
             var s = hubSkills[name];
             var row = el('div', 'display:flex; align-items:center; gap:10px; padding:6px 10px; border:1px solid rgba(128,128,128,0.25); border-radius:4px;');
+            row.className = 'hub-row hub-skill-row';
             var info = el('div', 'flex:1; min-width:0;');
+            info.className = 'hub-row-info';
             info.appendChild(el('div', 'font-size:12px; font-weight:700;', name));
             info.appendChild(el('div', 'font-size:10px; opacity:0.55;',
                 (s.files || []).length + ' file' + ((s.files || []).length === 1 ? '' : 's') + ' · ' + (s.bytes || 0) + ' bytes'));
             row.appendChild(info);
+            var acts = hubRowActions(row);
             var editBtn = el('button', 'flex-shrink:0;');
             editBtn.type = 'button'; editBtn.className = 'aicli-btn-slim'; editBtn.title = 'Edit';
+            editBtn.setAttribute('aria-label', 'Edit ' + 'skill ' + name);
             editBtn.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-pencil' }));
             editBtn.addEventListener('click', function () { window.hubOpenSkillEditor(name); });
-            row.appendChild(editBtn);
+            acts.appendChild(editBtn);
             var delBtn = el('button', 'flex-shrink:0;');
             delBtn.type = 'button'; delBtn.className = 'aicli-btn-slim'; delBtn.title = 'Delete';
+            delBtn.setAttribute('aria-label', 'Delete ' + 'skill ' + name);
             delBtn.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-trash-o' }));
             delBtn.addEventListener('click', function () { hubDeleteSkill(name); });
-            row.appendChild(delBtn);
+            acts.appendChild(delBtn);
             list.appendChild(row);
         });
     }
@@ -421,20 +444,25 @@
         names.forEach(function (name) {
             var c = hubCommands[name];
             var row = el('div', 'display:flex; align-items:center; gap:10px; padding:6px 10px; border:1px solid rgba(128,128,128,0.25); border-radius:4px;');
+            row.className = 'hub-row hub-command-row';
             var info = el('div', 'flex:1; min-width:0;');
+            info.className = 'hub-row-info';
             info.appendChild(el('div', 'font-size:12px; font-weight:700;', '/' + name));
             info.appendChild(el('div', 'font-size:10px; opacity:0.55; font-family:monospace;', name + '.md · ' + (c.bytes || 0) + ' bytes'));
             row.appendChild(info);
+            var acts = hubRowActions(row);
             var editBtn = el('button', 'flex-shrink:0;');
             editBtn.type = 'button'; editBtn.className = 'aicli-btn-slim'; editBtn.title = 'Edit';
+            editBtn.setAttribute('aria-label', 'Edit ' + 'command /' + name);
             editBtn.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-pencil' }));
             editBtn.addEventListener('click', function () { window.hubOpenCommandEditor(name); });
-            row.appendChild(editBtn);
+            acts.appendChild(editBtn);
             var delBtn = el('button', 'flex-shrink:0;');
             delBtn.type = 'button'; delBtn.className = 'aicli-btn-slim'; delBtn.title = 'Delete';
+            delBtn.setAttribute('aria-label', 'Delete ' + 'command /' + name);
             delBtn.appendChild(Object.assign(document.createElement('i'), { className: 'fa fa-trash-o' }));
             delBtn.addEventListener('click', function () { hubDeleteCommand(name); });
-            row.appendChild(delBtn);
+            acts.appendChild(delBtn);
             list.appendChild(row);
         });
     }
@@ -664,7 +692,10 @@
             wrap.appendChild(el('div', 'font-weight:700;', agentLabel(a.agentId) + ' has running session(s) — reload to pick up the new config:'));
             a.sessions.forEach(function (sess) {
                 var line = el('div', 'display:flex; align-items:center; gap:8px; margin-top:3px;');
-                line.appendChild(el('span', 'font-family:monospace; font-size:10px; opacity:0.7;', sess.id + (sess.path ? ' @ ' + sess.path : '')));
+                line.className = 'hub-apply-session';
+                var sid = el('span', 'font-family:monospace; font-size:10px; opacity:0.7;', sess.id + (sess.path ? ' @ ' + sess.path : ''));
+                sid.className = 'hub-apply-session-id';
+                line.appendChild(sid);
                 var rb = el('button', '');
                 rb.type = 'button'; rb.className = 'aicli-btn-slim'; rb.textContent = 'Reload agent';
                 rb.addEventListener('click', function () {
@@ -690,20 +721,27 @@
         drift.forEach(function (d) {
             var row = el('div', 'padding:8px 0; border-top:1px solid rgba(128,128,128,0.2);');
             var head = el('div', 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;');
-            head.appendChild(el('span', 'font-family:monospace; font-size:11px; font-weight:700;', d.file));
-            head.appendChild(el('span', 'font-family:monospace; font-size:11px;', d.key));
+            head.className = 'hub-drift-head';
+            var file = el('span', 'font-family:monospace; font-size:11px; font-weight:700;', d.file);
+            file.className = 'hub-drift-file';
+            head.appendChild(file);
+            var key = el('span', 'font-family:monospace; font-size:11px;', d.key);
+            key.className = 'hub-drift-key';
+            head.appendChild(key);
             head.appendChild(el('span', 'font-size:10px; opacity:0.6;', '(' + d.kind + ')'));
+            var acts = hubRowActions(head);
             ['adopt', 'overwrite', 'release'].forEach(function (mode) {
                 var b = el('button', '');
                 b.type = 'button'; b.className = 'aicli-btn-slim';
                 b.textContent = mode.charAt(0).toUpperCase() + mode.slice(1);
                 b.addEventListener('click', function () { hubResolve(d, mode); });
-                head.appendChild(b);
+                acts.appendChild(b);
             });
             row.appendChild(head);
             var det = document.createElement('details');
             var sum = document.createElement('summary');
             sum.style.cssText = 'font-size:10px; opacity:0.6; cursor:pointer;';
+            sum.className = 'hub-drift-values';
             sum.textContent = 'show values';
             det.appendChild(sum);
             var pre = el('pre', 'font-size:10px; max-height:160px; overflow:auto; background:rgba(0,0,0,0.2); padding:6px; border-radius:3px;');
@@ -799,6 +837,7 @@
             det.style.cssText = 'border:1px solid rgba(128,128,128,0.25); border-radius:4px; padding:4px 8px;';
             var sum = document.createElement('summary');
             sum.style.cssText = 'cursor:pointer; display:flex; align-items:center; gap:8px; font-size:11px;';
+            sum.className = 'hub-git-sum';
             sum.appendChild(el('span', 'font-family:monospace; opacity:0.6;', c.short));
             sum.appendChild(el('span', 'opacity:0.55; font-size:10px;', new Date(c.ts * 1000).toLocaleString()));
             sum.appendChild(el('span', 'flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', c.subject));
@@ -806,15 +845,19 @@
             var files = el('div', 'margin-top:4px; display:flex; flex-direction:column; gap:2px;');
             (c.files || []).forEach(function (f) {
                 var row = el('div', 'display:flex; align-items:center; gap:8px; font-size:10px;');
-                row.appendChild(el('span', 'font-family:monospace; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', f));
+                row.className = 'hub-git-file';
+                var fp = el('span', 'font-family:monospace; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', f);
+                fp.className = 'hub-git-file-path'; fp.title = f;
+                row.appendChild(fp);
+                var acts = hubRowActions(row);
                 var db = el('button', '');
                 db.type = 'button'; db.className = 'aicli-btn-slim'; db.textContent = 'Diff';
                 db.addEventListener('click', function () { hubGitDiff(f, c); });
-                row.appendChild(db);
+                acts.appendChild(db);
                 var rb = el('button', '');
                 rb.type = 'button'; rb.className = 'aicli-btn-slim'; rb.textContent = 'Restore';
                 rb.addEventListener('click', function () { hubGitRestore(f, c); });
-                row.appendChild(rb);
+                acts.appendChild(rb);
                 files.appendChild(row);
             });
             if (!(c.files || []).length) files.appendChild(el('div', 'font-size:10px; opacity:0.5;', 'no files recorded'));

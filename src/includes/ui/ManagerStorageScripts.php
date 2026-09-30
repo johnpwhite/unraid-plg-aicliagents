@@ -60,9 +60,6 @@ function refreshStats() {
         // consumed by av2RefreshStoreCardSizes() driven by the Store-tab poll.
         renderHomeStats(data.homes);
         renderCleanupCard(data.artifacts);
-        // HOME_BACKUP.md R12: same source as renderHomeStats() above — "every
-        // user with a home" is exactly Object.keys(data.homes).
-        if (typeof renderBackupUsers === 'function') renderBackupUsers(data.homes);
     });
 }
 
@@ -114,11 +111,12 @@ function refreshStats() {
 
 function formatSize(bytes) {
     if (typeof bytes !== 'number' || bytes === 0) return '0 KB';
+    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
     if (bytes < 1048576) return Math.max(1, Math.round(bytes / 1024)) + ' KB';
     return (bytes / 1048576).toFixed(2) + ' MB';
 }
 
-function renderLayerList(layers, dirtyMb) {
+function renderLayerList(layers, dirtyMb, upperMode) {
     if ((!layers || layers.length === 0) && (!dirtyMb || dirtyMb === 0)) return '';
 
     // WP #276: collapse the repeated persistence path into a single header line
@@ -152,21 +150,32 @@ function renderLayerList(layers, dirtyMb) {
                 '</div>';
     }
 
-    // Indent the list so it visually tucks under the persistence path header
-    // above (~20px is roughly the width of the folder icon + its trailing space).
-    html += '<div class="se-layer-list" style="margin-left:20px;">';
-
-    // ZRAM row (WP #267) — in-memory upper layer, orange left bar.
+    // #231: the live/unsaved upper is its OWN tile ABOVE the durable layer list,
+    // not another row inside it — it is a different KIND of thing (unbaked, still
+    // changing) from the immutable SquashFS layers, and drawing it as just
+    // another layer row conflated "in RAM / not yet saved as a layer" with the
+    // baked history below. upper_mode is independent from backend: an entity can
+    // keep layered storage while its writable upper lives durably on disk (#251).
     if (typeof dirtyMb !== 'undefined' && dirtyMb !== null && dirtyMb > 0) {
-        html += '<div class="se-layer-item se-layer-zram" style="' + ramBar + rowPadL + '">' +
-                  '<i class="fa fa-bolt" style="color:var(--orange, #ff8c00);" title="In-memory ZRAM upper layer (unflushed)"></i>' +
-                  '<span class="se-layer-path">ZRAM (in-memory upper layer)</span>' +
+        var isZram = (upperMode === 'zram');
+        var dirtyLabel = isZram ? 'ZRAM changes (volatile, not yet flushed)' : 'Writable changes (durable, not yet compacted)';
+        var dirtyTitle = isZram ? 'Volatile changes in the ZRAM upper layer; Persist writes them to a durable layer'
+                                : 'Changes already saved in the durable disk upper; Persist or Consolidate folds them into an immutable layer';
+        html += '<div class="se-live-tile" style="margin-left:20px; display:flex; align-items:center; gap:8px; ' +
+                  'padding:7px 10px; margin-bottom:6px; border:1px solid var(--orange, #ff8c00); ' +
+                  'border-left-width:3px; border-radius:5px; background:rgba(255,140,0,0.07);" title="' + dirtyTitle + '">' +
+                  '<i class="fa fa-bolt" style="color:var(--orange, #ff8c00);"></i>' +
+                  '<span class="se-layer-path" style="flex:1; font-weight:600;">' + dirtyLabel + '</span>' +
                   '<span class="se-layer-size">' + dirtyMb + ' MB</span>' +
                 '</div>';
     }
 
-    // Flash rows — basename only, blue right bar, matching left-padding so the
-    // icon column lines up with the ZRAM row above.
+    // Indent the list so it visually tucks under the persistence path header
+    // above (~20px is roughly the width of the folder icon + its trailing space).
+    html += '<div class="se-layer-list" style="margin-left:20px;">';
+
+    // Flash rows — the durable, immutable SquashFS layers. Basename only, blue
+    // right bar.
     $.each(layers, function(i, l) {
         var icon = l.name.indexOf('delta') >= 0 ? 'fa-plus-square' : 'fa-database';
         html += '<div class="se-layer-item" style="' + rowPadL + flashBar + '" title="' + l.path + '">' +
@@ -187,7 +196,36 @@ function renderLayerList(layers, dirtyMb) {
 // AJAX handlers stay registered (home flows still use them; advanced/admin
 // paths can hit them directly) but lose their UI entry point on this tab.
 
+// HOME_STORAGE_CARD_JOB_STATE.md (Forgejo #247): what the card says about the
+// supervisor job that is queued, running or deferred for a home. `job` is the
+// server's own field on the snapshot (StorageMetricsService), so every device
+// shows the same state and the same lock. Returns null when there is no job.
+function homeJobLabel(job) {
+    if (!job || !job.state) return null;
+    var verb = { bake: 'Saving', consolidate: 'Merging layers', mount: 'Mounting', unmount: 'Unmounting',
+                 repair: 'Repairing', delete: 'Deleting', backup: 'Backing up', restore: 'Restoring' }[job.op] || (job.op || 'Working');
+    if (job.state === 'queued') return { text: verb + ' — queued', title: verb + ' is queued behind another storage job.', deferred: false };
+    if (job.state === 'deferred') {
+        var why = { busy_cooldown: 'this home was saved less than 30 minutes ago and is still in use; the plugin retries when it is idle',
+                    mount_busy: 'this home is in use; the plugin retries when it is idle' }[job.defer_reason] || 'the plugin will retry';
+        return { text: verb + ' — waiting', title: verb + ' is waiting: ' + why + '.', deferred: true };
+    }
+    return { text: verb + '…', title: verb + ' is running now. The figures refresh when it finishes.', deferred: false };
+}
+
+// Forgejo #255: give the operator a stable byte-sized answer while the generic
+// activity stripe is moving slowly. dirty_mb is the same server snapshot field
+// used by the card's upper-layer figure, so this is an estimate of the work
+// remaining rather than a made-up percentage.
+function homeJobRemaining(job, dirtyMb) {
+    if (!job || Number(dirtyMb || 0) <= 0) return '';
+    var action = job.op === 'consolidate' ? 'merge' : (job.op === 'bake' ? 'save' : 'process');
+    return '~' + formatSize(Number(dirtyMb) * 1048576) + ' to ' + action;
+}
+
 function renderHomeStats(homes) {
+    // HOME_BACKUP.md #287: the backup line on each card reads this snapshot.
+    if (typeof aicliNoteHomesForBackup === 'function') aicliNoteHomesForBackup(homes);
     let html = '';
     let totalPhysical = 0;
     const users = Object.keys(homes || {});
@@ -197,35 +235,51 @@ function renderHomeStats(homes) {
         $.each(homes, function(u, h) {
             totalPhysical += h.physical_mb;
             const canConsolidate = h.layers >= 2;
-            const cardClass = 'storage-entity-card' + (h.percent > 0 ? ' has-dirty' : '') + (!h.mounted ? ' offline' : '');
+            const job = homeJobLabel(h.job);
+            const jobRemaining = homeJobRemaining(job, h.dirty_mb);
+            const hasUpperChanges = Number(h.dirty_mb || 0) > 0;
+            const isZramUpper = h.upper_mode === 'zram';
+            const upperFigure = !hasUpperChanges ? 'Layered'
+                : (isZramUpper ? (h.dirty_mb + ' MB volatile') : (h.dirty_mb + ' MB writable'));
+            // A disk upper has no fixed capacity represented by this card, so
+            // never paint it as a fake 100%-full bar. Its byte count is the fact.
+            const upperBarWidth = isZramUpper ? Number(h.percent || 0) : 0;
+            const upperBarText = !hasUpperChanges ? 'Layered'
+                : (isZramUpper ? (Number(h.percent || 0) + '% ZRAM used') : (h.dirty_mb + ' MB durable writable layer'));
+            const lockTitle = job ? ' (locked: ' + job.text + ')' : '';
+            const cardClass = 'storage-entity-card' + (hasUpperChanges ? ' has-dirty' : '') + (!h.mounted ? ' offline' : '');
             html += '<div class="' + cardClass + '">' +
                 '<div class="se-header">' +
                     '<div><div class="se-title"><i class="fa fa-home" style="color:var(--orange, #e68a00); margin-right:6px;"></i>' + u + '</div>' +
                     '<div class="se-meta">' + h.physical_mb + ' MB persisted &middot; ' + h.layers + ' Layer' + (h.layers !== 1 ? 's' : '') + '</div></div>' +
                     '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">' +
-                        '<div style="font-size:11px; font-weight:700; color:' + (!h.mounted ? '#888' : (h.percent > 0 ? 'var(--orange, #ff8c00)' : '#4caf50')) + ';">' + (!h.mounted ? 'OFFLINE' : (h.percent > 0 ? h.dirty_mb + ' MB Dirty' : 'Synced')) + '</div>' +
+                        '<div style="font-size:11px; font-weight:700; color:' + (!h.mounted ? '#888' : (hasUpperChanges ? 'var(--orange, #ff8c00)' : '#4caf50')) + ';">' + (!h.mounted ? 'OFFLINE' : upperFigure) + '</div>' +
+                        // #247: the job badge sits under the figure so the figure stays readable
+                        (job ? '<div data-testid="home-job-badge" style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="' + job.title + '">' + (job.deferred ? '⧗ ' : '⟳ ') + job.text + (jobRemaining ? ' <span data-testid="home-job-remaining" style="font-weight:600; opacity:0.9; text-transform:none;">· ' + jobRemaining + '</span>' : '') + '</div>' : '') +
                         // WP #271 follow-up: pending-consolidation badge
                         (h.consolidate_pending ? '<div style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="Auto-consolidation deferred — waiting for the home mount to go idle (no active terminals).">⧗ Awaiting idle</div>' : '') +
                     '</div>' +
                 '</div>' +
                 '<div class="se-body">' +
-                    '<div class="stat-bar-wrap" style="height:12px; opacity:' + (h.mounted ? 1 : 0.3) + ';"><div class="stat-bar-base" style="width:' + (100 - h.percent) + '%;"></div><div class="stat-bar-dirty" style="width:' + h.percent + '%;"></div><div class="stat-bar-text">' + (h.mounted ? (h.percent > 0 ? h.percent + '% Uncommitted' : 'Synced') : 'OFFLINE') + '</div></div>' +
+                    '<div class="stat-bar-wrap' + (job ? ' stat-bar-busy' + (job.deferred ? ' stat-bar-deferred' : '') : '') + '" style="height:12px; opacity:' + (h.mounted ? 1 : 0.3) + ';"' + (job ? ' title="' + job.title + '"' : '') + '><div class="stat-bar-base" style="width:' + (100 - upperBarWidth) + '%;"></div><div class="stat-bar-dirty" style="width:' + upperBarWidth + '%;"></div><div class="stat-bar-text">' + (job ? '' : (h.mounted ? upperBarText : 'OFFLINE')) + '</div></div>' +
                     '<div class="se-mount-label"><i class="fa fa-hdd-o"></i> ' + h.mount_point + '</div>' +
-                    renderLayerList(h.layer_files, h.dirty_mb) +
+                    renderLayerList(h.layer_files, h.dirty_mb, h.upper_mode) +
                     // Bug #1380: non-modal relocation offer — shown ONLY when this
                     // entity's data sits on a GENUINE USB flash drive AND a durable
                     // non-array non-flash target exists to move it to.
                     (h.can_graduate ?
                         '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(76,175,80,0.08); border:1px solid rgba(76,175,80,0.35); border-radius:4px;">' +
                             '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-hdd-o" style="color:#4caf50; margin-right:5px;"></i>This data is on a USB flash drive — move it to a durable disk (faster, no USB wear)</span>' +
-                            '<button type="button" class="aicli-btn-slim" style="background:#4caf50; white-space:nowrap;" onclick="graduateStorage(\'home\', \'' + u + '\', ' + (h.physical_mb || 0) + '); return false;">Move off USB flash drive</button>' +
+                            '<button type="button" class="aicli-btn-slim" style="white-space:nowrap;" onclick="graduateStorage(\'home\', \'' + u + '\', ' + (h.physical_mb || 0) + '); return false;">Move off USB flash drive</button>' +
                         '</div>' : '') +
+                    // HOME_BACKUP.md #287: this home's own backup — status line + Backup… dialog.
+                    aicliHomeBackupStripHtml(u) +
                 '</div>' +
                 '<div class="se-actions">' +
-                    '<a href="#" class="stat-icon-btn" onclick="persistEntity(\'home\', \'' + u + '\'); return false;" title="Persist to storage"><i class="fa fa-save"></i></a>' +
-                    '<a href="#" class="stat-icon-btn" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate Layers' : 'Requires 2+ layers') + '"><i class="fa fa-compress"></i></a>' +
-                    '<a href="#" class="stat-icon-btn" onclick="repairStorage(\'home\', \'' + u + '\'); return false;" title="Repair Mount"><i class="fa fa-wrench"></i></a>' +
-                    '<a href="#" class="stat-icon-btn" onclick="deleteHomeStorage(\'' + u + '\'); return false;" title="Delete home data (permanent)" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'persistEntity(\'home\', \'' + u + '\'); return false;') + '" title="Persist to storage' + lockTitle + '"><i class="fa fa-save"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', \'' + u + '\')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate Layers' + lockTitle : 'Requires 2+ layers') + '"><i class="fa fa-compress"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', \'' + u + '\'); return false;') + '" title="Repair Mount' + lockTitle + '"><i class="fa fa-wrench"></i></a>' +
+                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'deleteHomeStorage(\'' + u + '\'); return false;') + '" title="Delete home data (permanent)' + lockTitle + '" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
                 '</div>' +
                 '</div>';
         });
@@ -264,7 +318,7 @@ function renderCleanupCard(artifacts) {
                     '<div style="font-size:10px; opacity:0.5; margin-top:4px;">These files are safe to remove once you have verified your agents and workspaces are functioning correctly.</div>' +
                 '</div>' +
                 '<div class="se-actions">' +
-                    '<button type="button" class="aicli-btn-slim" onclick="purgeArtifacts()" style="background:var(--orange, #ff8c00);"><i class="fa fa-trash"></i> Purge All Artifacts</button>' +
+                    '<button type="button" class="aicli-btn-slim" onclick="purgeArtifacts()"><i class="fa fa-trash"></i> Purge All Artifacts</button>' +
                 '</div>' +
             '</div>' +
         '</div>' +
@@ -699,7 +753,7 @@ function deleteHomeStorage(id) {
                             '<button type="button" ' +
                                 'class="aicli-btn-slim aicli-show-on-store-btn" ' +
                                 'data-agent="' + idSafe + '" ' +
-                                'style="background:' + color + '; white-space:nowrap; margin-left:16px;" ' +
+                                'style="white-space:nowrap; margin-left:16px;" ' +
                                 'title="Switch to the Agent Store tab and scroll to this agent — Repair / Clear-halt actions live on the card.">' +
                                 '<i class="fa fa-external-link"></i> Show on Agent Store →' +
                             '</button>' +
@@ -744,7 +798,7 @@ function deleteHomeStorage(id) {
                                 'data-type="' + typeSafe + '" ' +
                                 'data-id="' + idSafe + '" ' +
                                 'data-sibling-dir="' + (sibDir || '') + '" ' +
-                                'style="background:' + color + '; white-space:nowrap; margin-left:16px;">' +
+                                'style="white-space:nowrap; margin-left:16px;">' +
                                 '<i class="fa fa-reply"></i> Restore from sibling' +
                             '</button>' +
                         '</div>' +
@@ -871,14 +925,20 @@ function deleteHomeStorage(id) {
         });
     }
 
-    // Trigger fetch when the storage tab becomes visible
-    $(document).on('click', '[data-tab="storage"], .aicli-nav-item[href*="storage"]', function() {
+    // Trigger fetch when the storage tab becomes visible. Epic #307: the
+    // Manager's real tab button is .aicli-tab-btn with switchMainTab('storage')
+    // — the two older selectors match nothing on this page, so the banner
+    // never loaded unless Storage was already the active tab at load time.
+    $(document).on('click', '.aicli-tab-btn[onclick*="\'storage\'"], [data-tab="storage"], .aicli-nav-item[href*="storage"]', function() {
         setTimeout(fetchBootIntegrity, 300);
     });
-    // Also fetch if storage tab is already active on page load
-    if ($('#tab-storage').hasClass('active') || $('#tab-storage').is(':visible')) {
-        setTimeout(fetchBootIntegrity, 800);
-    }
+    // Also fetch if storage tab is already active on page load. Checked after
+    // DOM-ready, because ManagerScripts.php restores the last-used tab then.
+    $(function() {
+        setTimeout(function() {
+            if ($('#tab-storage').hasClass('active') || $('#tab-storage').is(':visible')) fetchBootIntegrity();
+        }, 800);
+    });
 })();
 
 // ---- WP #922: Recent-consolidate-failure indicator ----
@@ -979,7 +1039,8 @@ function deleteHomeStorage(id) {
 
 // ---- Phase 4b: Storage Unavailable halt overlay ----
 // Fetches list_halts once on page load. If any halts exist, renders a
-// fixed-position overlay (z-index:10002) blocking the page until each halt
+// fixed-position overlay (z-index:10004, above the Activity tray pill at
+// 10003, so the pill never covers a card's buttons) blocking the page until each halt
 // is resolved. Cross-tab: localStorage event 'aicli_halt_cleared' dismisses
 // the overlay in other tabs without polling.
 (function() {
@@ -1102,8 +1163,9 @@ function deleteHomeStorage(id) {
         var st = document.createElement('style');
         st.id = STYLE_ID;
         st.textContent =
-            '#' + OVERLAY_ID + '{position:fixed;inset:0;z-index:10002;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:32px 24px;box-sizing:border-box;overflow-y:auto;}' +
-            '#' + OVERLAY_ID + ' .aicli-halt-header{max-width:720px;width:100%;text-align:center;margin-bottom:20px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6);}' +
+            '#' + OVERLAY_ID + '{position:fixed;inset:0;z-index:10004;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:32px 24px;box-sizing:border-box;overflow-y:auto;}' +
+            '#' + OVERLAY_ID + ' .aicli-halt-header{max-width:720px;width:100%;text-align:center;margin-bottom:20px;color:#fff;text-shadow:0 1px 3px #000;}' +
+            /* Solid black shadow: a translucent one blended to grey over a light page and left the orange title at 2.77:1 (axe color-contrast, 2026-09-29). */
             '#' + OVERLAY_ID + ' .aicli-halt-title{font-size:22px;font-weight:700;margin-bottom:8px;color:var(--orange,#e68a00);}' +
             '#' + OVERLAY_ID + ' .aicli-halt-subtitle{font-size:13px;opacity:.85;margin-bottom:4px;}' +
             '#' + OVERLAY_ID + ' .aicli-halt-note{font-size:11px;opacity:.7;}' +
@@ -1118,13 +1180,28 @@ function deleteHomeStorage(id) {
             '#' + OVERLAY_ID + ' .aicli-halt-buttons{display:flex;flex-wrap:wrap;gap:8px;}' +
             '#' + OVERLAY_ID + ' .aicli-btn-slim{all:unset !important;display:inline-flex !important;align-items:center !important;gap:6px !important;padding:6px 12px !important;font-size:12px !important;font-weight:600 !important;border-radius:4px !important;cursor:pointer !important;border:1px solid var(--border-color,#ddd) !important;background:var(--mild-background-color,#f7f9f9) !important;color:var(--text-color,#222) !important;text-decoration:none !important;}' +
             '#' + OVERLAY_ID + ' .aicli-btn-slim:hover{background:var(--border-color,rgba(0,0,0,.08)) !important;}' +
-            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-primary{background:var(--orange,#e68a00) !important;color:#fff !important;border-color:var(--orange,#e68a00) !important;}' +
-            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-confirm{background:#2ecc71 !important;color:#fff !important;border-color:#27ae60 !important;}' +
-            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-info{background:#3498db !important;color:#fff !important;border-color:#2980b9 !important;}' +
-            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-danger{background:#c0392b !important;color:#fff !important;border-color:#a93226 !important;}' +
+            // NATIVE_BUTTON_STYLE.md (2026-09-29): every action has the same plain
+            // look (the theme's text on its mild background, a thin border), like
+            // Unraid's own buttons. No orange, green or blue fill. The destructive
+            // action keeps red text; its confirmation step is unchanged.
+            '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-danger{color:color-mix(in srgb,#dc2626 70%,var(--text-color,#1c1b1b)) !important;}' +
             '#' + OVERLAY_ID + ' .aicli-btn-slim.aicli-halt-btn-neutral{background:transparent !important;color:var(--text-color,#222) !important;}' +
             '#' + OVERLAY_ID + ' .aicli-heal-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--alt-text-color,#888);border-top-color:transparent;border-radius:50%;animation:aicli-halt-spin 0.9s linear infinite;margin-right:8px;vertical-align:middle;}' +
-            '@keyframes aicli-halt-spin{to{transform:rotate(360deg)}}';
+            '@keyframes aicli-halt-spin{to{transform:rotate(360deg)}}' +
+            // Epic #307: at phone size each action is a 44 px touch target that
+            // wraps its text, and the overlay uses the full width. Desktop unchanged.
+            '@media (max-width:600px){' +
+                '#' + OVERLAY_ID + '{padding:16px 12px;}' +
+                '#' + OVERLAY_ID + ' .aicli-halt-card{padding:14px 14px;}' +
+                '#' + OVERLAY_ID + ' .aicli-halt-entity{overflow-wrap:anywhere;}' +
+                '#' + OVERLAY_ID + ' .aicli-btn-slim{min-height:44px !important;box-sizing:border-box !important;white-space:normal !important;overflow-wrap:anywhere !important;flex:1 1 100% !important;justify-content:center !important;}' +
+                // Readable text (4.5:1): orange-on-grey and white-on-orange /
+                // white-on-green were 2.1-2.6:1.
+                '#' + OVERLAY_ID + ' .aicli-halt-entity{color:var(--text-color,#222);}' +
+                '#' + OVERLAY_ID + ' .aicli-halt-when{opacity:1;}' +
+                '#' + OVERLAY_ID + ' .aicli-halt-state{color:var(--text-color,#222);}' +
+                '#' + OVERLAY_ID + ' .aicli-halt-badge{color:#111;}' +
+            '}';
         document.head.appendChild(st);
     }
 
@@ -1151,7 +1228,9 @@ function deleteHomeStorage(id) {
                 '<div class="aicli-halt-subtitle">Boot integrity check found something worth your attention. The plugin won\'t overwrite your data without explicit consent.</div>' +
                 '<div class="aicli-halt-note">Tip: you can Dismiss to deal with this later, or click Retry after fixing the underlying issue.</div>' +
             '</div>' +
-            '<div class="aicli-halt-cards">' + cards + '</div>' +
+            // id: every card lookup below uses #aicli-halt-cards. Without it,
+            // dismissing ONE halt closed the whole overlay and hid the others.
+            '<div class="aicli-halt-cards" id="aicli-halt-cards">' + cards + '</div>' +
         '</div>';
     }
 
@@ -1564,153 +1643,142 @@ function aicliBlockedByConsolidate(actionLabel) {
 })();
 
 /* ---------------------------------------------------------------------------
- * HOME_BACKUP.md R1/R12 — Home backup card. Settings (target/quiesce/keep/
- * schedule/excludes/nudge) are plugin-wide and save through the SAME generic
- * settings form every other Storage/Config field uses (autoSaveConfig() /
- * saveAICliAgentsManager()); the per-user rows below reuse renderHomeStats()'s
- * own data source (data.homes from get_storage_status, wired in refreshStats()
- * above) so "every user with a home" never drifts from the Persistence cards.
+ * HOME_BACKUP.md "2026-09-24 redesign (#287)" — each home has its OWN backup
+ * settings, reached from a Backup… button on that home's card. The dialog
+ * saves every change at once through set_home_backup_setting (one key per
+ * request) and shows the value the server read back from disk, so what the
+ * dialog shows is what is saved. It never posts the shared settings form:
+ * the Storage tab sits outside #aicli-settings-form (Bug #710), which is why
+ * the old plugin-wide card never saved anything.
  * ------------------------------------------------------------------------- */
 
-// Schedule select/day/time -> the single backup_schedule cfg string.
-function aicliBackupScheduleChanged() {
-    var mode = $('#backup_schedule_mode').val();
-    var day = $('#backup_schedule_day').val();
-    var time = $('#backup_schedule_time').val() || '02:00';
-    var value = 'off';
-    if (mode === 'daily') value = 'daily:' + time;
-    else if (mode === 'weekly') value = 'weekly:' + day + ':' + time;
-    $('#backup_schedule').val(value);
-    $('#backup_schedule_day').toggle(mode === 'weekly');
-    $('#backup_schedule_at_label').toggle(mode !== 'off');
-    $('#backup_schedule_time').toggle(mode !== 'off');
-    autoSaveConfig();
-}
-
-// The checkbox has no name (an unchecked checkbox never serializes); it only
-// drives the hidden backup_nudge_working field the form actually submits.
-function aicliBackupNudgeChanged() {
-    $('#backup_nudge_working').val($('#backup_nudge_working_cb').is(':checked') ? '1' : '0');
-    autoSaveConfig();
-}
-
-function aicliToggleBackupPicker() {
-    var panel = $('#aicli-backup-picker');
-    if (panel.is(':visible')) { panel.hide().empty(); return; }
-    panel.show().html('<div style="padding:8px; font-size:11px; opacity:.6;"><i class="fa fa-spinner fa-spin"></i> Probing storage targets…</div>');
-    // kind=home: the SAME S-11 enumeration/refusal policy the Config tab's own
-    // picker uses (StorageTargetService) — refuses /mnt/user and network paths
-    // for exactly the reason HOME_BACKUP.md's target rule states.
-    aicliAjax('enumerate_storage_targets', { kind: 'home' }, function(data) {
-        if (!data || data.status !== 'ok') {
-            panel.html('<div style="color:#f87171; font-size:11px;">' + escapeHtml((data && data.message) || 'Enumeration failed') + '</div>');
-            return;
-        }
-        var html = '<div style="border:1px solid var(--border-color, rgba(128,128,128,0.25)); border-radius:5px; padding:6px; max-height:220px; overflow-y:auto;">';
-        $.each(data.targets || [], function(i, t) {
-            if (t.refuse) return;
-            html += '<div class="aicli-backup-target-row" data-path="' + escapeHtml(t.path) + '" style="padding:5px 8px; cursor:pointer; border-bottom:1px solid var(--border-color, rgba(128,128,128,0.12));">'
-                + '<div style="font-size:11px; font-weight:600;">' + escapeHtml(t.label) + (t.recommended ? ' <span style="color:#22c55e;">(recommended)</span>' : '') + '</div>'
-                + '<div style="font-family:monospace; font-size:10px; opacity:.7;">' + escapeHtml(t.path) + '</div>'
-                + '</div>';
-        });
-        html += '</div>';
-        panel.html(html);
-        panel.find('.aicli-backup-target-row').on('click', function() {
-            $('#backup_target').val($(this).attr('data-path'));
-            panel.hide().empty();
-            autoSaveConfig();
-            aicliCheckBackupTarget();
-        });
-    }).fail(function() { panel.html('<div style="color:#f87171; font-size:11px;">Server error during target enumeration</div>'); });
-}
-
-function aicliCheckBackupTarget() {
-    var path = ($('#backup_target').val() || '').trim();
-    var box = $('#aicli-backup-target-result');
-    if (!path) { box.empty(); return; }
-    box.html('<i class="fa fa-spinner fa-spin"></i> Checking…');
-    aicliAjax('backup_validate_target', { target: path }, function(r) {
-        if (!r || r.status !== 'ok' || !r.ok) {
-            box.html('<span style="color:#f87171;"><i class="fa fa-times-circle"></i> ' + escapeHtml((r && r.message) || 'This target cannot be used.') + '</span>');
-            return;
-        }
-        var free = (typeof r.free_bytes === 'number') ? (r.free_bytes / 1073741824).toFixed(1) + ' GB free' : '';
-        box.html('<span style="color:#22c55e;"><i class="fa fa-check-circle"></i> ' + escapeHtml(r.resolved || path) + (r.fs ? ' (' + escapeHtml(r.fs) + ')' : '') + (free ? ' — ' + free : '') + '</span>');
-    }).fail(function() { box.html('<span style="color:#f87171;">Server error checking target</span>'); });
-}
+var _aicliHomes = {};          // last homes snapshot from get_storage_status, by user
+var _aicliBackupRunning = {};  // user -> step text while that home's backup job runs
+var _aicliHb = null;           // the open dialog: { user, settings }
+var AICLI_HB_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function aicliBackupRowId(user) { return String(user).replace(/[^A-Za-z0-9_-]/g, '_'); }
 
-// R12: one row per user with a home — SAME set renderHomeStats() draws from.
-// Idempotent: an existing row is left alone (its own poll owns its status),
-// only a NEW or REMOVED user changes the DOM.
-function renderBackupUsers(homes) {
-    var users = Object.keys(homes || {});
-    var container = $('#backup-users-container');
-    if (users.length === 0) {
-        container.html('<div class="storage-empty-state" style="padding:16px; text-align:center; opacity:.6; font-size:11px;">No user has a home yet.</div>');
-        return;
-    }
-    container.find('[data-backup-user]').each(function() {
-        if (users.indexOf($(this).attr('data-backup-user')) === -1) $(this).remove();
-    });
-    if (container.children('.storage-empty-state').length) container.empty();
-    $.each(users, function(i, u) {
-        var rowId = aicliBackupRowId(u);
-        if ($('#backup-row-' + rowId).length) return;
-        var row = $(
-            '<div class="storage-entity-card" id="backup-row-' + rowId + '" data-backup-user="' + escapeHtml(u) + '" style="padding:8px 10px;">' +
-                '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">' +
-                    '<div style="font-size:12px; font-weight:700;"><i class="fa fa-user" style="opacity:.6; margin-right:6px;"></i>' + escapeHtml(u) + '</div>' +
-                    '<button type="button" class="aicli-btn-slim" id="backup-now-' + rowId + '"><i class="fa fa-life-ring"></i> Back up now</button>' +
-                '</div>' +
-                '<div id="backup-last-' + rowId + '" style="font-size:10px; opacity:.7; margin-top:4px;">Checking last backup…</div>' +
-                '<div id="backup-progress-' + rowId + '" style="display:none; font-size:10px; color:var(--orange, #ff8c00); margin-top:4px;"><i class="fa fa-spinner fa-spin"></i> <span></span></div>' +
-                '<div id="backup-snapshots-' + rowId + '" style="display:flex; flex-direction:column; gap:4px; margin-top:6px;">Loading snapshots…</div>' +
-                '<div id="restore-last-' + rowId + '" style="font-size:10px; opacity:.7; margin-top:4px;"></div>' +
-                '<div id="restore-progress-' + rowId + '" style="display:none; font-size:10px; color:var(--orange, #ff8c00); margin-top:4px;"><i class="fa fa-spinner fa-spin"></i> <span></span></div>' +
-            '</div>'
-        );
-        row.find('#backup-now-' + rowId).on('click', function() { aicliBackupNow(u); });
-        container.append(row);
-        aicliRefreshBackupStatus(u);
-        aicliRefreshSnapshots(u);
-        aicliRefreshRestoreStatus(u);
-    });
+function aicliFmtSchedule(s) {
+    var m = /^daily:(\d\d:\d\d)$/.exec(s || '');
+    if (m) return 'daily at ' + m[1];
+    m = /^weekly:(\d):(\d\d:\d\d)$/.exec(s || '');
+    if (m) return 'weekly on ' + AICLI_HB_DAYS[+m[1]] + ' at ' + m[2];
+    return '';
 }
+
+function aicliFmtBackupWhen(at) { return at ? new Date(at).toLocaleString() : 'unknown time'; }
+
+// HOME_BACKUP.md 2026-09-29: a warm backup is complete even when the running
+// sessions changed files during it; say how many.
+function aicliFmtChangedDuring(lb) {
+    var n = (lb && typeof lb.changed_during === 'number') ? lb.changed_during : 0;
+    if (!lb || !lb.warm || n <= 0) return '';
+    return ' · ' + n + (n === 1 ? ' file' : ' files') + ' changed during the backup';
+}
+
+// The Home card's backup line: one of unset / never / running / ok / failed.
+function aicliHomeBackupState(user) {
+    var h = _aicliHomes[user] || {};
+    var bk = h.backup || null;
+    var job = (h.job && h.job.op === 'backup') ? h.job : null;
+    if (_aicliBackupRunning[user] || job) {
+        var step = _aicliBackupRunning[user] || (job && job.state === 'queued' ? 'queued' : (job && job.state === 'deferred' ? 'waiting' : 'running'));
+        return { state: 'running', icon: 'fa-spinner fa-spin', text: 'Backing up — ' + step };
+    }
+    var lb = h.last_backup || null;
+    if (!bk || !bk.configured) {
+        // HOME_BACKUP.md 2026-09-24 follow-up: a home can have older snapshots
+        // (made before it had a folder of its own). Say where they are; the
+        // dialog offers that folder, it is never chosen silently.
+        var earlier = (bk && bk.earlier_target) || '';
+        if (earlier) {
+            return { state: 'unset', icon: 'fa-life-ring', text: 'No folder chosen — earlier backups found in ' + earlier + (lb ? ' (last ' + aicliFmtBackupWhen(lb.at) + ').' : '.') };
+        }
+        return { state: 'unset', icon: 'fa-life-ring', text: 'Backup is not set up.' };
+    }
+    var sched = aicliFmtSchedule(bk.schedule);
+    var run = h.last_backup_run || null;
+    var runT = run && run.at ? Date.parse(run.at) : NaN;
+    var lbT = lb && lb.at ? Date.parse(lb.at) : NaN;
+    if (run && run.ok === false && (!lb || isNaN(lbT) || (!isNaN(runT) && runT >= lbT))) {
+        return { state: 'failed', icon: 'fa-exclamation-triangle', text: 'Last backup failed' + (run.summary ? ': ' + run.summary : '.') };
+    }
+    if (lb) {
+        var size = (typeof lb.bytes === 'number') ? ' · ' + (lb.bytes / 1048576).toFixed(1) + ' MB' : '';
+        return { state: 'ok', icon: 'fa-check-circle', text: 'Last backup ' + aicliFmtBackupWhen(lb.at) + size + ' (' + (lb.warm ? 'warm' : 'cold') + ')' + aicliFmtChangedDuring(lb) + (sched ? ' · ' + sched : '') };
+    }
+    return { state: 'never', icon: 'fa-circle-o', text: 'Not backed up yet · to ' + bk.target + (sched ? ' · ' + sched : '') };
+}
+
+function aicliHomeBackupStripHtml(user) {
+    var st = aicliHomeBackupState(user);
+    var rowId = aicliBackupRowId(user);
+    return '<div class="se-backup se-backup-' + st.state + '" data-testid="home-backup-strip" data-user="' + escapeHtml(user) + '" data-state="' + st.state + '">' +
+        '<span class="se-backup-status" id="home-backup-status-' + rowId + '"><i class="fa ' + st.icon + '" aria-hidden="true"></i> <span class="se-backup-text">' + escapeHtml(st.text) + '</span></span>' +
+        '<button type="button" class="aicli-btn-slim se-backup-btn" id="home-backup-btn-' + rowId + '" data-user="' + escapeHtml(user) + '" aria-haspopup="dialog" aria-describedby="home-backup-status-' + rowId + '">' +
+            (st.state === 'unset' ? 'Set up backup…' : 'Backup…') + '</button>' +
+    '</div>';
+}
+
+// Repaint one card's backup line in place (no card re-render, focus kept),
+// and the same line at the top of the dialog when it is open for that user.
+function aicliPaintBackupStrip(user) {
+    var st = aicliHomeBackupState(user);
+    var strip = $('.se-backup[data-user]').filter(function() { return $(this).attr('data-user') === user; });
+    strip.attr('class', 'se-backup se-backup-' + st.state).attr('data-state', st.state);
+    strip.find('.se-backup-status').html('<i class="fa ' + st.icon + '" aria-hidden="true"></i> <span class="se-backup-text">' + escapeHtml(st.text) + '</span>');
+    strip.find('.se-backup-btn').text(st.state === 'unset' ? 'Set up backup…' : 'Backup…');
+    if (_aicliHb && _aicliHb.user === user) {
+        $('#hb-state').attr('class', 'hb-state hb-state-' + st.state).attr('data-state', st.state)
+            .html('<i class="fa ' + st.icon + '" aria-hidden="true"></i> ' + escapeHtml(st.text));
+    }
+}
+
+// Called by renderHomeStats() with every fresh snapshot.
+function aicliNoteHomesForBackup(homes) {
+    _aicliHomes = homes || {};
+    $.each(_aicliHomes, function(u, h) {
+        if (h && h.job && h.job.op === 'backup' && h.job.state === 'running') aicliPollBackupStatus(u);
+    });
+    if (_aicliHb && _aicliHb.user) aicliPaintBackupStrip(_aicliHb.user);
+}
+
+$(document).on('click', '.se-backup-btn', function(e) {
+    e.preventDefault();
+    aicliOpenHomeBackup($(this).attr('data-user'));
+});
 
 var _aicliBackupPollers = {};
 
-// HOME_RESTORE.md R1: keeps "Back up now" and every "Restore…" button in a
-// user's row disabled while EITHER a backup or a restore job is running for
-// that user — the supervisor's own entity lock already refuses one job while
-// the other runs (HOME_RESTORE.md R4), this only keeps the row's buttons from
-// inviting a click that would just be refused.
+// HOME_RESTORE.md R1: "Back up now" and every "Restore…" button stay disabled
+// while EITHER a backup or a restore job runs for that user; "Back up now"
+// also needs a backup folder (#287).
 var _aicliRowBusy = {};
 
 function aicliUpdateRowBusyUI(user) {
     var rowId = aicliBackupRowId(user);
     var state = _aicliRowBusy[user] || {};
     var busy = !!(state.backup || state.restore);
-    $('#backup-now-' + rowId).prop('disabled', busy);
-    $('#backup-row-' + rowId).find('.aicli-restore-btn').prop('disabled', busy);
+    var noTarget = !(_aicliHb && _aicliHb.user === user && _aicliHb.settings && _aicliHb.settings.target);
+    var btn = $('#backup-now-' + rowId);
+    btn.prop('disabled', busy || noTarget)
+        .attr('title', busy ? 'A backup or restore of this home is running.' : (noTarget ? 'Choose a destination folder first.' : ''));
+    $('#backup-row-' + rowId).find('.aicli-restore-btn, .aicli-snap-delete-btn').prop('disabled', busy);
 }
 
+// Dialog: last backup line, and the running step while a job runs.
 function aicliRefreshBackupStatus(user) {
     var rowId = aicliBackupRowId(user);
     aicliAjax('backup_status', { user: user }, function(r) {
         var lastEl = $('#backup-last-' + rowId);
         if (!r || r.status !== 'ok') { lastEl.text('Backup status unavailable.'); return; }
         if (r.last_backup) {
-            // StorageHandler::backupStatusFor(): {at (ISO 8601 UTC string),
-            // path, bytes, files, warm, ok}.
+            // StorageHandler::backupStatusFor(): {at (ISO 8601 UTC string), path, bytes, files, warm, ok}.
             var lb = r.last_backup;
-            var when = lb.at ? new Date(lb.at).toLocaleString() : 'unknown time';
             var size = (typeof lb.bytes === 'number') ? (lb.bytes / 1048576).toFixed(1) + ' MB' : '';
             var files = (typeof lb.files === 'number') ? (lb.files + ' files') : '';
-            var mode = lb.warm ? 'warm' : 'cold';
-            lastEl.text('Last backup: ' + when + (size ? ' — ' + size : '') + (files ? ', ' + files : '') + ' (' + mode + ')');
+            lastEl.text('Last backup: ' + aicliFmtBackupWhen(lb.at) + (size ? ' — ' + size : '') + (files ? ', ' + files : '') + ' (' + (lb.warm ? 'warm' : 'cold') + ')' + aicliFmtChangedDuring(lb));
         } else {
             lastEl.text('No backup yet.');
         }
@@ -1728,24 +1796,31 @@ function aicliRefreshBackupStatus(user) {
     }).fail(function() { $('#backup-last-' + rowId).text('Backup status unavailable.'); });
 }
 
-// 5s poll while running — same cadence startInstallPolling() uses for an
-// install/upgrade progress bar (ManagerStoreScripts.php).
+// 5s poll while a backup runs — same cadence startInstallPolling() uses for an
+// install/upgrade progress bar. Feeds the card line AND the dialog.
 function aicliPollBackupStatus(user) {
     if (_aicliBackupPollers[user]) return;
     _aicliBackupPollers[user] = setInterval(function() {
         var rowId = aicliBackupRowId(user);
         aicliAjax('backup_status', { user: user }, function(r) {
             if (!r || r.status !== 'ok' || !r.running) {
+                var wasRunning = !!_aicliBackupRunning[user];
                 clearInterval(_aicliBackupPollers[user]);
                 delete _aicliBackupPollers[user];
-                aicliRefreshBackupStatus(user);
-                // A finished backup does not change the snapshot list on its
-                // own... except it does (a new snapshot just landed) — refresh
-                // it so the new snapshot's Restore button appears without a
-                // manual page reload.
-                aicliRefreshSnapshots(user);
+                delete _aicliBackupRunning[user];
+                if (_aicliHomes[user] && _aicliHomes[user].job && _aicliHomes[user].job.op === 'backup') _aicliHomes[user].job = null;
+                aicliPaintBackupStrip(user);
+                if (_aicliHb && _aicliHb.user === user) {
+                    aicliRefreshBackupStatus(user);
+                    // A new snapshot just landed: show its Restore button now.
+                    aicliRefreshSnapshots(user);
+                }
+                // Pull the new last_backup into the card once (bounded: only on a real finish).
+                if (wasRunning && typeof refreshStats === 'function') refreshStats();
                 return;
             }
+            _aicliBackupRunning[user] = r.running.step || 'running';
+            aicliPaintBackupStrip(user);
             $('#backup-progress-' + rowId).show().find('span').text(r.running.step || 'Running…');
         });
     }, 5000);
@@ -1753,7 +1828,8 @@ function aicliPollBackupStatus(user) {
 
 function aicliBackupNow(user) {
     if (aicliBlockedByConsolidate('starting a home backup')) return false;
-    var warm = $('input[name="backup_quiesce"]:checked').val() === 'warm';
+    var s = (_aicliHb && _aicliHb.user === user && _aicliHb.settings) ? _aicliHb.settings : ((_aicliHomes[user] || {}).backup || {});
+    var warm = s.quiesce === 'warm';
     swal({
         title: 'Back up ' + user + '’s home now?',
         text: warm
@@ -1765,7 +1841,9 @@ function aicliBackupNow(user) {
         aicliAjax('backup_home', { user: user }, function(r) {
             if (r && r.status === 'ok') {
                 swal({ title: 'Queued', text: 'Watch the activity tray for progress.', type: 'info', timer: 2500, showConfirmButton: false });
-                clearChanged();
+                _aicliBackupRunning[user] = 'queued';
+                aicliPaintBackupStrip(user);
+                aicliPollBackupStatus(user);
             } else {
                 swal('Could not start', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
             }
@@ -1773,6 +1851,310 @@ function aicliBackupNow(user) {
         });
     });
 }
+
+/* ---- The per-home Backup dialog ---------------------------------------- */
+
+function aicliHbIndicator(key) {
+    return '<span class="hb-save" id="hb-save-' + key + '" aria-live="polite"></span>';
+}
+
+function aicliOpenHomeBackup(user) {
+    if (!user) return;
+    aicliCloseHomeBackup(false);
+    var rowId = aicliBackupRowId(user);
+    var e = escapeHtml;
+    var dayOpts = '';
+    $.each(AICLI_HB_DAYS, function(i, d) { dayOpts += '<option value="' + i + '">' + d + '</option>'; });
+    var html =
+    '<div id="aicli-home-backup-backdrop" class="hb-backdrop">' +
+      '<div id="aicli-home-backup-dialog" class="hb-dialog" role="dialog" aria-modal="true" aria-labelledby="hb-title" data-user="' + e(user) + '">' +
+        '<div class="hb-header">' +
+          '<h2 id="hb-title" class="hb-title" tabindex="-1"><i class="fa fa-life-ring" aria-hidden="true"></i> Backup — ' + e(user) + '</h2>' +
+          '<button type="button" class="hb-close" id="hb-close" aria-label="Close">&times;</button>' +
+        '</div>' +
+        '<div class="hb-body" id="backup-row-' + rowId + '">' +
+          '<div class="hb-status" aria-live="polite">' +
+            '<div id="hb-state" class="hb-state"></div>' +
+            '<div id="backup-last-' + rowId + '" class="hb-muted"></div>' +
+            '<div id="backup-progress-' + rowId + '" class="hb-progress" style="display:none;"><i class="fa fa-spinner fa-spin" aria-hidden="true"></i> <span></span></div>' +
+          '</div>' +
+          '<div id="hb-load" class="hb-muted">Loading backup settings…</div>' +
+          '<fieldset class="hb-fields" id="hb-fields" disabled>' +
+            '<div class="hb-field">' +
+              '<div class="hb-label-row"><span class="hb-label" id="hb-target-label">Destination folder</span>' + aicliHbIndicator('target') + '</div>' +
+              '<div class="hb-target-row">' +
+                '<code id="hb-target-show" class="hb-target hb-empty" aria-labelledby="hb-target-label">No folder chosen</code>' +
+                '<button type="button" class="aicli-btn-slim" id="hb-choose"><i class="fa fa-folder-open" aria-hidden="true"></i> Choose folder…</button>' +
+              '</div>' +
+              '<input type="hidden" id="hb-target-input" value="">' +
+              '<div id="hb-target-check" class="hb-check"></div>' +
+              '<div id="hb-suggest" class="hb-suggest" hidden data-testid="hb-suggest">' +
+                '<span>Your earlier backups are in <code id="hb-suggest-path"></code></span>' +
+                '<button type="button" class="aicli-btn-slim" id="hb-suggest-use">Use this folder</button>' +
+              '</div>' +
+              '<div class="hb-help">A folder on a /mnt/user share is saved as its pool or disk path: copying a home’s many small files through the share can freeze the server.</div>' +
+            '</div>' +
+            '<fieldset class="hb-field hb-radios">' +
+              '<legend class="hb-label">Mode ' + aicliHbIndicator('quiesce') + '</legend>' +
+              '<label><input type="radio" name="hb-quiesce" value="cold"> Cold — closes the sessions first, most consistent</label>' +
+              '<label><input type="radio" name="hb-quiesce" value="warm"> Warm — sessions keep running, best effort</label>' +
+            '</fieldset>' +
+            '<div class="hb-field">' +
+              '<div class="hb-label-row"><label class="hb-label" for="hb-keep">Keep</label>' + aicliHbIndicator('keep') + '</div>' +
+              '<div class="hb-inline"><input type="number" id="hb-keep" min="1" max="50" step="1" inputmode="numeric"> <span>snapshots</span></div>' +
+            '</div>' +
+            '<div class="hb-field">' +
+              '<div class="hb-label-row"><label class="hb-label" for="hb-sched-mode">Schedule</label>' + aicliHbIndicator('schedule') + '</div>' +
+              '<div class="hb-inline hb-wrap">' +
+                '<select id="hb-sched-mode"><option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select>' +
+                '<select id="hb-sched-day" aria-label="Day of the week">' + dayOpts + '</select>' +
+                '<label class="hb-at" id="hb-sched-at" for="hb-sched-time">at</label>' +
+                '<input type="time" id="hb-sched-time" value="02:00">' +
+              '</div>' +
+            '</div>' +
+            '<div class="hb-field">' +
+              '<div class="hb-label-row"><span class="hb-label">Continue on relaunch</span>' + aicliHbIndicator('nudge_working') + '</div>' +
+              '<label class="hb-check-label"><input type="checkbox" id="hb-nudge"> Tell an agent to continue if it was working when the backup started</label>' +
+            '</div>' +
+            '<details class="hb-field hb-details">' +
+              '<summary>Advanced: excluded files</summary>' +
+              '<div class="hb-label-row"><label class="hb-label" for="hb-excludes">Excluded files, one pattern per line</label>' + aicliHbIndicator('excludes') + '</div>' +
+              '<textarea id="hb-excludes" rows="5" spellcheck="false"></textarea>' +
+              '<div class="hb-help">Saved when you leave the field.</div>' +
+            '</details>' +
+          '</fieldset>' +
+          '<div class="hb-field">' +
+            '<div class="hb-label">Snapshots</div>' +
+            '<div id="backup-snapshots-' + rowId + '" class="hb-snapshots">Loading snapshots…</div>' +
+            '<div id="restore-last-' + rowId + '" class="hb-muted"></div>' +
+            '<div id="restore-progress-' + rowId + '" class="hb-progress" style="display:none;"><i class="fa fa-spinner fa-spin" aria-hidden="true"></i> <span></span></div>' +
+            '<div class="hb-help">Restore closes every session of ' + e(user) + ', then reopens them when it finishes; a session that was working is told to continue.</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="hb-footer">' +
+          '<button type="button" class="aicli-btn-slim" id="backup-now-' + rowId + '" disabled title="Choose a destination folder first.">Back up now</button>' +
+          '<button type="button" class="aicli-btn-slim hb-secondary" id="hb-close-footer">Close</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+    $('body').append(html);
+    _aicliHb = { user: user, settings: null, earlier: (((_aicliHomes[user] || {}).backup) || {}).earlier_target || '' };
+
+    var dlg = $('#aicli-home-backup-dialog');
+    $('#aicli-home-backup-backdrop').on('mousedown', function(ev) { if (ev.target === this) aicliCloseHomeBackup(true); });
+    $('#hb-close, #hb-close-footer').on('click', function() { aicliCloseHomeBackup(true); });
+    $('#hb-choose').on('click', function() { openPathPicker('hb-target-input'); });
+    $('#hb-suggest-use').on('click', function() {
+        if (_aicliHb && _aicliHb.earlier) aicliHbSave('target', _aicliHb.earlier);
+    });
+    $('#hb-target-input').on('change', function() {
+        aicliHbSave('target', $(this).val() || '');
+        $('#hb-choose').trigger('focus');
+    });
+    dlg.find('input[name="hb-quiesce"]').on('change', function() { aicliHbSave('quiesce', $(this).val()); });
+    $('#hb-keep').on('change', function() { aicliHbSave('keep', $(this).val()); });
+    $('#hb-sched-mode, #hb-sched-day, #hb-sched-time').on('change', function() {
+        aicliHbToggleSchedule();
+        aicliHbSave('schedule', aicliHbScheduleValue());
+    });
+    $('#hb-nudge').on('change', function() { aicliHbSave('nudge_working', $(this).is(':checked') ? '1' : '0'); });
+    $('#hb-excludes').on('change', function() { aicliHbSave('excludes', $(this).val()); });
+    $('#backup-now-' + rowId).on('click', function() { aicliBackupNow(user); });
+
+    aicliPaintBackupStrip(user);
+    aicliHbLoad(user);
+    aicliRefreshBackupStatus(user);
+    aicliRefreshSnapshots(user);
+    aicliRefreshRestoreStatus(user);
+    // Focus the dialog's heading, not a control: a mouse user sees no focus
+    // ring, and a keyboard user's first Tab reaches Close (HOME_BACKUP.md
+    // 2026-09-24 follow-up — the ring on "Choose folder…" was this focus).
+    document.getElementById('hb-title').focus();
+}
+
+function aicliCloseHomeBackup(returnFocus) {
+    var user = _aicliHb ? _aicliHb.user : null;
+    _aicliHb = null;
+    $('#aicli-home-backup-backdrop').remove();
+    if (returnFocus && user) {
+        var b = document.getElementById('home-backup-btn-' + aicliBackupRowId(user));
+        if (b) b.focus();
+    }
+}
+
+function aicliHbLoad(user) {
+    $('#hb-load').removeClass('hb-error').text('Loading backup settings…').show();
+    aicliAjax('get_home_backup_settings', { user: user }, function(r) {
+        if (!_aicliHb || _aicliHb.user !== user) return;
+        if (!r || r.status !== 'ok' || !r.settings) { aicliHbLoadFailed(user); return; }
+        _aicliHb.settings = r.settings;
+        $.each(['target', 'quiesce', 'keep', 'schedule', 'nudge_working', 'excludes'], function(i, k) { aicliHbApply(k); });
+        $('#hb-fields').prop('disabled', false);
+        $('#hb-load').hide();
+        aicliUpdateRowBusyUI(user);
+        if (r.settings.target) aicliHbCheckTarget(r.settings.target);
+        aicliHbPaintSuggest();
+        // Focus stays where it is (the heading): moving it to a control here
+        // drew a focus ring on "Choose folder…" for a mouse user.
+    }).fail(function() { if (_aicliHb && _aicliHb.user === user) aicliHbLoadFailed(user); });
+}
+
+function aicliHbLoadFailed(user) {
+    $('#hb-load').addClass('hb-error').html('<span role="alert">Could not load the backup settings.</span> ' +
+        '<button type="button" class="aicli-btn-slim" id="hb-retry">Try again</button>').show();
+    $('#hb-retry').on('click', function() { aicliHbLoad(user); });
+}
+
+// "Your earlier backups are in <path> — Use this folder": only while the home
+// has no folder of its own and earlier snapshots were found.
+function aicliHbPaintSuggest() {
+    var box = document.getElementById('hb-suggest');
+    if (!box || !_aicliHb) return;
+    var show = !!(_aicliHb.settings && !_aicliHb.settings.target && _aicliHb.earlier);
+    $('#hb-suggest-path').text(show ? _aicliHb.earlier : '');
+    box.hidden = !show;
+}
+
+// Put the SAVED value of one setting into its control.
+function aicliHbApply(key) {
+    if (!_aicliHb || !_aicliHb.settings) return;
+    var s = _aicliHb.settings;
+    switch (key) {
+        case 'target':
+            $('#hb-target-input').val(s.target || '');
+            $('#hb-target-show').text(s.target || 'No folder chosen').toggleClass('hb-empty', !s.target);
+            break;
+        case 'quiesce':
+            $('input[name="hb-quiesce"][value="' + (s.quiesce === 'warm' ? 'warm' : 'cold') + '"]').prop('checked', true);
+            break;
+        case 'keep':
+            $('#hb-keep').val(s.keep);
+            break;
+        case 'schedule':
+            var mode = 'off', day = '0', time = '02:00', m;
+            if ((m = /^daily:(\d\d:\d\d)$/.exec(s.schedule || ''))) { mode = 'daily'; time = m[1]; }
+            else if ((m = /^weekly:(\d):(\d\d:\d\d)$/.exec(s.schedule || ''))) { mode = 'weekly'; day = m[1]; time = m[2]; }
+            $('#hb-sched-mode').val(mode);
+            $('#hb-sched-day').val(day);
+            $('#hb-sched-time').val(time);
+            aicliHbToggleSchedule();
+            break;
+        case 'nudge_working':
+            $('#hb-nudge').prop('checked', !!s.nudge_working);
+            break;
+        case 'excludes':
+            $('#hb-excludes').val(s.excludes || '');
+            break;
+    }
+}
+
+function aicliHbToggleSchedule() {
+    var mode = $('#hb-sched-mode').val();
+    $('#hb-sched-day').toggle(mode === 'weekly');
+    $('#hb-sched-at, #hb-sched-time').toggle(mode !== 'off');
+}
+
+function aicliHbScheduleValue() {
+    var mode = $('#hb-sched-mode').val();
+    var time = $('#hb-sched-time').val() || '02:00';
+    if (mode === 'daily') return 'daily:' + time;
+    if (mode === 'weekly') return 'weekly:' + ($('#hb-sched-day').val() || '0') + ':' + time;
+    return 'off';
+}
+
+function aicliHbShowCheck(check, path) {
+    var box = $('#hb-target-check');
+    if (!path) { box.attr('class', 'hb-check').removeAttr('role').empty(); return; }
+    if (!check || check.ok === false) {
+        box.attr('class', 'hb-check hb-err').attr('role', 'alert')
+            .html('<i class="fa fa-times-circle" aria-hidden="true"></i> ' + escapeHtml((check && check.message) || 'This folder cannot be used for backups.'));
+        return;
+    }
+    var free = (typeof check.free_bytes === 'number' && check.free_bytes > 0) ? ' — ' + (check.free_bytes / 1073741824).toFixed(1) + ' GB free' : '';
+    box.attr('class', 'hb-check hb-ok').removeAttr('role')
+        .html('<i class="fa fa-check-circle" aria-hidden="true"></i> ' + escapeHtml(check.resolved || path) + (check.fs ? ' (' + escapeHtml(check.fs) + ')' : '') + free);
+}
+
+// The saved target can go missing (a disk unplugged): check it on open.
+function aicliHbCheckTarget(path) {
+    aicliAjax('backup_validate_target', { target: path }, function(r) {
+        if (!_aicliHb || !_aicliHb.settings || _aicliHb.settings.target !== path) return;
+        aicliHbShowCheck(r || null, path);
+    }).fail(function() { aicliHbShowCheck({ ok: false, message: 'Could not check this folder.' }, path); });
+}
+
+// Save ONE setting now. The control ends up showing what the server read back.
+function aicliHbSave(key, value) {
+    if (!_aicliHb || !_aicliHb.settings) return;
+    var user = _aicliHb.user;
+    var ind = $('#hb-save-' + key);
+    ind.removeAttr('role').attr('class', 'hb-save hb-saving').text('Saving…');
+    var failed = function(msg) {
+        if (!_aicliHb || _aicliHb.user !== user) return;
+        aicliHbApply(key); // put the last saved value back
+        ind.attr('class', 'hb-save hb-err').attr('role', 'alert')
+            .html('<i class="fa fa-times-circle" aria-hidden="true"></i> Not saved: ' + escapeHtml(msg));
+        if (key === 'target') aicliHbShowCheck({ ok: false, message: msg }, value || '-');
+    };
+    aicliAjax('set_home_backup_setting', { user: user, key: key, value: value }, function(r) {
+        if (!_aicliHb || _aicliHb.user !== user) return;
+        if (!r || r.status !== 'ok' || !r.settings) { failed((r && r.message) || 'unknown error'); return; }
+        _aicliHb.settings = r.settings;
+        aicliHbApply(key);
+        ind.attr('class', 'hb-save hb-ok').html('<i class="fa fa-check" aria-hidden="true"></i> Saved');
+        if (key === 'target') aicliHbShowCheck(r.check || { ok: true, resolved: r.value }, r.value);
+        var h = _aicliHomes[user] = _aicliHomes[user] || {};
+        var earlier = r.settings.target ? '' : (_aicliHb.earlier || '');
+        h.backup = { configured: !!r.settings.target, target: r.settings.target, schedule: r.settings.schedule, quiesce: r.settings.quiesce, earlier_target: earlier };
+        if (key === 'target') {
+            aicliHbPaintSuggest();
+            // The earlier snapshots may be in the folder just chosen.
+            aicliRefreshSnapshots(user);
+            aicliRefreshBackupStatus(user);
+        }
+        aicliPaintBackupStrip(user);
+        aicliUpdateRowBusyUI(user);
+    }).fail(function() { failed('the server did not answer.'); });
+}
+
+// Escape closes the dialog (or only the folder browser on top of it); Tab stays inside.
+document.addEventListener('keydown', function(ev) {
+    if (!_aicliHb) return;
+    if ($('.sweet-alert:visible').length) return; // a confirm is on top: it owns the keys
+    var picker = document.getElementById('aicli-path-picker-backdrop');
+    if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (picker) {
+            // One Escape closes one layer: the New folder row, then the browser.
+            if (aicliPathPickerEscape() === 'picker') $('#hb-choose').trigger('focus');
+            return;
+        }
+        aicliCloseHomeBackup(true);
+        return;
+    }
+    if (ev.key !== 'Tab' || picker) return;
+    var dlg = document.getElementById('aicli-home-backup-dialog');
+    if (!dlg) return;
+    var items = $(dlg).find('button, [href], input:not([type="hidden"]), select, textarea, summary, [tabindex]:not([tabindex="-1"])')
+        .filter(function() { return !this.disabled && $(this).is(':visible'); }).toArray();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1];
+    // Focus outside the dialog, or on its heading (not in the list): the
+    // first Tab goes to the first control, Shift+Tab to the last one.
+    if (!dlg.contains(document.activeElement) || items.indexOf(document.activeElement) === -1) {
+        ev.preventDefault();
+        (ev.shiftKey ? last : first).focus();
+        return;
+    }
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+}, true);
+
+// The folder browser closes by Select or Cancel: give focus back to "Choose folder…".
+$(document).on('click', '#pp-cancel, #pp-confirm', function() {
+    if (_aicliHb) setTimeout(function() { $('#hb-choose').trigger('focus'); }, 0);
+});
 
 /* ---------------------------------------------------------------------------
  * HOME_RESTORE.md R1 — Home restore. Each snapshot row (from `list_backups`)
@@ -1791,36 +2173,100 @@ function aicliRefreshSnapshots(user) {
     var box = $('#backup-snapshots-' + rowId);
     aicliAjax('list_backups', { user: user }, function(r) {
         if (!r || r.status !== 'ok') { box.html('<div style="font-size:10px; opacity:.6;">Snapshot list unavailable.</div>'); return; }
-        var snaps = r.snapshots || [];
-        if (snaps.length === 0) { box.html('<div style="font-size:10px; opacity:.6;">No snapshots yet.</div>'); return; }
-        var html = '';
-        $.each(snaps, function(i, s) {
-            var when = s.at ? new Date(s.at).toLocaleString() : 'unknown time';
-            var size = (typeof s.bytes === 'number') ? (s.bytes / 1048576).toFixed(1) + ' MB' : '';
-            var files = (typeof s.files === 'number') ? (s.files + ' files') : '';
-            var mode = s.warm ? 'warm' : 'cold';
-            var label = s.label === 'pre-restore' ? ' <span style="color:#f59e0b;">(pre-restore safety snapshot)</span>' : '';
-            var bad = (s.ok === false) ? ' <span style="color:#f87171;">(incomplete)</span>' : '';
-            html += '<div class="aicli-snapshot-row" style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:10px; padding:3px 6px; border:1px solid var(--border-color, rgba(128,128,128,0.15)); border-radius:4px;">' +
-                '<span>' + escapeHtml(when) + (size ? ' — ' + size : '') + (files ? ', ' + files : '') + ' (' + mode + ')' + label + bad + '</span>' +
-                '<button type="button" class="aicli-btn-slim aicli-restore-btn" style="font-size:10px; padding:1px 6px;" ' +
-                    'data-path="' + escapeHtml(s.path) + '" data-at="' + escapeHtml(when) + '" data-warm="' + (s.warm ? '1' : '0') +
-                    '" data-files="' + escapeHtml(String(files || '')) + '" data-size="' + escapeHtml(String(size || '')) + '">Restore…</button>' +
-            '</div>';
-        });
-        box.html(html);
-        box.find('.aicli-restore-btn').on('click', function() {
-            var btn = $(this);
-            aicliRestoreHome(user, {
-                path: btn.attr('data-path'),
-                at: btn.attr('data-at'),
-                warm: btn.attr('data-warm') === '1',
-                files: btn.attr('data-files'),
-                size: btn.attr('data-size')
-            });
-        });
-        aicliUpdateRowBusyUI(user); // a just-added button must respect an already-running job
+        if (_aicliHb && _aicliHb.user === user) {
+            _aicliHb.earlier = r.earlier_target || '';
+            aicliHbPaintSuggest();
+        }
+        aicliRenderSnapshots(user, r.snapshots || []);
     }).fail(function() { box.html('<div style="font-size:10px; opacity:.6;">Snapshot list unavailable.</div>'); });
+}
+
+// Draw one user's snapshot rows (Restore… and Delete… on each).
+function aicliRenderSnapshots(user, snaps) {
+    var rowId = aicliBackupRowId(user);
+    var box = $('#backup-snapshots-' + rowId);
+    if (snaps.length === 0) { box.html('<div style="font-size:10px; opacity:.6;">No snapshots yet.</div>'); return; }
+    var html = '';
+    $.each(snaps, function(i, s) {
+        var when = s.at ? new Date(s.at).toLocaleString() : 'unknown time';
+        var size = (typeof s.bytes === 'number') ? (s.bytes / 1048576).toFixed(1) + ' MB' : '';
+        var files = (typeof s.files === 'number') ? (s.files + ' files') : '';
+        var mode = s.warm ? 'warm' : 'cold';
+        var label = s.label === 'pre-restore' ? ' <span style="color:#f59e0b;">(pre-restore safety snapshot)</span>' : '';
+        var bad = (s.ok === false) ? ' <span style="color:#f87171;">(incomplete)</span>' : '';
+        var data = 'data-path="' + escapeHtml(s.path) + '" data-at="' + escapeHtml(when) + '" data-warm="' + (s.warm ? '1' : '0') +
+                '" data-files="' + escapeHtml(String(files || '')) + '" data-size="' + escapeHtml(String(size || '')) + '"';
+        var what = escapeHtml(when) + (size ? ', ' + size : '');
+        html += '<div class="aicli-snapshot-row" style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:10px; padding:3px 6px; border:1px solid var(--border-color, rgba(128,128,128,0.15)); border-radius:4px;">' +
+            '<span>' + escapeHtml(when) + (size ? ' — ' + size : '') + (files ? ', ' + files : '') + ' (' + mode + ')' + label + bad + '</span>' +
+            '<span class="aicli-snapshot-actions">' +
+              '<button type="button" class="aicli-btn-slim aicli-restore-btn" style="font-size:10px; padding:1px 6px;" ' + data +
+                ' aria-label="Restore the snapshot from ' + what + '">Restore…</button>' +
+              '<button type="button" class="aicli-btn-slim danger aicli-snap-delete-btn" style="font-size:10px; padding:1px 6px;" ' + data +
+                ' aria-label="Delete the snapshot from ' + what + '">Delete…</button>' +
+            '</span>' +
+        '</div>';
+    });
+    box.html(html);
+    box.find('.aicli-restore-btn').on('click', function() {
+        var btn = $(this);
+        aicliRestoreHome(user, {
+            path: btn.attr('data-path'),
+            at: btn.attr('data-at'),
+            warm: btn.attr('data-warm') === '1',
+            files: btn.attr('data-files'),
+            size: btn.attr('data-size')
+        });
+    });
+    box.find('.aicli-snap-delete-btn').on('click', function() {
+        var btn = $(this);
+        aicliDeleteSnapshot(user, {
+            path: btn.attr('data-path'),
+            at: btn.attr('data-at'),
+            files: btn.attr('data-files'),
+            size: btn.attr('data-size')
+        }, this);
+    });
+    aicliUpdateRowBusyUI(user); // a just-added button must respect an already-running job
+}
+
+// HOME_BACKUP.md 2026-09-24 follow-up: confirm, then delete ONE snapshot.
+// The server removes only that snapshot folder inside the home's backup
+// folder, and refuses while a backup or restore of the home runs. The answer
+// carries the new list and last backup, so the dialog and the card update at once.
+function aicliDeleteSnapshot(user, snap, opener) {
+    var facts = escapeHtml(snap.at || 'an unknown time') + (snap.size ? ', ' + escapeHtml(snap.size) : '') + (snap.files ? ', ' + escapeHtml(snap.files) : '');
+    swal({
+        title: 'Delete this snapshot?',
+        text: '<div style="text-align:left; font-size:12px; line-height:1.6;">' +
+                '<p>The snapshot of ' + escapeHtml(user) + '’s home from <strong>' + facts + '</strong> is deleted from the backup folder. You cannot restore it after this.</p>' +
+                '<p style="font-size:11px; opacity:.8; overflow-wrap:anywhere;">' + escapeHtml(snap.path || '') + '</p>' +
+              '</div>',
+        html: true,
+        type: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Delete snapshot',
+        showLoaderOnConfirm: true,
+        closeOnConfirm: false
+    }, function(confirmed) {
+        if (!confirmed) { if (opener && document.body.contains(opener)) opener.focus(); return; }
+        aicliAjax('delete_backup_snapshot', { user: user, snapshot: snap.path }, function(r) {
+            if (!r || r.status !== 'ok') {
+                swal('Not deleted', (r && r.message) || 'Unknown error. Check debug.log.', 'error');
+                return;
+            }
+            swal({ title: 'Snapshot deleted', text: r.warning || '', type: r.warning ? 'warning' : 'success', timer: r.warning ? null : 1500, showConfirmButton: !!r.warning });
+            aicliRenderSnapshots(user, r.snapshots || []);
+            var h = _aicliHomes[user] = _aicliHomes[user] || {};
+            h.last_backup = r.last_backup || null;
+            if (h.backup && !h.backup.configured) h.backup.earlier_target = r.earlier_target || '';
+            if (_aicliHb && _aicliHb.user === user) { _aicliHb.earlier = r.earlier_target || ''; aicliHbPaintSuggest(); }
+            aicliPaintBackupStrip(user);
+            aicliRefreshBackupStatus(user);
+            var next = $('#backup-snapshots-' + aicliBackupRowId(user)).find('button:enabled').get(0) || document.getElementById('hb-title');
+            if (next) setTimeout(function() { next.focus(); }, 0);
+        }).fail(function() { swal('Not deleted', 'The server did not answer. Nothing was deleted.', 'error'); });
+    });
 }
 
 // One user's last restore record and, while a restore job runs, its progress.
