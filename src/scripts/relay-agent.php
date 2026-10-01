@@ -92,8 +92,12 @@ switch ($action) {
     // stopping any listener of an older generation. Run by the activation of a
     // new generation and by the supervisor when its audit cannot decide alone.
     // Session-agnostic and idempotent, like drain-all.
+    // #383: remove the Relay traces of finished test sessions (ids "e2e…"). Session-
+    // agnostic and idempotent; a running session is never touched. Run by
+    // tests/lib/e2e-sessions.sh close and by the boot sweep.
+    case 'purge-test-traces': $result = ['status'=>'ok', 'purged'=>AgentRelayService::purgeTestSessionTraces()]; break;
     case 'http-listener-reconcile': $result = AgentRelayService::ensureHttpListener(); break;
-    default: $result = ['status'=>'error', 'message'=>'Unknown action. Use topics, subscriptions, inbox, contacts, direct, reply, create, update, archive, delete, join, leave, publish, request, request-status, cancel-request, ack, resolve, fail, drain-all, or peer-sync. Message shapes: "direct <recipient_session_id> <message>" and "reply <thread_id> <message> <recipient_session_id>".'];
+    default: $result = ['status'=>'error', 'message'=>'Unknown action. Use topics, subscriptions, inbox, contacts, direct, reply, create, update, archive, delete, join, leave, publish, request, request-status, cancel-request, ack, resolve, fail, drain-all, peer-sync, or purge-test-traces. Message shapes: "direct <recipient_session_id> <message>" and "reply <thread_id> <message> <recipient_session_id>".'];
 }
 echo json_encode($result, JSON_UNESCAPED_SLASHES) . PHP_EOL;
 exit(($result['status'] ?? 'error') === 'ok' ? 0 : 1);

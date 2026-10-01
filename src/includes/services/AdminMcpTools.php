@@ -581,7 +581,7 @@ class AdminMcpTools {
             }
 
             if (($result['status'] ?? '') === 'ok' && self::tier($name) === 'change') {
-                self::recordChangeAudit($name, $result);
+                self::recordChangeAudit($name, $result, is_array($args) ? $args : []);
             }
             return $result;
         } catch (\Throwable $e) {
@@ -693,12 +693,23 @@ class AdminMcpTools {
      * broken tray write must never turn an already-successful mutation into a
      * reported failure, so every exception here is swallowed.
      */
-    private static function recordChangeAudit(string $tool, array $result): void {
+    private static function recordChangeAudit(string $tool, array $result, array $args = []): void {
         try {
             $caller = AdminService::callerIdentity();
             $who    = $caller['agentId'] !== '' ? $caller['agentId'] : 'unknown agent';
-            $where  = $caller['workspaceId'] !== '' ? $caller['workspaceId'] : 'unknown workspace';
+            // #384: name the workspace a person knows (its display name), not only its id.
+            $where  = $caller['name'] !== '' ? $caller['name'] : ($caller['workspaceId'] !== '' ? $caller['workspaceId'] : 'unknown workspace');
             $label  = "$tool via $who ($where)";
+            // #384: a spoken message shows what was said (first 60 characters) and what
+            // happened to it (mode: played aloud, kept as voice mail, ...).
+            if ($tool === 'aicli_speak') {
+                $said = trim((string)preg_replace('/\s+/', ' ', (string)($args['text'] ?? '')));
+                if ($said !== '') {
+                    $label .= ': "' . (function_exists('mb_substr') ? mb_substr($said, 0, 60) : substr($said, 0, 60)) . (strlen($said) > 60 ? '…' : '') . '"';
+                }
+                $mode = (string)($result['speak']['mode'] ?? '');
+                if ($mode !== '') $label .= " [$mode]";
+            }
             $meta   = ['tool' => $tool, 'agentId' => $caller['agentId'], 'workspaceId' => $caller['workspaceId']];
             // WORKSPACE_SEND_INPUT.md R5: this tool acts on a DIFFERENT workspace
             // than the caller's own — the Activity entry must name which one was

@@ -848,7 +848,7 @@
             var onDone = function (text, error) {
                 if (gen !== inputGeneration) { resolve(); return; }
                 if (isFinal) {
-                    setInputState('idle', { text: text || '' });
+                    setInputState('idle', error ? { text: text || '', error: error } : { text: text || '' });
                 } else if (error) {
                     // R11: one piece's transcription failing must not end the
                     // recording — only report it and keep listening.

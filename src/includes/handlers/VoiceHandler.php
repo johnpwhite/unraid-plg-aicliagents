@@ -78,8 +78,11 @@ class VoiceHandler
             case 'voice_set_workspace_voice': return self::voiceSetWorkspaceVoice();
             // AGENT_VOICE.md "#323 guided setup" — Forgejo #323.
             case 'voice_engine_prepare':return self::voiceEnginePrepare();
-            case 'check_voice_engine':  return VoiceEngineSetupService::check();
+            case 'check_voice_engine':  return VoiceEngineSetupService::check(self::engineParam());
+            // VOICE_ENGINE_SETUP.md — Forgejo #381 #382: what is installed, before any button.
+            case 'voice_engine_status': return VoiceEngineSetupService::status(self::engineParam());
             case 'voice_engine_finish': return self::voiceEngineFinish();
+            case 'voice_engine_download': return self::voiceEngineDownload();
             default:                    return null;
         }
     }
@@ -230,18 +233,37 @@ class VoiceHandler
         return strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'POST';
     }
 
+    /**
+     * VOICE_ENGINE_SETUP.md: which engine a setup action is about. Only 'tts' (the
+     * default) or 'stt' is accepted; anything else means 'tts'. It picks a fixed
+     * profile inside the service and is never a path, a URL or a container name.
+     */
+    private static function engineParam(): string
+    {
+        $e = (string)($_REQUEST['engine'] ?? $_POST['engine'] ?? $_GET['engine'] ?? '');
+        return $e === 'stt' ? 'stt' : 'tts';
+    }
+
     /** Check Docker, then connect to an existing engine or write the template. */
     private static function voiceEnginePrepare(): array
     {
         if (!self::isPost()) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
-        return VoiceEngineSetupService::prepare();
+        return VoiceEngineSetupService::prepare(self::engineParam());
     }
 
-    /** Save tts_url/tts_voice for the running engine and file it in Folder View 3. */
+    /** Start the Whisper model download inside the running Speaches container (the model name is fixed in the service). */
+    private static function voiceEngineDownload(): array
+    {
+        if (!self::isPost()) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
+        if (self::engineParam() !== 'stt') return ['status' => 'error', 'message' => 'Only the dictation engine downloads a model.'];
+        return VoiceEngineSetupService::startModelDownload();
+    }
+
+    /** Connect: save tts_url/tts_voice (or stt_url/stt_model) for the running engine and file it in Folder View 3. */
     private static function voiceEngineFinish(): array
     {
         if (!self::isPost()) return ['status' => 'error', 'message' => 'This action needs a POST request.'];
-        $r = VoiceEngineSetupService::finish();
+        $r = VoiceEngineSetupService::finish(self::engineParam());
         if (($r['status'] ?? '') === 'ok') $r['settings'] = VoiceService::settings();
         return $r;
     }
@@ -252,7 +274,7 @@ class VoiceHandler
                 'voicemail_list', 'voicemail_mark_heard', 'voicemail_replay', 'voicemail_set_mode',
                 'voicemail_delete', 'voicemail_delete_all', 'voicemail_set_spoken_name',
                 'voice_set_workspace_voice',
-                'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish'];
+                'voice_engine_prepare', 'check_voice_engine', 'voice_engine_finish', 'voice_engine_status', 'voice_engine_download'];
     }
 
     private static function getVoiceSettings(): array

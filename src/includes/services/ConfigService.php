@@ -1065,6 +1065,27 @@ class ConfigService {
             foreach ($sessions as $id => $s) {
                 if (!isset($ordered[$id])) $ordered[$id] = $s;
             }
+            // #385: a drawer that does not list every stored row (a row another tab
+            // or a tool just added, a hidden one, a test fixture) still sends a
+            // reorder, and "not a full list" used to throw that order away, so the
+            // rows snapped back on the next load. The rows the save DOES name take
+            // the slots those same rows already hold, in the saved order. Rows it
+            // does not name keep their place; a save of one row moves nothing.
+            $named = [];
+            foreach (($incoming['sessions'] ?? []) as $s) {
+                $nid = is_array($s) ? (string)($s['id'] ?? '') : '';
+                if ($nid !== '' && isset($ordered[$nid]) && !in_array($nid, $named, true)) $named[] = $nid;
+            }
+            if (count($named) >= 2) {
+                $keys = array_keys($ordered);
+                $n = 0;
+                foreach ($keys as $i => $k) {
+                    if (in_array((string)$k, $named, true)) $keys[$i] = $named[$n++];
+                }
+                $reordered = [];
+                foreach ($keys as $k) $reordered[$k] = $ordered[$k];
+                $ordered = $reordered;
+            }
             $sessions = $ordered;
         }
         $incoming['sessions'] = array_values($sessions);

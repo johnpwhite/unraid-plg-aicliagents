@@ -57,6 +57,55 @@ class ValidationService {
     }
 
     /**
+     * #368 (docs/specs/TERMINAL_URL_LINKS.md): agent scratch files live under
+     * /tmp (Claude Code prints /tmp/claude-0/...). The viewer may READ them;
+     * nothing may write there. Only read actions call validateReadPath(); every
+     * write action still calls validatePath(), which refuses /tmp outside
+     * /tmp/unraid-aicliagents. realpath() is applied first, so a /tmp symlink
+     * that points into a refused place resolves there and is refused.
+     */
+    private static $READ_ONLY_EXTRA_BASES = ['/tmp'];
+
+    /** File names never shown from a scratch folder, even read-only (login copies, keys, tokens). */
+    private static $READ_DENY_NAMES = [
+        'storagestate.json', '.git-credentials', '.netrc', 'id_rsa', 'id_ed25519', 'id_ecdsa',
+        'secrets.cfg', 'credentials', 'credentials.json', '.env',
+    ];
+
+    /**
+     * Like validatePath() for READ actions: also accepts /tmp, except credential
+     * files under the extra base. Returns the resolved path or false.
+     */
+    public static function validateReadPath($path) {
+        $resolved = self::validatePath($path);
+        if ($resolved !== false) return $resolved;
+        if (empty($path) || !is_string($path)) return false;
+        $canon = realpath($path);
+        if ($canon === false) {
+            $parent = realpath(dirname($path));
+            if ($parent === false) return false;
+            $canon = $parent . '/' . basename($path);
+        }
+        $resolved = self::validatePath($canon, self::$READ_ONLY_EXTRA_BASES);
+        if ($resolved === false) return false;
+        $name = strtolower(basename($resolved));
+        if (in_array($name, self::$READ_DENY_NAMES, true)
+            || substr($name, -6) === '.token' || substr($name, -4) === '.pem' || substr($name, -4) === '.key') {
+            return false;
+        }
+        return $resolved;
+    }
+
+    /**
+     * True when $resolved is readable through the viewer but not writable: it is
+     * under /tmp and outside every write allow-list base.
+     */
+    public static function isReadOnlyPath($resolved): bool {
+        return is_string($resolved) && $resolved !== '' && self::validatePath($resolved) === false
+            && self::validatePath($resolved, self::$READ_ONLY_EXTRA_BASES) !== false;
+    }
+
+    /**
      * Like validatePath(), but tolerant of a not-yet-created path at ANY depth.
      * validatePath() only accepts a missing file whose PARENT dir exists; this
      * walks up to the nearest EXISTING ancestor, canonicalises THAT against the

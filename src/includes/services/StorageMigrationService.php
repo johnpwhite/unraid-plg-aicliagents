@@ -63,19 +63,61 @@ class StorageMigrationService {
         // SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1: route the agent-mount arm through
         // AgentRegistry::agentPath() instead of repeating the literal AGENT_BASE path.
         $mnt = ($type === 'agent') ? AgentRegistry::agentPath($id) : UtilityService::getWorkDir($id) . "/home";
+        // #373: name the uppers to wipe BEFORE the unmount, while the kernel
+        // still shows the live mount's own upperdir/workdir.
+        $wipeDirs = self::rebuildWipeDirs((string)$type, (string)$id, (string)$persistPath, $mnt);
         exec("umount -l " . escapeshellarg($mnt) . " 2>/dev/null");
         
         // 2. Wipe Flash
         foreach (glob("$persistPath/{$type}_{$id}_*.sqsh") as $f) @unlink($f);
 
-        // 3. Wipe ZRAM
-        $zramBase = "/tmp/unraid-aicliagents/zram_upper/{$type}s/$id";
-        if (is_dir($zramBase)) exec("rm -rf " . escapeshellarg($zramBase));
+        // 3. Wipe the upper(s): zram base plus, for a home, the live disk upper.
+        foreach ($wipeDirs as $dir) {
+            if (is_dir($dir)) exec("rm -rf " . escapeshellarg($dir));
+        }
 
         $flashMB = round($flashOld / 1024 / 1024, 2);
         LogService::log("Successfully wiped all storage for $id. Reclaimed $flashMB MB of Flash space and $ramOld MB of RAM.", LogService::LOG_INFO, "StorageMigrationService");
         
         return true;
+    }
+
+    /**
+     * #373 (docs/specs/HOME_STORAGE_LIFECYCLE.md "the live mount wins"): the
+     * directories a nuclear rebuild must remove. Always the zram base of the
+     * entity. For a home also the live mount's own upperdir and workdir (they
+     * sit on disk when the home runs with a disk upper) and the policy disk
+     * upper/work for the persist path. A live path is used only when it has the
+     * shape of an upper/work dir of THIS entity, so an odd mount option can
+     * never make the rebuild delete an unrelated folder. Pure: the mount table
+     * and zram base are arguments.
+     *
+     * @return string[]
+     */
+    public static function rebuildWipeDirs(
+        string $type,
+        string $id,
+        string $persistPath,
+        string $mnt,
+        ?string $mounts = null,
+        string $zramBase = StoragePathResolver::ZRAM_BASE
+    ): array {
+        $dirs = [rtrim($zramBase, '/') . "/{$type}s/$id"];
+        if ($type !== 'home') return $dirs;
+        $safe = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $id) ?: 'unknown';
+        if ($mounts === null) {
+            $mounts = is_readable('/proc/mounts') ? (string)@file_get_contents('/proc/mounts') : '';
+        }
+        foreach (['upperdir' => '_upper', 'workdir' => '_work'] as $opt => $dirName) {
+            $live = StorageMountService::overlayOptionAt($mounts, rtrim($mnt, '/'), $opt);
+            if ($live !== null && preg_match('#/' . $dirName . '/homes/' . preg_quote($safe, '#') . '/?$#', $live)) {
+                $dirs[] = rtrim($live, '/');
+            }
+            if ($persistPath !== '') {
+                $dirs[] = rtrim($persistPath, '/') . "/$dirName/homes/$safe";
+            }
+        }
+        return array_values(array_unique($dirs));
     }
 
     /**

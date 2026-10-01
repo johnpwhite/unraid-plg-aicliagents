@@ -501,6 +501,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:12px; opacity:0.8;">Dictate into a workspace from the microphone icon in the terminal drawer. Leave the endpoint empty to use the browser's own speech recognition.</div>
                         </dd>
 
+                        <?php /* VOICE_ENGINE_SETUP.md #381 #382: the "Set up local dictation" row. */ require __DIR__ . '/VoiceSttSetupCard.php'; ?>
+
                         <dt>Transcription endpoint URL</dt>
                         <dd>
                             <input type="text" id="aicli-voice-stt-url" aria-label="Transcription endpoint URL" onchange="aicliVoiceSaveField('stt_url')" placeholder="http://192.168.1.4:8000" style="width:100%;">
@@ -773,28 +775,66 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     // event's `text` holds only the words still in progress.
                     // So the result is every phrase plus that last text.
                     var heard = [];
-                    box.css('color', '').text('Listening… 3 s');
+                    var interim = '';
+                    var baseSeconds = null;
+                    var stopTimer = null;
+                    var answerTimer = null;
+                    // The box shows what is going on at every step: the seconds left,
+                    // the words heard so far (finished phrases plus the ones still
+                    // in progress), then "Transcribing…" while the engine answers.
+                    var show = function (head) {
+                        var said = heard.concat(interim.trim() ? [interim.trim()] : []).join(' ');
+                        box.css('color', '').text(said ? head + ' ' + said : head);
+                    };
+                    var finish = function () {
+                        done = true;
+                        window.removeEventListener('aicli-voice-input', onEvt);
+                        if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+                        if (answerTimer) { clearTimeout(answerTimer); answerTimer = null; }
+                    };
+                    box.css('color', '').text('Listening… 3 s left');
                     var onEvt = function (e) {
                         var d = (e && e.detail) || {};
                         if (d.state === 'refused') {
-                            done = true;
-                            window.removeEventListener('aicli-voice-input', onEvt);
+                            finish();
                             box.css('color', '#f87171').text(d.error || 'Test failed.');
                         } else if (d.state === 'recording') {
                             if (typeof d.phrase === 'string' && d.phrase.trim()) heard.push(d.phrase.trim());
+                            if (typeof d.interim === 'string') interim = d.interim;
+                            if (typeof d.error === 'string' && d.error) { box.css('color', '#f87171').text(d.error); return; }
+                            if (typeof d.seconds === 'number') {
+                                if (baseSeconds === null) baseSeconds = d.seconds;
+                                var left = Math.max(0, 3 - (d.seconds - baseSeconds));
+                                show('Listening… ' + left + ' s left');
+                            } else {
+                                show('Listening…');
+                            }
                             // The 3 s start when the microphone really records
                             // (after a permission prompt), not at the click.
                             if (!timerStarted) {
                                 timerStarted = true;
-                                setTimeout(function () {
-                                    if (!done) api.stopInput();
+                                stopTimer = setTimeout(function () {
+                                    stopTimer = null;
+                                    if (done) return;
+                                    interim = '';
+                                    show('Transcribing…');
+                                    api.stopInput();
+                                    // Never wait for ever: the engine may be loading its model.
+                                    answerTimer = setTimeout(function () {
+                                        if (done) return;
+                                        finish();
+                                        box.css('color', '#f87171').text('No answer from the transcription server after 60 s. Check the endpoint and try again.');
+                                    }, 60000);
                                 }, 3000);
                             }
+                        } else if (d.state === 'transcribing') {
+                            interim = '';
+                            show('Transcribing…');
                         } else if (d.state === 'idle' && typeof d.text === 'string') {
-                            done = true;
-                            window.removeEventListener('aicli-voice-input', onEvt);
+                            finish();
                             if (d.text.trim()) heard.push(d.text.trim());
-                            box.css('color', '').text(heard.length ? heard.join(' ') : 'Nothing was recognised.');
+                            if (!heard.length && typeof d.error === 'string' && d.error) box.css('color', '#f87171').text(d.error);
+                            else box.css('color', '').text(heard.length ? heard.join(' ') : 'Nothing was recognised.');
                         }
                     };
                     window.addEventListener('aicli-voice-input', onEvt);

@@ -90,8 +90,14 @@ class AssetsHandler {
         $allowMissing = filter_var($_POST['allow_missing'] ?? $_GET['allow_missing'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
         $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
-        $resolved = ValidationService::validatePath($rawPath);
+        // #368: /tmp is readable here (and only here); see ValidationService::validateReadPath.
+        $resolved = ValidationService::validateReadPath($rawPath);
         if ($resolved === false) {
+            return ['status' => 'error', 'message' => 'File not found or access denied'];
+        }
+        $readOnly = ValidationService::isReadOnlyPath($resolved);
+        if ($readOnly && $allowMissing) {
+            // A create-on-save buffer under a read-only base could never be saved.
             return ['status' => 'error', 'message' => 'File not found or access denied'];
         }
 
@@ -140,6 +146,7 @@ class AssetsHandler {
             'size'      => strlen($bytes),
             'truncated' => $truncated,
             'exists'    => true,
+            'readOnly'  => $readOnly,
         ];
     }
 }

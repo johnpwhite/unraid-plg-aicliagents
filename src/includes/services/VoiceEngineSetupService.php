@@ -3,7 +3,10 @@
  * <module_context>
  *     <name>VoiceEngineSetupService</name>
  *     <description>The guided natural-voice setup (docs/specs/AGENT_VOICE.md,
- *     "#323 guided setup"). Checks that Docker is on, finds an existing Kokoro
+ *     "#323 guided setup") and, with the same code, the local dictation setup
+ *     (docs/specs/VOICE_ENGINE_SETUP.md: engine 'stt' = a Speaches Whisper
+ *     server; Connect reads an installed container's real settings, #381 #382).
+ *     Checks that Docker is on, finds an existing Kokoro
  *     container, or writes a corrected Kokoro-FastAPI-CPU template to dockerMan's
  *     user templates (no host folder mapped, a free host port) so Unraid's own
  *     Add Container page can create the container.
@@ -12,7 +15,8 @@
  *     <dependencies>AdminService (setSetting for tts_url/tts_voice), AtomicWriteService
  *     (template and docker.json writes).</dependencies>
  *     <constraints>Never runs docker and never calls a Docker API write endpoint:
- *     only GET /_ping, /containers/json and /containers/{id}/json. No shell. The
+ *     only GET /_ping, /containers/json, /containers/{id}/json and
+ *     /containers/{id}/logs. No shell. The
  *     engine URL is always built here from the container's own settings, never
  *     taken from a request. Never writes a /mnt/user path. Never deletes a file:
  *     an existing template is renamed to a dated .aicli-bak copy.</constraints>
@@ -44,6 +48,33 @@ class VoiceEngineSetupService
     public const FOLDER_NAME    = 'aicliagents';
     public const DEFAULT_VOICE  = 'af_heart';
 
+    // ---- engine profiles (docs/specs/VOICE_ENGINE_SETUP.md R1) -----------------
+    public const STT_IMAGE        = 'ghcr.io/speaches-ai/speaches';
+    public const STT_TAG          = 'latest-cpu';
+    public const STT_MODEL        = 'Systran/faster-whisper-small';
+    /** Named Docker volume for the Whisper model cache: no host folder (R5, the #378 lesson). */
+    public const STT_CACHE_VOLUME = 'aicli-speaches-hf-cache';
+    public const PROFILES = [
+        'tts' => ['label' => 'Kokoro', 'name' => 'Kokoro-FastAPI-CPU', 'template' => 'my-Kokoro-FastAPI-CPU.xml',
+            'image' => 'ghcr.io/remsky/kokoro-fastapi-cpu', 'prefix' => 'ghcr.io/remsky/kokoro-fastapi',
+            'port' => 8880, 'first' => 8880, 'last' => 8899],
+        'stt' => ['label' => 'Speaches', 'name' => 'Speaches-CPU', 'template' => 'my-Speaches-CPU.xml',
+            'image' => 'ghcr.io/speaches-ai/speaches', 'prefix' => 'ghcr.io/speaches-ai/speaches',
+            'port' => 8000, 'first' => 8010, 'last' => 8029],
+    ];
+
+    /** The engine key: 'stt' or (anything else) 'tts'. */
+    public static function engineKey(?string $engine): string
+    {
+        return $engine === 'stt' ? 'stt' : 'tts';
+    }
+
+    /** @return array{label:string,name:string,template:string,image:string,prefix:string,port:int,first:int,last:int} */
+    public static function profile(?string $engine): array
+    {
+        return self::PROFILES[self::engineKey($engine)];
+    }
+
     // ---- test seams (null = the real path / transport) ----------------------
     public static ?string $dockerCfgPath = null;
     public static ?string $templatesDir = null;
@@ -53,8 +84,16 @@ class VoiceEngineSetupService
     public static ?array $procNetPaths = null;
     /** @var callable|null fn(string $path): ?array — decoded JSON of a Docker API GET, null on failure. */
     public static $dockerApi = null;
+    /** @var callable|null fn(string $path): ?string — raw body of a Docker API GET (the logs stream), null on failure. */
+    public static $dockerRaw = null;
     /** @var callable|null fn(string $url): array{status:int,body:string} — GET for the engine probe. */
     public static $httpGet = null;
+    /** @var callable|null fn(string $url): array{status:int,body:string,timedOut?:bool} — the POST that starts the model download. */
+    public static $httpPost = null;
+    /** @var string|null where the "download started" marker lives (default: the plugin's RAM tmp folder). */
+    public static ?string $downloadMarker = null;
+    /** A download that started longer ago than this, and still shows no model, is started again. */
+    public const DOWNLOAD_RETRY_SECONDS = 1800;
     /** @var callable|null fn(): string — this server's LAN address. */
     public static $serverIp = null;
     /** @var callable|null fn(): int — clock for the backup file name. */
@@ -64,7 +103,8 @@ class VoiceEngineSetupService
     {
         self::$dockerCfgPath = self::$templatesDir = self::$folderViewPluginDir = self::$folderViewCfgDir = null;
         self::$procNetPaths = null;
-        self::$dockerApi = self::$httpGet = self::$serverIp = self::$now = null;
+        self::$dockerApi = self::$dockerRaw = self::$httpGet = self::$httpPost = self::$serverIp = self::$now = null;
+        self::$downloadMarker = null;
     }
 
     private static function templatesDir(): string
@@ -72,15 +112,15 @@ class VoiceEngineSetupService
         return rtrim(self::$templatesDir ?? '/boot/config/plugins/dockerMan/templates-user', '/');
     }
 
-    public static function templatePath(): string
+    public static function templatePath(string $engine = 'tts'): string
     {
-        return self::templatesDir() . '/' . self::TEMPLATE_FILE;
+        return self::templatesDir() . '/' . self::profile($engine)['template'];
     }
 
     /** Unraid's own Add Container page for the plugin's template. */
-    public static function addContainerUrl(): string
+    public static function addContainerUrl(string $engine = 'tts'): string
     {
-        return '/Docker/AddContainer?xmlTemplate=' . rawurlencode('user:' . self::templatePath());
+        return '/Docker/AddContainer?xmlTemplate=' . rawurlencode('user:' . self::templatePath($engine));
     }
 
     // ---- Docker state (read-only) -------------------------------------------
@@ -126,13 +166,90 @@ class VoiceEngineSetupService
         return is_array($data) ? $data : null;
     }
 
+    /** @return string|null the raw body of a Docker API GET, or null when Docker does not answer. */
+    private static function dockerRawBody(string $path): ?string
+    {
+        if (self::$dockerRaw !== null) {
+            $r = (self::$dockerRaw)($path);
+            return is_string($r) ? $r : null;
+        }
+        if (!function_exists('curl_init') || !file_exists('/var/run/docker.sock')) return null;
+        $ch = curl_init('http://localhost' . $path);
+        curl_setopt($ch, CURLOPT_UNIX_SOCKET_PATH, '/var/run/docker.sock');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPGET, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+        curl_setopt($ch, CURLOPT_MAXFILESIZE, 262144);
+        $body = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        return ($body === false || $status < 200 || $status >= 300) ? null : (string)$body;
+    }
+
     /**
-     * The existing Kokoro-FastAPI container, if any. A running one wins over a
+     * #382: the last non-empty line the container wrote (stdout or stderr), for a
+     * stopped or crashing container. Docker's logs body is a stream of frames (an
+     * 8-byte header, then the text) unless the container has a tty, then plain text.
+     * The line is cleaned of control and colour codes and cut to 200 characters.
+     * Empty when Docker does not answer or the container wrote nothing.
+     */
+    public static function lastLogLine(string $containerId): string
+    {
+        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $containerId)) return '';
+        $raw = self::dockerRawBody('/containers/' . $containerId . '/logs?stdout=1&stderr=1&tail=5');
+        if ($raw === null || $raw === '') return '';
+        $text = '';
+        $len = strlen($raw);
+        $framed = $len >= 8 && in_array(ord($raw[0]), [0, 1, 2], true) && substr($raw, 1, 3) === "\0\0\0";
+        if ($framed) {
+            $i = 0;
+            while ($i + 8 <= $len) {
+                $size = unpack('N', substr($raw, $i + 4, 4))[1];
+                $text .= substr($raw, $i + 8, $size);
+                $i += 8 + $size;
+            }
+        } else {
+            $text = $raw;
+        }
+        $text = (string)preg_replace('/\x1b\[[0-9;?]*[A-Za-z]/', '', $text);
+        $lines = preg_split('/\r?\n/', $text) ?: [];
+        for ($k = count($lines) - 1; $k >= 0; $k--) {
+            $line = trim((string)preg_replace('/[\x00-\x1f\x7f]+/', ' ', $lines[$k]));
+            if ($line !== '') return function_exists('mb_substr') ? mb_substr($line, 0, 200) : substr($line, 0, 200);
+        }
+        return '';
+    }
+
+    /**
+     * #382: how a container that is not running is doing. From `docker inspect`:
+     * 'crashing' when it is restarting, exited with a non-zero code, or has an error;
+     * 'stopped' otherwise. The last log line is added for both.
+     *
+     * @return array{state:string,exitCode:int,error:string,logLine:string}
+     */
+    public static function stoppedState(string $containerId): array
+    {
+        $info = preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $containerId) ? self::docker('/containers/' . $containerId . '/json') : null;
+        $st = is_array($info) ? (array)($info['State'] ?? []) : [];
+        $exit = (int)($st['ExitCode'] ?? 0);
+        $err = trim((string)($st['Error'] ?? ''));
+        $crashing = !empty($st['Restarting']) || $exit !== 0 || $err !== '';
+        return [
+            'state' => $crashing ? 'crashing' : 'stopped',
+            'exitCode' => $exit,
+            'error' => function_exists('mb_substr') ? mb_substr($err, 0, 200) : substr($err, 0, 200),
+            'logLine' => self::lastLogLine($containerId),
+        ];
+    }
+
+    /**
+     * The existing engine container, if any. A running one wins over a
      * stopped one.
      *
      * @return array{id:string,name:string,running:bool,state:string,image:string}|null
      */
-    public static function findExisting(): ?array
+    public static function findExisting(string $engine = 'tts'): ?array
     {
         $list = self::docker('/containers/json?all=1');
         if (!is_array($list)) return null;
@@ -140,7 +257,7 @@ class VoiceEngineSetupService
         foreach ($list as $c) {
             if (!is_array($c)) continue;
             $image = (string)($c['Image'] ?? '');
-            if (stripos($image, self::IMAGE_PREFIX) !== 0) continue;
+            if (stripos($image, self::profile($engine)['prefix']) !== 0) continue;
             $name = ltrim((string)(($c['Names'][0] ?? '')), '/');
             $entry = [
                 'id' => (string)($c['Id'] ?? ''),
@@ -160,15 +277,17 @@ class VoiceEngineSetupService
      * network: server IP + 8880. Another network with its own address: that
      * address + 8880. null when no reachable address is known.
      */
-    public static function engineUrlFor(string $containerId): ?string
+    public static function engineUrlFor(string $containerId, string $engine = 'tts'): ?string
     {
         if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $containerId)) return null;
         $info = self::docker('/containers/' . $containerId . '/json');
         if (!is_array($info)) return null;
+        $cport = self::profile($engine)['port'];
+        $tpl = self::templateSettings($engine);
         $mode = (string)($info['HostConfig']['NetworkMode'] ?? 'bridge');
-        $key = self::CONTAINER_PORT . '/tcp';
+        $key = $cport . '/tcp';
         if ($mode === 'host') {
-            return self::urlFor(self::serverIp(), self::CONTAINER_PORT);
+            return self::urlFor(self::serverIp(), $cport);
         }
         if ($mode === 'bridge' || $mode === 'default' || $mode === '') {
             $port = 0;
@@ -178,15 +297,59 @@ class VoiceEngineSetupService
                     if ($p > 0) { $port = $p; break 2; }
                 }
             }
+            // #382: a container that reports no binding (stopped and never started): the
+            // host port the user applied on the Add Container page, from their template.
+            if ($port <= 0) $port = (int)($tpl['hostPort'] ?? 0);
             return $port > 0 ? self::urlFor(self::serverIp(), $port) : null;
         }
         foreach ((array)($info['NetworkSettings']['Networks'] ?? []) as $net) {
             $ip = (string)($net['IPAddress'] ?? '');
             if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)) {
-                return self::urlFor($ip, self::CONTAINER_PORT);
+                return self::urlFor($ip, $cport);
             }
         }
+        // #382: stopped on a custom network reports no address; the template's own
+        // address (MyIP) is what the user applied.
+        $myIp = (string)($tpl['ip'] ?? '');
+        if ($myIp !== '' && filter_var($myIp, FILTER_VALIDATE_IP)) return self::urlFor($myIp, $cport);
         return null;
+    }
+
+    /**
+     * #382: what the user applied on Unraid's Add Container page, read from their
+     * user template (written by this wizard, then possibly edited by hand): the host
+     * port of the engine's port, the container's own address (MyIP), the network and
+     * the model in the preload variable. Empty values when there is no readable
+     * template. Nothing here is taken from a request.
+     *
+     * @return array{hostPort:int,ip:string,network:string,model:string}
+     */
+    public static function templateSettings(string $engine = 'tts'): array
+    {
+        $out = ['hostPort' => 0, 'ip' => '', 'network' => '', 'model' => ''];
+        $path = self::templatePath($engine);
+        if (!is_file($path)) return $out;
+        $raw = @file_get_contents($path);
+        if ($raw === false || $raw === '' || stripos($raw, '<!DOCTYPE') !== false || stripos($raw, '<!ENTITY') !== false) return $out;
+        $prev = libxml_use_internal_errors(true);
+        $xml = @simplexml_load_string($raw, 'SimpleXMLElement', LIBXML_NONET | LIBXML_NOCDATA);
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$xml instanceof \SimpleXMLElement) return $out;
+        $out['network'] = trim((string)($xml->Network ?? ''));
+        $out['ip'] = trim((string)($xml->MyIP ?? ''));
+        $cport = (string)self::profile($engine)['port'];
+        foreach ($xml->Config ?? [] as $cfg) {
+            $type = (string)($cfg['Type'] ?? '');
+            $target = (string)($cfg['Target'] ?? '');
+            $value = trim((string)$cfg);
+            if ($type === 'Port' && $target === $cport && ctype_digit($value)) $out['hostPort'] = (int)$value;
+            if ($type === 'Variable' && $target === 'PRELOAD_MODELS') {
+                $list = json_decode($value, true);
+                if (is_array($list) && isset($list[0]) && is_string($list[0])) $out['model'] = $list[0];
+            }
+        }
+        return $out;
     }
 
     private static function urlFor(string $host, int $port): ?string
@@ -250,11 +413,12 @@ class VoiceEngineSetupService
         return $used;
     }
 
-    /** The first free host port in 8880–8899, or null. */
-    public static function choosePort(): ?int
+    /** The first free host port in the engine's range (tts 8880–8899, stt 8010–8029), or null. */
+    public static function choosePort(string $engine = 'tts'): ?int
     {
         $used = self::usedPorts();
-        for ($p = self::PORT_FIRST; $p <= self::PORT_LAST; $p++) {
+        $prof = self::profile($engine);
+        for ($p = $prof['first']; $p <= $prof['last']; $p++) {
             if (!isset($used[$p])) return $p;
         }
         return null;
@@ -312,6 +476,46 @@ class VoiceEngineSetupService
         return $out;
     }
 
+    /**
+     * The Speaches (Whisper) template for local dictation (docs/specs/VOICE_ENGINE_SETUP.md).
+     * Bridge network, one host port, NO host folder: the model cache is a Docker named
+     * volume given in the extra parameters, so Docker gives it the image's own owner
+     * (the image runs as uid 1000; a host folder made by Unraid as 99:100 would refuse
+     * the model download — the #378 lesson). The container downloads the model at its
+     * first start (PRELOAD_MODELS) and runs it in int8 on the CPU.
+     */
+    public static function sttTemplateXml(int $port): string
+    {
+        if ($port < 1024 || $port > 65535) throw new \InvalidArgumentException('invalid port');
+        $p = self::profile('stt');
+        $x = static fn(string $v): string => htmlspecialchars($v, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+        $var = static function (string $name, string $target, string $value, string $desc) use ($x): string {
+            return '  <Config Name="' . $x($name) . '" Target="' . $x($target) . '" Default="' . $x($value) . '" Description="' . $x($desc)
+                . '" Type="Variable" Display="advanced-hide" Required="false" Mask="false">' . $x($value) . "</Config>\n";
+        };
+        $extra = "--health-cmd='curl -fsS -m 5 http://localhost:" . $p['port'] . "/health -o /dev/null || exit 1' --health-interval=60s --health-timeout=10s --health-retries=3"
+            . ' -v ' . self::STT_CACHE_VOLUME . ':/home/ubuntu/.cache/huggingface/hub';
+        $out  = "<?xml version=\"1.0\"?>\n<Container version=\"2\">\n";
+        $out .= '  <Name>' . $p['name'] . "</Name>\n";
+        $out .= '  <Repository>' . self::STT_IMAGE . ':' . self::STT_TAG . "</Repository>\n";
+        $out .= '  <Registry>' . self::STT_IMAGE . "</Registry>\n";
+        $out .= "  <Network>bridge</Network>\n";
+        $out .= '  <ExtraParams>' . $x($extra) . "</ExtraParams>\n";
+        $out .= '  <WebUI>http://[IP]:[PORT:' . $p['port'] . "]/docs</WebUI>\n";
+        $out .= "  <Privileged>false</Privileged>\n";
+        $out .= "  <Support>https://github.com/speaches-ai/speaches/issues</Support>\n";
+        $out .= "  <Project>https://github.com/speaches-ai/speaches</Project>\n";
+        $out .= '  <Overview>' . $x('Speaches: a local Whisper speech-to-text server (CPU build) with an OpenAI-compatible API, for dictation in the AI CLI Agents plugin. Written by the plugin\'s "Set up local dictation" button. No host folder is mapped: the model cache is the Docker volume ' . self::STT_CACHE_VOLUME . ', which Docker creates with the image\'s own owner. The plugin asks the server to download the model (' . self::STT_MODEL . ', about 500 MB) when you press Connect.') . "</Overview>\n";
+        $out .= "  <Beta>False</Beta>\n";
+        $out .= "  <Category>AI: Productivity: Tools: Other: Status:Stable</Category>\n";
+        $out .= '  <Config Name="Web UI Port" Target="' . $p['port'] . '" Default="' . $p['port'] . '" Mode="tcp" Description="Host port for the transcription API. The plugin picked a free one." Type="Port" Display="always" Required="true" Mask="false">' . $port . "</Config>\n";
+        $out .= $var('Preload model', 'PRELOAD_MODELS', json_encode([self::STT_MODEL], JSON_UNESCAPED_SLASHES), 'Models the container downloads at its first start.');
+        $out .= $var('Compute type', 'WHISPER__COMPUTE_TYPE', 'int8', 'int8 is the fast, small choice on a CPU.');
+        $out .= $var('Log Level', 'LOG_LEVEL', 'INFO', 'Logging level for the API');
+        $out .= "</Container>\n";
+        return $out;
+    }
+
     // ---- the three steps --------------------------------------------------------
 
     /**
@@ -320,89 +524,248 @@ class VoiceEngineSetupService
      *  {status:ok, mode:'existing', container, running} — connect only, no write
      *  {status:ok, mode:'template', addContainerUrl, port, backup?}
      */
-    public static function prepare(): array
+    public static function prepare(string $engine = 'tts'): array
     {
+        $engine = self::engineKey($engine);
+        $prof = self::profile($engine);
         $docker = self::dockerState();
         if (!$docker['running']) return ['status' => 'error', 'code' => $docker['enabled'] ? 'docker_stopped' : 'docker_off', 'message' => $docker['message']];
 
-        $existing = self::findExisting();
+        $existing = self::findExisting($engine);
         if ($existing !== null) {
             return ['status' => 'ok', 'mode' => 'existing', 'container' => $existing['name'], 'running' => $existing['running']];
         }
 
-        $port = self::choosePort();
+        $port = self::choosePort($engine);
         if ($port === null) {
-            return ['status' => 'error', 'code' => 'no_port', 'message' => 'Ports ' . self::PORT_FIRST . ' to ' . self::PORT_LAST . ' are all in use. Free one, then try again.'];
+            return ['status' => 'error', 'code' => 'no_port', 'message' => 'Ports ' . $prof['first'] . ' to ' . $prof['last'] . ' are all in use. Free one, then try again.'];
         }
 
-        $xml = self::templateXml($port);
+        $xml = $engine === 'stt' ? self::sttTemplateXml($port) : self::templateXml($port);
         $dir = self::templatesDir();
         if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
             return ['status' => 'error', 'code' => 'write_failed', 'message' => 'Could not create the Docker templates folder on the flash drive.'];
         }
-        $path = self::templatePath();
+        $path = self::templatePath($engine);
         $backup = null;
         if (is_file($path)) {
             if ((string)@file_get_contents($path) !== $xml) {
                 $ts = self::$now !== null ? (int)(self::$now)() : time();
                 $backup = $path . '.aicli-bak-' . date('Ymd-His', $ts);
                 if (!@rename($path, $backup)) {
-                    return ['status' => 'error', 'code' => 'write_failed', 'message' => 'Could not keep a copy of the existing Kokoro template, so it was not replaced.'];
+                    return ['status' => 'error', 'code' => 'write_failed', 'message' => 'Could not keep a copy of the existing ' . $prof['label'] . ' template, so it was not replaced.'];
                 }
             }
         }
         if (!AtomicWriteService::write($path, $xml)) {
-            return ['status' => 'error', 'code' => 'write_failed', 'message' => 'Could not write the Kokoro template to the flash drive.'];
+            return ['status' => 'error', 'code' => 'write_failed', 'message' => 'Could not write the ' . $prof['label'] . ' template to the flash drive.'];
         }
-        $out = ['status' => 'ok', 'mode' => 'template', 'addContainerUrl' => self::addContainerUrl(), 'port' => $port];
+        $out = ['status' => 'ok', 'mode' => 'template', 'addContainerUrl' => self::addContainerUrl($engine), 'port' => $port];
         if ($backup !== null) $out['backup'] = basename($backup);
         return $out;
     }
 
     /**
-     * Step 4 (the poll). Read-only.
-     * state: docker_off | docker_stopped | no_container | stopped | starting | ready
+     * The sentence for a container that is not running (#382): stopped or crashing,
+     * with the last log line, and the permission help for the natural voice (#378).
+     *
+     * @param array{state:string,exitCode:int,error:string,logLine:string} $st
      */
-    public static function check(): array
+    private static function notRunningMessage(string $engine, string $name, array $st): string
     {
+        if ($st['state'] === 'crashing') {
+            $msg = 'The ' . $name . ' container keeps stopping' . ($st['exitCode'] !== 0 ? ' (exit code ' . $st['exitCode'] . ')' : '') . '.';
+            if ($st['error'] !== '') $msg .= ' Docker says: ' . $st['error'] . '.';
+        } else {
+            $msg = 'The ' . $name . ' container is stopped. Start it from the Docker tab.';
+        }
+        if ($st['logLine'] !== '') $msg .= ' Last log line: ' . $st['logLine'];
+        if ($engine === 'tts') $msg .= ' ' . self::PERMISSION_HELP;
+        return $msg;
+    }
+
+    /**
+     * Step 4 (the poll). Read-only.
+     * state: docker_off | docker_stopped | no_container | stopped | crashing | starting | ready
+     */
+    public static function check(string $engine = 'tts'): array
+    {
+        $engine = self::engineKey($engine);
+        $prof = self::profile($engine);
         $docker = self::dockerState();
         if (!$docker['running']) {
             return ['status' => 'ok', 'state' => $docker['enabled'] ? 'docker_stopped' : 'docker_off', 'message' => $docker['message']];
         }
-        $c = self::findExisting();
+        $c = self::findExisting($engine);
         if ($c === null) {
             return ['status' => 'ok', 'state' => 'no_container', 'message' => 'Waiting for you to press Apply on the Add Container page. Unraid downloads the image first; this can take several minutes.'];
         }
         if (!$c['running']) {
-            return ['status' => 'ok', 'state' => 'stopped', 'container' => $c['name'], 'message' => 'The ' . $c['name'] . ' container is stopped. Start it from the Docker tab. ' . self::PERMISSION_HELP];
+            $st = self::stoppedState($c['id']);
+            return ['status' => 'ok', 'state' => $st['state'], 'container' => $c['name'], 'message' => self::notRunningMessage($engine, $c['name'], $st)];
         }
-        $url = self::engineUrlFor($c['id']);
+        $url = self::engineUrlFor($c['id'], $engine);
         if ($url === null) {
-            return ['status' => 'ok', 'state' => 'starting', 'container' => $c['name'], 'message' => 'The ' . $c['name'] . ' container has no port for the speech API. Check its port on the Docker tab.'];
+            return ['status' => 'ok', 'state' => 'starting', 'container' => $c['name'], 'message' => 'The ' . $c['name'] . ' container has no port for the ' . ($engine === 'stt' ? 'transcription' : 'speech') . ' API. Check its port on the Docker tab.'];
         }
-        $voices = self::probe($url);
-        if ($voices === []) {
-            return ['status' => 'ok', 'state' => 'starting', 'container' => $c['name'], 'url' => $url, 'message' => 'Kokoro is starting. The first start can take a minute.'];
+        $found = self::probe($url, $engine);
+        if ($found === []) {
+            // Speaches answers but lists no model: the image does not install one by itself
+            // (PRELOAD_MODELS is ignored), so the plugin asks it to download the model (R6).
+            if ($engine === 'stt' && self::engineHealthy($url)) {
+                $since = self::downloadStartedAt();
+                if ($since !== null) {
+                    $secs = max(0, self::nowTs() - $since);
+                    return ['status' => 'ok', 'state' => 'downloading', 'container' => $c['name'], 'url' => $url, 'elapsed' => $secs,
+                        'message' => 'Downloading the Whisper model (about 500 MB). ' . self::elapsedText($secs) . ' The speech server stays quiet until it is done.'];
+                }
+                return ['status' => 'ok', 'state' => 'needs_model', 'container' => $c['name'], 'url' => $url,
+                    'message' => 'Speaches is running, but it has no Whisper model yet. Starting the download (about 500 MB).'];
+            }
+            $msg = $engine === 'stt'
+                ? 'Speaches is starting. This can take a minute.'
+                : 'Kokoro is starting. The first start can take a minute.';
+            return ['status' => 'ok', 'state' => 'starting', 'container' => $c['name'], 'url' => $url, 'message' => $msg];
         }
-        return ['status' => 'ok', 'state' => 'ready', 'container' => $c['name'], 'url' => $url, 'voices' => count($voices)];
+        return ['status' => 'ok', 'state' => 'ready', 'container' => $c['name'], 'url' => $url]
+            + ($engine === 'stt' ? ['models' => count($found)] : ['voices' => count($found)]);
     }
 
-    /** @return string[] voice ids the engine lists; [] when it does not answer yet. */
-    public static function probe(string $url): array
+    private static function nowTs(): int
     {
-        $target = rtrim($url, '/') . '/v1/audio/voices';
-        if (self::$httpGet !== null) {
-            $r = (self::$httpGet)($target);
-        } else {
-            $ch = curl_init($target);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 4);
-            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
-            curl_setopt($ch, CURLOPT_MAXFILESIZE, 1048576);
-            $body = curl_exec($ch);
-            $r = ['status' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), 'body' => $body === false ? '' : (string)$body];
-            curl_close($ch);
+        return self::$now !== null ? (int)(self::$now)() : time();
+    }
+
+    private static function elapsedText(int $secs): string
+    {
+        if ($secs < 60) return 'Started less than a minute ago.';
+        $m = intdiv($secs, 60);
+        return 'Started ' . $m . ($m === 1 ? ' minute' : ' minutes') . ' ago.';
+    }
+
+    private static function downloadMarkerPath(): string
+    {
+        if (self::$downloadMarker !== null) return self::$downloadMarker;
+        $base = getenv('AICLI_TMP_BASE') ?: '/tmp/unraid-aicliagents';
+        return rtrim($base, '/') . '/voice-stt-download.json';
+    }
+
+    /** @return int|null when the model download was started, or null when none is running (or it is too old to trust). */
+    private static function downloadStartedAt(): ?int
+    {
+        $d = json_decode((string)@file_get_contents(self::downloadMarkerPath()), true);
+        $t = is_array($d) ? (int)($d['startedAt'] ?? 0) : 0;
+        if ($t <= 0 || self::nowTs() - $t >= self::DOWNLOAD_RETRY_SECONDS) return null;
+        return $t;
+    }
+
+    /** True when Speaches answers its health check. */
+    private static function engineHealthy(string $url): bool
+    {
+        return (int)(self::httpGetJson(rtrim($url, '/') . '/health')['status'] ?? 0) === 200;
+    }
+
+    /**
+     * The model download (R6). POST only. Asks the running Speaches to download the
+     * fixed model STT_MODEL (nothing comes from the request). The server keeps downloading
+     * after this short request ends, so the request is cut after 3 seconds and the page
+     * polls check(). A marker file stops a second download from starting.
+     */
+    public static function startModelDownload(): array
+    {
+        $c = self::findExisting('stt');
+        if ($c === null || !$c['running']) return ['status' => 'error', 'message' => 'The Speaches container is not running.'];
+        $url = self::engineUrlFor($c['id'], 'stt');
+        if ($url === null || !self::engineHealthy($url)) return ['status' => 'error', 'message' => 'Speaches does not answer yet. Wait a moment and try again.'];
+        if (self::probe($url, 'stt') !== []) return ['status' => 'ok', 'state' => 'ready', 'message' => 'The Whisper model is already installed.'];
+        $since = self::downloadStartedAt();
+        if ($since !== null) return ['status' => 'ok', 'state' => 'downloading', 'elapsed' => max(0, self::nowTs() - $since), 'message' => 'The download is already running.'];
+
+        $marker = self::downloadMarkerPath();
+        $dir = dirname($marker);
+        if (!is_dir($dir)) @mkdir($dir, 0755, true);
+        if (!AtomicWriteService::write($marker, json_encode(['startedAt' => self::nowTs(), 'model' => self::STT_MODEL]))) {
+            return ['status' => 'error', 'message' => 'Could not record the download start. Try again.'];
         }
+        $target = rtrim($url, '/') . '/v1/models/' . self::STT_MODEL;
+        $r = self::$httpPost !== null ? (array)(self::$httpPost)($target) : self::curlPost($target);
+        $code = (int)($r['status'] ?? 0);
+        $ok = !empty($r['timedOut']) || ($code >= 200 && $code < 300);
+        if (!$ok) {
+            @unlink($marker);
+            return ['status' => 'error', 'message' => 'Speaches refused to download the Whisper model' . ($code > 0 ? ' (HTTP ' . $code . ')' : '') . '. Check the Speaches container log.'];
+        }
+        return ['status' => 'ok', 'state' => 'downloading', 'elapsed' => 0, 'message' => 'The Whisper model download started.'];
+    }
+
+    /** @return array{status:int,body:string,timedOut:bool} one POST, cut after 3 seconds (the engine keeps working). */
+    private static function curlPost(string $target): array
+    {
+        $ch = curl_init($target);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, '');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+        $body = curl_exec($ch);
+        $r = ['status' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), 'body' => $body === false ? '' : (string)$body,
+              'timedOut' => curl_errno($ch) === CURLE_OPERATION_TIMEDOUT];
+        curl_close($ch);
+        return $r;
+    }
+
+    /**
+     * #382 (docs/specs/VOICE_ENGINE_SETUP.md R2): read-only. What is installed, in what
+     * state, and what Connect would connect to. The page calls it on load to choose
+     * between "Set up ..." and "Connect".
+     *
+     * installed=false: no container of the engine's image (or Docker is off or stopped).
+     * state as check(), plus 'not_installed'.
+     */
+    public static function status(string $engine = 'tts'): array
+    {
+        $engine = self::engineKey($engine);
+        $docker = self::dockerState();
+        if (!$docker['running']) {
+            return ['status' => 'ok', 'engine' => $engine, 'installed' => false, 'state' => $docker['enabled'] ? 'docker_stopped' : 'docker_off', 'message' => $docker['message']];
+        }
+        $c = self::findExisting($engine);
+        if ($c === null) {
+            return ['status' => 'ok', 'engine' => $engine, 'installed' => false, 'state' => 'not_installed', 'message' => ''];
+        }
+        $r = self::check($engine);
+        $r['engine'] = $engine;
+        $r['installed'] = true;
+        // A container that exists but has no answer yet may still have a known URL from its settings.
+        if (!isset($r['url'])) {
+            $u = self::engineUrlFor($c['id'], $engine);
+            if ($u !== null) $r['url'] = $u;
+        }
+        return $r;
+    }
+
+    /**
+     * @return string[] what the engine lists: voice ids (tts) or installed transcription
+     *                  model ids (stt); [] when it does not answer yet (or, for stt, has no model yet).
+     */
+    public static function probe(string $url, string $engine = 'tts'): array
+    {
+        $engine = self::engineKey($engine);
+        $base = rtrim($url, '/');
+        if ($engine === 'stt') {
+            // Healthy first, then the models the engine has really installed.
+            if ((int)(self::httpGetJson($base . '/health')['status'] ?? 0) !== 200) return [];
+            $r = self::httpGetJson($base . '/v1/models?task=automatic-speech-recognition');
+            if ((int)($r['status'] ?? 0) !== 200) return [];
+            $data = json_decode((string)($r['body'] ?? ''), true);
+            $ids = [];
+            foreach ((array)($data['data'] ?? []) as $m) {
+                $id = is_array($m) ? (string)($m['id'] ?? '') : (string)$m;
+                if ($id !== '' && preg_match('#^[\w.\-/]{1,64}$#', $id)) $ids[] = $id;
+            }
+            return $ids;
+        }
+        $r = self::httpGetJson($base . '/v1/audio/voices');
         if ((int)($r['status'] ?? 0) !== 200) return [];
         $data = json_decode((string)($r['body'] ?? ''), true);
         $ids = [];
@@ -413,28 +776,61 @@ class VoiceEngineSetupService
         return $ids;
     }
 
-    /**
-     * Step 5. Probes again, saves tts_url and tts_voice, files the container
-     * in the Folder View 3 folder.
-     */
-    public static function finish(): array
+    /** @return array{status:int,body:string} one GET to the engine (through the test seam when set). */
+    private static function httpGetJson(string $target): array
     {
-        $c = self::findExisting();
+        if (self::$httpGet !== null) {
+            return (array)(self::$httpGet)($target);
+        }
+        $ch = curl_init($target);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 4);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+        curl_setopt($ch, CURLOPT_MAXFILESIZE, 1048576);
+        $body = curl_exec($ch);
+        $r = ['status' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), 'body' => $body === false ? '' : (string)$body];
+        curl_close($ch);
+        return $r;
+    }
+
+    /**
+     * Step 5 (Connect). Reads the engine's real settings (see engineUrlFor), probes
+     * it, saves tts_url and tts_voice (or stt_url and stt_model) and files the
+     * container in the Folder View 3 folder.
+     */
+    public static function finish(string $engine = 'tts'): array
+    {
+        $engine = self::engineKey($engine);
+        $prof = self::profile($engine);
+        $c = self::findExisting($engine);
         if ($c === null || !$c['running']) {
-            return ['status' => 'error', 'message' => 'The Kokoro container is not running yet.'];
+            if ($c !== null) {
+                $st = self::stoppedState($c['id']);
+                return ['status' => 'error', 'state' => $st['state'], 'message' => self::notRunningMessage($engine, $c['name'], $st)];
+            }
+            return ['status' => 'error', 'message' => 'The ' . $prof['label'] . ' container is not running yet.'];
         }
-        $url = self::engineUrlFor($c['id']);
-        $voices = $url !== null ? self::probe($url) : [];
-        if ($url === null || $voices === []) {
-            return ['status' => 'error', 'message' => 'Kokoro does not answer yet. Wait a moment and try again.'];
+        $url = self::engineUrlFor($c['id'], $engine);
+        $found = $url !== null ? self::probe($url, $engine) : [];
+        if ($url === null || $found === []) {
+            return ['status' => 'error', 'message' => $prof['label'] . ' does not answer yet. Wait a moment and try again.'];
         }
-        $voice = in_array(self::DEFAULT_VOICE, $voices, true) ? self::DEFAULT_VOICE : $voices[0];
-        foreach (['tts_url' => $url, 'tts_voice' => $voice] as $k => $v) {
+        if ($engine === 'stt') {
+            $wanted = array_values(array_filter([self::templateSettings('stt')['model'], self::STT_MODEL]));
+            $model = $found[0];
+            foreach ($wanted as $w) { if (in_array($w, $found, true)) { $model = $w; break; } }
+            $save = ['stt_url' => $url, 'stt_model' => $model];
+        } else {
+            $voice = in_array(self::DEFAULT_VOICE, $found, true) ? self::DEFAULT_VOICE : $found[0];
+            $save = ['tts_url' => $url, 'tts_voice' => $voice];
+        }
+        foreach ($save as $k => $v) {
             $r = AdminService::setSetting($k, $v);
             if (isset($r['error'])) return ['status' => 'error', 'message' => (string)$r['error']];
         }
         $folder = self::addToFolderView($c['name'], $c['image']);
-        return ['status' => 'ok', 'url' => $url, 'voice' => $voice, 'container' => $c['name'], 'folder' => $folder];
+        return ['status' => 'ok', 'url' => $url, 'container' => $c['name'], 'folder' => $folder]
+            + ($engine === 'stt' ? ['model' => $save['stt_model']] : ['voice' => $save['tts_voice']]);
     }
 
     // ---- Folder View 3 ------------------------------------------------------------

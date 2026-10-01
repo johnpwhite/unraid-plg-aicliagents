@@ -1662,11 +1662,75 @@ class AgentRelayService {
      */
     public static function forgetSessionRelayTraces(string $sessionId): void {
         $sessionId=self::cleanId($sessionId); if ($sessionId==='') return;
+        if (self::isTestSessionId($sessionId)) { self::purgeTestSessionTraces([$sessionId]); return; } // #383
         foreach ((self::actors()['actors'] ?? []) as $a) {
             $sid=self::cleanId(is_array($a)?(string)($a['session_id'] ?? ''):(string)$a);
             if ($sid===$sessionId) return; // topic owner — leave recoverable
         }
         @unlink(self::path("subscriptions/$sessionId.json"));
+    }
+
+    /**
+     * #383 (docs/specs/AGENT_RELAY_POC.md "2026-10-01"): remove every Relay trace of
+     * test sessions (ids that start "e2e", see isTestSessionId): subscription,
+     * delivery folder, direct index folders, and the direct messages they sent or
+     * received. A test run registers a Relay identity and used to leave it behind,
+     * so the contact store and every agent's inbox grew with each run. A session
+     * that is still running is never touched (a live test owns it). Only
+     * isTestSessionId ids are ever removed: a real workspace can never match.
+     *
+     * @param array<int,string>|null $onlyIds limit to these ids (still test ids only)
+     * @return array<int,string> ids purged
+     */
+    public static function purgeTestSessionTraces(?array $onlyIds = null): array {
+        $ids=[];
+        $consider=function(string $raw) use (&$ids, $onlyIds): void {
+            $id=self::cleanId($raw);
+            if ($id==='' || !self::isTestSessionId($id) || isset($ids[$id])) return;
+            if ($onlyIds!==null && !in_array($id,$onlyIds,true)) return;
+            if (ProcessManager::isRunning($id)) return;
+            $ids[$id]=true;
+        };
+        foreach (glob(self::path('subscriptions/*.json')) ?: [] as $f) $consider(basename($f,'.json'));
+        foreach (glob(self::path('deliveries/*'), GLOB_ONLYDIR) ?: [] as $d) $consider(basename($d));
+        foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) foreach (glob(self::path("direct/$box/*"), GLOB_ONLYDIR) ?: [] as $d) $consider(basename($d));
+        // Canonical messages: any thread message whose sender or recipient is a test id.
+        $msgFiles=[];
+        foreach (glob(self::path('direct/dm_*/msg_*.json')) ?: [] as $f) {
+            $m=self::readJson($f,[]);
+            $hit=false;
+            foreach (['sender_session','recipient_session'] as $k) {
+                $consider((string)($m[$k] ?? ''));
+                if (isset($ids[self::cleanId((string)($m[$k] ?? ''))])) $hit=true;
+            }
+            if ($hit) $msgFiles[]=$f;
+        }
+        if (!$ids) return [];
+        foreach (array_keys($ids) as $id) {
+            @unlink(self::path("subscriptions/$id.json"));
+            self::removeTree(self::path("deliveries/$id"));
+            foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) self::removeTree(self::path("direct/$box/$id"));
+        }
+        foreach ($msgFiles as $f) {
+            // The message also sits in the index folders of its other party (a real
+            // workspace): remove those entries too, or they point at a deleted file.
+            foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) foreach (glob(self::path("direct/$box/*/*_" . basename($f))) ?: [] as $entry) @unlink($entry);
+            @unlink($f);
+        }
+        foreach (glob(self::path('direct/dm_*'), GLOB_ONLYDIR) ?: [] as $dir) @rmdir($dir); // empty threads only
+        self::recordDirectIndexCount();
+        return array_keys($ids);
+    }
+
+    /** Remove a directory tree under the Relay store; a no-op for a missing path. */
+    private static function removeTree(string $dir): void {
+        if (!is_dir($dir) || is_link($dir)) return;
+        foreach (scandir($dir) ?: [] as $e) {
+            if ($e==='.' || $e==='..') continue;
+            $p="$dir/$e";
+            if (is_dir($p) && !is_link($p)) self::removeTree($p); else @unlink($p);
+        }
+        @rmdir($dir);
     }
 
     /**
@@ -1692,6 +1756,8 @@ class AgentRelayService {
             if (ProcessManager::isRunning($id)) continue;
             if (@unlink($file)) $swept[]=$id;
         }
+        // #383: test sessions leave no trace after a reboot either.
+        foreach (self::purgeTestSessionTraces() as $id) $swept[]=$id;
         return $swept;
     }
 

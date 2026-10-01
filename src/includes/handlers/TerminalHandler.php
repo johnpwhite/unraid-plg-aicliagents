@@ -1693,6 +1693,11 @@ class TerminalHandler {
                     : \AICliAgents\Services\TerminalService::findSession($path, $agentId)
             ),
             'terminalGeneration' => \AICliAgents\Services\TerminalGenerationService::current((string)$id),
+            // #365 (docs/specs/TERMINAL_BACKGROUND_WARM.md): true once ttyd's socket
+            // exists. The page mounts the terminal frame only after this, so the
+            // first request never finds no socket (nginx [crit] connect() failed).
+            'terminalSocketReady' => (bool)preg_match('/^[A-Za-z0-9_-]{1,64}$/', (string)$id)
+                && file_exists('/var/run/aicliterm-' . $id . '.sock'),
         ];
     }
 

@@ -600,7 +600,7 @@ class UtilityHandler {
             return ['status' => 'error', 'message' => 'Missing or invalid path'];
         }
         $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
-        $resolved = ValidationService::validatePath($rawPath);
+        $resolved = ValidationService::validateReadPath($rawPath);
         if ($resolved === false) {
             // A REFUSED location is not a missing file, and the caller must be able to
             // say so. Both used to answer exists:false, so the UI reported "File not
@@ -623,6 +623,7 @@ class UtilityHandler {
             'isFile' => $exists && is_file($resolved),
             'path'   => $exists ? $resolved : '',
             'reason' => $exists ? '' : 'not_found',
+            'readOnly' => $exists && ValidationService::isReadOnlyPath($resolved),
         ];
     }
 

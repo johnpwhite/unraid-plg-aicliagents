@@ -50,6 +50,8 @@ class TmuxService {
         self::$tmuxRunner = null;
         self::$sessionResolver = null;
         self::$sleeper = null;
+        self::$processProbe = null;
+        self::$winchSender = null;
     }
 
     /** usleep() that a test can replace, so the Enter ladder does not cost ten real seconds. */
@@ -1290,8 +1292,58 @@ class TmuxService {
                 if ($attempt >= 2) return ['sent' => true, 'confirmed' => false, 'attempts' => $attempt];
             }
             // Our own text is still on the input line: pressing again can only submit it.
+            // #371: two Enters did not take while our text is provably on the input line.
+            // Record what the agent process is doing (the next occurrence explains
+            // itself) and wake it with a window-size signal before the next Enter.
+            if ($onLine === true && $attempt === self::STUCK_NUDGE_AFTER) self::nudgeStuckAgent($name, $sock);
         }
         return ['sent' => true, 'confirmed' => false, 'attempts' => $attempt];
+    }
+
+    /** #371: after this many Enters that did not take, the agent process is inspected and woken. */
+    const STUCK_NUDGE_AFTER = 2;
+
+    /** Test seam (#371): returns the output of `ps -o stat=,wchan=,tpgid= -p <pid>`; null in production. */
+    public static $processProbe = null;
+    /** Test seam (#371): called with (int $pgid) instead of signalling the process group; null in production. */
+    public static $winchSender = null;
+
+    /**
+     * #371 (docs/specs/PASTE_ENTER_CONFIRM.md "Follow-up 2026-10-01"): a Claude Code
+     * session ignored the plugin's Enter for 14 hours while no client was attached, and
+     * took the notice in the same second an owner opened the terminal (a client attach
+     * and a window resize). The cause was never reproduced. Two things are done here:
+     *  1. One log line says what the agent process is doing (state, kernel wait channel,
+     *     tmux mode, attached clients), so the next occurrence is explained by the log.
+     *  2. The agent's foreground process group gets SIGWINCH, the signal a resize sends.
+     *     It only makes the agent re-read the terminal size, so it is safe at any time.
+     * Nothing here presses a key; the ladder's next Enter does that. Never throws.
+     *
+     * @return array{pid:int,pgid:int,signalled:bool}
+     */
+    private static function nudgeStuckAgent(string $name, string $sock): array {
+        $out = ['pid' => 0, 'pgid' => 0, 'signalled' => false];
+        try {
+            $r = self::runTmuxAt($sock, ['display-message', '-p', '-t', $name, '#{pane_pid}|#{pane_in_mode}|#{session_attached}|#{pane_current_command}']);
+            $parts = explode('|', trim((string)($r['out'] ?? '')));
+            $pid = (int)($parts[0] ?? 0);
+            if ($pid <= 0) { LogService::log("Enter did not take in $name and the pane process could not be read (#371).", LogService::LOG_WARN, "TmuxService"); return $out; }
+            $out['pid'] = $pid;
+            $ps = is_callable(self::$processProbe)
+                ? (string)call_user_func(self::$processProbe, $pid)
+                : (string)@shell_exec('ps -o stat=,wchan=,tpgid= -p ' . (int)$pid . ' 2>/dev/null');
+            $f = preg_split('/\s+/', trim($ps)) ?: [];
+            $pgid = (int)($f[2] ?? 0);
+            $out['pgid'] = $pgid;
+            if ($pgid > 0) {
+                if (is_callable(self::$winchSender)) { call_user_func(self::$winchSender, $pgid); $out['signalled'] = true; }
+                elseif (function_exists('posix_kill') && defined('SIGWINCH')) { $out['signalled'] = @posix_kill(-$pgid, SIGWINCH); }
+            }
+            LogService::log("Enter did not take in $name after " . self::STUCK_NUDGE_AFTER . " tries (#371): pane pid $pid, process state '" . ($f[0] ?? '?') . "', wchan '" . ($f[1] ?? '?') . "', pane mode '" . ($parts[1] ?? '?') . "', attached clients " . ($parts[2] ?? '?') . ", command '" . ($parts[3] ?? '?') . "'; sent SIGWINCH to group $pgid: " . ($out['signalled'] ? 'yes' : 'no') . '.', LogService::LOG_WARN, "TmuxService");
+        } catch (\Throwable $e) {
+            LogService::log("Stuck-agent nudge failed for $name: " . $e->getMessage(), LogService::LOG_WARN, "TmuxService");
+        }
+        return $out;
     }
 
     /**
