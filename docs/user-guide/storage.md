@@ -237,6 +237,7 @@ The **Home Storage** tab shows one card for each user that has a home. A card wi
 | Folder line | The folder that holds the layer files. |
 | Orange tile | The unsaved changes. In RAM mode it reads "ZRAM changes (volatile, not yet flushed)". In disk mode it reads "Writable changes (durable, not yet compacted)". |
 | Layer rows | One row per layer with its file name and size. |
+| Old layers strip | Appears only after **Convert to plain folders**, while the plugin keeps the old layers for a rollback. It reads "Old layers kept for rollback: 5.00 MB, removed automatically on 5 Nov 2026" and has the button **Remove old layers**. The date is the day the plugin removes the layers by itself. See "Remove the old layers" below. |
 | Backup strip | The state of the config backup of this home and the button **Config backup…** (**Set up config backup…** when no folder is chosen). A config backup is a copy of the home folder: the settings, sign-ins and history of the agents. It is not a backup of the server. See [Home backup and restore](backup-restore.md). |
 
 A badge **Awaiting idle** (with an hourglass) means the plugin wants to merge this home but waits until no terminal uses it. A home in plain folders never shows this badge.
@@ -307,6 +308,15 @@ Repair changes no data. It mounts the same layers again.
 
 The plugin refuses to delete a home that a workspace is using. Close the workspaces first. It also refuses while a save, backup, restore, merge or convert for that home is queued or running. Wait for the job to end in the activity tray, then try again.
 
+### Remove the old layers
+
+After **Convert to plain folders**, the plugin keeps the old layers of the home for 14 days, so that a rollback is possible. While they exist, the home card shows the strip "Old layers kept for rollback: <size>, removed automatically on <date>". You do not have to do anything: the plugin removes the layers on that date. To get the space back sooner:
+
+1. Press **Remove old layers** on the card. Expect: a dialog **Remove old layers?** with the size that you get back.
+2. Press **Remove**. Expect: "Removed" and the strip disappears. Press **Cancel** to keep the layers.
+
+This is the same removal as the **Remove** button of the line **Left over** on the **Boot disk space** card. The plugin checks again that nobody needs the layers. If a conversion of this home is still open, the strip does not show and the layers stay. The button is off while a job runs on the home. After you remove the layers, you can no longer roll the conversion back.
+
 ### Job states on the card
 
 While a job runs, a small badge appears under the status word. The bar shows a moving stripe. The text has a verb and a state:
@@ -357,11 +367,11 @@ This number (from 4 to 40, default 30) is how many layers a home may build up. T
 Sometimes the plugin needs a merge, but workspaces hold the home. This happens when the disk is nearly full or the RAM area is nearly full. The Activity tray then shows a notice, "Storage tidy-up needs your workspaces closed". It names the reason ("Disk space is low." or "Workspace memory is nearly full.") and lists the open workspaces.
 
 - **Close all and tidy up** closes every workspace, saves their places, merges, and opens them again. A confirmation repeats this before anything closes.
-- **Later** hides the notice for this wait. A later wait asks again.
+- **Later** hides the notice for this wait. A later wait asks again. If the wait still goes on after 24 hours, the notice comes back.
 
 A banner on the terminal page reads "Storage reclaim needed" until the tidy-up is done. When the last workspace closes, it reads "Storage tidy-up starting". You can minimise the banner. If you close the workspaces yourself, the tidy-up starts by itself.
 
-For a home that can change to plain folders, the notice offers the conversion instead. Its title is "Convert this home to plain folders", and its button is **Convert to plain folders**. **Later** works the same way. The banner then reads "Home can change to plain folders". The notice stays when no workspace is open, because no automatic tidy-up runs for such a home. See "Convert a home to plain folders" above. When the plugin refuses the job, the row names the reason and the button works again. When the plugin does not answer, the row says "Could not reach the server."
+For a home that can change to plain folders, the notice offers the conversion instead. Its title is "Convert this home to plain folders", and its button is **Convert to plain folders**. **Later** works the same way. The banner then reads "Home can change to plain folders" and has its own button **Convert to plain folders**. The button opens the same dialog as the notice, so you can convert even when you hid the notice. The notice stays when no workspace is open, because no automatic tidy-up runs for such a home. See "Convert a home to plain folders" above. When the plugin refuses the job, the row names the reason and the button works again. When the plugin does not answer, the row says "Could not reach the server."
 
 ### The field "Work folder for storage jobs"
 
@@ -622,6 +632,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The banner "Home can change to plain folders" has its own button **Convert to plain folders** and no longer points to the notice at the bottom right. **Later** on the notice ends after 24 hours. Spec `docs/specs/STORAGE_RECLAIM_NOTICE.md`, issue #746.
+- **2026-10-22** — The home card shows the old layers that wait for a rollback, with their size and removal date, and the button **Remove old layers**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #747.
 - **2026-10-20** — The migration lists only homes with saved storage or a saved workspace. A user account alone does not add an empty home. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #723.
 - **2026-10-20** — The migration waits for workspaces to stop before it moves storage. A forced agent conversion also waits for its mount to become idle. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #722.
 - **2026-10-20** — The agent conversion compares the full copied tree and checks sample file hashes before it switches storage. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #721.

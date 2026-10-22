@@ -110,7 +110,7 @@ When the storage needs a tidy-up and workspaces are open, the tray shows a row w
 - **Close all and tidy up** closes every open workspace and saves each conversation. The plugin tidies the storage and starts the workspaces again.
 - **Later** hides the row for this wait only.
 
-A banner above the terminal says what happens. It reads "Storage tidy-up in progress", "Storage tidy-up starting" or "Storage reclaim needed". It has no action buttons. Press the arrow at its right to shrink it to a small chip, and press the chip to open it again.
+A banner above the terminal says what happens. It reads "Storage tidy-up in progress", "Storage tidy-up starting" or "Storage reclaim needed". It has no action buttons, except the banner "Home can change to plain folders": that one has the button **Convert to plain folders**. Press the arrow at its right to shrink it to a small chip, and press the chip to open it again.
 
 > [!WARNING]
 > **Close all and tidy up** closes all your open workspaces. The plugin saves where each one stopped. Do not reboot the server until the banner is gone.

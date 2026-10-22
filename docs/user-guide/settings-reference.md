@@ -259,6 +259,7 @@ Below it, **User Home Persistence** shows one card for each home. A banner at th
 | Save icon (**Persist to storage**) | Saves the unsaved changes of the home into a layer. | Confirm dialog "Persist Home Changes?" with the button **Persist Now**. |
 | Merge icon (**Consolidate**) | Saves unsaved changes and merges all layers into one. It is greyed out when there is one layer and no unsaved change. | Asks you to confirm. Workspaces of the home pause and resume when it ends. |
 | **Convert to plain folders** | Appears when the home has layers and its folder is not on a USB flash drive. It changes the home to plain folders in the same place. Then the home needs no more saves or tidy-ups. A home in plain folders has no save or merge icon. | Confirm dialog "Convert to plain folders?". Every workspace of the home closes and opens again. |
+| **Remove old layers** | Appears on the home card only after a conversion to plain folders, while the plugin keeps the old layers for a rollback. The line next to it shows their size and the date of the automatic removal (14 days after the conversion). It removes them at once. | Confirm dialog "Remove old layers?" with the button **Remove**. |
 | Wrench icon (**Repair mount**) | Appears when a home is not mounted. It unmounts and mounts the layers again. | Confirm dialog "Repair home storage?". It may briefly interrupt active sessions. |
 | Trash icon (**Delete home data (permanent)**) | Deletes the stored layers, settings and session data of the home. | Confirm dialog. For the primary user's home you must type DELETE. The deletion is permanent. |
 | **Set up config backup…** / **Config backup…** | Opens the config backup dialog of this home. The backup copies the home folder (agent settings, sign-ins and history). It does not copy the server. | Opens the dialog. |
@@ -420,6 +421,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — New home card control **Remove old layers**, with a line that shows the size and the removal date of the old layers. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #747.
 - **2026-10-20** — New setting **Live transcription endpoint**: with a live engine, your words appear while you speak and are corrected. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issue #731.
 - **2026-10-20** — Agent installs, upgrades, restores from a kept backup and removals wait until **Persistence engine** conversion ends, and the migration waits for active installs. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #708.
 - **2026-10-20** — **Home Storage** and **Agent Storage** moves are refused while **Persistence engine** conversion is queued or running. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #707.
