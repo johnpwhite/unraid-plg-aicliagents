@@ -437,6 +437,20 @@ class UtilityHandler {
         if ($path === false || !is_dir($path) || !is_readable($path)) {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];
         }
+        // A folder that is not itself allowed but SITS ABOVE one (for example "/")
+        // is answered with just the children that lead to an allowed base, so that
+        // "Up one level" out of /root is not a dead end. Each such waypoint carries
+        // selectable=false: it may be opened, never chosen as a workspace.
+        $waypoints = self::allowedChildren($path);
+        if ($waypoints !== null) {
+            $items = [];
+            if ($path !== '/') $items[] = ['name' => '..', 'path' => dirname($path)];
+            return [
+                'status' => 'ok', 'path' => $path, 'items' => array_merge($items, $waypoints),
+                'page' => 1, 'limit' => $limit, 'has_more' => false,
+                'next_page' => null, 'truncated' => false, 'selectable' => false,
+            ];
+        }
         if (ValidationService::validatePath($rawPath) === false) {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];
         }
@@ -467,6 +481,40 @@ class UtilityHandler {
             $response['normalised'] = \AICliAgents\Services\SecretPaths::normaliseModes($path);
         }
         return $response;
+    }
+
+    /**
+     * For a folder that is NOT itself inside the allow-list but lies above one,
+     * the existing child folders that lead to an allowed base. Returns null when
+     * $path is allowed itself (list it normally) or leads to no base at all, so
+     * the caller falls through to the ordinary refusal.
+     *
+     * Only names taken from the allow-list are ever returned: the folder itself
+     * is never scanned, so nothing outside the allow-list can be disclosed.
+     *
+     * @return array<int,array{name:string,path:string,mtime:int,selectable:bool}>|null
+     */
+    private static function allowedChildren(string $path): ?array {
+        if (ValidationService::validatePath($path) !== false) return null;
+        $prefix = rtrim($path, '/') . '/';
+        $children = [];
+        foreach (ValidationService::allowedPathBases() as $base) {
+            if (strpos($base, $prefix) !== 0) continue;
+            $name = explode('/', substr($base, strlen($prefix)))[0];
+            if ($name === '' || isset($children[$name])) continue;
+            $full = $prefix . $name;
+            if (!is_dir($full) || !is_readable($full)) continue;
+            $mtime = @filemtime($full);
+            $children[$name] = [
+                'name' => $name,
+                'path' => $full,
+                'mtime' => $mtime === false ? 0 : $mtime,
+                'selectable' => ValidationService::validatePath($full) !== false,
+            ];
+        }
+        if (!$children) return null;
+        ksort($children);
+        return array_values($children);
     }
 
     /**
