@@ -81,6 +81,7 @@ A page lands under **Not linked yet (N)** when no wiki page links to it and it l
 1. Press a page in the tree, in the **Recent** list, or in a link inside another page. Expect: the page replaces the wiki view. No tab opens.
 2. A strip above the page shows **Back to** the title of the previous page, the path (such as "Wiki / Page title") and a **Close this page** button.
 3. Press **Back** or **Close**, or press Escape. Expect: the previous page shows. From the first page you return to the wiki home, at the place where you left it.
+4. After a Back, press **Forward** (the arrow to the right of **Back to**) or press Alt+Right to return to the page you left. Alt+Left does the same as Back. **Forward** is dimmed when there is no page to go to. Opening a new page after a Back removes Forward, as in a browser.
 
 Escape does not go back while you type in a field. Opening wiki pages never changes the open tabs of the Notes world. To read a wiki page in a tab, choose **Open in a tab** in the **More actions** menu of the page. When a page that is open is archived or deleted, the wiki goes back one step and says so. A reload of the page returns to the wiki home, because the history is kept in memory only.
 
@@ -191,3 +192,10 @@ The wiki is not a separate store. A wiki page is an ordinary Notebook file with 
 - [Voice](voice.md): voice mail and the voice switch.
 - [Settings reference](settings-reference.md): every setting on every tab.
 - [Agent Relay](relay.md): how agents send messages to each other.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-22** — The wiki strip has a **Forward** button. Alt+Left and Alt+Right move through the wiki history. Spec `docs/specs/NOTEBOOK_WIKI_NAVIGATION.md`, issue #734.
+
+</details>

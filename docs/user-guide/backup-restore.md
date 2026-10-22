@@ -278,6 +278,8 @@ A backup is a job in the same queue as saves and merges. Only one storage job ru
 | A snapshot is marked **(incomplete)** | It did not finish. | Delete it. Do not restore it. |
 | Health warns about an old backup | No good snapshot within twice the schedule interval. | Run a backup. Check the schedule and the drive. |
 | A restore is refused with one sentence | A check failed before anything closed. | Read the sentence. Typical causes: the home is halted, the drive is not mounted, or there is no room. |
+| "The backup place … is on a network share, and the share is not mounted." | The folder is on a network share (for example under `/mnt/remotes`), and the share is not connected. A backup or restore would use an empty local folder. | Mount the share in Unassigned Devices, check that the server is on, then try again. The plugin changes no snapshot while the share is not mounted. |
+| "The backup place … is mounted, but the plugin cannot write to it." | The share is connected, but it takes no writes. The share may be read-only, or the server may not answer. | Check that the share is online and not read-only. Then press **Back up now** again. |
 | **Last restore** shows "— failed" | The restore stopped. The home stays as the copy left it. | Restore the safety snapshot named in the line. |
 | `restore-home` says it refuses to run | You ran it inside an agent workspace. | Run it in your own shell. |
 
@@ -291,6 +293,8 @@ A backup is a job in the same queue as saves and merges. Only one storage job ru
 
 <details>
 <summary>Change history</summary>
+
+- **2026-10-22** — A backup place on a network share is checked before each backup and each restore: the share must be mounted, and a backup writes a small test file. A share that is not mounted is refused with one sentence, and no snapshot is deleted. Spec `docs/specs/HOME_BACKUP.md`, issue #749.
 
 - **2026-10-18** — A **Replace** restore no longer removes the folders that the backup left out. Spec `docs/specs/HOME_RESTORE.md`, issue #658.
 

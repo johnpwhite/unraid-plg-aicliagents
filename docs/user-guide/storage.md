@@ -423,6 +423,9 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | **Home** *name*: **conversation history** | The sessions that the agents keep in the home. | **Move old sessions…**. After a move, **Bring back…** also shows. See "Move old conversation sessions". |
 | **Home** *name*: **caches** | The cache content that is still on the boot disk. A note says where the cache lives now (RAM or a pool). | **Clear caches**. A link **Cache setting** opens the field **Cache location for plain-folder homes**. See "Caches of a plain-folder home". |
 | **Home** *name*: **other** | The rest of the home: your own files and agent settings. | None. |
+| **Home** *name*: **quarantine** | Damaged agent databases that the plugin set aside and replaced. Shown only when the folder holds something. | **Archive…** and **Remove**. See "Archive or remove old data of a home". |
+| **Home** *name*: **data of deleted OpenCode workspaces** | OpenCode keeps one database for each workspace. This line counts the data of workspaces that are not in your workspace list or your favourites any more. Included in the **conversation history** line. | **Archive…** and **Remove**. |
+| **Home** *name*: **large Codex session logs** | Codex session logs of 1 MB or more that did not change for 14 days. Included in the **conversation history** line. | **Archive…** and **Remove**. |
 | **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Consolidate (merge)". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
@@ -439,6 +442,29 @@ A home in plain folders has the first three **Home** lines. A home with layers h
 The plugin checks each item again just before it removes it. It removes only items that the last measure listed under **Left over**. It keeps an item that a mount or a program uses, and says so. It also keeps old layers that an open conversion needs to finish or roll back.
 
 An **Unfinished conversion copy** is a partial copy left by a failed storage migration when the plugin could not remove it. The plugin checks its marker and path again before it removes the copy.
+
+### Archive or remove old data of a home
+
+Three lines of the card can move old data off the boot disk. Each line has a small **i** mark (hold the mouse over it for a short note) and two buttons.
+
+- **quarantine**: databases that an agent set aside because they were damaged.
+- **data of deleted OpenCode workspaces**: OpenCode data of workspaces that you deleted. Data of a workspace that is in your list, or is a favourite, is never listed.
+- **large Codex session logs**: Codex logs of 1 MB or more, not changed for 14 days. Codex cannot resume a session that you archive or remove. These logs are also counted in the line **conversation history**. For many agents at once, use **Move old sessions…**, which can bring sessions back.
+
+To archive:
+
+1. Make a folder inside a pool first, for example `/mnt/datapool/backups`. The plugin does not make new folders at the top of a pool, because Unraid shows each one as a share.
+2. Press **Archive…** on the line. Expect: a dialog with the size and the number of items.
+3. Pick the pool and type the name of the folder. Expect: the line **Files go to** shows the full place, `…/aicliagents-archive/<server name>/<date>/`.
+4. Press **Archive**. Expect: a message "Archive started". The Activity tray shows the progress.
+
+The plugin copies each file, checks the copy with a SHA-256 value, writes a list of the files (a manifest file) in the archive, and only then removes the file from the boot disk. If a copy does not match, the original stays. The plugin never writes over a different file in the archive. The folder must be on a mounted pool. A folder on the boot disk, in RAM or under `/mnt/user` is refused, and so is the pool itself.
+
+To remove, press **Remove** on the line. Expect: a dialog that names the items and the space it frees. Press **Remove** to continue. Nothing is copied first, so the data is gone for good. Use **Archive…** when you may want it later.
+
+In both cases the plugin leaves an item alone when a program has one of its files open, or when OpenCode data changed in the last day. The line then says how many items it left. If the workspace list is empty or unreadable, the plugin offers no OpenCode data at all, because it cannot tell which data is in use. The buttons are grey during a storage migration.
+
+An agent can ask for the same actions with the tools `aicli_archive_boot_data` and `aicli_remove_boot_data`. They only propose: nothing moves until you approve the item in the Activity tray. `aicli_get_boot_space` lists the lines.
 
 ### The warning when the boot disk is nearly full
 
@@ -639,6 +665,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The card **Boot disk space** has lines for the quarantine folder, the data of deleted OpenCode workspaces and large Codex session logs. Each line has **Archive…** (to a folder on a pool, with a checked copy and a list of files) and **Remove**. Agents get the same actions as proposals. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-22** — The banner "Home can change to plain folders" has its own button **Convert to plain folders** and no longer points to the notice at the bottom right. **Later** on the notice ends after 24 hours. Spec `docs/specs/STORAGE_RECLAIM_NOTICE.md`, issue #746.
 - **2026-10-22** — The home card shows the old layers that wait for a rollback, with their size and removal date, and the button **Remove old layers**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #747.
 - **2026-10-22** — **Persistence engine** and **Keep agents compressed** are replaced by **Home storage** and **Agent storage**. Each shows what is true on disk, such as **Mixed: 1 of 2 homes are plain folders**, and a change converts only its own kind. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #748.

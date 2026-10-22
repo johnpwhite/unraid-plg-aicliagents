@@ -82,6 +82,7 @@ These tools answer a question and change nothing.
 | A tail of the plugin log, with an optional filter | `aicli_get_logs` | `logs [context] [lines]` |
 | The voices that the voice engine offers | `aicli_list_voices` | `voices` |
 | Saved favourites | `aicli_list_favourites` | `favourites` |
+| The Boot disk space lines that can be archived or removed (from the last measure) | `aicli_get_boot_space` | `boot-space` |
 | Voice mail (see [Voice](voice.md)) | `aicli_list_voicemail` | `voicemail` |
 | The saved copies of a home | `aicli_list_backups` | `list-backups` |
 | The current screen of one running workspace, as plain text with secrets masked. Every call writes a line in the log. | `aicli_read_workspace_screen` | `read-screen` |
@@ -124,6 +125,8 @@ The workspace tools, the schedule tools and `aicli_add_favourite` accept an empt
 | Back up a home | `aicli_backup_home` | `backup-home` | The plugin closes every running session of that user, copies the home to the backup target, and starts the sessions again. A warm backup skips the close. |
 | Restore a home | `aicli_restore_home` | `restore-home` | The plugin closes every running session of that user, saves a "pre-restore" safety copy (unless the proposal says otherwise), restores the home, and starts the sessions again. **Replace** makes the home match the copy. **Merge** only adds files. |
 | Merge the layers of a home into one | `aicli_consolidate_home` | `consolidate-home` | The plugin closes every running session of that user, merges the layers, and starts the sessions again. |
+| Archive old data of a home off the boot disk (quarantine, data of deleted OpenCode workspaces, large Codex logs) | `aicli_archive_boot_data` | `archive-boot-data` | A background job copies each file to a folder you named on a pool, checks the copy, lists it in a manifest file, and then removes the file from the boot disk. The folder must already exist. |
+| Remove that data for good | `aicli_remove_boot_data` | `remove-boot-data` | A background job removes the items from the boot disk. Nothing is copied first. |
 | Remove a Notebook file for good | `aicli_purge_artefact` | `artefact-purge` | The file is removed. An agent should archive a page instead, unless you asked for the file to be gone. |
 
 See [Home backup and restore](backup-restore.md) and [Home and agent storage](storage.md) for what these jobs do.
@@ -194,6 +197,7 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — New tools `aicli_get_boot_space`, `aicli_archive_boot_data` and `aicli_remove_boot_data`. The last two only propose. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-18** — Agents can turn voice off, but they must ask you to turn it on or unmute a workspace. Spec `docs/specs/VOICE_SWITCHES.md`, issue #665.
 
 </details>

@@ -108,7 +108,7 @@ The card has a **Natural voice** row, the **Voice (all devices)** switch, the te
 | **Messages kept per workspace** (Voice mail) | Sets how many voice mail messages one workspace keeps. When it has more, the oldest messages you have heard go first. | 50 | A whole number from 1 to 500 | Raise it if you want a longer history. | Saves. | Yes |
 | **Days kept** (Voice mail) | Sets how long a message stays. Older messages go, heard or not. | 7 days | A whole number from 1 to 90 | Raise it if you are away for long periods. | Saves. | Yes |
 | **Local dictation** button (**Set up local dictation**, or **Connect local dictation**) | Installs the free Speaches server (Whisper) as a Docker container and connects it for dictation. The Whisper model is about 500 MB and the download can take several minutes. | Not set up | Not applicable | Press it when you want dictation to stay on your server and work in every browser. | The same flow as **Natural voice**. You can leave the page and press **Connect** again later. | No |
-| **Transcription endpoint URL** | Sets the address of an OpenAI-compatible transcription server, for example Speaches. Empty means the browser's own speech recognition. | Empty (browser recognition) | Empty, or an http or https address | Enter an address when you run your own transcription server. | Saves. | No. An agent cannot change the address. |
+| **Transcription endpoint URL** | Sets the address of an OpenAI-compatible transcription server, for example Speaches. Empty means the browser's own speech recognition. When the server does not answer, dictation uses the browser's recognition for the rest of that recording. | Empty (browser recognition) | Empty, or an http or https address | Enter an address when you run your own transcription server. | Saves. | No. An agent cannot change the address. |
 | **Live transcription endpoint** | Sets the address of a live (streaming) transcription engine, for example wss://stt-live.example.com/. With it, your words appear while you speak and are corrected. **Test** connects from this browser and says whether the engine answers. | Empty (off) | Empty, or a ws:// or wss:// address | Enter an address when you run a live engine. An HTTPS page needs a wss:// address. | Saves. | No. An agent cannot change the address. |
 | **Model** (Voice input) | Chooses which model the transcription server uses. Ignored in browser mode. | whisper-1 | A model name the server lists | Change it to use another Whisper model. | Saves. | Yes |
 | **Language** (Voice input) | Sets the language you speak, for example "en". Empty lets the browser or the engine detect it. | Empty | Empty, or a short language tag such as en or en-US | Set it if detection picks the wrong language. | Saves. | Yes |
@@ -251,6 +251,20 @@ The panel also has a section **Keep saved workspaces running**.
 See [Home and agent storage](storage.md) and [Home backup and restore](backup-restore.md). The tab has a **System Resources** card with one bar, **Unraid RAM Disk (Rootfs)**, that shows the RAM disk use of Unraid. It has no setting.
 
 Below it, **User Home Persistence** shows one card for each home. A banner at the top of the tab shows a storage problem or a running merge. While a merge runs, storage actions pause. Workspaces of that home resume by themselves when it ends.
+
+### Boot disk space card: archive and remove
+
+The card **Boot disk space** (see [Home and agent storage](storage.md), "Boot disk space") has three lines that offer **Archive…** and **Remove**. A line shows only while it has something to move. A small **i** mark gives a short note.
+
+| Control | What it does | At once | Agent |
+| :-- | :-- | :-- | :-- |
+| **Home** *name*: **quarantine** | Counts the damaged agent databases that the plugin set aside. | Shows the size and the number of items. | Read: `aicli_get_boot_space` |
+| **Home** *name*: **data of deleted OpenCode workspaces** | Counts the OpenCode data of workspaces that are not in the workspace list or the favourites. Data of a workspace that exists is never counted. | Shows the size and the number of items. | Read: `aicli_get_boot_space` |
+| **Home** *name*: **large Codex session logs** | Counts Codex session logs of 1 MB or more that did not change for 14 days. The size is also part of **conversation history**. | Shows the size and the number of items. | Read: `aicli_get_boot_space` |
+| **Archive…** | Opens a dialog. You pick a pool and a folder that already exists in it. The plugin copies each file to `<folder>/aicliagents-archive/<server name>/<date>/`, checks the copy, lists it in a manifest file, and then removes the file from the boot disk. It makes no new top-level folder on a pool. It refuses the boot disk, RAM, `/mnt/user` and the pool itself. | Starts a background job. The Activity tray shows the progress. | Proposal only: `aicli_archive_boot_data` |
+| **Remove** | Opens a confirm dialog that names the items. It removes them from the boot disk for good, with no copy. | Confirm dialog, then a background job. | Proposal only: `aicli_remove_boot_data` |
+
+Both buttons leave an item alone when a program has one of its files open. They are grey during a storage migration.
 
 ### Actions on a home card
 
@@ -421,6 +435,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — New lines on the **Boot disk space** card (quarantine, data of deleted OpenCode workspaces, large Codex session logs) with the buttons **Archive…** and **Remove**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-22** — New home card control **Remove old layers**, with a line that shows the size and the removal date of the old layers. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #747.
 - **2026-10-22** — **Persistence engine** and **Keep agents compressed** are replaced by **Home storage** and **Agent storage**. Each shows its real state and a change converts only its own kind. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #748.
 - **2026-10-20** — New setting **Live transcription endpoint**: with a live engine, your words appear while you speak and are corrected. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issue #731.

@@ -122,6 +122,10 @@ An open note has a header with the title and a row of icon buttons. A line below
 
 Several open notes show as tabs above the note. A tab that does not fit goes into an "N more" menu. Press the cross on a tab, or press the middle mouse button, to close it. Alt+] and Alt+[ step to the next and the previous tab.
 
+### Go back to the note you came from
+
+When you follow a link inside a note (a link in **Linked from**, a wiki link written with double square brackets, or a click in a diagram), the target opens as a new active tab. The drawer remembers the note you left. Two buttons then show at the start of the note header: **Back to** (the title of the note you left) and **Forward to** (after a Back). A button that has nowhere to go is dimmed. Alt+Left does the same as Back and Alt+Right does the same as Forward. The keys do nothing while you type in a field. A link that you follow after a Back removes Forward, as in a browser. A note that you open from the list, the search or a tab is not a link, so it does not add a step. The drawer keeps this history in memory only: a reload clears it. On a phone each button has a touch area of 44 pixels.
+
 In a wide drawer the list hides while a note is open, so the note gets the full width. Press **Show note list** (or **Hide note list**) to change that. The choice is kept for each workspace. In a narrow drawer the list is a tab of its own (the list icon, **All notes**).
 
 ### The Properties panel
@@ -342,3 +346,10 @@ A notebook is a folder called notebook in the root of the project. It holds one 
 - [Config Hub](config-hub.md): how the Notebook tools and skill reach every agent.
 - [Settings reference](settings-reference.md): every setting on every tab.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Activity tray.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-22** — Back and Forward buttons (and Alt+Left, Alt+Right) between notes that you open from a link. Spec `docs/specs/NOTEBOOK_WIKI_NAVIGATION.md`, issue #734.
+
+</details>
