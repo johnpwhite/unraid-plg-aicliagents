@@ -186,10 +186,10 @@ _entity_upper_pref() {
     [ "$_v" = "disk" ] && printf 'disk' || printf 'zram'
 }
 
-# _cfg_value <key> -> the raw value of one cfg key ('' when absent). Uses
+# _aicli_cfg_key <key> -> the raw value of one cfg key ('' when absent). Uses
 # resolve_paths.sh's _rp_read_cfg when it is loaded, else reads the same cfg
 # file directly with the same pattern.
-_cfg_value() {
+_aicli_cfg_key() {
     local _k="${1:-}" _cfg
     if declare -f _rp_read_cfg >/dev/null 2>&1; then
         _rp_read_cfg "$_k" 2>/dev/null || true
@@ -212,8 +212,8 @@ _entity_upper_policy() {
         printf '%s' "$AICLI_STORAGE_BACKEND_POLICY"; return 0
     fi
     [ "$_type" = "agent" ] && _key="storage_backend_agents"
-    _v="$(_cfg_value "$_key")"
-    [ -n "$_v" ] || _v="$(_cfg_value storage_backend_mode)"
+    _v="$(_aicli_cfg_key "$_key")"
+    [ -n "$_v" ] || _v="$(_aicli_cfg_key storage_backend_mode)"
     printf '%s' "$_v"
 }
 
@@ -406,11 +406,11 @@ _keep_agents_compressed() {
     if [ -n "${AICLI_KEEP_AGENTS_COMPRESSED:-}" ]; then
         v="$AICLI_KEEP_AGENTS_COMPRESSED"
     else
-        a="$(_cfg_value storage_backend_agents)"
+        a="$(_aicli_cfg_key storage_backend_agents)"
         case "$a" in
             layering)    v=1 ;;
             passthrough) v=0 ;;
-            *)           v="$(_cfg_value keep_agents_compressed)" ;;
+            *)           v="$(_aicli_cfg_key keep_agents_compressed)" ;;
         esac
     fi
     [ "$v" = "1" ] && printf '1' || printf '0'

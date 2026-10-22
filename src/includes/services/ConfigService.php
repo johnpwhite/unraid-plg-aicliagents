@@ -281,11 +281,21 @@ class ConfigService {
         if ($needsBoot) {
             $path = (string)($merged['agent_storage_path'] ?? '');
             if (!array_key_exists($path, $internalBoot)) {
-                try {
-                    require_once __DIR__ . '/FileStorage.php';
-                    $internalBoot[$path] = $path !== '' && (string)(FileStorage::probeTarget($path)['mount_class'] ?? '') === 'boot_internal';
-                } catch (\Throwable $e) {
-                    $internalBoot[$path] = false;
+                // The boot disk class does not change while the server runs. Keep the answer in
+                // the RAM state folder, so a config that is not saved yet costs one storagectl
+                // probe per boot, not one per request (#748).
+                $memo = SecretPaths::stateRoot() . '/.agent-boot-class-' . md5($path);
+                $known = @file_get_contents($memo);
+                if ($known === '1' || $known === '0') {
+                    $internalBoot[$path] = $known === '1';
+                } else {
+                    try {
+                        require_once __DIR__ . '/FileStorage.php';
+                        $internalBoot[$path] = $path !== '' && (string)(FileStorage::probeTarget($path)['mount_class'] ?? '') === 'boot_internal';
+                        @file_put_contents($memo, $internalBoot[$path] ? '1' : '0');
+                    } catch (\Throwable $e) {
+                        $internalBoot[$path] = false;
+                    }
                 }
             }
             $internal = $internalBoot[$path];

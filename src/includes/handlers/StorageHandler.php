@@ -99,7 +99,7 @@ class StorageHandler {
             case 'nuclear_rebuild_storage':     $result = self::wipe(); break;
             case 'purge_artifacts':             $result = self::purgeArtifacts(); break;
             case 'preflight_migrate':           return self::preflightMigrate();
-            case 'storage_kind_state':     return \AICliAgents\Services\StorageBackendMigrationService::kindStates();
+            case 'get_storage_kind_state':     return \AICliAgents\Services\StorageBackendMigrationService::kindStates();
             case 'storage_backend_migration_status': return \AICliAgents\Services\StorageBackendMigrationService::status();
             case 'storage_backend_migration_recovery': $result = \AICliAgents\Services\StorageBackendMigrationService::recoverInterruptedAsync((string)($_REQUEST['operation'] ?? ''), getAICliConfig()); break;
             case 'execute_migrate':             $result = self::executeMigrateExclusive(); break;
@@ -131,7 +131,7 @@ class StorageHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
-                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'storage_kind_state', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode',
+                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'get_storage_kind_state', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',

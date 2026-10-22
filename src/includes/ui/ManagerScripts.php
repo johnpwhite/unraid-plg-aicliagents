@@ -375,7 +375,7 @@ function aicliRenderKindState(r) {
 }
 function aicliLoadKindState() {
     if (!$('#aicli-kind-state-homes').length) return;
-    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=storage_kind_state&csrf_token=' + encodeURIComponent(csrf))
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_storage_kind_state&csrf_token=' + encodeURIComponent(csrf))
         .done(aicliRenderKindState);
 }
 
