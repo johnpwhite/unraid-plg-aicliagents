@@ -14,7 +14,10 @@ if (!is_file($manager) || !in_array($mode, ['startup', 'reload'], true)) {
 
 require_once $manager;
 
-$env = \AICliAgents\Services\EnvService::buildEffectiveEnv($rootDir !== '' ? $rootDir : null, $agentId);
+// buildLaunchEnv adds the launch-only OpenCode skill-scan switches (#741). A pinned
+// older manager has only buildEffectiveEnv; use that then.
+$builder = method_exists('\AICliAgents\Services\EnvService', 'buildLaunchEnv') ? 'buildLaunchEnv' : 'buildEffectiveEnv';
+$env = \AICliAgents\Services\EnvService::$builder($rootDir !== '' ? $rootDir : null, $agentId);
 $names = [];
 foreach ($env as $key => $value) {
     if (\AICliAgents\Services\EnvService::isReservedKey($key)) {

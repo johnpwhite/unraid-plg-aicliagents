@@ -217,6 +217,69 @@ class EnvService {
         return $env;
     }
 
+    /**
+     * The env an agent process gets at launch: the effective merge plus launch-only
+     * additions that the Settings page must not show as inherited values.
+     * OpenCode reads BOTH ~/.claude/skills and ~/.agents/skills; the addition makes it
+     * list each skill at one path only (docs/specs/OPENCODE_SKILL_SINGLE_PATH.md).
+     */
+    public static function buildLaunchEnv(?string $path, string $agentId): array {
+        $env = self::buildEffectiveEnv($path, $agentId);
+        if ($agentId === 'opencode') {
+            $env = array_merge($env, self::opencodeSkillScanEnv(dirname(ConfigService::getUserStatePath()), $env));
+        }
+        return $env;
+    }
+
+    /**
+     * Env additions that make OpenCode list each skill at ONE path.
+     *
+     * OpenCode scans ~/.claude/skills and ~/.agents/skills, puts all matches in one
+     * list and loads them with unbounded concurrency; for a duplicate name the last
+     * parse to finish wins. The Config Hub projects the aicli-* skills into both
+     * folders, so the <location> line of the system prompt changed from session to
+     * session and a local model could not reuse its prompt cache (#741).
+     *
+     * Fix: switch off only OpenCode's ~/.claude scan (OPENCODE_DISABLE_CLAUDE_CODE_SKILLS)
+     * and give it every ~/.claude/skills entry that is NOT also in ~/.agents/skills
+     * through `skills.paths` (OPENCODE_CONFIG_CONTENT). The personal skills keep loading.
+     * A project's .claude/skills is added as a relative path (no walk-up to parents).
+     *
+     * Does nothing when the user already chose: any of the three OpenCode skill
+     * switches set, or OPENCODE_CONFIG_CONTENT set.
+     *
+     * @param array<string,string> $env effective env so far
+     * @return array<string,string> keys to add (empty = leave OpenCode as it is)
+     */
+    public static function opencodeSkillScanEnv(string $home, array $env): array {
+        foreach (['OPENCODE_DISABLE_CLAUDE_CODE', 'OPENCODE_DISABLE_CLAUDE_CODE_SKILLS', 'OPENCODE_DISABLE_EXTERNAL_SKILLS'] as $k) {
+            $v = strtolower(trim((string)($env[$k] ?? '')));
+            if ($v !== '' && $v !== '0' && $v !== 'false') return [];
+        }
+        if (trim((string)($env['OPENCODE_CONFIG_CONTENT'] ?? '')) !== '') return [];
+
+        $home = rtrim($home, '/');
+        $claudeDir = $home . '/.claude/skills';
+        $sharedDir = $home . '/.agents/skills';
+        $paths = [];
+        $names = is_dir($claudeDir) ? (@scandir($claudeDir) ?: []) : [];
+        sort($names, SORT_STRING);
+        foreach ($names as $name) {
+            if ($name === '.' || $name === '..') continue;
+            if (!is_dir($claudeDir . '/' . $name)) continue;
+            if (is_dir($sharedDir . '/' . $name)) continue; // OpenCode still reads this one from ~/.agents/skills
+            $paths[] = $claudeDir . '/' . $name;
+        }
+        $paths[] = '.claude/skills';
+
+        $json = json_encode(['skills' => ['paths' => $paths]], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($json)) return [];
+        return [
+            'OPENCODE_DISABLE_CLAUDE_CODE_SKILLS' => 'true',
+            'OPENCODE_CONFIG_CONTENT'             => $json,
+        ];
+    }
+
     // ---------- Seed (manifest-driven defaults; additive + sidecar-tracked) ----------
 
     /**
