@@ -36,7 +36,7 @@
     <div class="aicli-tabs" role="group" aria-label="Manager sections" tabindex="0" style="margin-bottom:0; border-bottom:none;">
         <div class="aicli-tab-btn active" onclick="switchMainTab('config', this)">Configuration</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('store', this)">Agent Store</div>
-        <div class="aicli-tab-btn" onclick="switchMainTab('storage', this)">Home Storage</div>
+        <div class="aicli-tab-btn" onclick="switchMainTab('storage', this)">Storage</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('hub', this)">Config Hub</div>
         <div class="aicli-tab-btn" onclick="switchMainTab('relay', this)">Agent Relay</div>
         <div class="aicli-tab-btn" id="aicli-tab-btn-debug" onclick="switchMainTab('debug', this)">Debug Console</div>

@@ -67,12 +67,32 @@
     }
 
     // Pure: the button of one action. A disabled action keeps its reason in the tooltip.
+    // The native button look and the 44 px tap area come from .aicli-btn-slim (Phase 6, S1).
     function buttonHtml(part, a, migrationBusy) {
         var off = !a.enabled || migrationBusy;
         var reason = migrationBusy ? 'Wait for the storage migration to finish.' : (a.reason || 'Not available now.');
-        return '<button type="button" class="aicli-bs-act" data-testid="boot-space-action" data-action-id="' + esc(a.id) + '" data-part-key="' + esc(part.key) + '"' +
+        return '<button type="button" class="aicli-bs-act aicli-btn-slim" data-testid="boot-space-action" data-action-id="' + esc(a.id) + '" data-part-key="' + esc(part.key) + '"' +
             (off ? ' disabled aria-disabled="true" title="' + esc(reason) + '"' : ' title="' + esc(a.label) + '"') +
-            ' style="font-size:11px; padding:3px 10px; white-space:nowrap; margin:0; ' + (off ? 'opacity:0.4; cursor:not-allowed;' : '') + '">' + esc(a.label) + '</button>';
+            '>' + esc(a.label) + '</button>';
+    }
+
+    // Pure: the small (i) next to the label of a line, and its panel. The note of the line, its (i) text
+    // and the link to a setting are in the panel. Empty when the line has none of them.
+    function lineHelpHtml(part) {
+        var paras = '';
+        if (part.note) paras += '<p>' + esc(part.note) + '</p>';
+        if (part.info) paras += '<p>' + esc(part.info) + '</p>';
+        if (part.setting_link) {
+            paras += '<p><a href="#" class="aicli-bs-setting" data-setting="' + esc(part.setting_link) + '" data-testid="boot-space-setting-link">Go to setting</a></p>';
+        }
+        if (!paras) return { btn: '', panel: '' };
+        var cid = 'bs-' + String(part.key).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+        return {
+            btn: '<button type="button" class="aicli-help-btn aicli-bs-info" data-aicli-help="' + cid + '" data-testid="boot-space-info"' +
+                ' aria-label="About ' + esc(part.label) + '" aria-expanded="false" aria-controls="aicli-help-' + cid + '">' +
+                '<i class="fa fa-info-circle" aria-hidden="true"></i></button>',
+            panel: '<div class="aicli-help-panel" id="aicli-help-' + cid + '" data-testid="help-panel-' + cid + '" role="note" hidden>' + paras + '</div>'
+        };
     }
 
     // Pure: the HTML of one line.
@@ -82,20 +102,15 @@
         var acts = '';
         if (part.action) acts += buttonHtml(part, part.action, migrationBusy);
         (part.extra_actions || []).forEach(function (a) { acts += ' ' + buttonHtml(part, a, migrationBusy); });
-        var note = part.note ? '<div style="font-size:10px; opacity:0.6; margin-top:1px;">' + esc(part.note) + '</div>' : '';
-        // R8 (#724): a short (i) note on the lines that can be archived or removed.
-        var info = part.info
-            ? ' <i class="fa fa-info-circle aicli-bs-info" data-testid="boot-space-info" tabindex="0" role="img" aria-label="' + esc(part.info) + '" title="' + esc(part.info) + '" style="opacity:0.7; cursor:help; font-size:11px;"></i>' : '';
-        var link = part.setting_link
-            ? ' <a href="#" class="aicli-bs-setting" data-setting="' + esc(part.setting_link) + '" data-testid="boot-space-setting-link" style="font-size:10px;">Cache setting</a>' : '';
+        // Phase 6: the note, the (i) text (R8, #724) and the link to a setting are behind one (i).
+        var help = lineHelpHtml(part);
         return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:grid; grid-template-columns:minmax(240px,0.7fr) minmax(180px,1.3fr) 70px minmax(120px,max-content); align-items:center; gap:8px 14px; padding:8px 0; border-top:1px solid var(--border-color, #333);">' +
-            '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + info + link + note + '</div>' +
+            '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + help.btn + help.panel + '</div>' +
             '<div style="min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
             '<div data-testid="boot-space-size" style="text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
             '<div style="text-align:right;">' + acts + '</div>' +
         '</div>';
     }
-
     // Pure: the warning about the agent temporary folders in RAM (AGENT_TEMP_FOLDER.md R4). '' when there is no warning.
     // The numbers come from the background measure (data.agent_tmp). The button opens the dialog of fragment 60.
     function tmpWarnHtml(t, migrationBusy) {
@@ -104,9 +119,9 @@
         var canClean = closed > 0 && !migrationBusy;
         return '<div data-testid="boot-space-tmp-warn" style="padding:10px; margin-bottom:12px; border:1px solid #ff8c00; border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">' +
             '<div style="font-weight:600; margin-bottom:3px;"><i class="fa fa-exclamation-triangle"></i> Temporary files of agents use ' + human(t.ram_bytes) + ' of RAM</div>' +
-            '<div style="opacity:0.85; margin-bottom:6px;">The warning limit is ' + human((Number(t.warn_mb) || 0) * 1048576) + '. Sessions that no longer run hold ' + human(closed) + ' of it. A large temporary folder in RAM can make typing slow. The setting Agent temporary folder (Configuration tab) can move new sessions to a pool.</div>' +
-            '<button type="button" class="aicli-bs-tmp-act" data-testid="boot-space-tmp-clean"' + (canClean ? '' : ' disabled aria-disabled="true" title="' + (migrationBusy ? 'Wait for the storage migration to finish.' : 'No closed session holds temporary files.') + '"') +
-            ' style="font-size:11px; padding:3px 10px; margin:0; ' + (canClean ? '' : 'opacity:0.4; cursor:not-allowed;') + '">Clean up temporary files of closed sessions</button></div>';
+            '<div style="opacity:0.85; margin-bottom:6px;">The warning limit is ' + human((Number(t.warn_mb) || 0) * 1048576) + '. Sessions that no longer run hold ' + human(closed) + ' of it. A large temporary folder in memory can make typing slow. The setting Agent temporary files (Configuration tab) can move new sessions to a pool.</div>' +
+            '<button type="button" class="aicli-bs-tmp-act aicli-btn-slim" data-testid="boot-space-tmp-clean"' + (canClean ? '' : ' disabled aria-disabled="true" title="' + (migrationBusy ? 'Wait for the storage migration to finish.' : 'No closed session holds temporary files.') + '"') +
+            '>Clean up temporary files of closed sessions</button></div>';
     }
 
     // Pure: the whole card body. `data` is the answer of get_boot_space.
@@ -130,29 +145,42 @@
             var stopped = migration.status === 'interrupted';
             // Say which kind converts: the migration status names it (homes or agents).
             var kindWord = migration.kind === 'homes' ? 'Home storage' : (migration.kind === 'agents' ? 'Agent storage' : 'Storage');
-            var recovery = stopped ? '<div style="margin-top:6px;"><button type="button" data-testid="boot-space-migration-continue" data-recovery="continue">Continue</button> <button type="button" data-testid="boot-space-migration-rollback" data-recovery="rollback">Put back</button></div>' : '';
+            var recovery = stopped ? '<div style="margin-top:6px;"><button type="button" class="aicli-btn-slim" data-testid="boot-space-migration-continue" data-recovery="continue">Continue</button> <button type="button" class="aicli-btn-slim" data-testid="boot-space-migration-rollback" data-recovery="rollback">Put back</button></div>' : '';
             migrationBanner = '<div data-testid="boot-space-migration" role="status" aria-live="polite" style="padding:10px 12px; margin:0 0 10px; border:1px solid #e6a23c; border-radius:4px; background:rgba(230,162,60,.12); font-size:12px;"><strong>' + (stopped ? kindWord + ' migration stopped' : (migration.status === 'queued' ? kindWord + ' migration starting' : kindWord + ' migration in progress')) + '</strong><div>' + esc(migration.message || 'Workspaces and storage actions are paused until this finishes.') + '</div><div>' + esc(progress) + '</div>' + (Number(migration.total) > 0 ? '<progress max="' + Number(migration.total) + '" value="' + Number(migration.completed || 0) + '" aria-label="Storage migration progress" style="width:100%; margin-top:6px;"></progress>' : '') + recovery + '</div>';
         }
+        // Phase 6: the card itself (header, status, (i), menu) is in ManagerStorageTab.php. This is its body.
         return '<style>@media(max-width:760px){#aicli-boot-space-card .aicli-bs-line{grid-template-columns:minmax(0,1fr) auto !important;}#aicli-boot-space-card .aicli-bs-line>div:first-child,#aicli-boot-space-card .aicli-bs-line>div:last-child{grid-column:1/-1;}#aicli-boot-space-card .aicli-bs-line>div:last-child{justify-self:end;}}</style>' +
-            '<div class="aicli-card" data-testid="boot-space-card" id="boot-space">' +
-            '<div class="aicli-card-header"><i class="fa fa-hdd-o text-orange-500"></i> Boot disk space</div>' +
-            '<div class="aicli-card-body">' +
-                '<p style="margin:0 0 10px; font-size:12px; opacity:0.75;">Where the space on the boot disk goes. The sizes are the space really used on disk, so compression is counted. The largest part is first.</p>' +
                 diskHtml(data && data.disk) +
                 migrationBanner +
                 tmpWarnHtml(data && data.agent_tmp, migrationBusy) +
                 rows +
                 '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11px; opacity:0.85;">' +
                     '<span>' + stamp + '</span>' +
-                    '<button type="button" id="aicli-bs-measure" data-testid="boot-space-measure-now" style="font-size:11px; padding:3px 10px; margin:0;"' + ((measuring || migrationBusy) ? ' disabled title="Wait for the storage migration to finish."' : '') + '>Measure now</button>' +
-                '</div>' +
-            '</div></div>';
+                    '<button type="button" id="aicli-bs-measure" class="aicli-btn-slim" data-testid="boot-space-measure-now"' + ((measuring || migrationBusy) ? ' disabled title="Wait for the storage migration to finish."' : '') + '>Measure now</button>' +
+                '</div>';
+    }
+
+    // Pure: the status line of the card: "5.7 GB used of 15 GB \u00b7 8.6 GB free".
+    function statusText(data) {
+        var d = data && data.disk;
+        if (!d || !d.size) return 'Not measured yet';
+        return human(d.used) + ' used of ' + human(d.size) + ' \u00b7 ' + human(d.free) + ' free';
     }
 
     function draw(data) {
         state.data = data;
         var el = document.getElementById('aicli-boot-space-card');
-        if (el) el.innerHTML = cardHtml(data);
+        if (window.aicliCards) {
+            window.aicliCards.setStatus('boot-space', statusText(data));
+            window.aicliCards.setWarning('boot-space', !!(data && data.agent_tmp && data.agent_tmp.warn), 'Warning');
+        }
+        if (!el) return;
+        var html = cardHtml(data);
+        // The same answer draws nothing again, so an open (i) panel and a focused button stay.
+        if (el.__aicliHtml === html) return;
+        el.__aicliHtml = html;
+        el.innerHTML = html;
+        if (window.aicliHelp) window.aicliHelp.attach(el);
     }
 
     function stopPoll() { if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; } }
@@ -213,7 +241,7 @@
         if (r && r.measuring) h += ' <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
         if (migrationBusy) h += ' Storage actions are paused until the migration finishes.';
         if (stale && !(r && r.measuring) && !migrationBusy) {
-            h += ' <button type="button" class="aicli-bs-dialog-measure" data-testid="bootspace-dialog-measure-now" style="font-size:11px; padding:2px 8px; margin:0 0 0 6px;">Measure now</button>';
+            h += ' <button type="button" class="aicli-bs-dialog-measure aicli-btn-slim" data-testid="bootspace-dialog-measure-now">Measure now</button>';
         }
         return h + '</div>';
     };
@@ -314,6 +342,7 @@
     // Test seams.
     reg.tmpWarnHtml = tmpWarnHtml;
     reg.cardHtml = cardHtml;
+    reg.statusText = statusText;
     reg.human = human;
     reg.load = load;
 

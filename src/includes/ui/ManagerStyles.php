@@ -2230,4 +2230,181 @@
     @media (prefers-reduced-motion: reduce) {
         .aicli-help-panel { animation: none; }
     }
+    /* =========================================================================
+       SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md, Phase 3: the shared card header
+       (src/includes/ui/SettingsCard.php, assets/ui/settings-cards.js).
+       One 44 px row: chevron, icon, title, one-line status, (i), actions, [more].
+       Colours come only from tokens the page already uses. The status is 12 px at
+       full text colour. The help panel and the menu sit in the page flow, under the
+       header, so the card's overflow:hidden cannot cut them.
+       ========================================================================= */
+    .aicli-card-head {
+        display: flex; align-items: center; gap: 4px;
+        box-sizing: border-box; min-height: 44px; padding: 0 6px 0 4px;
+        background: var(--title-header-background-color, #2a2a2a);
+        border-bottom: 1px solid var(--border-color, #333);
+        color: var(--text-color, #eee);
+    }
+    .aicli-card--collapsed > .aicli-card-head { border-bottom-color: transparent; }
+    .aicli-card-body[hidden] { display: none !important; }
+    /* Phase 5: the Advanced part of a card. A native details element; the summary is a 44 px row
+       with the label and its (i). A row that the page hides keeps its hidden attribute (the dd rule sets display). */
+    [data-aicli-hide-plain-homes][hidden] { display: none !important; }
+    .aicli-adv { margin-top: 10px; border-top: 1px solid var(--border-color, rgba(128,128,128,0.35)); }
+    .aicli-adv-summary {
+        display: flex; align-items: center; gap: 6px; cursor: pointer;
+        min-height: 44px; box-sizing: border-box; list-style: none;
+        font-size: 13px; font-weight: 700; color: var(--aicli-text, var(--text-color, #1c1b1b));
+    }
+    .aicli-adv-summary::-webkit-details-marker { display: none; }
+    .aicli-adv-summary::before { content: '\25B8'; display: inline-block; width: 1em; }
+    .aicli-adv[open] > .aicli-adv-summary::before { content: '\25BE'; }
+    .aicli-adv-summary:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    .aicli-adv-body { padding-bottom: 4px; }
+    .aicli-card-toggle {
+        appearance: none; -webkit-appearance: none;
+        display: inline-flex; align-items: center; gap: 8px;
+        flex: 0 1 auto; min-width: 0; min-height: 44px; box-sizing: border-box;
+        margin: 0 !important; padding: 0 8px !important;
+        border: 0 !important; border-radius: 4px !important;
+        background: transparent !important; box-shadow: none !important;
+        color: var(--text-color, #eee) !important;
+        font-size: 1.1em !important; font-weight: bold !important; line-height: 1.2 !important;
+        letter-spacing: 0 !important; text-transform: none !important; text-align: left;
+        cursor: pointer;
+    }
+    .aicli-card-toggle:hover { background: var(--mild-background-color, rgba(128,128,128,0.18)) !important; }
+    .aicli-card-toggle:focus-visible, .aicli-card-menu-btn:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    .aicli-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .aicli-card-chevron { width: 12px; font-size: 12px; transition: transform 0.2s ease-out; }
+    .aicli-card--collapsed .aicli-card-chevron { transform: rotate(-90deg); }
+    .aicli-card-status {
+        flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        font-size: 12px; font-weight: normal; text-align: right;
+        color: var(--aicli-text, var(--text-color, #1c1b1b));
+    }
+    .aicli-card--warn { border-left: 3px solid var(--orange, #ff8c00); }
+    .aicli-card--warn .aicli-card-status { font-weight: 600; color: var(--aicli-accent-text, var(--aicli-text, var(--text-color, #1c1b1b))); }
+    .aicli-card-menu-btn {
+        appearance: none; -webkit-appearance: none;
+        display: inline-flex; align-items: center; justify-content: center;
+        /* 44 x 44 px on every device: the desktop touch-target check counts it too. Unraid gives
+           each button a min-width, so the size needs !important. */
+        box-sizing: border-box; flex: 0 0 auto; width: 44px !important; height: 44px !important; min-width: 44px !important;
+        margin: 0 !important; padding: 0 !important;
+        border: 0 !important; border-radius: 4px !important;
+        background: transparent !important; box-shadow: none !important;
+        color: var(--text-color, #eee) !important; font-size: 16px !important; line-height: 1 !important;
+        cursor: pointer;
+    }
+    .aicli-card-menu-btn:hover, .aicli-card-menu-btn[aria-expanded="true"] { background: var(--mild-background-color, rgba(128,128,128,0.18)) !important; }
+    .aicli-card > .aicli-help-panel, .aicli-card > .aicli-card-menu { margin: 10px 15px 0; width: auto; }
+    .aicli-card > .aicli-card-menu:not([hidden]) { display: flex; flex-wrap: wrap; gap: 8px; }
+    .aicli-card-menu-item { min-height: 32px; }
+    .aicli-card-menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* Card order (Phase 4). The [more] button is also the drag handle on a desktop pointer. */
+    @media (pointer: fine) {
+        .aicli-card-menu-btn { cursor: grab; touch-action: none; }
+    }
+    .aicli-cards--dragging, .aicli-cards--dragging * { user-select: none; -webkit-user-select: none; }
+    .aicli-cards--dragging .aicli-card-menu-btn { cursor: grabbing; }
+    .aicli-card--dragging { position: relative; z-index: 10; opacity: 0.85; pointer-events: none; box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
+    .aicli-card--drop-before { box-shadow: 0 -3px 0 0 var(--orange, #ff8c00); }
+    .aicli-card--drop-after { box-shadow: 0 3px 0 0 var(--orange, #ff8c00); }
+    .aicli-card--moving { transition: transform 200ms ease-out; }
+    .aicli-settings-toolbar { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; }
+    .aicli-settings-note { font-size: 12px; color: var(--aicli-text, var(--text-color, #1c1b1b)); }
+    .aicli-saved-tick { display: inline-block; font-size: 12px; font-weight: 600; color: var(--aicli-text, var(--text-color, #1c1b1b)); }
+    .aicli-sr-only { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+    @media (prefers-reduced-motion: reduce) {
+        .aicli-card-chevron { transition: none; }
+        .aicli-card--moving { transition: none; }
+    }
+    /* A touch screen: each menu item is 44 px high (the menu button is 44 px on every device). */
+    @media (pointer: coarse) {
+        .aicli-card-menu-item { min-height: 44px; }
+    }
+    /* A phone: the title row stays 44 px. The status sits on its own line under it. */
+    @media (max-width: 600px) {
+        .aicli-card-head { flex-wrap: wrap; row-gap: 0; }
+        .aicli-card-toggle { flex: 1 1 0; }
+        .aicli-card-status { order: 10; flex: 1 1 100%; white-space: normal; text-align: left; padding: 0 12px 8px 12px; }
+        .aicli-card > .aicli-help-panel, .aicli-card > .aicli-card-menu { margin: 10px 12px 0; }
+    }
+
+    /* =========================================================================
+       SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md, Phase 7: Agent Store, Config Hub and
+       Agent Relay use the shared card header.
+       ========================================================================= */
+    /* The buttons of a card header (Config Hub and Agent Relay). */
+    .aicli-card-actions { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+    .aicli-card-actions > .aicli-btn-slim { margin: 0 !important; }
+    /* Agent Store: one agent card. The header is the 44 px row; the card keeps its rail and its size rules. */
+    .av2-card.aicli-card { min-height: 0; margin: 0; box-shadow: none; }
+    .av2-card > .aicli-card-head { border-radius: 10px 10px 0 0; padding-left: 10px; }
+    .av2-card.aicli-card--collapsed > .aicli-card-head { border-radius: 10px; }
+    .av2-card.aicli-card--warn { border-left: 1px solid var(--border-color, #262a33); }
+    .av2-card > .aicli-card-body, #tab-store .av2-card > .aicli-card-body {
+        display: flex; flex-direction: column; flex: 1 1 auto; padding: 0 !important; overflow: visible;
+    }
+    .av2-card > .aicli-card-body[hidden] { display: none !important; }
+    .av2-card .aicli-card-head .av2-icon { width: 32px; height: 32px; flex: 0 0 32px; border-radius: 7px; padding: 3px; }
+    .av2-card .aicli-card-title { font-family: 'Fraunces', Georgia, 'Times New Roman', serif; }
+    .av2-card .aicli-card-head .av2-actions { flex: 0 0 auto; }
+    .av2-card .aicli-card-head .av2-buttons { align-items: center; }
+    .av2-card .aicli-card-head .av2-btn { margin-top: 0 !important; margin-bottom: 0 !important; }
+    .av2-card .aicli-card-head .av2-health-pill { flex: 0 0 auto; }
+    .av2-card > .aicli-card-body > .av2-strip { padding-top: 10px; }
+    .av2-strip > .aicli-help-btn { flex: 0 0 auto; align-self: center; }
+    .av2-card .av2-strip + .aicli-help-panel { margin: 0 18px 10px; width: auto; }
+    .aicli-card-body.relay-card-body { padding: 0; }
+    .av2-help-source { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* A phone: five chips share one row, so a long label ("Start options") wraps to a second line. */
+    @media (max-width: 600px) {
+        #tab-store .av2-strip .av2-chip .av2-label { white-space: normal; line-height: 1.15; font-size: 10px; }
+        .av2-card .av2-strip + .aicli-help-panel { margin: 0 10px 10px; }
+        /* The header keeps one 44 px row: the action buttons are icon-only squares (aria-label names them). */
+        .av2-card .aicli-card-head .av2-btn { font-size: 0 !important; min-width: 44px; padding-left: 0 !important; padding-right: 0 !important; }
+        .av2-card .aicli-card-head .av2-btn > i { font-size: 16px; margin: 0; }
+        .av2-card .aicli-card-head .av2-actions { order: 0; }
+    }
+    /* Config Hub and Agent Relay: on a phone the buttons of a card share the line under the title, and a
+       collapsed card is the title row only. */
+    @media (max-width: 600px) {
+        .aicli-card-actions { order: 11; flex: 1 1 100%; flex-wrap: wrap; padding: 0 12px 8px; }
+        .aicli-card-actions > .aicli-btn-slim { flex: 1 1 auto; }
+        .aicli-card--collapsed .aicli-card-actions { display: none; }
+    }
+    /* A touch screen: the whole label of a checkbox is the hit area, 44 px tall (findings H1 and R2). */
+    @media (pointer: coarse), (max-width: 600px) {
+        .hub-agent-tile { min-height: 44px; align-items: center; }
+        .hub-agent-tile input { width: 20px; height: 20px; margin: 0; }
+        #tab-relay label:has(> input[type="checkbox"]), #tab-relay label:has(> input[type="radio"]) { min-height: 44px; box-sizing: border-box; }
+        #relay-owner-table .relay-owner-boot { min-height: 44px; }
+    }
+    /* =========================================================================
+       SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md, Phase 6: the Storage tab. One list of cards
+       (a card for each home, Boot disk space, System memory). The home card keeps the
+       class storage-entity-card, so the older rules for its body still apply.
+       ========================================================================= */
+    .aicli-storage-cards { display: flex; flex-direction: column; gap: 16px; width: 100%; margin-bottom: 8px; }
+    .aicli-storage-cards > .aicli-card { margin: 0; }
+    .aicli-card-body.se-home-body { padding: 0; display: flex; flex-direction: column; }
+    .aicli-card-body.se-home-body[hidden] { display: none !important; }
+    .storage-entity-card .se-summary {
+        display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 4px 12px; font-size: 12px;
+    }
+    .storage-entity-card .se-summary .se-meta { font-size: 12px; opacity: 1; }
+    /* A row of the home card (backup, old layers, convert, USB move): text, then (i), then the button. */
+    .storage-entity-card .se-row {
+        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+        padding: 4px 4px 4px 8px; border: 1px solid var(--border-color, rgba(128,128,128,0.25));
+        border-radius: 4px; font-size: 11px; line-height: 1.4;
+    }
+    .storage-entity-card .se-row-text { min-width: 0; flex: 1 1 200px; overflow-wrap: anywhere; font-size: 11px; }
+    .storage-entity-card .se-backup-status { flex: 1 1 200px; }
+    .storage-entity-card .se-actions { flex-wrap: wrap; }
+    .storage-entity-card .se-body > .aicli-help-panel { width: auto; }
+    /* The (i) of a line of the Boot disk space card sits right of the label. */
+    #aicli-boot-space-card .aicli-bs-info { vertical-align: middle; }
 </style>

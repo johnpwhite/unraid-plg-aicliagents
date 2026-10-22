@@ -91,7 +91,7 @@ class HomeCacheService
         $pct = $sum * 100.0 / $ramBytes;
         if ($pct > 25.0) {
             return ['status' => 'warn', 'message' => sprintf(
-                'The RAM caches of %d plain-folder home(s) can use up to %s MB together: %.0f%% of the RAM (over 25%%). Lower "RAM cache size per home" in the Configuration tab, or move the caches to a pool.',
+                'The RAM caches of %d plain-folder home(s) can use up to %s MB together: %.0f%% of the RAM (over 25%%). Lower "Memory for caches, per home" in the Configuration tab, or move the caches to a pool.',
                 count($capsBytes), $mb($sum), $pct)];
         }
         return ['status' => 'ok', 'message' => sprintf('RAM caches may use up to %s MB together (%.0f%% of the RAM).', $mb($sum), $pct)];

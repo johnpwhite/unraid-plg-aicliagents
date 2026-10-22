@@ -122,7 +122,7 @@ final class UpperPlacementService
         }
         $current = self::currentMode($config);
         if (StorageBackendPolicyService::kindMode($config, StorageBackendPolicyService::KIND_HOMES) !== StorageBackendPolicyService::LAYERING) {
-            return ['status' => 'error', 'message' => 'The writable layer applies to homes on SquashFS layers. Homes on plain folders have none. Change Home storage first.'];
+            return ['status' => 'error', 'message' => 'The writable layer applies to homes on compressed layers. Homes on plain folders have none. Change Home storage first.'];
         }
         $usb = $seams['usb'] ?? (static function () use ($config): bool {
             $v = StorageBackendPolicyService::targetVerdicts($config);

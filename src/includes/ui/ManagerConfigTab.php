@@ -7,118 +7,140 @@
  * </module_context>
  */
 require_once __DIR__ . '/SettingsCard.php'; // aicli_help_btn(), aicli_help_panel(): the help is behind an (i).
+require_once __DIR__ . '/SettingsAdvanced.php'; // aicli_adv_open(), aicli_adv_close(): the Advanced part of a card.
 $autoSave = 'onchange="autoSaveConfig()"';
+
+
+// SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md Phase 3 and Phase 5: the one-line status of each card, built here
+// from $config. The same format sits in data-aicli-status-format, so assets/ui/settings-cards.js can
+// rebuild it from the form after a save. A status that starts with "Off" makes its card start collapsed.
+$cardOnOff = static fn($v, string $default): string => (string)($v ?? $default) === '1' ? 'On' : 'Off';
+$stGeneral = 'Tab shown: ' . ((string)($config['enable_tab'] ?? '1') === '0' ? 'No' : 'Yes')
+    . ' · user ' . (string)($config['user'] ?? 'root') . ' · ' . (string)($config['root_path'] ?? '/mnt/user');
+$cardKindWord = static fn($v): string => (string)($v ?? 'layering') === 'passthrough' ? 'Plain folders' : 'Compressed layers';
+$stStorage = 'Homes: ' . $cardKindWord($config['storage_backend_homes'] ?? null)
+    . ' · Agents: ' . $cardKindWord($config['storage_backend_agents'] ?? null);
+// The row "Save unsaved home changes every" has no use when every home is a plain folder. The saved kind is the
+// first guess; the page script (aicliRenderKindState) hides or shows the row again from the real storage status.
+$bakeHidden = (string)($config['storage_backend_homes'] ?? 'layering') === 'passthrough';
+$stTerminal = ucfirst((string)($config['theme'] ?? 'dark')) . ' · ' . (string)($config['font_size'] ?? 12) . ' px';
+$cardModelError = ['recommended' => 'Verified agents', 'all' => 'All agents', 'off' => 'Off'];
+$stContinue = 'After a restart: ' . (\AICliAgents\Services\ConfigService::autoContinueOnRestart() ? 'On' : 'Off')
+    . ' · After a model error: ' . ($cardModelError[\AICliAgents\Services\TransientErrorService::settings($config)['mode']] ?? 'Verified agents');
+$stRelayNotices = ucfirst((string)($config['relay_notice_style'] ?? 'short')) . ' · resend after ' . (string)($config['relay_notice_resend_minutes'] ?? '10') . ' min';
+$cardTtsUrl = trim((string)($config['tts_url'] ?? ''));
+$cardTtsHost = $cardTtsUrl === '' ? '' : (string)(parse_url($cardTtsUrl, PHP_URL_HOST) ?: $cardTtsUrl);
+$stVoice = $cardOnOff($config['voice_enabled'] ?? null, '0')
+    . ($cardTtsHost !== '' ? ' · voice server ' . $cardTtsHost : ((string)($config['voice_enabled'] ?? '0') === '1' ? ' · browser voice' : ''));
+$stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki page ' . $cardOnOff($config['wiki_page_enabled'] ?? null, '0');
 ?>
 <!-- TAB 1: CONFIGURATION -->
 <div id="tab-config" class="aicli-tab-content active aicli-layout">
-    <div class="aicli-config-grid">
+    <?php /* Phase 3: the layout note and the Reset layout button. The live region says "Saved" after a silent save. */ ?>
+    <div class="aicli-settings-toolbar">
+        <span class="aicli-settings-note" data-testid="settings-save-note">Changes save as you make them.</span>
+        <button type="button" class="aicli-btn-slim" data-aicli-card-action="reset-layout" data-testid="reset-layout">Reset layout</button>
+        <div id="aicli-settings-live" class="aicli-sr-only" aria-live="polite" aria-atomic="true" data-testid="settings-live"></div>
+    </div>
+    <div class="aicli-config-grid" data-aicli-cards="config">
 
-            <div class="aicli-card">
-                <div class="aicli-card-header"><i class="fa fa-globe text-orange-500"></i> Global Configuration</div>
-                <div class="aicli-card-body">
+            <?php /* Phase 5: nine cards. Rows moved between cards; every control keeps its name, id, data-testid and aria-label. */ ?>
+            <?=aicli_card_open('general', 'fa-globe', 'General', $stGeneral, 'card-general', '',
+                ['format' => 'Tab shown: {enable_tab} · user {user} · {root_path}'])?>
                     <dl>
-                        <dt>Enable Main Tab <?=aicli_help_btn('enable-tab', 'Enable Main Tab')?></dt>
+                        <dt>Show the AI CLI Agents tab <?=aicli_help_btn('enable-tab', 'Show the AI CLI Agents tab')?></dt>
                         <dd>
-                            <select name="enable_tab" aria-label="Enable Main Tab" style="width: 100%;" <?=$autoSave?>>
+                            <select name="enable_tab" aria-label="Show the AI CLI Agents tab" style="width: 100%;" <?=$autoSave?>>
                                 <?=mk_option($config['enable_tab'], "1", _('Yes'))?>
                                 <?=mk_option($config['enable_tab'], "0", _('No'))?>
                             </select>
                             <?=aicli_help_panel('enable-tab')?>
                         </dd>
 
-                        <?php // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two settings, one per kind. Each line below the select shows the REAL state. ?>
-                        <dt>Home storage <?=aicli_help_btn('storage-backend-homes', 'Home storage')?></dt>
+                        <dt>Terminal user <?=aicli_help_btn('terminal-user', 'Terminal user')?></dt>
                         <dd>
-                            <select name="storage_backend_homes" aria-label="Home storage" data-testid="storage-backend-homes" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'layering', _('SquashFS layers'))?>
-                                <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'passthrough', _('Plain folders'))?>
-                            </select>
-                            <div id="aicli-kind-state-homes" data-testid="storage-kind-state-homes" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
-                            <?=aicli_help_panel('storage-backend-homes')?>
+                            <div class="input-row">
+                                <?php /* Bug #1054 follow-up: stamp the original user value at render time so
+                                   saveAICliAgentsManager can detect a user-switch and force a full page reload
+                                   afterwards. Without the reload the Store-card Args panel, workspace list, and
+                                   any other per-user UI state stay populated from the previous user's home
+                                   overlay (since the textareas are PHP-pre-rendered from the old request). */ ?>
+                                <input type="hidden" id="aicli-original-user" value="<?=htmlspecialchars($config['user'] ?? 'root', ENT_QUOTES, 'UTF-8')?>">
+                                <select name="user" id="user_select" aria-label="Terminal user" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                    <?php // Bug #1053: getUnraidUsers() returns a numeric-indexed LIST of
+                                          // usernames, so iterate as a list (the value is $u, the username),
+                                          // not as an associative array with $u => $d (which made the option
+                                          // value the list INDEX — saved "4" for the 5th user).
+                                    foreach ($users as $u): ?>
+                                        <?=mk_option($config['user'], $u, $u)?>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="aicli-btn-slim" onclick="window.open('/Users/UserAdd', '_blank')" title="Add User"><i class="fa fa-user-plus"></i></button>
+                                <button type="button" class="aicli-btn-slim" onclick="safeReload()" title="Refresh"><i class="fa fa-refresh"></i></button>
+                            </div>
+                            <?=aicli_help_panel('terminal-user')?>
                         </dd>
 
-                        <dt>Agent storage <?=aicli_help_btn('storage-backend-agents', 'Agent storage')?></dt>
+                        <dt>Starting folder <?=aicli_help_btn('root-path', 'Starting folder')?></dt>
                         <dd>
-                            <select name="storage_backend_agents" aria-label="Agent storage" data-testid="storage-backend-agents" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'layering', _('SquashFS layers'))?>
-                                <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'passthrough', _('Plain folders'))?>
-                            </select>
-                            <div id="aicli-kind-state-agents" data-testid="storage-kind-state-agents" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
-                            <div id="aicli-backend-migration-status" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
-                            <?=aicli_help_panel('storage-backend-agents')?>
+                            <div class="input-row">
+                                <input type="text" name="root_path" id="root_path" aria-label="Workspace root path" value="<?=htmlspecialchars($config['root_path'] ?? '/mnt/user', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('root_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
+                            </div>
+                            <?=aicli_help_panel('root-path')?>
                         </dd>
 
-                        <dt>Writable layer for homes <?=aicli_help_btn('storage-upper-mode', 'Writable layer for homes')?></dt>
+                        <!-- WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3: the setting is stored in bytes
+                             (upload_max_bytes) but shown and edited here in MB. The visible field
+                             has no name attribute, so the form never submits it directly; onchange
+                             writes the byte value into the hidden field, which autoSaveConfig()
+                             then serializes and saves like every other setting on this tab. -->
+                        <dt>Largest upload <?=aicli_help_btn('upload-max', 'Largest upload')?></dt>
                         <dd>
-                            <select name="storage_upper_mode" aria-label="Writable layer for homes" data-testid="storage-upper-mode" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'zram', _('RAM (zram): fast, no disk wear, lost on a crash until saved'))?>
-                                <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'disk', _('Disk: survives a crash or power cut, uses space on the persistence drive'))?>
-                            </select>
-                            <?=aicli_help_panel('storage-upper-mode')?>
+                            <?php
+                            $uploadMaxBytes = (int)($config['upload_max_bytes'] ?? 536870912);
+                            $uploadMaxMb = $uploadMaxBytes > 0 ? (int) round($uploadMaxBytes / 1048576) : 0;
+                            ?>
+                            <div class="input-row">
+                                <input type="number" id="upload_max_mb" aria-label="Largest upload in megabytes" value="<?=$uploadMaxMb?>" min="0" step="1" style="width:100px !important; flex-shrink:0;" onchange="aicliApplyUploadMaxBytes(this.value)">
+                                <span style="opacity:0.75; font-size:11px;">MB · 0 = no limit</span>
+                            </div>
+                            <input type="hidden" name="upload_max_bytes" id="upload_max_bytes" value="<?=$uploadMaxBytes?>">
+                            <?=aicli_help_panel('upload-max')?>
                         </dd>
-
-                        <?php /* BOOT_DISK_SPACE.md R4 */ ?>
-                        <dt>Keep the previous version for rollback <?=aicli_help_btn('keep-previous-version', 'Keep the previous version for rollback')?></dt>
+                        <script>
+                        function aicliApplyUploadMaxBytes(mb) {
+                            var n = Math.max(0, parseInt(mb, 10) || 0);
+                            document.getElementById('upload_max_bytes').value = n > 0 ? (n * 1048576) : 0;
+                            autoSaveConfig();
+                        }
+                        </script>
+                    </dl>
+            <?=aicli_adv_open('general', 'General')?>
+                    <dl>
+                        <dt>Log detail <?=aicli_help_btn('log-level', 'Log detail')?></dt>
                         <dd>
-                            <select name="keep_previous_version" aria-label="Keep the previous version for rollback" data-testid="keep-previous-version" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['keep_previous_version'] ?? '1', '1', _('Yes'))?>
-                                <?=mk_option($config['keep_previous_version'] ?? '1', '0', _('No'))?>
-                            </select>
-                            <?=aicli_help_panel('keep-previous-version')?>
-                        </dd>
-
-                        <dt>Logging Level <?=aicli_help_btn('log-level', 'Logging Level')?></dt>
-                        <dd>
-                            <select name="log_level" aria-label="Logging Level" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['log_level'], "0", _('Errors Only'))?>
+                            <select name="log_level" aria-label="Log detail" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['log_level'], "0", _('Errors only'))?>
                                 <?=mk_option($config['log_level'], "1", _('Warnings'))?>
-                                <?=mk_option($config['log_level'], "2", _('Normal (Info)'))?>
-                                <?=mk_option($config['log_level'], "3", _('Debug (Verbose)'))?>
+                                <?=mk_option($config['log_level'], "2", _('Normal'))?>
+                                <?=mk_option($config['log_level'], "3", _('Debug'))?>
                             </select>
                             <?=aicli_help_panel('log-level')?>
                         </dd>
 
-                        <dt>Backup Interval <?=aicli_help_btn('bake-schedule', 'Backup Interval')?></dt>
+                        <dt>Check for new agent versions <?=aicli_help_btn('version-check-schedule', 'Check for new agent versions')?></dt>
                         <dd>
-                            <div class="input-row">
-                                <?php
-                                // #153: this control drives the REAL automatic-save cadence the
-                                // storage supervisor reads (bake_schedule_minutes). The old
-                                // sync_interval_hours/mins selects were wired to nothing.
-                                $bakeEvery = (string)($config['bake_schedule_minutes'] ?? '120');
-                                $bakeChoices = ['15' => 'Every 15 minutes', '30' => 'Every 30 minutes', '60' => 'Every hour', '120' => 'Every 2 hours', '240' => 'Every 4 hours', '480' => 'Every 8 hours', '720' => 'Every 12 hours', '1440' => 'Once a day'];
-                                if (!isset($bakeChoices[$bakeEvery]) && ctype_digit($bakeEvery)) $bakeChoices[$bakeEvery] = "Every $bakeEvery minutes";
-                                ?>
-                                <select name="bake_schedule_minutes" aria-label="Automatic backup interval" style="flex: 1; min-width: 0;" <?=$autoSave?>>
-                                    <?php foreach ($bakeChoices as $mins => $label): echo mk_option($bakeEvery, (string)$mins, $label); endforeach; ?>
-                                </select>
-                                <button type="button" class="aicli-btn-slim" onclick="persistEntity('home', activeTerminalUser)"><i class="fa fa-save"></i> Persist</button>
-                            </div>
-                            <?=aicli_help_panel('bake-schedule')?>
-                        </dd>
-
-                        <dt>Workspace working directory <?=aicli_help_btn('workspace-cwd', 'Workspace working directory')?></dt>
-                        <dd>
-                            <?php $cwdMode = (string)($config['workspace_cwd'] ?? 'auto'); if ($cwdMode === 'share') $cwdMode = 'auto'; ?>
-                            <select name="workspace_cwd" aria-label="Workspace working directory" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($cwdMode, 'auto', _('Automatic safe path (direct pool for cache-only shares)'))?>
-                                <?=mk_option($cwdMode, 'pool', _('Pool path when the share is cache-only (legacy explicit mode)'))?>
-                            </select>
-                            <?=aicli_help_panel('workspace-cwd')?>
-                        </dd>
-
-                        <dt>Version Check Schedule <?=aicli_help_btn('version-check-schedule', 'Version Check Schedule')?></dt>
-                        <dd>
-                            <select name="version_check_schedule" aria-label="Version check schedule" <?=$autoSave?>>
+                            <select name="version_check_schedule" aria-label="Check for new agent versions" <?=$autoSave?>>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 */6 * * *', 'Every 6 hours')?>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 6 * * *', 'Daily at 6am')?>
                                 <?=mk_option($config['version_check_schedule']??'0 6 * * *', '0 6 * * 1', 'Weekly (Monday 6am)')?>
-                                <?=mk_option($config['version_check_schedule']??'0 6 * * *', '', 'Disabled')?>
+                                <?=mk_option($config['version_check_schedule']??'0 6 * * *', '', 'Never')?>
                             </select>
                             <?=aicli_help_panel('version-check-schedule')?>
                         </dd>
 
-                        <dt>Version History (months) <?=aicli_help_btn('version-check-months', 'Version History (months)')?></dt>
+                        <dt>Keep version check results for <?=aicli_help_btn('version-check-months', 'Keep version check results for')?></dt>
                         <dd>
                             <select name="version_check_months" aria-label="Version history retention in months" <?=$autoSave?>>
                                 <?=mk_option($config['version_check_months']??'3', '1', '1 month')?>
@@ -128,17 +150,276 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </select>
                             <?=aicli_help_panel('version-check-months')?>
                         </dd>
-                    </dl>
-                </div>
-            </div>
 
-            <div class="aicli-card">
-                <div class="aicli-card-header"><i class="fa fa-user-circle text-orange-500"></i> Session & Environment</div>
-                <div class="aicli-card-body">
-                    <dl>
-                        <dt>Terminal Theme <?=aicli_help_btn('theme', 'Terminal Theme')?></dt>
+                        <?php /* PLUGIN_MANAGEMENT_TOOLS.md Phase 1: the one master switch for the read-only admin MCP tool catalogue (AdminMcpTools). It saves through the same autoSaveConfig()/`save` path as every other select, so ConfigService::saveConfig() calls AdminMcpTools::ensureMcpRegistered() when it changes. */ ?>
+                        <dt>Let agents manage the plugin <?=aicli_help_btn('admin-tools', 'Let agents manage the plugin')?></dt>
                         <dd>
-                            <select name="theme" aria-label="Terminal theme" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                            <select name="admin_tools_enabled" aria-label="Let agents manage the plugin"style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['admin_tools_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['admin_tools_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('admin-tools')?>
+                        </dd>
+
+                        <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
+                           only — stored in localStorage, never sent to the server on its own, and
+                           never round-tripped through this form's own action=save. It travels only
+                           as the X-AICli-Device header/aicli_device param on every OTHER AJAX call
+                           this browser makes (CommonLogging.php's aicliAjax(), ajaxUrl() in the SPA),
+                           so an event this browser causes can say which device it came from. */ ?>
+                        <dt>Device name (this browser) <?=aicli_help_btn('device-label', 'Device name (this browser)')?></dt>
+                        <dd>
+                            <input type="text" id="aicli_device_label" aria-label="Device name"maxlength="40"
+                                   placeholder="for example phone, laptop" style="flex: 1; min-width: 0;"
+                                   oninput="window.aicliSaveDeviceLabel(this.value)">
+                            <?=aicli_help_panel('device-label')?>
+                        </dd>
+                    </dl>
+                    <script>
+                    (function () {
+                        'use strict';
+                        var KEY = 'aicli_device_label';
+                        window.aicliSaveDeviceLabel = function (value) {
+                            try {
+                                var trimmed = (value || '').trim();
+                                if (trimmed === '') localStorage.removeItem(KEY);
+                                else localStorage.setItem(KEY, trimmed);
+                            } catch (e) { /* best-effort — a blocked localStorage must not break the field */ }
+                        };
+                        document.addEventListener('DOMContentLoaded', function () {
+                            var el = document.getElementById('aicli_device_label');
+                            if (!el) return;
+                            try { el.value = localStorage.getItem(KEY) || ''; } catch (e) { /* leave blank */ }
+                        });
+                    }());
+                    </script>
+            <?=aicli_adv_close()?>
+            <?=aicli_card_close()?>
+
+            <?=aicli_card_open('storage', 'fa-hdd-o', 'Storage', $stStorage, 'card-storage', '',
+                ['format' => 'Homes: {storage_backend_homes} · Agents: {storage_backend_agents}'])?>
+                    <dl>
+                        <?php // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two settings, one per kind. Each line below the select shows the REAL state. ?>
+                        <dt>Home storage <?=aicli_help_btn('storage-backend-homes', 'Home storage')?></dt>
+                        <dd>
+                            <select name="storage_backend_homes" aria-label="Home storage" data-testid="storage-backend-homes" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'layering', _('Compressed layers'))?>
+                                <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'passthrough', _('Plain folders'))?>
+                            </select>
+                            <div id="aicli-kind-state-homes" data-testid="storage-kind-state-homes" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
+                            <?=aicli_help_panel('storage-backend-homes')?>
+                        </dd>
+
+                        <dt>Agent storage <?=aicli_help_btn('storage-backend-agents', 'Agent storage')?></dt>
+                        <dd>
+                            <select name="storage_backend_agents" aria-label="Agent storage" data-testid="storage-backend-agents" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'layering', _('Compressed layers'))?>
+                                <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'passthrough', _('Plain folders'))?>
+                            </select>
+                            <div id="aicli-kind-state-agents" data-testid="storage-kind-state-agents" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
+                            <div id="aicli-backend-migration-status" data-aicli-warns-card="storage" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
+                            <?=aicli_help_panel('storage-backend-agents')?>
+                        </dd>
+
+                        <dt>Where homes are stored <?=aicli_help_btn('home-storage-path', 'Where homes are stored')?></dt>
+                        <dd>
+                            <?php /* S-11 (#1355): storage target picker. The path input is read-only —
+                               the value is set by the picker (ranked candidates from
+                               enumerate_storage_targets, or a probed custom path) and routes through
+                               the EXISTING preflight_migrate → swal → execute_migrate flow via
+                               saveAICliAgentsManager. */ ?>
+                            <div class="input-row">
+                                <input type="text" name="home_storage_path" id="home_storage_path" readonly value="<?=htmlspecialchars(\AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config), ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current home storage location — use Change to move it">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('home')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
+                            </div>
+                            <?=aicli_help_panel('home-storage-path')?>
+                            <div id="aicli-storage-picker-home" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
+                            <?php $homeClass = \AICliAgents\Services\StorageMountService::classifyPath($config['home_storage_path'] ?? ''); ?>
+                            <?php if ($homeClass === 'array'): ?>
+                                <div style="font-size:10px; color:#eab308; margin-top:2px; padding:3px 6px; background:rgba(234,179,8,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-exclamation-triangle"></i> On array — unavailable when stopped. Emergency mode will activate.</div>
+                            <?php elseif (strpos($homeClass, 'pool:') === 0): ?>
+                                <div style="font-size:10px; color:#3b82f6; margin-top:2px; padding:3px 6px; background:rgba(59,130,246,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-info-circle"></i> On pool '<?=htmlspecialchars(substr($homeClass, 5), ENT_QUOTES, 'UTF-8')?>' — unavailable if pool is stopped.</div>
+                            <?php endif; ?>
+                        </dd>
+
+                        <dt>Where agents are stored <?=aicli_help_btn('agent-storage-path', 'Where agents are stored')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
+                                <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('agent')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
+                            </div>
+                            <?=aicli_help_panel('agent-storage-path')?>
+                            <div id="aicli-storage-picker-agent" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
+                            <?php $agentClass = \AICliAgents\Services\StorageMountService::classifyPath($config['agent_storage_path'] ?? ''); ?>
+                            <?php if ($agentClass === 'array'): ?>
+                                <div style="font-size:10px; color:#eab308; margin-top:2px; padding:3px 6px; background:rgba(234,179,8,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-exclamation-triangle"></i> On array — agents unavailable when stopped.</div>
+                            <?php elseif (strpos($agentClass, 'pool:') === 0): ?>
+                                <div style="font-size:10px; color:#3b82f6; margin-top:2px; padding:3px 6px; background:rgba(59,130,246,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-info-circle"></i> On pool '<?=htmlspecialchars(substr($agentClass, 5), ENT_QUOTES, 'UTF-8')?>' — unavailable if pool is stopped.</div>
+                            <?php endif; ?>
+                            <?php /* S-11: informational record of the /mnt/user path the user actually
+                               picked when the picker stored a resolved exclusive-share pool path.
+                               Serialized with every form save (action=save). */ ?>
+                            <input type="hidden" name="storage_picked_via" id="storage_picked_via" value="<?=htmlspecialchars($config['storage_picked_via'] ?? '', ENT_QUOTES, 'UTF-8')?>">
+                        </dd>
+
+                        <?php /* BOOT_DISK_SPACE.md R4 */ ?>
+                        <dt>Keep the previous agent version <?=aicli_help_btn('keep-previous-version', 'Keep the previous agent version')?></dt>
+                        <dd>
+                            <select name="keep_previous_version" aria-label="Keep the previous agent version" data-testid="keep-previous-version" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['keep_previous_version'] ?? '1', '1', _('Yes'))?>
+                                <?=mk_option($config['keep_previous_version'] ?? '1', '0', _('No'))?>
+                            </select>
+                            <?=aicli_help_panel('keep-previous-version')?>
+                        </dd>
+                    </dl>
+            <?=aicli_adv_open('storage', 'Storage')?>
+                    <?php /* Phase 5: hidden when every home is a plain folder. The saved kind decides at render time (this style rule, no flash); aicliRenderKindState() in ManagerScripts.php then follows the real storage status. */ ?>
+                    <?php if ($bakeHidden): ?><style id="aicli-bake-hide">[data-aicli-hide-plain-homes] { display: none !important; }</style><?php endif; ?>
+                    <dl>
+                        <dt data-aicli-hide-plain-homes>Save unsaved home changes every <?=aicli_help_btn('bake-schedule', 'Save unsaved home changes every')?></dt>
+                        <dd data-aicli-hide-plain-homes>
+                            <div class="input-row">
+                                <?php
+                                // #153: this control drives the REAL automatic-save cadence the
+                                // storage supervisor reads (bake_schedule_minutes). The old
+                                // sync_interval_hours/mins selects were wired to nothing.
+                                $bakeEvery = (string)($config['bake_schedule_minutes'] ?? '120');
+                                $bakeChoices = ['15' => 'Every 15 minutes', '30' => 'Every 30 minutes', '60' => 'Every hour', '120' => 'Every 2 hours', '240' => 'Every 4 hours', '480' => 'Every 8 hours', '720' => 'Every 12 hours', '1440' => 'Once a day'];
+                                if (!isset($bakeChoices[$bakeEvery]) && ctype_digit($bakeEvery)) $bakeChoices[$bakeEvery] = "Every $bakeEvery minutes";
+                                ?>
+                                <select name="bake_schedule_minutes" aria-label="Save unsaved home changes every" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                    <?php foreach ($bakeChoices as $mins => $label): echo mk_option($bakeEvery, (string)$mins, $label); endforeach; ?>
+                                </select>
+                                <button type="button" class="aicli-btn-slim" onclick="persistEntity('home', activeTerminalUser)"><i class="fa fa-save"></i> Save now</button>
+                            </div>
+                            <?=aicli_help_panel('bake-schedule')?>
+                        </dd>
+
+                        <dt>Where unsaved changes are kept <?=aicli_help_btn('storage-upper-mode', 'Where unsaved changes are kept')?></dt>
+                        <dd>
+                            <select name="storage_upper_mode" aria-label="Where unsaved changes are kept" data-testid="storage-upper-mode" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'zram', _('Memory (zram): fast, no disk wear, lost on a crash until saved'))?>
+                                <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'disk', _('Disk: survives a crash or power cut, uses space on the persistence drive'))?>
+                            </select>
+                            <?=aicli_help_panel('storage-upper-mode')?>
+                        </dd>
+
+                        <dt style="align-self: flex-start; padding-top: 6px;">Merge layers after <?=aicli_help_btn('consolidate-max-layers', 'Merge layers after')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="consolidate_max_layers" aria-label="Merge layers after"
+                                       value="<?=\AICliAgents\Services\ConfigService::getConsolidateMaxLayers()?>"
+                                       min="4" max="40" step="1" style="width: 90px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">layers</span>
+                            </div>
+                            <?=aicli_help_panel('consolidate-max-layers')?>
+                        </dd>
+
+                        <?php /* #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R6): the setting
+                           consolidate_stage_path. Empty = the plugin picks a folder by itself
+                           (Docker appdata, then VM domains, then a protected pool). */ ?>
+                        <dt>Work folder for storage jobs <?=aicli_help_btn('consolidate-stage-path', 'Work folder for storage jobs')?></dt>
+                        <dd>
+                            <input type="text" name="consolidate_stage_path" aria-label="Work folder for storage jobs" data-testid="consolidate-stage-path"
+                                   value="<?=htmlspecialchars((string)($config['consolidate_stage_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                   placeholder="Automatic" style="width: 100%;" <?=$autoSave?>>
+                            <?=aicli_help_panel('consolidate-stage-path')?>
+                        </dd>
+
+                        <?php /* BOOT_DISK_SPACE.md R5 (#537): where the caches of a plain-folder home live.
+                           Keys: home_cache_location, home_cache_path, home_cache_ram_mb. */ ?>
+                        <dt>Caches of plain-folder homes <?=aicli_help_btn('home-cache-location', 'Caches of plain-folder homes')?></dt>
+                        <dd>
+                            <select name="home_cache_location" aria-label="Caches of plain-folder homes" data-testid="home-cache-location" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['home_cache_location'] ?? 'ram', 'ram', _('Memory (default): no boot disk use, emptied when the server restarts'))?>
+                                <?=mk_option($config['home_cache_location'] ?? 'ram', 'pool', _('A folder on a pool'))?>
+                            </select>
+                            <?=aicli_help_panel('home-cache-location')?>
+                        </dd>
+
+                        <dt>Cache folder on a pool <?=aicli_help_btn('home-cache-path', 'Cache folder on a pool')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="text" name="home_cache_path" id="home_cache_path" aria-label="Cache folder on a pool" data-testid="home-cache-path"
+                                       value="<?=htmlspecialchars((string)($config['home_cache_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                       placeholder="/mnt/cache/aicli-caches" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('home_cache_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
+                            </div>
+                            <?=aicli_help_panel('home-cache-path')?>
+                        </dd>
+
+                        <dt>Memory for caches, per home <?=aicli_help_btn('home-cache-ram-mb', 'Memory for caches, per home')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="home_cache_ram_mb" aria-label="Memory for caches, per home" data-testid="home-cache-ram-mb"
+                                       value="<?=htmlspecialchars((string)($config['home_cache_ram_mb'] ?? '1024'), ENT_QUOTES, 'UTF-8')?>"
+                                       min="256" max="8192" step="256" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">MB · 256 to 8192</span>
+                            </div>
+                            <?=aicli_help_panel('home-cache-ram-mb')?>
+                        </dd>
+
+                        <?php /* BOOT_DISK_SPACE.md R6: the setting history_move_path. */ ?>
+                        <dt>Folder for moved sessions <?=aicli_help_btn('history-move-path', 'Folder for moved sessions')?></dt>
+                        <dd>
+                            <input type="text" name="history_move_path" aria-label="Folder for moved sessions" data-testid="history-move-path"
+                                   value="<?=htmlspecialchars((string)($config['history_move_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                   placeholder="/mnt/pool/aicli-history" style="width: 100%;" <?=$autoSave?>>
+                            <?=aicli_help_panel('history-move-path')?>
+                        </dd>
+
+                        <?php /* AGENT_TEMP_FOLDER.md R2: the settings agent_tmp_location, agent_tmp_path and agent_tmp_warn_mb.
+                           The choice "boot" shows only when the boot device is an internal disk (not a USB stick). */
+                        $aicliTmpBootOk = false;
+                        try { $aicliTmpBootOk = \AICliAgents\Services\AgentTempService::bootAllowed(); } catch (\Throwable $e) { $aicliTmpBootOk = false; } ?>
+                        <dt>Agent temporary files <?=aicli_help_btn('agent-tmp-location', 'Agent temporary files')?></dt>
+                        <dd>
+                            <select name="agent_tmp_location" aria-label="Agent temporary files" data-testid="agent-tmp-location" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'ram', _('Memory (default)'))?>
+                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'pool', _('A folder on a pool'))?>
+                                <?php if ($aicliTmpBootOk): ?>
+                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'boot', _('The internal boot disk'))?>
+                                <?php endif; ?>
+                            </select>
+                            <?=aicli_help_panel('agent-tmp-location')?>
+                        </dd>
+                        <dt>Temporary folder on a pool <?=aicli_help_btn('agent-tmp-path', 'Temporary folder on a pool')?></dt>
+                        <dd>
+                            <input type="text" name="agent_tmp_path" aria-label="Temporary folder on a pool"data-testid="agent-tmp-path"
+                                   value="<?=htmlspecialchars((string)($config['agent_tmp_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
+                                   placeholder="/mnt/cache/agent-tmp" style="width: 100%;" <?=$autoSave?>>
+                            <?=aicli_help_panel('agent-tmp-path')?>
+                        </dd>
+                        <dt>Warn when temporary files in memory pass <?=aicli_help_btn('agent-tmp-warn-mb', 'Warn when temporary files in memory pass')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="agent_tmp_warn_mb" aria-label="Warn when temporary files in memory pass"data-testid="agent-tmp-warn-mb"
+                                       value="<?=htmlspecialchars((string)($config['agent_tmp_warn_mb'] ?? '1024'), ENT_QUOTES, 'UTF-8')?>"
+                                       min="64" max="1048576" step="64" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">MB</span>
+                            </div>
+                            <?=aicli_help_panel('agent-tmp-warn-mb')?>
+                        </dd>
+
+                        <dt>Which path a workspace runs on <?=aicli_help_btn('workspace-cwd', 'Which path a workspace runs on')?></dt>
+                        <dd>
+                            <?php $cwdMode = (string)($config['workspace_cwd'] ?? 'auto'); if ($cwdMode === 'share') $cwdMode = 'auto'; ?>
+                            <select name="workspace_cwd" aria-label="Which path a workspace runs on" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($cwdMode, 'auto', _('Automatic'))?>
+                                <?=mk_option($cwdMode, 'pool', _('Pool path when the share is on one pool only'))?>
+                            </select>
+                            <?=aicli_help_panel('workspace-cwd')?>
+                        </dd>
+                    </dl>
+            <?=aicli_adv_close()?>
+            <?=aicli_card_close()?>
+
+            <?=aicli_card_open('terminal', 'fa-terminal', 'Terminal', $stTerminal, 'card-terminal', '',
+                ['format' => '{theme} · {font_size} px'])?>
+                    <dl>
+                        <dt>Colour scheme <?=aicli_help_btn('theme', 'Colour scheme')?></dt>
+                        <dd>
+                            <select name="theme" aria-label="Colour scheme"style="flex: 1; min-width: 0;" <?=$autoSave?>>
                                 <?=mk_option($config['theme']??'dark', "dark", _('Dark'))?>
                                 <?=mk_option($config['theme']??'dark', "light", _('Light'))?>
                                 <?=mk_option($config['theme']??'dark', "solarized", _('Solarized'))?>
@@ -146,7 +427,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?=aicli_help_panel('theme')?>
                         </dd>
 
-                        <dt>Font Size <?=aicli_help_btn('font-size', 'Font Size')?></dt>
+                        <dt>Text size <?=aicli_help_btn('font-size', 'Text size')?></dt>
                         <dd>
                             <div class="input-row">
                                 <input type="number" name="font_size" aria-label="Terminal font size in pixels" value="<?=$config['font_size'] ?? 12?>" min="8" max="32" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
@@ -155,6 +436,21 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?=aicli_help_panel('font-size')?>
                         </dd>
 
+                        <?php /* RESPONSIVE_PRIORITY.md: the setting responsive_priority. */ ?>
+                        <dt>Keep typing fast when the server is busy <?=aicli_help_btn('responsive-priority', 'Keep typing fast when the server is busy')?></dt>
+                        <dd>
+                            <select name="responsive_priority" aria-label="Keep typing fast when the server is busy"data-testid="responsive-priority" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['responsive_priority'] ?? '0', '1', _('On'))?>
+                                <?=mk_option($config['responsive_priority'] ?? '0', '0', _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('responsive-priority')?>
+                        </dd>
+                    </dl>
+            <?=aicli_card_close()?>
+
+            <?=aicli_card_open('continue', 'fa-repeat', 'Automatic continue', $stContinue, 'card-continue', '',
+                ['format' => 'After a restart: {auto_continue_on_restart} · After a model error: {transient_error_continue}'])?>
+                    <dl>
                         <!-- CONTINUE_ON_RESTART.md (2026-09-09): relocated from the Agent Relay
                              tab (Relay messaging never owned this). Saves through the same
                              autoSaveConfig()/`save` path as every other select on this tab. -->
@@ -181,331 +477,31 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?=aicli_help_panel('transient-error-continue')?>
                         </dd>
 
-                        <dt>Model error: wait and limit <?=aicli_help_btn('transient-error-wait', 'Model error: wait and limit')?></dt>
+                        <dt>Wait before each continue, and how many <?=aicli_help_btn('transient-error-wait', 'Wait before each continue, and how many')?></dt>
                         <dd>
                             <div class="input-row">
                                 <input type="text" name="transient_error_backoff_minutes" aria-label="Minutes to wait before each automatic continue" value="<?=htmlspecialchars((string)($config['transient_error_backoff_minutes'] ?? '1,5,15'), ENT_QUOTES, 'UTF-8')?>" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="opacity:0.75; font-size:11px;">min, at most</span>
+                                <span style="opacity:0.75; font-size:11px;">minutes ·</span>
                                 <input type="number" name="transient_error_max_continues" aria-label="Automatic continues per error before it needs you" value="<?=htmlspecialchars((string)($config['transient_error_max_continues'] ?? '3'), ENT_QUOTES, 'UTF-8')?>" min="0" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
                                 <span style="opacity:0.75; font-size:11px;">times</span>
                             </div>
                             <?=aicli_help_panel('transient-error-wait')?>
                         </dd>
-
-                        <dt>Terminal User <?=aicli_help_btn('terminal-user', 'Terminal User')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <?php /* Bug #1054 follow-up: stamp the original user value at render time so
-                                   saveAICliAgentsManager can detect a user-switch and force a full page reload
-                                   afterwards. Without the reload the Store-card Args panel, workspace list, and
-                                   any other per-user UI state stay populated from the previous user's home
-                                   overlay (since the textareas are PHP-pre-rendered from the old request). */ ?>
-                                <input type="hidden" id="aicli-original-user" value="<?=htmlspecialchars($config['user'] ?? 'root', ENT_QUOTES, 'UTF-8')?>">
-                                <select name="user" id="user_select" aria-label="Terminal user" style="flex: 1; min-width: 0;" <?=$autoSave?>>
-                                    <?php // Bug #1053: getUnraidUsers() returns a numeric-indexed LIST of
-                                          // usernames, so iterate as a list (the value is $u, the username),
-                                          // not as an associative array with $u => $d (which made the option
-                                          // value the list INDEX — saved "4" for the 5th user).
-                                    foreach ($users as $u): ?>
-                                        <?=mk_option($config['user'], $u, $u)?>
-                                    <?php endforeach; ?>
-                                </select>
-                                <button type="button" class="aicli-btn-slim" onclick="window.open('/Users/UserAdd', '_blank')" title="Add User"><i class="fa fa-user-plus"></i></button>
-                                <button type="button" class="aicli-btn-slim" onclick="safeReload()" title="Refresh"><i class="fa fa-refresh"></i></button>
-                            </div>
-                            <?=aicli_help_panel('terminal-user')?>
-                        </dd>
-
-                        <dt>Workspace Root <?=aicli_help_btn('root-path', 'Workspace Root')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="text" name="root_path" id="root_path" aria-label="Workspace root path" value="<?=htmlspecialchars($config['root_path'] ?? '/mnt/user', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;" <?=$autoSave?>>
-                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('root_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
-                            </div>
-                            <?=aicli_help_panel('root-path')?>
-                        </dd>
-
-                        <!-- WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3: the setting is stored in bytes
-                             (upload_max_bytes) but shown and edited here in MB. The visible field
-                             has no name attribute, so the form never submits it directly; onchange
-                             writes the byte value into the hidden field, which autoSaveConfig()
-                             then serializes and saves like every other setting on this tab. -->
-                        <dt>Upload size limit <?=aicli_help_btn('upload-max', 'Upload size limit')?></dt>
-                        <dd>
-                            <?php
-                            $uploadMaxBytes = (int)($config['upload_max_bytes'] ?? 536870912);
-                            $uploadMaxMb = $uploadMaxBytes > 0 ? (int) round($uploadMaxBytes / 1048576) : 0;
-                            ?>
-                            <div class="input-row">
-                                <input type="number" id="upload_max_mb" aria-label="Upload size limit in megabytes" value="<?=$uploadMaxMb?>" min="0" step="1" style="width:100px !important; flex-shrink:0;" onchange="aicliApplyUploadMaxBytes(this.value)">
-                                <span style="opacity:0.75; font-size:11px;">MB (0 = no limit)</span>
-                            </div>
-                            <input type="hidden" name="upload_max_bytes" id="upload_max_bytes" value="<?=$uploadMaxBytes?>">
-                            <?=aicli_help_panel('upload-max')?>
-                        </dd>
-                        <script>
-                        function aicliApplyUploadMaxBytes(mb) {
-                            var n = Math.max(0, parseInt(mb, 10) || 0);
-                            document.getElementById('upload_max_bytes').value = n > 0 ? (n * 1048576) : 0;
-                            autoSaveConfig();
-                        }
-                        </script>
-
-                        <dt>Home Storage <?=aicli_help_btn('home-storage-path', 'Home Storage')?></dt>
-                        <dd>
-                            <?php /* S-11 (#1355): storage target picker. The path input is read-only —
-                               the value is set by the picker (ranked candidates from
-                               enumerate_storage_targets, or a probed custom path) and routes through
-                               the EXISTING preflight_migrate → swal → execute_migrate flow via
-                               saveAICliAgentsManager. */ ?>
-                            <div class="input-row">
-                                <input type="text" name="home_storage_path" id="home_storage_path" readonly value="<?=htmlspecialchars(\AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config), ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current home storage location — use Change to move it">
-                                <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('home')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
-                            </div>
-                            <?=aicli_help_panel('home-storage-path')?>
-                            <div id="aicli-storage-picker-home" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
-                            <?php $homeClass = \AICliAgents\Services\StorageMountService::classifyPath($config['home_storage_path'] ?? ''); ?>
-                            <?php if ($homeClass === 'array'): ?>
-                                <div style="font-size:10px; color:#eab308; margin-top:2px; padding:3px 6px; background:rgba(234,179,8,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-exclamation-triangle"></i> On array — unavailable when stopped. Emergency mode will activate.</div>
-                            <?php elseif (strpos($homeClass, 'pool:') === 0): ?>
-                                <div style="font-size:10px; color:#3b82f6; margin-top:2px; padding:3px 6px; background:rgba(59,130,246,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-info-circle"></i> On pool '<?=htmlspecialchars(substr($homeClass, 5), ENT_QUOTES, 'UTF-8')?>' — unavailable if pool is stopped.</div>
-                            <?php endif; ?>
-                        </dd>
-
-                        <dt>Agent Storage <?=aicli_help_btn('agent-storage-path', 'Agent Storage')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
-                                <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('agent')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
-                            </div>
-                            <?=aicli_help_panel('agent-storage-path')?>
-                            <div id="aicli-storage-picker-agent" class="aicli-storage-picker" style="display:none; width:100%; margin-top:4px;"></div>
-                            <?php $agentClass = \AICliAgents\Services\StorageMountService::classifyPath($config['agent_storage_path'] ?? ''); ?>
-                            <?php if ($agentClass === 'array'): ?>
-                                <div style="font-size:10px; color:#eab308; margin-top:2px; padding:3px 6px; background:rgba(234,179,8,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-exclamation-triangle"></i> On array — agents unavailable when stopped.</div>
-                            <?php elseif (strpos($agentClass, 'pool:') === 0): ?>
-                                <div style="font-size:10px; color:#3b82f6; margin-top:2px; padding:3px 6px; background:rgba(59,130,246,0.08); border-radius:3px; display:flex; align-items:center; gap:4px; width:100%;"><i class="fa fa-info-circle"></i> On pool '<?=htmlspecialchars(substr($agentClass, 5), ENT_QUOTES, 'UTF-8')?>' — unavailable if pool is stopped.</div>
-                            <?php endif; ?>
-                            <?php /* S-11: informational record of the /mnt/user path the user actually
-                               picked when the picker stored a resolved exclusive-share pool path.
-                               Serialized with every form save (action=save). */ ?>
-                            <input type="hidden" name="storage_picked_via" id="storage_picked_via" value="<?=htmlspecialchars($config['storage_picked_via'] ?? '', ENT_QUOTES, 'UTF-8')?>">
-                        </dd>
-
-                        <dt style="align-self: flex-start; padding-top: 6px;">Consolidate Layer Ceiling <?=aicli_help_btn('consolidate-max-layers', 'Consolidate Layer Ceiling')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="number" name="consolidate_max_layers" aria-label="Consolidate layer ceiling"
-                                       value="<?=\AICliAgents\Services\ConfigService::getConsolidateMaxLayers()?>"
-                                       min="4" max="40" step="1" style="width: 90px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">layers</span>
-                            </div>
-                            <?=aicli_help_panel('consolidate-max-layers')?>
-                        </dd>
-
-                        <?php /* #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R6): the setting
-                           consolidate_stage_path. Empty = the plugin picks a folder by itself
-                           (Docker appdata, then VM domains, then a protected pool). */ ?>
-                        <dt>Work folder for storage jobs <?=aicli_help_btn('consolidate-stage-path', 'Work folder for storage jobs')?></dt>
-                        <dd>
-                            <input type="text" name="consolidate_stage_path" aria-label="Work folder for storage jobs" data-testid="consolidate-stage-path"
-                                   value="<?=htmlspecialchars((string)($config['consolidate_stage_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
-                                   placeholder="Automatic" style="width: 100%;" <?=$autoSave?>>
-                            <?=aicli_help_panel('consolidate-stage-path')?>
-                        </dd>
-
-                        <?php /* BOOT_DISK_SPACE.md R5 (#537): where the caches of a plain-folder home live.
-                           Keys: home_cache_location, home_cache_path, home_cache_ram_mb. */ ?>
-                        <dt>Cache location for plain-folder homes <?=aicli_help_btn('home-cache-location', 'Cache location for plain-folder homes')?></dt>
-                        <dd>
-                            <select name="home_cache_location" aria-label="Cache location for plain-folder homes" data-testid="home-cache-location" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['home_cache_location'] ?? 'ram', 'ram', _('RAM (default): no boot disk use, emptied when the server restarts'))?>
-                                <?=mk_option($config['home_cache_location'] ?? 'ram', 'pool', _('A folder on a pool'))?>
-                            </select>
-                            <?=aicli_help_panel('home-cache-location')?>
-                        </dd>
-
-                        <dt>Cache folder on a pool <?=aicli_help_btn('home-cache-path', 'Cache folder on a pool')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="text" name="home_cache_path" id="home_cache_path" aria-label="Cache folder on a pool" data-testid="home-cache-path"
-                                       value="<?=htmlspecialchars((string)($config['home_cache_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
-                                       placeholder="/mnt/cache/aicli-caches" style="flex: 1; min-width: 0;" <?=$autoSave?>>
-                                <button type="button" class="aicli-btn-slim" onclick="openPathPicker('home_cache_path')" title="Browse"><i class="fa fa-folder-open"></i></button>
-                            </div>
-                            <?=aicli_help_panel('home-cache-path')?>
-                        </dd>
-
-                        <dt>RAM cache size per home <?=aicli_help_btn('home-cache-ram-mb', 'RAM cache size per home')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="number" name="home_cache_ram_mb" aria-label="RAM cache size per home" data-testid="home-cache-ram-mb"
-                                       value="<?=htmlspecialchars((string)($config['home_cache_ram_mb'] ?? '1024'), ENT_QUOTES, 'UTF-8')?>"
-                                       min="256" max="8192" step="256" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">MB</span>
-                            </div>
-                            <?=aicli_help_panel('home-cache-ram-mb')?>
-                        </dd>
-
-                        <?php /* BOOT_DISK_SPACE.md R6: the setting history_move_path. */ ?>
-                        <dt>Folder for moved sessions <?=aicli_help_btn('history-move-path', 'Folder for moved sessions')?></dt>
-                        <dd>
-                            <input type="text" name="history_move_path" aria-label="Folder for moved sessions" data-testid="history-move-path"
-                                   value="<?=htmlspecialchars((string)($config['history_move_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
-                                   placeholder="/mnt/pool/aicli-history" style="width: 100%;" <?=$autoSave?>>
-                            <?=aicli_help_panel('history-move-path')?>
-                        </dd>
-
-                        <?php /* RESPONSIVE_PRIORITY.md: the setting responsive_priority. */ ?>
-                        <dt>Keep the terminal responsive <?=aicli_help_btn('responsive-priority', 'Keep the terminal responsive')?></dt>
-                        <dd>
-                            <select name="responsive_priority" aria-label="Keep the terminal responsive" data-testid="responsive-priority" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['responsive_priority'] ?? '0', '1', _('On'))?>
-                                <?=mk_option($config['responsive_priority'] ?? '0', '0', _('Off (default)'))?>
-                            </select>
-                            <?=aicli_help_panel('responsive-priority')?>
-                        </dd>
-
-                        <?php /* AGENT_TEMP_FOLDER.md R2: the settings agent_tmp_location, agent_tmp_path and agent_tmp_warn_mb.
-                           The choice "boot" shows only when the boot device is an internal disk (not a USB stick). */
-                        $aicliTmpBootOk = false;
-                        try { $aicliTmpBootOk = \AICliAgents\Services\AgentTempService::bootAllowed(); } catch (\Throwable $e) { $aicliTmpBootOk = false; } ?>
-                        <dt>Agent temporary folder <?=aicli_help_btn('agent-tmp-location', 'Agent temporary folder')?></dt>
-                        <dd>
-                            <select name="agent_tmp_location" aria-label="Agent temporary folder" data-testid="agent-tmp-location" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'ram', _('RAM (default)'))?>
-                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'pool', _('A folder on a pool'))?>
-                                <?php if ($aicliTmpBootOk): ?>
-                                <?=mk_option($config['agent_tmp_location'] ?? 'ram', 'boot', _('The internal boot disk'))?>
-                                <?php endif; ?>
-                            </select>
-                            <?=aicli_help_panel('agent-tmp-location')?>
-                        </dd>
-                        <dt>Agent temporary folder on a pool <?=aicli_help_btn('agent-tmp-path', 'Agent temporary folder on a pool')?></dt>
-                        <dd>
-                            <input type="text" name="agent_tmp_path" aria-label="Agent temporary folder on a pool" data-testid="agent-tmp-path"
-                                   value="<?=htmlspecialchars((string)($config['agent_tmp_path'] ?? ''), ENT_QUOTES, 'UTF-8')?>"
-                                   placeholder="/mnt/cache/agent-tmp" style="width: 100%;" <?=$autoSave?>>
-                            <?=aicli_help_panel('agent-tmp-path')?>
-                        </dd>
-                        <dt>Warn when agent temporary files in RAM pass <?=aicli_help_btn('agent-tmp-warn-mb', 'Warn when agent temporary files in RAM pass')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="number" name="agent_tmp_warn_mb" aria-label="Warn when agent temporary files in RAM pass" data-testid="agent-tmp-warn-mb"
-                                       value="<?=htmlspecialchars((string)($config['agent_tmp_warn_mb'] ?? '1024'), ENT_QUOTES, 'UTF-8')?>"
-                                       min="64" max="1048576" step="64" style="width: 110px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="font-size:11px; opacity:0.7; margin-left:8px;">MB</span>
-                            </div>
-                            <?=aicli_help_panel('agent-tmp-warn-mb')?>
-                        </dd>
-
-                        <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
-                           only — stored in localStorage, never sent to the server on its own, and
-                           never round-tripped through this form's own action=save. It travels only
-                           as the X-AICli-Device header/aicli_device param on every OTHER AJAX call
-                           this browser makes (CommonLogging.php's aicliAjax(), ajaxUrl() in the SPA),
-                           so an event this browser causes can say which device it came from. */ ?>
-                        <dt>Device label (this browser only) <?=aicli_help_btn('device-label', 'Device label (this browser only)')?></dt>
-                        <dd>
-                            <input type="text" id="aicli_device_label" aria-label="Device label" maxlength="40"
-                                   placeholder="for example phone, laptop" style="flex: 1; min-width: 0;"
-                                   oninput="window.aicliSaveDeviceLabel(this.value)">
-                            <?=aicli_help_panel('device-label')?>
-                        </dd>
                     </dl>
-
-                    <script>
-                    (function () {
-                        'use strict';
-                        var KEY = 'aicli_device_label';
-                        window.aicliSaveDeviceLabel = function (value) {
-                            try {
-                                var trimmed = (value || '').trim();
-                                if (trimmed === '') localStorage.removeItem(KEY);
-                                else localStorage.setItem(KEY, trimmed);
-                            } catch (e) { /* best-effort — a blocked localStorage must not break the field */ }
-                        };
-                        document.addEventListener('DOMContentLoaded', function () {
-                            var el = document.getElementById('aicli_device_label');
-                            if (!el) return;
-                            try { el.value = localStorage.getItem(KEY) || ''; } catch (e) { /* leave blank */ }
-                        });
-                    }());
-                    </script>
-
-
-                    <!-- RELAY_WAITING_PILL.md (2026-09-09) Part 3: capture-on-deliver. Beside the
-                         pane-input controls above because it feeds the SAME readiness gate — a
-                         sample is only useful for improving the rules just above it. Saves
-                         through the same autoSaveConfig()/`save` path as every other select on
-                         this tab. -->
-                    <dl style="margin-top:14px;">
-                        <dt>Record a screen sample when I deliver a waiting message <?=aicli_help_btn('relay-gate-sampling', 'Record a screen sample when I deliver a waiting message')?></dt>
-                        <dd>
-                            <select name="relay_gate_sampling_enabled" aria-label="Record a screen sample when I deliver a waiting message" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['relay_gate_sampling_enabled'] ?? '0', "1", _('On'))?>
-                                <?=mk_option($config['relay_gate_sampling_enabled'] ?? '0', "0", _('Off (default)'))?>
-                            </select>
-                            <?=aicli_help_panel('relay-gate-sampling')?>
-                        </dd>
-                    </dl>
-
-                    <!-- RELAY_NOTICE_WORDING.md (#461): the wording of the notices the plugin types into an agent. -->
-                    <dl style="margin-top:14px;">
-                        <dt>Wording of Relay notices typed into agents <?=aicli_help_btn('relay-notice-style', 'Wording of Relay notices typed into agents')?></dt>
-                        <dd>
-                            <select name="relay_notice_style" id="aicli-relay-notice-style" aria-label="Wording of Relay notices" data-testid="relay-notice-style" style="width: 100%;" onchange="aicliRelayNoticeChanged()">
-                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'short', _('Short (default): about 20 words'))?>
-                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'minimal', _('Minimal: about 10 words'))?>
-                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'full', _('Full: the long original text'))?>
-                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'custom', _('Custom: my own words'))?>
-                            </select>
-                            <textarea name="relay_notice_custom" id="aicli-relay-notice-custom" aria-label="Custom Relay notice text" data-testid="relay-notice-custom" rows="2" maxlength="300" style="width:100%; margin-top:6px; display:none;" onchange="aicliRelayNoticeChanged()"><?=htmlspecialchars((string)($config['relay_notice_custom'] ?? ''), ENT_QUOTES)?></textarea>
-                            <?=aicli_help_panel('relay-notice-style')?>
-                            <div id="aicli-relay-notice-preview" data-testid="relay-notice-preview" style="font-family:monospace; font-size:11px; margin-top:6px; white-space:pre-wrap; word-break:break-word;"></div>
-                        </dd>
-                    </dl>
-                    <!-- RELAY_TOKEN_SAVINGS.md R15: how long an unread notice blocks a second one. -->
-                    <dl style="margin-top:14px;">
-                        <dt>Resend a Relay notice after (minutes) <?=aicli_help_btn('relay-notice-resend', 'Resend a Relay notice after (minutes)')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="number" name="relay_notice_resend_minutes" id="aicli-relay-notice-resend" aria-label="Resend a Relay notice after (minutes)" data-testid="relay-notice-resend" value="<?=htmlspecialchars((string)($config['relay_notice_resend_minutes'] ?? '10'), ENT_QUOTES, 'UTF-8')?>" min="1" max="240" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="opacity:0.75; font-size:11px;">minutes</span>
-                            </div>
-                            <?=aicli_help_panel('relay-notice-resend')?>
-                        </dd>
-                    </dl>
-                    <script>
-                    function aicliRelayNoticeChanged() {
-                        var st = document.getElementById('aicli-relay-notice-style');
-                        var tx = document.getElementById('aicli-relay-notice-custom');
-                        var pv = document.getElementById('aicli-relay-notice-preview');
-                        if (!st || !tx || !pv) return;
-                        tx.style.display = st.value === 'custom' ? 'block' : 'none';
-                        // Answers can arrive out of order. Only the answer of the newest request may write the preview.
-                        var seq = window.aicliRelayNoticeSeq = (window.aicliRelayNoticeSeq || 0) + 1;
-                        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx.value) + '&csrf_token=' + csrf, function (r) {
-                            if (seq !== window.aicliRelayNoticeSeq) return;
-                            if (r.status !== 'ok') { pv.style.color = '#d03b3b'; pv.textContent = r.message || 'This text cannot be used.'; return; }
-                            pv.style.color = '';
-                            pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
-                            autoSaveConfig();
-                        }).fail(function () { pv.textContent = 'Could not check the text. Nothing was saved.'; });
-                    }
-                    (function () { if (window.jQuery) jQuery(function () { if (document.getElementById('aicli-relay-notice-style')) aicliRelayNoticeChanged_init(); }); })();
-                    function aicliRelayNoticeChanged_init() {
-                        var st = document.getElementById('aicli-relay-notice-style');
-                        var tx = document.getElementById('aicli-relay-notice-custom');
-                        if (tx) tx.style.display = st.value === 'custom' ? 'block' : 'none';
-                        var seq = window.aicliRelayNoticeSeq = (window.aicliRelayNoticeSeq || 0) + 1;
-                        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx ? tx.value : '') + '&csrf_token=' + csrf, function (r) {
-                            if (seq !== window.aicliRelayNoticeSeq) return;
-                            var pv = document.getElementById('aicli-relay-notice-preview');
-                            if (pv && r.status === 'ok') pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
-                        });
-                    }
-                    </script>
+            <?=aicli_adv_open('continue', 'Automatic continue')?>
+                    <!-- AUTO_CONTINUE_PATTERNS.md: the operator's own auto-continue patterns. Rendered by ManagerAutoContinueScripts.php through its own AJAX actions (AutoContinueHandler), like the Agent voice card. No control here has a `name`, so the settings form never saves them. -->
+                    <div id="acp-card" class="acp-body" data-testid="acp-section">
+                    <div class="acp-toolbar">
+                        <h3 class="acp-h" id="acp-mine-h">Your patterns</h3>
+                        <button type="button" class="aicli-btn-slim" id="acp-add"><i class="fa fa-plus" aria-hidden="true"></i> Add pattern</button>
+                    </div>
+                    <div id="acp-status" class="acp-status" aria-live="polite"></div>
+                    <ul id="acp-list" class="acp-list" aria-labelledby="acp-mine-h"></ul>
+                    <details id="acp-builtins" class="acp-details">
+                        <summary>Built-in patterns (read-only)</summary>
+                        <div id="acp-builtin-list" class="acp-builtin-list"></div>
+                    </details>
+                    </div>
 
                     <!-- Moved to the bottom of the card (operator request 2026-09-13) so the settings rows stay together. -->
                     <!-- PANE_INPUT_HYBRID_ALLOWLIST.md (2026-09-09): moved here from the Agent
@@ -517,18 +513,9 @@ $autoSave = 'onchange="autoSaveConfig()"';
                          moved. -->
                     <details style="border:1px solid var(--border-color,#e0e0e0);border-radius:6px;padding:10px 14px;margin-top:14px;" id="pane-input-rules-section">
                         <summary style="cursor:pointer;font-weight:700;">Terminal input safety rules</summary>
-                        <p style="margin:10px 0 8px;opacity:.7;font-size:12px;">
-                          Before the plugin types into an agent's terminal, it reads the bottom of the screen. It
-                          does this for a Relay notice, for Continue, and for Reload. A <strong>block</strong> rule
-                          (shared by every agent) holds the input when the screen shows a question, a menu, a yes/no
-                          prompt, a pager, or a settings overlay. An <strong>idle</strong> rule (per agent) describes
-                          that agent's empty prompt. When an agent has idle rules, the plugin types only when it
-                          recognises the prompt; otherwise it holds. An agent with no idle rules uses the block
-                          rules only. Write each rule as a regular expression, in <code>/body/flags</code> form. You
-                          (or your coding agent) can also edit
-                          <code><?=htmlspecialchars(\AICliAgents\Services\SecretPaths::flashRoot(), ENT_QUOTES, 'UTF-8')?>/pane-input-rules.json</code> directly. A
-                          pattern that does not compile is dropped, and the built-in rule stays in force, so this
-                          check can never break.
+                        <?php /* Phase 3: the long intro is in the (i) of this card (help/cards.php, adv-continue). */ ?>
+                        <p class="aicli-hint" style="margin:10px 0 8px;">
+                          Rules file: <code><?=htmlspecialchars(\AICliAgents\Services\SecretPaths::flashRoot(), ENT_QUOTES, 'UTF-8')?>/pane-input-rules.json</code>
                         </p>
                         <div id="pane-input-errors" style="display:none;color:#b45309;font-size:12px;margin-bottom:8px;"></div>
                         <h4 style="margin:8px 0 4px;font-size:13px;">Block rules (all agents)</h4>
@@ -554,8 +541,95 @@ $autoSave = 'onchange="autoSaveConfig()"';
                           <span id="pane-input-probe-result" style="font-size:12px;"></span>
                         </div>
                     </details>
-                </div>
-            </div>
+            <?=aicli_adv_close()?>
+            <?=aicli_card_close()?>
+
+            <?=aicli_card_open('relay-notices', 'fa-envelope-o', 'Relay notices', $stRelayNotices, 'card-relay-notices', '',
+                ['format' => '{relay_notice_style} · resend after {relay_notice_resend_minutes} min'])?>
+                    <!-- RELAY_NOTICE_WORDING.md (#461): the wording of the notices the plugin types into an agent. RELAY_TOKEN_SAVINGS.md R15: how long an unread notice blocks a second one. -->
+                    <dl>
+                        <dt>Notice typed into an agent <?=aicli_help_btn('relay-notice-style', 'Notice typed into an agent')?></dt>
+                        <dd>
+                            <select name="relay_notice_style" id="aicli-relay-notice-style" aria-label="Notice typed into an agent"data-testid="relay-notice-style" style="width: 100%;" onchange="aicliRelayNoticeChanged()">
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'short', _('Short (default): about 20 words'))?>
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'minimal', _('Minimal: about 10 words'))?>
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'full', _('Full: the long original text'))?>
+                                <?=mk_option($config['relay_notice_style'] ?? 'short', 'custom', _('Custom: my own words'))?>
+                            </select>
+                            <textarea name="relay_notice_custom" id="aicli-relay-notice-custom" aria-label="Custom Relay notice text" data-testid="relay-notice-custom" rows="2" maxlength="300" style="width:100%; margin-top:6px; display:none;" onchange="aicliRelayNoticeChanged()"><?=htmlspecialchars((string)($config['relay_notice_custom'] ?? ''), ENT_QUOTES)?></textarea>
+                            <?=aicli_help_panel('relay-notice-style')?>
+                            <?php /* The example of the notice sits behind a "Show example" link. A bad custom text opens it, so the reason is never hidden. */ ?>
+                            <a href="#" id="aicli-relay-notice-example-link" data-testid="relay-notice-example-link" class="aicli-hint" role="button" aria-expanded="false" aria-controls="aicli-relay-notice-preview" style="display:inline-block; margin-top:6px;" onclick="return aicliRelayNoticeExample(this);">Show example</a>
+                            <div id="aicli-relay-notice-preview" data-testid="relay-notice-preview" hidden style="font-family:monospace; font-size:12px; margin-top:6px; white-space:pre-wrap; word-break:break-word;"></div>
+                        </dd>
+
+                        <dt>Resend a notice after <?=aicli_help_btn('relay-notice-resend', 'Resend a notice after')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="relay_notice_resend_minutes" id="aicli-relay-notice-resend" aria-label="Resend a notice after" data-testid="relay-notice-resend" value="<?=htmlspecialchars((string)($config['relay_notice_resend_minutes'] ?? '10'), ENT_QUOTES, 'UTF-8')?>" min="1" max="240" style="width: 70px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">minutes · 1 to 240</span>
+                            </div>
+                            <?=aicli_help_panel('relay-notice-resend')?>
+                        </dd>
+                    </dl>
+                    <script>
+                    // Shows or hides the example of the notice. A text that is not allowed always shows it, with the reason.
+                    function aicliRelayNoticeShow(show) {
+                        var pv = document.getElementById('aicli-relay-notice-preview');
+                        var link = document.getElementById('aicli-relay-notice-example-link');
+                        if (!pv) return;
+                        pv.hidden = !show;
+                        if (link) { link.textContent = show ? 'Hide example' : 'Show example'; link.setAttribute('aria-expanded', show ? 'true' : 'false'); }
+                    }
+                    function aicliRelayNoticeExample() {
+                        var pv = document.getElementById('aicli-relay-notice-preview');
+                        aicliRelayNoticeShow(!!(pv && pv.hidden));
+                        return false;
+                    }
+                    function aicliRelayNoticeChanged() {
+                        var st = document.getElementById('aicli-relay-notice-style');
+                        var tx = document.getElementById('aicli-relay-notice-custom');
+                        var pv = document.getElementById('aicli-relay-notice-preview');
+                        if (!st || !tx || !pv) return;
+                        tx.style.display = st.value === 'custom' ? 'block' : 'none';
+                        // Answers can arrive out of order. Only the answer of the newest request may write the preview.
+                        var seq = window.aicliRelayNoticeSeq = (window.aicliRelayNoticeSeq || 0) + 1;
+                        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx.value) + '&csrf_token=' + csrf, function (r) {
+                            if (seq !== window.aicliRelayNoticeSeq) return;
+                            if (r.status !== 'ok') { pv.style.color = '#d03b3b'; pv.textContent = r.message || 'This text cannot be used.'; aicliRelayNoticeShow(true); return; }
+                            pv.style.color = '';
+                            pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
+                            autoSaveConfig();
+                        }).fail(function () { pv.textContent = 'Could not check the text. Nothing was saved.'; aicliRelayNoticeShow(true); });
+                    }
+                    (function () { if (window.jQuery) jQuery(function () { if (document.getElementById('aicli-relay-notice-style')) aicliRelayNoticeChanged_init(); }); })();
+                    function aicliRelayNoticeChanged_init() {
+                        var st = document.getElementById('aicli-relay-notice-style');
+                        var tx = document.getElementById('aicli-relay-notice-custom');
+                        if (tx) tx.style.display = st.value === 'custom' ? 'block' : 'none';
+                        var seq = window.aicliRelayNoticeSeq = (window.aicliRelayNoticeSeq || 0) + 1;
+                        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_notice_preview&style=' + encodeURIComponent(st.value) + '&custom=' + encodeURIComponent(tx ? tx.value : '') + '&csrf_token=' + csrf, function (r) {
+                            if (seq !== window.aicliRelayNoticeSeq) return;
+                            var pv = document.getElementById('aicli-relay-notice-preview');
+                            if (pv && r.status === 'ok') pv.textContent = 'Actor notice (' + r.words_actor + ' words): ' + r.actor + '\nDirect message notice (' + r.words_direct + ' words): ' + r.direct;
+                        });
+                    }
+                    </script>
+
+            <?=aicli_adv_open('relay-notices', 'Relay notices')?>
+                    <!-- RELAY_WAITING_PILL.md Part 3: capture-on-deliver. It feeds the same readiness gate as the Terminal input safety rules (card Automatic continue). -->
+                    <dl>
+                        <dt>Keep a screen sample when I deliver a message <?=aicli_help_btn('relay-gate-sampling', 'Keep a screen sample when I deliver a message')?></dt>
+                        <dd>
+                            <select name="relay_gate_sampling_enabled" aria-label="Keep a screen sample when I deliver a message"style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['relay_gate_sampling_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['relay_gate_sampling_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('relay-gate-sampling')?>
+                        </dd>
+                    </dl>
+            <?=aicli_adv_close()?>
+            <?=aicli_card_close()?>
 
             <!-- Secrets Vault moved to per-agent Store cards (Secrets panel). See AGENT_LEVEL_TMUX_CONF.md
                  and the av2 card mockup. Single-key-per-agent agents (env_prefix + _API_KEY) still
@@ -578,21 +652,15 @@ $autoSave = 'onchange="autoSaveConfig()"';
                  never shows the stored value — only whether one is set — and
                  is sent over POST, not as a URL query parameter, because
                  aicliAjax()'s GET helper would put a secret in server access
-                 logs and browser history. AGENT_VOICE.md R13: the Voice id
+                 logs and browser history. AGENT_VOICE.md R13: the Voice name
                  field is a `<select>` filled from the read-only `list_voices`
                  action when the engine can answer it, falling back to the
                  plain text field — see aicliVoiceRefreshVoiceList() below. -->
-            <div class="aicli-card">
-                <div class="aicli-card-header"><i class="fa fa-volume-up text-orange-500"></i> Agent voice</div>
-                <div class="aicli-card-body">
-                    <p style="font-size:12px; opacity:0.8; margin-bottom:12px;">
-                        An agent can speak to get your attention. By default it uses the
-                        browser's own voice. Set an endpoint URL to use a real text-to-speech
-                        server instead.
-                    </p>
+
+            <?=aicli_card_open('voice', 'fa-volume-up', 'Agent voice', $stVoice, 'card-voice', '')?>
                     <dl>
                         <?php /* AGENT_VOICE.md "#323 guided setup": the "Set up natural voice" row. */ require __DIR__ . '/VoiceSetupCard.php'; ?>
-                        <dt>Voice (all devices) <?=aicli_help_btn('voice-toggle', 'Voice (all devices)')?></dt>
+                        <dt>Voice <?=aicli_help_btn('voice-toggle', 'Voice on or off')?></dt>
                         <dd>
                             <button type="button" id="aicli-voice-toggle" class="aicli-btn-slim" onclick="aicliVoiceToggleGlobal()">
                                 <i id="aicli-voice-toggle-icon" class="fa fa-volume-off"></i> <span id="aicli-voice-toggle-label">Off</span>
@@ -600,13 +668,13 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?=aicli_help_panel('voice-toggle')?>
                         </dd>
 
-                        <dt>Endpoint URL <?=aicli_help_btn('tts-url', 'Endpoint URL')?></dt>
+                        <dt>Voice server address <?=aicli_help_btn('tts-url', 'Voice server address')?></dt>
                         <dd>
-                            <input type="text" id="aicli-voice-tts-url" aria-label="Text-to-speech endpoint URL" onchange="aicliVoiceSaveField('tts_url')" placeholder="http://192.168.1.4:8880" style="width:100%;">
+                            <input type="text" id="aicli-voice-tts-url" aria-label="Voice server address"onchange="aicliVoiceSaveField('tts_url')" placeholder="http://192.168.1.4:8880" style="width:100%;">
                             <?=aicli_help_panel('tts-url')?>
                         </dd>
 
-                        <dt>Voice id <?=aicli_help_btn('tts-voice', 'Voice id')?></dt>
+                        <dt>Voice <?=aicli_help_btn('tts-voice', 'Voice name')?></dt>
                         <dd>
                             <!-- R13: when the engine can list its own voices
                                  (GET /v1/audio/voices, a Kokoro-FastAPI
@@ -614,14 +682,17 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                  field. Both share the same "tts_voice" value;
                                  aicliVoiceSaveField('tts_voice') reads
                                  whichever one is visible. -->
-                            <select id="aicli-voice-tts-voice-select" aria-label="Voice id" onchange="aicliVoiceSelectChanged()" style="width:100%; display:none;"></select>
-                            <input type="text" id="aicli-voice-tts-voice" aria-label="Voice id" onchange="aicliVoiceSaveField('tts_voice')" placeholder="af_heart" style="width:100%;">
+                            <select id="aicli-voice-tts-voice-select" aria-label="Voice name" onchange="aicliVoiceSelectChanged()" style="width:100%; display:none;"></select>
+                            <input type="text" id="aicli-voice-tts-voice" aria-label="Voice name"onchange="aicliVoiceSaveField('tts_voice')" placeholder="af_heart" style="width:100%;">
                             <?=aicli_help_panel('tts-voice')?>
                         </dd>
 
                         <dt>Speed <?=aicli_help_btn('tts-speed', 'Speed')?></dt>
                         <dd>
-                            <input type="number" id="aicli-voice-tts-speed" aria-label="Speech speed" onchange="aicliVoiceSaveField('tts_speed')" min="0.5" max="2.0" step="0.1" style="width:90px !important;">
+                            <div class="input-row">
+                                <input type="number" id="aicli-voice-tts-speed" aria-label="Speech speed" onchange="aicliVoiceSaveField('tts_speed')" min="0.5" max="2.0" step="0.1" style="width:90px !important;">
+                                <span style="opacity:0.75; font-size:11px;">1.0 = normal</span>
+                            </div>
                             <?=aicli_help_panel('tts-speed')?>
                         </dd>
 
@@ -631,7 +702,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <input type="password" data-aicli-eye id="aicli-voice-tts-key" aria-label="Text-to-speech API key" onchange="aicliVoiceSaveField('tts_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
                                 <button type="button" id="aicli-voice-key-clear" class="aicli-btn-slim" onclick="aicliVoiceClearKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
                             </div>
-                            <div class="aicli-hint">Key status: <strong id="aicli-voice-key-status">unknown</strong></div>
+                            <div class="aicli-hint">Status: <strong id="aicli-voice-key-status">unknown</strong></div>
                             <?=aicli_help_panel('tts-key')?>
                         </dd>
 
@@ -645,7 +716,9 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                  the buttons. -->
                             <div id="aicli-voice-test-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
                         </dd>
-
+                    </dl>
+            <?=aicli_adv_open('voice', 'Agent voice')?>
+                    <dl>
                         <!-- VOICE_MAIL.md R8: how much voice mail is kept. Saved one field
                              per request through save_voice_settings, like the fields above. -->
                         <dt style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px; font-weight:600;">Voice mail <?=aicli_help_btn('voicemail-intro', 'Voice mail')?></dt>
@@ -665,8 +738,11 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?=aicli_help_panel('voicemail-max-age-days')?>
                             <div id="aicli-voicemail-save-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
                         </dd>
+                    </dl>
+            <?=aicli_adv_close()?>
+            <?=aicli_card_close()?>
 
-                        <!-- VOICE_INPUT.md: "Voice input" section, in the SAME card — the
+                        <!-- VOICE_INPUT.md: the Dictation card — the
                              reverse direction from the TTS settings above (dictating INTO a
                              workspace, not the agent speaking). `stt_url` empty means browser
                              mode: the Web Speech API runs entirely on this device and nothing
@@ -676,26 +752,24 @@ $autoSave = 'onchange="autoSaveConfig()"';
                              button here records 3 s (8 s with a live endpoint, words shown as you speak) on this device and shows the recognised
                              text — it calls window.aicliVoice.startInput() with a fixed
                              non-workspace id ('manager') and never dictates anywhere. -->
-                        <dt style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px; font-weight:600;">Voice input <?=aicli_help_btn('stt-intro', 'Voice input')?></dt>
-                        <dd style="border-top:1px solid var(--border-color, rgba(128,128,128,0.25)); padding-top:12px; margin-top:8px;">
-                            <?=aicli_help_panel('stt-intro')?>
-                        </dd>
 
+            <?=aicli_card_open('dictation', 'fa-microphone', 'Dictation', 'Loading…', 'card-dictation', '')?>
+                    <dl>
                         <?php /* VOICE_ENGINE_SETUP.md #381 #382: the "Set up local dictation" row. */ require __DIR__ . '/VoiceSttSetupCard.php'; ?>
 
-                        <dt>Transcription endpoint URL <?=aicli_help_btn('stt-url', 'Transcription endpoint URL')?></dt>
+                        <dt>Transcription server address <?=aicli_help_btn('stt-url', 'Transcription server address')?></dt>
                         <dd>
-                            <input type="text" id="aicli-voice-stt-url" aria-label="Transcription endpoint URL" onchange="aicliVoiceSaveField('stt_url')" placeholder="http://192.168.1.4:8000" style="width:100%;">
+                            <input type="text" id="aicli-voice-stt-url" aria-label="Transcription server address"onchange="aicliVoiceSaveField('stt_url')" placeholder="http://192.168.1.4:8000" style="width:100%;">
                             <?=aicli_help_panel('stt-url')?>
                         </dd>
 
                         <!-- VOICE_LIVE_ENGINE.md R1/R7 (#731): the live (streaming) engine. The
                              browser connects to it directly; the Test button opens the socket from
                              this page and sends one second of silence. -->
-                        <dt>Live transcription endpoint <?=aicli_help_btn('stt-stream-url', 'Live transcription endpoint')?></dt>
+                        <dt>Live transcription server (optional) <?=aicli_help_btn('stt-stream-url', 'Live transcription server')?></dt>
                         <dd>
                             <div class="input-row">
-                                <input type="text" id="aicli-voice-stt-stream-url" aria-label="Live transcription endpoint" onchange="aicliVoiceSaveField('stt_stream_url')" placeholder="wss://stt-live.example.com/" style="flex:1; min-width:0;">
+                                <input type="text" id="aicli-voice-stt-stream-url" aria-label="Live transcription server"onchange="aicliVoiceSaveField('stt_stream_url')" placeholder="wss://stt-live.example.com/" style="flex:1; min-width:0;">
                                 <button type="button" class="aicli-btn-slim" onclick="aicliVoiceLiveTest()" title="Connect to the live endpoint from this browser" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Test</button>
                             </div>
                             <?=aicli_help_panel('stt-stream-url')?>
@@ -720,20 +794,19 @@ $autoSave = 'onchange="autoSaveConfig()"';
                                 <input type="password" data-aicli-eye id="aicli-voice-stt-key" aria-label="Transcription API key" onchange="aicliVoiceSaveField('stt_api_key')" placeholder="Leave empty to keep the current key" style="flex:1; min-width:0;" autocomplete="new-password">
                                 <button type="button" id="aicli-voice-stt-key-clear" class="aicli-btn-slim" onclick="aicliVoiceClearSttKey();" title="Remove the stored API key" style="font-size:11px; min-height:24px; min-width:44px; padding:2px 10px; white-space:nowrap;">Clear</button>
                             </div>
-                            <div class="aicli-hint">Key status: <strong id="aicli-voice-stt-key-status">unknown</strong></div>
+                            <div class="aicli-hint">Status: <strong id="aicli-voice-stt-key-status">unknown</strong></div>
                             <?=aicli_help_panel('stt-key')?>
                         </dd>
 
                         <dt aria-hidden="true">&nbsp;</dt>
                         <dd>
                             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceInputTest()"><i class="fa fa-microphone"></i> Test (records 3 s, 8 s live)</button>
+                                <button type="button" class="aicli-btn-slim" onclick="aicliVoiceInputTest()"><i class="fa fa-microphone"></i> Test</button>
                             </div>
                             <div id="aicli-voice-input-test-result" style="font-size:11px; min-height:1.4em; width:100%; overflow-wrap:anywhere;"></div>
                         </dd>
                     </dl>
-                </div>
-            </div>
+            <?=aicli_card_close()?>
 
             <script>
             (function () {
@@ -782,6 +855,19 @@ $autoSave = 'onchange="autoSaveConfig()"';
                         window.aicliVoice.setState(!!s.voice_enabled);
                     }
                     syncToggle();
+                    // Phase 5: the status of the card "Dictation" follows the stored settings.
+                    if (window.aicliCards) {
+                        var dHost = function (u) { return (u || '').replace(/^[a-z]+:\/\//i, '').replace(/[\/:].*$/, ''); };
+                        var dText = s.stt_url ? 'Server at ' + dHost(s.stt_url) : 'Browser dictation';
+                        if (s.stt_stream_url) dText += ' · live engine set';
+                        window.aicliCards.setStatus('dictation', dText);
+                    }
+                    // Phase 3: the one-line status of the card header follows the stored settings.
+                    if (window.aicliCards && typeof s.voice_enabled !== 'undefined') {
+                        var vHost = (s.tts_url || '').replace(/^[a-z]+:\/\//i, '').replace(/[\/:].*$/, '');
+                        window.aicliCards.setStatus('voice', (s.voice_enabled ? 'On' : 'Off')
+                            + (vHost ? ' · voice server ' + vHost : (s.voice_enabled ? ' · browser voice' : '')));
+                    }
                 }
 
                 // R13: fill the select from the engine's own voice list, or
@@ -822,7 +908,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                     return ($('#aicli-voice-tts-voice').val() || '').trim();
                 }
 
-                // Called on load, after an Endpoint URL save, and after Test —
+                // Called on load, after a voice server address save, and after Test —
                 // the three moments the engine's voice list can have changed.
                 window.aicliVoiceRefreshVoiceList = function () {
                     var current = currentVoiceValue();
@@ -1089,55 +1175,13 @@ $autoSave = 'onchange="autoSaveConfig()"';
             }());
             </script>
 
-            <!-- AUTO_CONTINUE_PATTERNS.md: the operator's own auto-continue patterns.
-                 Rendered by ManagerAutoContinueScripts.php through its own AJAX
-                 actions (AutoContinueHandler), like the Agent voice card. No control
-                 here has a `name`, so the settings form never saves them. -->
-            <div class="aicli-card" id="acp-card">
-                <div class="aicli-card-header"><i class="fa fa-repeat text-orange-500" aria-hidden="true"></i> Auto-continue patterns</div>
-                <div class="aicli-card-body acp-body">
-                    <p class="acp-help">The screen messages that let a workspace continue by itself: a temporary model error, or a usage quota with a retry time. Add your own pattern when an agent stops on a message the plugin does not know yet. Each change is saved at once.</p>
-                    <div class="acp-toolbar">
-                        <h3 class="acp-h" id="acp-mine-h">Your patterns</h3>
-                        <button type="button" class="aicli-btn-slim" id="acp-add"><i class="fa fa-plus" aria-hidden="true"></i> Add pattern</button>
-                    </div>
-                    <div id="acp-status" class="acp-status" aria-live="polite"></div>
-                    <ul id="acp-list" class="acp-list" aria-labelledby="acp-mine-h"></ul>
-                    <details id="acp-builtins" class="acp-details">
-                        <summary>Built-in patterns (read-only)</summary>
-                        <div id="acp-builtin-list" class="acp-builtin-list"></div>
-                    </details>
-                </div>
-            </div>
-
-            <!-- PLUGIN_MANAGEMENT_TOOLS.md Phase 1: the one master switch for the
-                 read-only admin MCP tool catalogue (AdminMcpTools). Saves through
-                 the same autoSaveConfig()/`save` path as every other select on this
-                 tab, so ConfigService::saveConfig() calls AdminMcpTools::ensureMcpRegistered()
-                 for us the instant this is changed — no separate Apply button needed. -->
-            <div class="aicli-card">
-                <div class="aicli-card-header"><i class="fa fa-wrench text-orange-500"></i> Plugin management</div>
-                <div class="aicli-card-body">
-                    <dl>
-                        <dt>Plugin management tools <?=aicli_help_btn('admin-tools', 'Plugin management tools')?></dt>
-                        <dd>
-                            <select name="admin_tools_enabled" aria-label="Plugin management tools" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['admin_tools_enabled'] ?? '0', "1", _('On'))?>
-                                <?=mk_option($config['admin_tools_enabled'] ?? '0', "0", _('Off (default)'))?>
-                            </select>
-                            <?=aicli_help_panel('admin-tools')?>
-                        </dd>
-                    </dl>
-                </div>
-            </div>
-
             <!-- ARTEFACTS.md: the Notebook card. Plain form fields, saved through the
                  same autoSaveConfig()/`save` path as the card above (UtilityHandler::save
                  checks notebook_folder). Only a person changes these: none of the five
                  keys is on AdminService::SETTINGS_ALLOWLIST, so an agent cannot. -->
-            <div class="aicli-card" id="notebook-settings-card">
-                <div class="aicli-card-header"><i class="fa fa-book text-orange-500"></i> Notebook</div>
-                <div class="aicli-card-body">
+
+            <?=aicli_card_open('notebook', 'fa-book', 'Notebook', $stNotebook, 'card-notebook', '',
+                ['format' => '{notebook_enabled} · wiki page {wiki_page_enabled}', 'domId' => 'notebook-settings-card'])?>
                     <dl>
                         <dt>Notebook <?=aicli_help_btn('notebook-enabled', 'Notebook')?></dt>
                         <dd>
@@ -1147,9 +1191,9 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </select>
                             <?=aicli_help_panel('notebook-enabled')?>
                         </dd>
-                        <dt>Show the Wiki as its own page <?=aicli_help_btn('wiki-page', 'Show the Wiki as its own page')?></dt>
+                        <dt>Show the Wiki page <?=aicli_help_btn('wiki-page', 'Show the Wiki page')?></dt>
                         <dd>
-                            <select name="wiki_page_enabled" aria-label="Show the Wiki as its own page" style="width: 100%;" <?=$autoSave?>>
+                            <select name="wiki_page_enabled" aria-label="Show the Wiki page"style="width: 100%;" <?=$autoSave?>>
                                 <?=mk_option($config['wiki_page_enabled'] ?? '0', "1", _('On'))?>
                                 <?=mk_option($config['wiki_page_enabled'] ?? '0', "0", _('Off (default)'))?>
                             </select>
@@ -1163,19 +1207,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </select>
                             <?=aicli_help_panel('notebook-auto-open')?>
                         </dd>
-                        <dt>Notebook folder name <?=aicli_help_btn('notebook-folder', 'Notebook folder name')?></dt>
-                        <dd>
-                            <input type="text" name="notebook_folder" aria-label="Notebook folder name" value="<?=htmlspecialchars((string)($config['notebook_folder'] ?? 'notebook'), ENT_QUOTES, 'UTF-8')?>" maxlength="40" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]{0,39}" style="width: 100%;" <?=$autoSave?>>
-                            <?=aicli_help_panel('notebook-folder')?>
-                        </dd>
-                        <dt>Allow production keys on connection cards <?=aicli_help_btn('notebook-prod-secrets', 'Allow production keys on connection cards')?></dt>
-                        <dd>
-                            <select name="notebook_allow_prod_secrets" aria-label="Allow production keys on connection cards" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "1", _('Allow'))?>
-                                <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "0", _('Refuse (default)'))?>
-                            </select>
-                            <?=aicli_help_panel('notebook-prod-secrets')?>
-                        </dd>
+
                         <dt>Tell the agent when I answer <?=aicli_help_btn('notebook-notify-agent', 'Tell the agent when I answer')?></dt>
                         <dd>
                             <select name="notebook_notify_agent" aria-label="Tell the agent when I answer in the Notebook" style="width: 100%;" <?=$autoSave?>>
@@ -1184,17 +1216,34 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             </select>
                             <?=aicli_help_panel('notebook-notify-agent')?>
                         </dd>
-                        <dt>Speak a notice when something needs you <?=aicli_help_btn('notebook-spoken-notice', 'Speak a notice when something needs you')?></dt>
+                    </dl>
+            <?=aicli_adv_open('notebook', 'Notebook')?>
+                    <dl>
+                        <dt>Folder name <?=aicli_help_btn('notebook-folder', 'Folder name')?></dt>
                         <dd>
-                            <select name="notebook_spoken_notice" aria-label="Speak a notice when something needs you" style="width: 100%;" <?=$autoSave?>>
+                            <input type="text" name="notebook_folder" aria-label="Folder name" placeholder="notebook" value="<?=htmlspecialchars((string)($config['notebook_folder'] ?? 'notebook'), ENT_QUOTES, 'UTF-8')?>" maxlength="40" pattern="[A-Za-z0-9_\-][A-Za-z0-9._\-]{0,39}" style="width: 100%;" <?=$autoSave?>>
+                            <?=aicli_help_panel('notebook-folder')?>
+                        </dd>
+                        <dt>Production keys on connection cards <?=aicli_help_btn('notebook-prod-secrets', 'Production keys on connection cards')?></dt>
+                        <dd>
+                            <select name="notebook_allow_prod_secrets" aria-label="Production keys on connection cards"style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "1", _('Allow'))?>
+                                <?=mk_option($config['notebook_allow_prod_secrets'] ?? '0', "0", _('Refuse (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('notebook-prod-secrets')?>
+                        </dd>
+
+                        <dt>Speak a notice when a page waits for me <?=aicli_help_btn('notebook-spoken-notice', 'Speak a notice when a page waits for me')?></dt>
+                        <dd>
+                            <select name="notebook_spoken_notice" aria-label="Speak a notice when a page waits for me"style="width: 100%;" <?=$autoSave?>>
                                 <?=mk_option($config['notebook_spoken_notice'] ?? '0', "1", _('Yes'))?>
                                 <?=mk_option($config['notebook_spoken_notice'] ?? '0', "0", _('No (default)'))?>
                             </select>
                             <?=aicli_help_panel('notebook-spoken-notice')?>
                         </dd>
-                        <dt>Quiet hours for spoken notices <?=aicli_help_btn('notebook-quiet-hours', 'Quiet hours for spoken notices')?></dt>
+                        <dt>Quiet hours <?=aicli_help_btn('notebook-quiet-hours', 'Quiet hours')?></dt>
                         <dd>
-                            <input type="text" name="notebook_quiet_hours" aria-label="Quiet hours for spoken notices" value="<?=htmlspecialchars((string)($config['notebook_quiet_hours'] ?? ''), ENT_QUOTES, 'UTF-8')?>" maxlength="11" placeholder="22:00-07:00" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]" style="width: 100%;" <?=$autoSave?>>
+                            <input type="text" name="notebook_quiet_hours" aria-label="Quiet hours"value="<?=htmlspecialchars((string)($config['notebook_quiet_hours'] ?? ''), ENT_QUOTES, 'UTF-8')?>" maxlength="11" placeholder="22:00-07:00" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]" style="width: 100%;" <?=$autoSave?>>
                             <?=aicli_help_panel('notebook-quiet-hours')?>
                         </dd>
                         <dt>Agent journal <?=aicli_help_btn('notebook-journal', 'Agent journal')?></dt>
@@ -1206,21 +1255,12 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <?=aicli_help_panel('notebook-journal')?>
                         </dd>
                     </dl>
-                </div>
-            </div>
+            <?=aicli_adv_close()?>
+            <?=aicli_card_close()?>
 
-            <div class="aicli-card">
-                <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between; padding:5px 15px;">
-                    <span><i class="fa fa-key text-orange-500"></i> SSH Keys</span>
-                    <button type="button" onclick="aicliShowSshHelp()" class="aicli-btn-slim" title="How to generate an SSH public key" style="font-size:10px;">
-                        <i class="fa fa-question-circle"></i> Help
-                    </button>
-                </div>
-                <div class="aicli-card-body">
-                    <p style="font-size:12px; opacity:0.8; margin-bottom:12px;">
-                        Add your SSH public key to connect directly to workspace tmux sessions from your local terminal.
-                        The key is stored in the plugin user's <code>~/.ssh/authorized_keys</code> with a forced command.
-                    </p>
+            <?=aicli_card_open('ssh', 'fa-key', 'SSH keys', 'Loading…', 'card-ssh',
+                '<button type="button" onclick="aicliShowSshHelp()" class="aicli-btn-slim" title="How to generate an SSH public key" style="font-size:10px;">'
+                . '<i class="fa fa-question-circle"></i> Help</button>')?>
                     <div id="aicli-ssh-keys-list" style="margin-bottom:12px; min-height:40px;">
                         <!-- populated by aicliLoadSshKeys() -->
                     </div>
@@ -1234,11 +1274,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <i class="fa fa-plus"></i> Add Key
                         </button>
                     </div>
-                    <p style="font-size:10px; opacity:0.75; margin-top:8px;">
-                        <strong>Connect:</strong> <code>ssh <?=htmlspecialchars($config['user'] ?? 'root', ENT_QUOTES)?> aicli-agent-&lt;name&gt;</code>
-                    </p>
-                </div>
-            </div>
+            <?=aicli_card_close()?>
     </div>
 </div>
 </form>
@@ -1301,6 +1337,8 @@ $autoSave = 'onchange="autoSaveConfig()"';
         list.appendChild(mkEl('span', 'opacity:0.75; font-size:11px;', 'Loading…'));
         aicliSshAjax('list_keys', {}).then(function (data) {
             clearNode(list);
+            var nKeys = data.keys ? data.keys.length : 0;
+            if (window.aicliCards) window.aicliCards.setStatus('ssh', nKeys === 0 ? 'No keys' : (nKeys === 1 ? '1 key' : nKeys + ' keys'));
             if (!data.keys || data.keys.length === 0) {
                 list.appendChild(mkEl('span', 'opacity:0.75; font-size:11px;', 'No keys registered.')); return;
             }
@@ -1723,17 +1761,25 @@ $autoSave = 'onchange="autoSaveConfig()"';
    400 px per column plus the 20 px gap, so the page width is used and no
    card is taller than its content. Cards are MOVED, never cloned, so their
    handlers survive. Runs when the tab is shown and again when the width
-   changes the column count. */
+   changes the column count. The input is the saved card order (Phase 4):
+   aicliCards.sortCards() gives the cards back in that order; without it the
+   cards keep their page order. */
 (function () {
     'use strict';
     var COL_MIN = 400, GAP = 20;
-    var grid = null, cards = [], lastN = 0, lastW = 0;
+    var grid = null, lastN = 0, lastW = 0;
 
     function collectCards() {
         var list = grid.querySelectorAll('.aicli-card');
-        return Array.prototype.filter.call(list, function (c) {
+        var found = Array.prototype.filter.call(list, function (c) {
             return c.parentNode === grid || (c.parentNode && c.parentNode.classList.contains('aicli-config-col'));
         });
+        // The default place of each card, stamped once before any card moves.
+        found.forEach(function (c, i) { if (!c.hasAttribute('data-aicli-pos')) c.setAttribute('data-aicli-pos', String(i)); });
+        if (window.aicliCards && typeof window.aicliCards.sortCards === 'function') {
+            try { found = window.aicliCards.sortCards(grid, found); } catch (e) { /* keep the page order */ }
+        }
+        return found;
     }
 
     function layout(force) {
@@ -1743,7 +1789,7 @@ $autoSave = 'onchange="autoSaveConfig()"';
         var n = Math.max(1, Math.floor((w + GAP) / (COL_MIN + GAP)));
         if (!force && n === lastN && Math.abs(w - lastW) < 2) return;
         lastN = n; lastW = w;
-        if (!cards.length) cards = collectCards();
+        var cards = collectCards();
         cards.forEach(function (c) { grid.appendChild(c); });
         Array.prototype.forEach.call(grid.querySelectorAll('.aicli-config-col'), function (col) { col.parentNode.removeChild(col); });
         if (n === 1) { grid.classList.remove('aicli-config-grid--cols'); return; }

@@ -4,8 +4,12 @@
  * Description: JavaScript logic for storage management in AICliAgents Manager.
  * Dependencies: jQuery, SweetAlert, $csrf_token.
  * Constraints: Atomic UI fragment (< 100 lines).
+ *   Phase 6 (docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md): every home is a card of the Storage
+ *   tab list (id home-<user>). The head of the card comes from aicli_card_open() in SettingsCard.php;
+ *   renderHomeStats() fills the body and sets the status line.
  * </module_context>
  */
+require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open(), aicli_help_texts(): the head and the (i) texts of a home card.
 ?>
 <script>
 // Top-level HTML escaper — shared by all top-level functions in this script
@@ -23,6 +27,38 @@ function escapeHtml(s) {
 // JavaScript string literal first, then HTML-escaped, so no name can close the attribute or the string.
 function aicliJsArg(s) {
     return escapeHtml(JSON.stringify(String(s == null ? '' : s)));
+}
+
+// Phase 6: an (i) button and its help panel, made in the browser (a home card, a line of the card).
+// The same markup as aicli_help_btn() and aicli_help_panel() in SettingsCard.php. The id may hold
+// only letters, digits and dashes. Put the button in the label and the panel under the row, then
+// run aicliHelp.attach(root) on the root.
+function aicliHelpHtml(id, label, html) {
+    var cid = String(id).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    return {
+        btn: '<button type="button" class="aicli-help-btn" data-aicli-help="' + cid + '" data-testid="help-btn-' + cid + '"' +
+            ' aria-label="About ' + escapeHtml(label) + '" aria-expanded="false" aria-controls="aicli-help-' + cid + '">' +
+            '<i class="fa fa-info-circle" aria-hidden="true"></i></button>',
+        panel: '<div class="aicli-help-panel" id="aicli-help-' + cid + '" data-testid="help-panel-' + cid + '" role="note" hidden>' + html + '</div>'
+    };
+}
+
+// Phase 6: the System memory card. The status line shows "41 % of 7.8 GB used". The card is closed
+// while the memory is under 80 % full and opens by itself above that, unless the person chose.
+function aicliRootfsStatus(r) {
+    var total = Number(r.total_mb) || 0;
+    var size = total >= 1024 ? (total / 1024).toFixed(1) + ' GB' : total + ' MB';
+    return Number(r.percent) + ' % of ' + size + ' used';
+}
+function aicliRenderRootfs(r) {
+    if (!r) return;
+    $('#rootfs-bar').css('width', r.percent + '%');
+    $('#rootfs-percent').text(r.percent + '%');
+    $('#rootfs-text').text(r.used_mb + 'MB / ' + r.total_mb + 'MB');
+    if (window.aicliCards) {
+        window.aicliCards.setStatus('system-memory', aicliRootfsStatus(r));
+        window.aicliCards.setDefaultCollapsed('system-memory', Number(r.percent) < 80);
+    }
 }
 
 function refreshStats() {
@@ -55,11 +91,7 @@ function refreshStats() {
             // patches the figures between reads; this poll is the reconcile.
             if (statsInterval !== 30000) { statsInterval = 30000; resetStatsTimer(); }
         }
-        if (data.rootfs) {
-            $('#rootfs-bar').css('width', data.rootfs.percent + '%');
-            $('#rootfs-percent').text(data.rootfs.percent + '%');
-            $('#rootfs-text').text(data.rootfs.used_mb + 'MB / ' + data.rootfs.total_mb + 'MB');
-        }
+        if (data.rootfs) aicliRenderRootfs(data.rootfs);
         // WP #748 J / Phase B: per-agent cards removed from the Storage tab.
         // Agent storage state is now surfaced in the Store card foot (size only;
         // health remains in the boot-integrity banner). data.agents is still
@@ -151,7 +183,7 @@ function renderLayerList(layers, dirtyMb, upperMode) {
     // mount-point line above for visual continuity.
     var html = '';
     if (flashRoot) {
-        html += '<div class="se-mount-label" style="opacity:0.65;" title="Common parent directory for the SquashFS layers below">' +
+        html += '<div class="se-mount-label" style="opacity:0.65;" title="Common parent directory for the compressed layers below">' +
                     '<i class="fa fa-folder-open-o"></i> ' + escapeHtml(flashRoot) +
                 '</div>';
     }
@@ -245,8 +277,8 @@ function aicliGraduatedStripHtml(user, h, job) {
     if (!g || !g.key) return '';
     var size = Number(g.bytes) > 0 ? formatSize(Number(g.bytes)) : 'size not known';
     var when = aicliGraduatedDate(g.expires_at);
-    return '<div data-testid="home-graduated-strip" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(230,138,0,0.08); border:1px solid rgba(230,138,0,0.35); border-radius:4px;">' +
-        '<span data-testid="home-graduated-line" style="font-size:10px; line-height:1.4;"><i class="fa fa-history" style="color:var(--orange, #e68a00); margin-right:5px;"></i>Old layers kept for rollback: ' + escapeHtml(size) + (when ? ', removed automatically on ' + escapeHtml(when) : '') + '</span>' +
+    return '<div class="se-row" data-testid="home-graduated-strip">' +
+        '<span class="se-row-text" data-testid="home-graduated-line"><i class="fa fa-history" style="color:var(--orange, #e68a00); margin-right:5px;"></i>Old layers kept for rollback: ' + escapeHtml(size) + (when ? ', removed automatically on ' + escapeHtml(when) : '') + '</span>' +
         '<button type="button" class="aicli-btn-slim" data-testid="home-graduated-btn" style="white-space:nowrap;"' + (job ? ' disabled title="' + job.title + '"' : '') + ' onclick="removeOldLayers(' + aicliJsArg(user) + '); return false;">Remove old layers</button>' +
         '</div>';
 }
@@ -290,16 +322,43 @@ function removeOldLayers(user) {
     return false;
 }
 
+// Phase 6 (SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md): the id of the card of one home, the id that
+// settings-cards.js saves the order and the open state under. Only a-z, 0-9 and dashes stay.
+function aicliHomeCardId(user) {
+    return 'home-' + String(user).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+}
+
+// Pure: the one-line status of a home card. Layered: "12 layers · 240 MB unsaved".
+// Plain folders: "Plain folders on the boot disk · no saves needed".
+function aicliHomeStatusText(h, job) {
+    var isPlain = h.backend === 'passthrough';
+    var parts = [];
+    if (!h.mounted) parts.push('Not mounted');
+    if (isPlain) {
+        var p = String(h.persist_path || '');
+        parts.push('Plain folders on ' + (p.indexOf('/boot') === 0 ? 'the boot disk' : (p || 'disk')));
+        parts.push('no saves needed');
+    } else {
+        var n = Number(h.layers) || 0;
+        parts.push(n + (n === 1 ? ' layer' : ' layers'));
+        parts.push(Number(h.dirty_mb || 0) > 0 ? h.dirty_mb + ' MB unsaved' : 'no unsaved changes');
+    }
+    if (job && job.text) parts.push(job.text);
+    return parts.join(' · ');
+}
+
 function renderHomeStats(homes) {
     // HOME_BACKUP.md #287: the backup line on each card reads this snapshot.
     if (typeof aicliNoteHomesForBackup === 'function') aicliNoteHomesForBackup(homes);
-    let html = '';
     let totalPhysical = 0;
+    let changed = false;
+    let index = 0;
+    const seen = {};
+    const list = $('#home-stats-container');
     const users = Object.keys(homes || {});
-    if (users.length === 0) {
-        html = '<div class="storage-empty-state"><i class="fa fa-home" style="font-size:24px; display:block; margin-bottom:8px; opacity:0.3;"></i>No active home persistence</div>';
-    } else {
-        $.each(homes, function(u, h) {
+    $('#home-stats-empty').html(users.length === 0
+        ? '<div class="storage-empty-state"><i class="fa fa-home" style="font-size:24px; display:block; margin-bottom:8px; opacity:0.3;"></i>No active home persistence</div>' : '');
+    $.each(homes || {}, function(u, h) {
             totalPhysical += h.physical_mb;
             // HOME_CARD_BUTTONS.md: Consolidate also saves the unsaved changes, so it has work
             // to do with one layer plus unsaved changes. Repair shows only for a home that is not mounted.
@@ -324,63 +383,98 @@ function renderHomeStats(homes) {
                 ? (plainPath.indexOf('/boot') === 0 ? 'Plain folders on the boot disk'
                     : 'Plain folders' + (plainPath ? ' on ' + escapeHtml(plainPath) : ''))
                 : h.physical_mb + ' MB persisted &middot; ' + h.layers + ' Layer' + (h.layers !== 1 ? 's' : '');
-            // A plain-folder home has nothing to measure: one short line replaces the bar.
+            // A plain-folder home has nothing to measure: no bar and no note. The status line of the card says it.
             const statBlock = isPlain
-                ? '<div class="se-plain-note" data-testid="home-plain-note" style="font-size:11px; opacity:' + (h.mounted ? 0.85 : 0.4) + ';">Saved straight to disk. No saves or tidy-ups needed.</div>'
+                ? ''
                 : '<div class="stat-bar-wrap' + (job ? ' stat-bar-busy' + (job.deferred ? ' stat-bar-deferred' : '') : '') + '" style="height:12px; opacity:' + (h.mounted ? 1 : 0.3) + ';"' + (job ? ' title="' + job.title + '"' : '') + '><div class="stat-bar-base" style="width:' + (100 - upperBarWidth) + '%;"></div><div class="stat-bar-dirty" style="width:' + upperBarWidth + '%;"></div><div class="stat-bar-text">' + (job ? '' : (h.mounted ? upperBarText : 'OFFLINE')) + '</div></div>';
             const lockTitle = job ? ' (locked: ' + job.text + ')' : '';
-            const cardClass = 'storage-entity-card' + (hasUpperChanges ? ' has-dirty' : '') + (!h.mounted ? ' offline' : '');
-            html += '<div class="' + cardClass + '">' +
-                '<div class="se-header">' +
-                    '<div><div class="se-title"><i class="fa fa-home" style="color:var(--orange, #e68a00); margin-right:6px;"></i>' + escapeHtml(u) + '</div>' +
-                    '<div class="se-meta" data-testid="home-storage-meta">' + metaText + '</div></div>' +
-                    '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">' +
-                        '<div style="font-size:11px; font-weight:700; color:' + (!h.mounted ? '#888' : (hasUpperChanges ? 'var(--orange, #ff8c00)' : '#4caf50')) + ';">' + (!h.mounted ? 'OFFLINE' : upperFigure) + '</div>' +
-                        // #247: the job badge sits under the figure so the figure stays readable
-                        (job ? '<div data-testid="home-job-badge" style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="' + job.title + '">' + (job.deferred ? '⧗ ' : '⟳ ') + job.text + (jobRemaining ? ' <span data-testid="home-job-remaining" style="font-weight:600; opacity:0.9; text-transform:none;">· ' + jobRemaining + '</span>' : '') + '</div>' : '') +
-                        // WP #271 follow-up: pending-consolidation badge
-                        (!isPlain && h.consolidate_pending ? '<div style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="Auto-consolidation deferred — waiting for the home mount to go idle (no active terminals).">⧗ Awaiting idle</div>' : '') +
+            const lockAttr = job ? ' disabled aria-disabled="true"' : '';
+            const cardId = aicliHomeCardId(u);
+            const suffix = cardId.replace(/^home-/, '');
+            seen[cardId] = true;
+            const convertHelp = aicliHelpHtml('storage-home-convert-' + suffix, 'Plain folders', AICLI_HOME_HELP.convert);
+            const body = '<div class="se-body">' +
+                    // The figures that sat in the card header: the size line, the state and the job badges.
+                    '<div class="se-summary">' +
+                        '<span class="se-meta" data-testid="home-storage-meta">' + metaText + '</span>' +
+                        '<span style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">' +
+                            '<span style="font-size:11px; font-weight:700; color:' + (!h.mounted ? '#888' : (hasUpperChanges ? 'var(--orange, #ff8c00)' : '#4caf50')) + ';">' + (!h.mounted ? 'OFFLINE' : upperFigure) + '</span>' +
+                            // #247: the job badge sits under the figure so the figure stays readable
+                            (job ? '<span data-testid="home-job-badge" style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="' + job.title + '">' + (job.deferred ? '⧗ ' : '⟳ ') + job.text + (jobRemaining ? ' <span data-testid="home-job-remaining" style="font-weight:600; opacity:0.9; text-transform:none;">· ' + jobRemaining + '</span>' : '') + '</span>' : '') +
+                            // WP #271 follow-up: pending-consolidation badge
+                            (!isPlain && h.consolidate_pending ? '<span style="font-size:9px; font-weight:700; color:var(--orange, #ff8c00); letter-spacing:0.5px; text-transform:uppercase;" title="Auto-consolidation deferred — waiting for the home mount to go idle (no active terminals).">⧗ Awaiting idle</span>' : '') +
+                        '</span>' +
                     '</div>' +
-                '</div>' +
-                '<div class="se-body">' +
                     statBlock +
                     '<div class="se-mount-label"><i class="fa fa-hdd-o"></i> ' + escapeHtml(h.mount_point) + '</div>' +
                     (isPlain ? '' : renderLayerList(h.layer_files, h.dirty_mb, h.upper_mode)) +
                     // #496 R9: a layered home on a disk that is not a USB stick can become
                     // plain folders in place. The USB relocation strip below stays for sticks.
                     (h.can_convert ?
-                        '<div data-testid="home-convert-strip" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(76,175,80,0.08); border:1px solid rgba(76,175,80,0.35); border-radius:4px;">' +
-                            '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-folder-open-o" style="color:#4caf50; margin-right:5px;"></i>This home can change to plain folders. Then it needs no more saves or tidy-ups.</span>' +
+                        '<div class="se-row" data-testid="home-convert-strip">' +
+                            '<span class="se-row-text"><i class="fa fa-folder-open-o" style="color:#4caf50; margin-right:5px;"></i>This home can change to plain folders. Then it needs no more saves or tidy-ups.' + convertHelp.btn + '</span>' +
                             '<button type="button" class="aicli-btn-slim" data-testid="home-convert-btn" style="white-space:nowrap;"' + (job ? ' disabled title="' + job.title + '"' : '') + ' onclick="convertHomeStorage(' + aicliJsArg(u) + '); return false;">Convert to plain folders</button>' +
-                        '</div>' : '') +
+                        '</div>' + convertHelp.panel : '') +
                     // R22: the rollback copy of the old layers, while it exists.
                     aicliGraduatedStripHtml(u, h, job) +
                     // Bug #1380: non-modal relocation offer — shown ONLY when this
                     // entity's data sits on a GENUINE USB flash drive AND a durable
                     // non-array non-flash target exists to move it to.
                     (h.can_graduate ?
-                        '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(76,175,80,0.08); border:1px solid rgba(76,175,80,0.35); border-radius:4px;">' +
-                            '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-hdd-o" style="color:#4caf50; margin-right:5px;"></i>This data is on a USB flash drive — move it to a durable disk (faster, no USB wear)</span>' +
+                        '<div class="se-row">' +
+                            '<span class="se-row-text"><i class="fa fa-hdd-o" style="color:#4caf50; margin-right:5px;"></i>This data is on a USB flash drive — move it to a durable disk (faster, no USB wear)</span>' +
                             '<button type="button" class="aicli-btn-slim" style="white-space:nowrap;" onclick="graduateStorage(\'home\', ' + aicliJsArg(u) + ', ' + (h.physical_mb || 0) + '); return false;">Move off USB flash drive</button>' +
                         '</div>' : '') +
-                    // HOME_BACKUP.md #287: this home's own backup — status line + Config backup… dialog.
+                    // HOME_BACKUP.md #287: this home's own backup — status line + Backup… dialog.
                     aicliHomeBackupStripHtml(u) +
                 '</div>' +
+                // The actions have words (Phase 6). Delete stays red and keeps its confirm.
                 '<div class="se-actions">' +
                     (isPlain ? '' :
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'persistEntity(\'home\', ' + aicliJsArg(u) + '); return false;') + '" title="Persist to storage' + lockTitle + '"><i class="fa fa-save"></i></a>' +
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" ' + (canConsolidate ? '' : 'style="opacity:0.3; cursor:default;"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', ' + aicliJsArg(u) + ')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate: save unsaved changes and merge all layers into one' + lockTitle : 'Nothing to merge: one layer and no unsaved changes') + '"><i class="fa fa-compress"></i></a>') +
-                    (showRepair ? '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', ' + aicliJsArg(u) + '); return false;') + '" title="Repair mount: this home is not mounted' + lockTitle + '"><i class="fa fa-wrench"></i></a>' : '') +
-                    '<a href="#" class="stat-icon-btn' + (job ? ' aicli-locked' : '') + '" onclick="' + (job ? 'return false;' : 'deleteHomeStorage(' + aicliJsArg(u) + '); return false;') + '" title="Delete home data (permanent)' + lockTitle + '" style="color:#c0392b;"><i class="fa fa-trash-o"></i></a>' +
-                '</div>' +
+                    '<button type="button" class="aicli-btn-slim' + (job ? ' aicli-locked' : '') + '" data-testid="home-save-btn"' + lockAttr + ' onclick="' + (job ? 'return false;' : 'persistEntity(\'home\', ' + aicliJsArg(u) + '); return false;') + '" title="Persist to storage' + lockTitle + '">Save now</button>' +
+                    '<button type="button" class="aicli-btn-slim' + (job ? ' aicli-locked' : '') + '" data-testid="home-merge-btn"' + (canConsolidate && !job ? '' : ' disabled aria-disabled="true"') + ' onclick="' + (canConsolidate && !job ? 'consolidateStorage(\'home\', ' + aicliJsArg(u) + ')' : 'return false;') + '; return false;" title="' + (canConsolidate ? 'Consolidate: save unsaved changes and merge all layers into one' + lockTitle : 'Nothing to merge: one layer and no unsaved changes') + '">Merge layers</button>') +
+                    (showRepair ? '<button type="button" class="aicli-btn-slim' + (job ? ' aicli-locked' : '') + '" data-testid="home-repair-btn"' + lockAttr + ' onclick="' + (job ? 'return false;' : 'repairStorage(\'home\', ' + aicliJsArg(u) + '); return false;') + '" title="Repair mount: this home is not mounted' + lockTitle + '">Repair</button>' : '') +
+                    '<button type="button" class="aicli-btn-slim danger' + (job ? ' aicli-locked' : '') + '" data-testid="home-delete-btn"' + lockAttr + ' onclick="' + (job ? 'return false;' : 'deleteHomeStorage(' + aicliJsArg(u) + '); return false;') + '" title="Delete home data (permanent)' + lockTitle + '">Delete home…</button>' +
                 '</div>';
-        });
-    }
-    $('#home-stats-container').html(html);
-    $('#homes-text-summary').text(totalPhysical.toFixed(2) + ' MB Total');
+            const cardClass = 'storage-entity-card' + (hasUpperChanges ? ' has-dirty' : '') + (!h.mounted ? ' offline' : '');
+            const html = AICLI_HOME_CARD_HEAD.split('zzidzz').join(suffix)
+                .split('zztitlezz').join(escapeHtml('Home: ' + u))
+                .split('zzstatuszz').join(escapeHtml(aicliHomeStatusText(h, job))) + body + '</div></div>';
+            const old = list.children('.aicli-card').filter(function() { return this.getAttribute('data-aicli-card') === cardId; });
+            const pos = 100 + index++;
+            if (old.length && old[0].__aicliSig === cardClass + html) { old.attr('data-aicli-pos', pos); return; }
+            const card = $(html).addClass(cardClass).attr({ 'data-aicli-home': u, 'data-aicli-pos': pos });
+            card.children('.aicli-help-panel').first().html(isPlain ? AICLI_HOME_HELP.plain : AICLI_HOME_HELP.layers);
+            card[0].__aicliSig = cardClass + html;
+            if (old.length) old.replaceWith(card);
+            else {
+                const firstFixed = list.children('.aicli-card').not('[data-aicli-home]').first();
+                if (firstFixed.length) firstFixed.before(card); else list.append(card);
+            }
+            changed = true;
+    });
+    list.children('[data-aicli-home]').each(function() {
+        if (!seen[this.getAttribute('data-aicli-card')]) { $(this).remove(); changed = true; }
+    });
+    $('#homes-text-summary').text(totalPhysical.toFixed(2) + ' MB used');
     window._aicliHomesLast = homes || {};   // R14: the convert dialog reads the sizes
+    if (changed && list[0]) {
+        // New cards get their handlers and their saved open state; the (i) buttons are wired.
+        if (window.aicliHelp) window.aicliHelp.attach(list[0]);
+        if (window.aicliCards) window.aicliCards.refresh(list[0]);
+    }
     aicliConsumeConvertDeepLink(homes);
 }
+
+// The head of a home card (the shared header of SettingsCard.php) and the (i) texts of a home. The
+// head holds the words zzidzz, zztitlezz and zzstatuszz, which renderHomeStats() replaces.
+var AICLI_HOME_CARD_HEAD = <?= json_encode(aicli_card_open('home-zzidzz', 'fa-home', 'zztitlezz', 'zzstatuszz', 'storage-card-zzidzz', '', ['pos' => 100, 'bodyClass' => 'se-home-body']), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+var AICLI_HOME_HELP = <?= json_encode([
+    'layers' => aicli_help_texts()['storage-home-layers'] ?? '',
+    'plain' => aicli_help_texts()['storage-home-plain'] ?? '',
+    'backup' => aicli_help_texts()['storage-home-backup'] ?? '',
+    'convert' => aicli_help_texts()['storage-home-convert'] ?? '',
+], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
 
 // #496 (CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R13): the install notification links to
 // this page with #aicli-convert=home:<user>. The first home snapshot after the page
@@ -540,7 +634,7 @@ function renderCleanupCard(artifacts) {
 
 function persistEntity(type, id) {
     const title = type === 'agent' ? "Persist Agent Updates?" : "Persist Home Changes?";
-    const text = type === 'agent' ? "Commit changes in RAM to storage for " + id + "." : "Commit current RAM session data to SquashFS layers for " + id + ".";
+    const text = type === 'agent' ? "Commit changes in RAM to storage for " + id + "." : "Commit current RAM session data to compressed layers for " + id + ".";
     
     swal({ title: title, text: text, type: "info", showCancelButton: true, confirmButtonText: "Persist Now", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
         if (!confirmed) return;
@@ -1949,7 +2043,7 @@ function aicliHomeBackupState(user) {
     var job = (h.job && h.job.op === 'backup') ? h.job : null;
     if (_aicliBackupRunning[user] || job) {
         var step = _aicliBackupRunning[user] || (job && job.state === 'queued' ? 'queued' : (job && job.state === 'deferred' ? 'waiting' : 'running'));
-        return { state: 'running', icon: 'fa-spinner fa-spin', text: 'Backing up config — ' + step };
+        return { state: 'running', icon: 'fa-spinner fa-spin', text: 'Backup: running — ' + step };
     }
     var lb = h.last_backup || null;
     if (!bk || !bk.configured) {
@@ -1958,32 +2052,34 @@ function aicliHomeBackupState(user) {
         // dialog offers that folder, it is never chosen silently.
         var earlier = (bk && bk.earlier_target) || '';
         if (earlier) {
-            return { state: 'unset', icon: 'fa-life-ring', text: 'No folder chosen — earlier config backups found in ' + earlier + (lb ? ' (last ' + aicliFmtBackupWhen(lb.at) + ').' : '.') };
+            return { state: 'unset', icon: 'fa-life-ring', text: 'Backup: no folder chosen — earlier backups found in ' + earlier + (lb ? ' (last ' + aicliFmtBackupWhen(lb.at) + ').' : '.') };
         }
-        return { state: 'unset', icon: 'fa-life-ring', text: 'Config backup is not set up.' };
+        return { state: 'unset', icon: 'fa-life-ring', text: 'Backup: not set up.' };
     }
     var sched = aicliFmtSchedule(bk.schedule);
     var run = h.last_backup_run || null;
     var runT = run && run.at ? Date.parse(run.at) : NaN;
     var lbT = lb && lb.at ? Date.parse(lb.at) : NaN;
     if (run && run.ok === false && (!lb || isNaN(lbT) || (!isNaN(runT) && runT >= lbT))) {
-        return { state: 'failed', icon: 'fa-exclamation-triangle', text: 'Last config backup failed' + (run.summary ? ': ' + run.summary : '.') };
+        return { state: 'failed', icon: 'fa-exclamation-triangle', text: 'Backup: last run failed' + (run.summary ? ': ' + run.summary : '.') };
     }
     if (lb) {
         var size = (typeof lb.bytes === 'number') ? ' · ' + (lb.bytes / 1048576).toFixed(1) + ' MB' : '';
-        return { state: 'ok', icon: 'fa-check-circle', text: 'Last config backup ' + aicliFmtBackupWhen(lb.at) + size + ' (' + (lb.warm ? 'warm' : 'cold') + ')' + aicliFmtChangedDuring(lb) + (sched ? ' · ' + sched : '') };
+        return { state: 'ok', icon: 'fa-check-circle', text: 'Backup: last ' + aicliFmtBackupWhen(lb.at) + size + ' (' + (lb.warm ? 'warm' : 'cold') + ')' + aicliFmtChangedDuring(lb) + (sched ? ' · ' + sched : '') };
     }
-    return { state: 'never', icon: 'fa-circle-o', text: 'Config not backed up yet · to ' + bk.target + (sched ? ' · ' + sched : '') };
+    return { state: 'never', icon: 'fa-circle-o', text: 'Backup: not yet · to ' + bk.target + (sched ? ' · ' + sched : '') };
 }
 
 function aicliHomeBackupStripHtml(user) {
     var st = aicliHomeBackupState(user);
     var rowId = aicliBackupRowId(user);
+    // Phase 6: the note that sat at the foot of the page is the (i) of this row.
+    var help = aicliHelpHtml('storage-home-backup-' + rowId, 'Backup', AICLI_HOME_HELP.backup);
     return '<div class="se-backup se-backup-' + st.state + '" data-testid="home-backup-strip" data-user="' + escapeHtml(user) + '" data-state="' + st.state + '">' +
         '<span class="se-backup-status" id="home-backup-status-' + rowId + '"><i class="fa ' + st.icon + '" aria-hidden="true"></i> <span class="se-backup-text">' + escapeHtml(st.text) + '</span></span>' +
-        '<button type="button" class="aicli-btn-slim se-backup-btn" id="home-backup-btn-' + rowId + '" data-user="' + escapeHtml(user) + '" aria-haspopup="dialog" aria-describedby="home-backup-status-' + rowId + '">' +
-            (st.state === 'unset' ? 'Set up config backup…' : 'Config backup…') + '</button>' +
-    '</div>';
+        help.btn +
+        '<button type="button" class="aicli-btn-slim se-backup-btn" id="home-backup-btn-' + rowId + '" data-user="' + escapeHtml(user) + '" aria-haspopup="dialog" aria-describedby="home-backup-status-' + rowId + '">Backup…</button>' +
+    '</div>' + help.panel;
 }
 
 // Repaint one card's backup line in place (no card re-render, focus kept),
@@ -1993,7 +2089,7 @@ function aicliPaintBackupStrip(user) {
     var strip = $('.se-backup[data-user]').filter(function() { return $(this).attr('data-user') === user; });
     strip.attr('class', 'se-backup se-backup-' + st.state).attr('data-state', st.state);
     strip.find('.se-backup-status').html('<i class="fa ' + st.icon + '" aria-hidden="true"></i> <span class="se-backup-text">' + escapeHtml(st.text) + '</span>');
-    strip.find('.se-backup-btn').text(st.state === 'unset' ? 'Set up config backup…' : 'Config backup…');
+    strip.find('.se-backup-btn').text('Backup…');
     if (_aicliHb && _aicliHb.user === user) {
         $('#hb-state').attr('class', 'hb-state hb-state-' + st.state).attr('data-state', st.state)
             .html('<i class="fa ' + st.icon + '" aria-hidden="true"></i> ' + escapeHtml(st.text));

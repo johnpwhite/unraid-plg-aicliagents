@@ -118,7 +118,7 @@ class BootSpaceService
     {
         $map = [
             'usb_boot' => 'Agents on a USB boot stick keep compressed layers.',
-            'keep_agents_compressed' => 'Agent storage is set to SquashFS layers (Configuration tab).',
+            'keep_agents_compressed' => 'Agent storage is set to Compressed layers (Configuration tab).',
             'no_layered_agents' => 'Every agent already uses plain folders.',
             'not_boot_disk' => 'The agents are not on the boot disk.',
         ];

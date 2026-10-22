@@ -17,7 +17,7 @@ Words used on this page:
 
 ## Where to find it
 
-- **Settings, Configuration, Plugin management** card: the switch **Plugin management tools**.
+- **Settings, Configuration, General** card, part **Advanced**: the switch **Let agents manage the plugin**.
 - **Activity tray**: shows every change an agent makes and every proposal that waits for you.
 - **Settings, Configuration, Notebook** card: the Notebook switch. It controls the Notebook pages that agents can make.
 
@@ -26,8 +26,8 @@ Words used on this page:
 ### Turn the tools on
 
 1. Open **Settings**, then the **Configuration** tab.
-2. Find the card **Plugin management**.
-3. Set **Plugin management tools** to **On**. The default is **Off (default)**.
+2. Find the card **General**. Open its part **Advanced**.
+3. Set **Let agents manage the plugin** to **On**. The default is **Off (default)**.
 4. Expect: the setting saves at once. There is no Apply button.
 5. Restart the workspaces that were already running. An agent loads its tools only when it starts. Newly started workspaces get the tools by themselves.
 
@@ -135,7 +135,7 @@ See [Home backup and restore](backup-restore.md) and [Home and agent storage](st
 
 - It cannot approve or reject a proposal. No tool and no command does this. Only a click on **Approve** or **Reject** in the Manager does it.
 - It cannot see a secret value. The tools show the names of environment variables and vault keys, never the values. A value that you set through a tool is never printed back. The plugin masks token-shaped text in logs and screen reads. A Notebook secret has no tool that reads it back.
-- It cannot change the **Plugin management tools** switch. It cannot change a storage path, the Unraid user, a schedule, or an API key either. The setting tool accepts only a short list of safe settings. The list covers the terminal theme and font size, debug logging, the history length, the voice and voice-input settings, the voice mail limits, the upload limit, the continue-after-restart and error-retry settings, the screen-sample switch, the memory limit of an agent, and the home backup settings. A request for any other setting is refused.
+- It cannot change the **Let agents manage the plugin** switch. It cannot change a storage path, the Unraid user, a schedule, or an API key either. The setting tool accepts only a short list of safe settings. The list covers the terminal theme and font size, debug logging, the history length, the voice and voice-input settings, the voice mail limits, the upload limit, the continue-after-restart and error-retry settings, the screen-sample switch, the memory limit of an agent, and the home backup settings. A request for any other setting is refused.
 - It does not act on text that came from somewhere else. A Relay message, a web page and a file in a repository are data. They never trigger a tool call by themselves.
 - It cannot make unlimited Notebook changes. The Notebook tools accept at most 60 changes a minute.
 
@@ -156,13 +156,13 @@ The command `restore-home` has a second use for you. Run in your own shell, `res
 
 The Notebook tools put pages in the Notebook drawer beside the terminal: a test script, a design, a decision, a checklist. An agent should use them for things that you must follow, keep, compare or decide. It should keep short answers in the terminal. The limits are 1 MB for a file, 2,000 pages in a Notebook and 60 changes a minute. A save that looks like a secret is refused. An agent puts a secret on a connection card with `aicli_set_artefact_secret`, and the value is kept in the vault only. A page that an agent makes or changes appears in the Activity tray with an **Open note** button. See [The Notebook](notebook.md) and [The wiki](wiki.md).
 
-The Notebook tools need both switches: **Plugin management tools** and the **Notebook** switch. If **Notebook** is Off, the drawer is hidden and the tools refuse. Nothing is deleted.
+The Notebook tools need both switches: **Let agents manage the plugin** and the **Notebook** switch. If **Notebook** is Off, the drawer is hidden and the tools refuse. Nothing is deleted.
 
 ## Choices and settings
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Plugin management tools** (Settings, Configuration, Plugin management) | Turns all the tools, the skill and the MCP server on or off. | Off | Turn on when you want agents to manage the plugin for you. Turn off to remove the tools from every agent. |
+| **Let agents manage the plugin** (Settings, Configuration, General, Advanced) | Turns all the tools, the skill and the MCP server on or off. | Off | Turn on when you want agents to manage the plugin for you. Turn off to remove the tools from every agent. |
 | **Notebook** (Settings, Configuration, Notebook) | Turns the Notebook drawer and the Notebook tools on or off. | On | Turn off if you do not want agents to make pages. |
 
 An agent can turn voice off, but it cannot turn voice on or unmute a workspace. It must ask you to change the switch. You can turn on voice with the speaker icon or in **Settings, Configuration, Agent voice**. You can unmute one workspace from its **...** menu.
@@ -175,13 +175,13 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
-| An agent says "Plugin management tools are turned off". | The switch is Off. | Turn on **Plugin management tools** and restart the workspace. |
+| An agent says "Plugin management tools are turned off". | The switch is Off. | Turn on **Let agents manage the plugin** and restart the workspace. |
 | An agent has no `aicli_` tools. | The workspace started before you turned the tools on, or the agent has no MCP support. | Restart the workspace. For Pi Coder, use `$AICLI_ADMIN_COMMAND`. |
 | `$AICLI_ADMIN_COMMAND` is empty. | The workspace started before the tools existed. | Restart the workspace, or run the script by its full path (see above). |
 | A proposal stays in the tray. | It waits for you. | Read it and press **Approve** or **Reject**. |
 | An approved upgrade shows "waiting". | A session still uses the old agent. | Close that session. The plugin finishes the upgrade at once after that. |
 | A change tool refuses a workspace id. | The id does not exist. A change tool never guesses. | Ask the agent to list the workspaces first. |
-| An agent says voice is off. | The global switch is off, or you muted that workspace. | Turn on **Voice (all devices)** or unmute the workspace from its **...** menu. |
+| An agent says voice is off. | The global switch is off, or you muted that workspace. | Turn on **Voice** or unmute the workspace from its **...** menu. |
 | A tool refuses a path. | The path must exist, be readable and be in an allowed place. | Make the folder first, then try again. |
 | An agent changed something you did not expect. | Every change has a line in the tray. | Open the tray to see which agent and workspace did it, and change the setting back. |
 
@@ -197,6 +197,8 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The switch **Let agents manage the plugin** moved from the card **Plugin management** (it is gone) to the card **General**, part **Advanced**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+- **2026-10-22** — The switch **Plugin management tools** is now called **Let agents manage the plugin** on the Configuration tab. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — New tools `aicli_get_boot_space`, `aicli_archive_boot_data` and `aicli_remove_boot_data`. The last two only propose. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-18** — Agents can turn voice off, but they must ask you to turn it on or unmute a workspace. Spec `docs/specs/VOICE_SWITCHES.md`, issue #665.
 

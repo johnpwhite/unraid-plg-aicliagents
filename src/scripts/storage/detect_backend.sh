@@ -365,13 +365,13 @@ _entity_manifest_expects_layers() {
 # ---------------------------------------------------------------------------
 # BOOT_DISK_SPACE.md R3: agents in plain folders on an internal boot.
 # On an internal boot disk (not a USB stick) a NEW agent install uses plain
-# folders unless Agent storage is set to SquashFS layers (the old flag "Keep agents compressed" before the two storage settings). A USB boot
+# folders unless Agent storage is set to Compressed layers (the old flag "Keep agents compressed" before the two storage settings). A USB boot
 # keeps compressed layers. An agent that already has layers stays layered
 # (effective_backend keeps its "layers pin it" rule); only the person converts it.
 
 # agent_storage_choice <engine_policy> <keep_compressed> <device_class> -> layers|plain
 #   engine_policy    layering | passthrough | "" (the agents policy: storage_backend_agents, else storage_backend_mode)
-#   keep_compressed  1 = Agent storage is SquashFS layers (see _keep_agents_compressed), else 0
+#   keep_compressed  1 = Agent storage is Compressed layers (see _keep_agents_compressed), else 0
 #   device_class     usb | internal (where the plugin keeps its agents)
 # Pure (no subprocess). passthrough policy is plain for every device; a USB
 # device or an unknown device class is layers (err toward layers, as the rest of
@@ -397,7 +397,7 @@ agent_convert_fits() {
     if [ "$after" -ge "$reserve" ]; then printf 'ok'; else printf 'no_room:%s' "$(( reserve - after ))"; fi
 }
 
-# _keep_agents_compressed -> 1|0. 1 means "Agent storage is SquashFS layers".
+# _keep_agents_compressed -> 1|0. 1 means "Agent storage is Compressed layers".
 # AICLI_KEEP_AGENTS_COMPRESSED wins (tests). Else the Agent storage setting
 # (storage_backend_agents) answers: layering = 1, passthrough = 0. When that key
 # is absent, the old keep_agents_compressed flag in the cfg file answers (one

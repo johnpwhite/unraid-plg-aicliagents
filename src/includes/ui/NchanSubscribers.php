@@ -57,11 +57,7 @@
                 if (data && typeof renderHomeStats === 'function') {
                     if (data.homes) { renderHomeStats(data.homes); }
                     if (data.artifacts) { renderCleanupCard(data.artifacts); }
-                    if (data.rootfs) {
-                        $('#rootfs-bar').css('width', data.rootfs.percent + '%');
-                        $('#rootfs-percent').text(data.rootfs.percent + '%');
-                        $('#rootfs-text').text(data.rootfs.used_mb + 'MB / ' + data.rootfs.total_mb + 'MB');
-                    }
+                    if (data.rootfs) { aicliRenderRootfs(data.rootfs); }
                 }
                 // EVENT_FIRST_RECONCILIATION.md fact table: "Maintenance /
                 // force-reclaim state … (aicli_storage_status, maintenance key)".

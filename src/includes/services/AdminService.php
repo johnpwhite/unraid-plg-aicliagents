@@ -560,8 +560,8 @@ class AdminService {
             // ---- storage paths ----
             'home_storage_path'    => ['group' => 'storage', 'description' => "Where the plugin stores each user's persistent home data."],
             'agent_storage_path'   => ['group' => 'storage', 'description' => "Where the plugin stores each agent's persistent install data."],
-            'storage_backend_homes' => ['group' => 'storage', 'description' => 'Home storage: layering keeps homes in SquashFS layers, passthrough keeps them in plain folders. A change from the Configuration tab converts the homes that are not on the new kind. Setting it here changes only the saved value and converts nothing.'],
-            'storage_backend_agents' => ['group' => 'storage', 'description' => 'Agent storage: layering keeps agents in SquashFS layers, passthrough keeps them in plain folders. New installs use this kind. A change from the Configuration tab converts the agents that are not on the new kind. Setting it here changes only the saved value and converts nothing.'],
+            'storage_backend_homes' => ['group' => 'storage', 'description' => 'Home storage: layering keeps homes in compressed layers, passthrough keeps them in plain folders. A change from the Configuration tab converts the homes that are not on the new kind. Setting it here changes only the saved value and converts nothing.'],
+            'storage_backend_agents' => ['group' => 'storage', 'description' => 'Agent storage: layering keeps agents in compressed layers, passthrough keeps them in plain folders. New installs use this kind. A change from the Configuration tab converts the agents that are not on the new kind. Setting it here changes only the saved value and converts nothing.'],
             'write_protect_agents' => ['group' => 'storage', 'description' => 'Keeps installed agent files read-only between upgrades.'],
             // BOOT_DISK_SPACE.md R4
             'keep_previous_version' => ['group' => 'storage', 'description' => 'Each agent keeps its last version so you can roll back. Turn this off to keep only the version in use and save space on the boot disk.'],
@@ -629,10 +629,10 @@ class AdminService {
             'tts_speed'     => ['group' => 'voice', 'description' => 'Speech speed, 0.5 (slower) to 2.0 (faster).'],
 
             // ---- voice input (VOICE_INPUT.md) — the dictation counterpart of the group above ----
-            'stt_url'       => ['group' => 'voice', 'description' => 'Speech-to-text (transcription) engine URL. Empty uses the browser\'s own speech recognition; set to send recordings to a transcription server instead. Changes only on the Settings page, Agent voice — an agent cannot change it.'],
+            'stt_url'       => ['group' => 'voice', 'description' => 'Speech-to-text (transcription) engine URL. Empty uses the browser\'s own speech recognition; set to send recordings to a transcription server instead. Changes only on the Settings page, Dictation — an agent cannot change it.'],
             'stt_model'     => ['group' => 'voice', 'description' => 'The model name to ask the transcription engine for (ignored in browser mode). Must match a model the engine actually has installed.'],
             'stt_language'  => ['group' => 'voice', 'description' => 'Language hint for transcription. Empty lets the engine detect the language on its own.'],
-            'stt_stream_url' => ['group' => 'voice', 'description' => 'Live transcription endpoint: a streaming (websocket) engine, ws:// or wss://. The browser streams the microphone to it and types the words while you speak, with corrections. Empty turns live dictation off. Changes only on the Settings page, Agent voice.'],
+            'stt_stream_url' => ['group' => 'voice', 'description' => 'Live transcription endpoint: a streaming (websocket) engine, ws:// or wss://. The browser streams the microphone to it and types the words while you speak, with corrections. Empty turns live dictation off. Changes only on the Settings page, Dictation.'],
 
             // ---- voice mail (VOICE_MAIL.md R8) ----
             'voicemail_max_per_workspace' => ['group' => 'voice', 'description' => 'How many voice mail messages to keep for each workspace, 1 to 500. When a workspace has more, the oldest heard messages go first.'],

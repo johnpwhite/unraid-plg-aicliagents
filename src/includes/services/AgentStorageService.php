@@ -257,7 +257,7 @@ class AgentStorageService
      * The numbers of the "Convert agents to plain folders" dialog, and whether the
      * dialog is offered at all.
      *
-     * Offered only on an internal boot disk, while Agent storage is not "SquashFS layers",
+     * Offered only on an internal boot disk, while Agent storage is not "Compressed layers",
      * and when at least one agent is layered. For each layered agent: its size now
      * (its layers on disk), its estimated size as plain folders (the unpacked size
      * divided by the boot file system's compression ratio), the total extra space,

@@ -24,7 +24,7 @@ final class StorageBackendPolicyService
     {
         return self::normalizeMode($mode) === self::PASSTHROUGH
             ? 'Plain folders'
-            : 'SquashFS layers';
+            : 'Compressed layers';
     }
 
     // ---- Two kinds of storage: homes and agents (docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md) ----
@@ -95,7 +95,7 @@ final class StorageBackendPolicyService
 
     /**
      * The real state of one kind, from the backend of each item in the storage status.
-     * `homes[*].backend` and `agents[*].backend` hold "flash" (SquashFS layers) or
+     * `homes[*].backend` and `agents[*].backend` hold "flash" (Compressed layers) or
      * "passthrough" (plain folders). The saved setting does not matter here: one home
      * that a person converted by hand makes the kind "mixed".
      *
@@ -119,7 +119,7 @@ final class StorageBackendPolicyService
             $label = 'Plain folders';
         } elseif ($plain === 0) {
             $state = 'layers';
-            $label = 'SquashFS layers';
+            $label = 'Compressed layers';
         } else {
             $state = 'mixed';
             $label = 'Mixed: ' . $plain . ' of ' . $total . ' ' . $noun . ' are plain folders';
@@ -159,7 +159,7 @@ final class StorageBackendPolicyService
     /** Plain name of an engine, as the Configuration selects show it. */
     public static function kindLabel(string $mode): string
     {
-        return self::normalizeMode($mode) === self::PASSTHROUGH ? 'Plain folders' : 'SquashFS layers';
+        return self::normalizeMode($mode) === self::PASSTHROUGH ? 'Plain folders' : 'Compressed layers';
     }
 
     /**
@@ -199,7 +199,7 @@ final class StorageBackendPolicyService
             'warnings' => $warnings,
             'refuse' => $refused,
             'message' => $usb
-                ? 'This path is backed by removable/USB storage. Plain folders write every change directly to that device. SquashFS layers are recommended to reduce wear.'
+                ? 'This path is backed by removable/USB storage. Plain folders write every change directly to that device. Compressed layers are recommended to reduce wear.'
                 : ($refused
                     ? 'The storage probe refused this target.'
                     : 'Plain folders write changes directly to the selected path.'),

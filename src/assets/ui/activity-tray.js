@@ -1089,7 +1089,7 @@
                     + ' data-user="' + esc(a.meta.user || 'root') + '"'
                     + ' title="Closes every workspace of this home, changes the home to plain folders, then opens them again. It needs no more tidy-ups.">Convert to plain folders</button>';
                 btns += '<button class="btn" data-act="dismiss_activity" data-opid="' + esc(a.opId) + '"'
-                    + ' title="Hides this notice. You can convert the home later on the Home Storage tab.">Later</button>';
+                    + ' title="Hides this notice. You can convert the home later on the Storage tab.">Later</button>';
             } else if (reclaimAsk) {
                 btns += '<button class="btn force" data-act="consolidate_home" data-opid="' + esc(a.opId) + '"'
                     + ' data-user="' + esc(a.meta.user || 'root') + '" data-count="' + esc(a.meta.count || 0) + '"'

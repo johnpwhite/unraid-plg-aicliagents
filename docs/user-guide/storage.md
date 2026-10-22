@@ -6,7 +6,7 @@
 
 ## In plain words
 
-The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. On an internal boot disk, a new agent also installs as plain folders unless **Agent storage** is set to **SquashFS layers**. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
+The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. On an internal boot disk, a new agent also installs as plain folders unless **Agent storage** is set to **Compressed layers**. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
 
 ## The basics
 
@@ -27,8 +27,8 @@ On top of the layers sits one **writable layer**. Every change an agent makes go
 
 Two actions move the data down into layers:
 
-- **Save** (the card button is called **Persist**). The plugin writes the changes in the writable layer into one small, new layer. Nothing closes. The plugin frees the writable layer at once, or when the last workspace of the home closes.
-- **Merge** (the card button is called **Consolidate**). The plugin joins all layers and the unsaved changes into one single layer. It closes the open workspaces of that home for a short time to do this.
+- **Save** (the card button is called **Save now**). The plugin writes the changes in the writable layer into one small, new layer. Nothing closes. The plugin frees the writable layer at once, or when the last workspace of the home closes.
+- **Merge** (the card button is called **Merge layers**). The plugin joins all layers and the unsaved changes into one single layer. It closes the open workspaces of that home for a short time to do this.
 
 Each save adds a layer. Many layers slow the first load and use more memory. A merge brings the count back to one.
 
@@ -40,29 +40,31 @@ With layers, the agent writes to the writable layer. The plugin writes to the dr
 
 ## Where to find it
 
-Open the **AI CLI Agents** page under Unraid's Settings menu. It has these tabs: **Configuration**, **Agent Store**, **Home Storage**, **Config Hub**, **Agent Relay** and **Debug Console**.
+Open the **AI CLI Agents** page under Unraid's Settings menu. It has these tabs: **Configuration**, **Agent Store**, **Storage**, **Config Hub**, **Agent Relay** and **Debug Console**.
 
 | What you want | Where it is |
 | :-- | :-- |
-| Choose where home and agent data live | **Configuration** tab, card **Global Configuration**, fields **Home Storage** and **Agent Storage** (button **Change…**) |
-| Choose the writable layer for homes | **Configuration** tab, field **Writable layer for homes** |
+| Choose where home and agent data live | **Configuration** tab, card **Storage**, fields **Where homes are stored** and **Where agents are stored** (button **Change…**) |
+| Choose the writable layer for homes | **Configuration** tab, field **Where unsaved changes are kept** |
 | Choose how homes are stored | **Configuration** tab, field **Home storage** |
 | Choose how agents are stored | **Configuration** tab, field **Agent storage** |
-| Choose how often the plugin saves | **Configuration** tab, field **Backup Interval** |
-| Choose when the plugin merges | **Configuration** tab, field **Consolidate Layer Ceiling** |
-| See where the boot disk space goes, and free it | **Home Storage** tab, card **Boot disk space** (at the top). It includes homes and agents from their configured storage paths. See "Boot disk space" below. |
-| See, save, merge, repair or delete a home | **Home Storage** tab, section **User Home Persistence** |
+| Choose how often the plugin saves | **Configuration** tab, field **Save unsaved home changes every** |
+| Choose when the plugin merges | **Configuration** tab, field **Merge layers after** |
+| See where the boot disk space goes, and free it | **Storage** tab, card **Boot disk space**. It includes homes and agents from their configured storage paths. See "Boot disk space" below. |
+| See, save, merge, repair or delete a home | **Storage** tab, section **Homes**: one card for each home |
 | See the size of an agent's files | The agent's card in the **Agent Store** tab. See [Agent Store](agent-store.md). |
 | See storage warnings | The Health dot near the top of the Settings page. See [Health, Activity and troubleshooting](health-and-troubleshooting.md). |
 | Get help when storage is missing | The terminal page. The drawer shows **Emergency Session**. |
 
-The **Home Storage** tab has a bar at the top, **System Resources**, with the label **Unraid RAM Disk (Rootfs)**. It shows how much of Unraid's own RAM disk is used. Unraid keeps its system files there. A full bar is a problem for the whole server, not only for this plugin.
+The **Storage** tab has three kinds of card: one card for each home, the card **Boot disk space**, and the card **System memory**. Each card has the same header: a button to open and close the card, a one-line status, an **(i)** button with help, and a menu to move the card. The cards start in this order: the homes, **Boot disk space**, **System memory**. The tab remembers the order and which cards you closed, in this browser only. The menu item **Reset layout** puts the cards back.
+
+The card **System memory** shows how much of Unraid's own memory (the RAM disk, where Unraid keeps its system files) is used. Its status reads, for example, "41 % of 7.8 GB used". The card is closed while the use is under 80 %, and it opens by itself above that. A full bar is a problem for the whole server, not only for this plugin. Save the unsaved home changes, or move the agent temporary files to a pool.
 
 ## Choosing where to keep storage
 
 ### The advice, in order
 
-Pick a place for **Home Storage** and **Agent Storage** in this order:
+Pick a place for **Where homes are stored** and **Where agents are stored** in this order:
 
 1. **A cache pool path**, for example `/mnt/cache/appdata/aicliagents`. This is the fastest and safest choice. The picker marks it **recommended** when it is open to you.
 2. **An Unassigned Devices path**, for example `/mnt/disks/mydrive/aicliagents`. Use this when you have a spare drive that is not in the array or a pool. Use a folder inside the device. The plugin refuses the top folder of the device itself, so the storage picker lists each drive as its `aicliagents` folder.
@@ -86,7 +88,7 @@ The plugin does not block `/mnt/user`, because some servers have no other choice
 Wait for a **Home storage** or **Agent storage** conversion to finish before you move storage. The plugin refuses a move while the conversion is queued or running.
 
 1. Open the **Configuration** tab.
-2. Press **Change…** next to **Home Storage** or **Agent Storage**. Expect: a panel opens and the plugin probes your storage targets.
+2. Press **Change…** next to **Where homes are stored** or **Where agents are stored**. Expect: a panel opens and the plugin probes your storage targets.
 3. Read the list. Each line shows a name, a path and small chips: the type of place, the free space, and warnings.
 4. Choose one line. Or choose **Custom path…** and type a path, for example one that starts with `/mnt/`. The **Browse** button next to the field opens a folder browser. The plugin checks a custom path when you leave the field. Expect: "Valid target", or a reason for the refusal.
 5. Press **Move storage here**. Expect: a confirmation titled **Migrate Storage?**. It shows the old and new paths and the list of files with their sizes.
@@ -145,13 +147,13 @@ You can also start the conversion from the notice in the Activity tray (see "The
 
 ### Agents on an internal boot disk
 
-The program files of an agent follow the same rule as a home. On a USB boot stick, every agent keeps compressed layers. On an internal boot disk (for example a small ZFS mirror), a new agent installs as **plain folders**. Plain folders start faster and need no merges. They also use more space on the boot disk, because a layer is compressed more than a folder is. Open **Configuration** and look at **Agent storage**. Choose **SquashFS layers** when your boot disk is small. Then new installs and updates use layers again. Choosing it converts the agents that are in plain folders back to layers, as the dialog explains.
+The program files of an agent follow the same rule as a home. On a USB boot stick, every agent keeps compressed layers. On an internal boot disk (for example a small ZFS mirror), a new agent installs as **plain folders**. Plain folders start faster and need no merges. They also use more space on the boot disk, because a layer is compressed more than a folder is. Open **Configuration** and look at **Agent storage**. Choose **Compressed layers** when your boot disk is small. Then new installs and updates use layers again. Choosing it converts the agents that are in plain folders back to layers, as the dialog explains.
 
 When the boot disk has no room for a new agent, the install stops and says "No space on the boot disk". The message names the **Boot disk space** card on the Storage tab and the setting **Agent storage**. The version in use stays.
 
 ### Convert agents to plain folders
 
-An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Agent storage** is not set to **SquashFS layers**, and when at least one agent has layers. The setting **Agent storage** then shows **Mixed** until you convert the rest. It is not offered on a USB boot stick.
+An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Agent storage** is not set to **Compressed layers**, and when at least one agent has layers. The setting **Agent storage** then shows **Mixed** until you convert the rest. It is not offered on a USB boot stick.
 
 1. On the **Boot disk space** card (see "Boot disk space" above), press **Convert to plain folders** on the line **Agents: current versions**. Expect: a dialog **Convert agents to plain folders?**.
 2. Read the dialog before you press anything. It lists each agent with **Size now** and **As plain folders**. Below the list it shows the extra space, the free space now and the free space after. The size as plain folders is an estimate: the size of the layer files times 5.8, divided by the compression of the boot disk. The dialog does not measure anything. It shows the numbers of the last measure, with the line "Measured at 14:05 (3 min ago)". When the numbers are more than 10 minutes old, or there are none, the dialog shows the button **Measure now**. Press it once, wait for the measure to end, and the dialog opens again with new numbers.
@@ -166,9 +168,9 @@ The old layers move to a backup folder. They stay for 14 days, then the plugin r
 
 ## The settings "Home storage" and "Agent storage"
 
-**Home storage** and **Agent storage** are two settings on the **Configuration** tab. Each setting has two choices. **SquashFS layers** stores changes in compressed layers and a writable layer. **Plain folders** stores files directly in ordinary folders. **Home storage** applies to the homes. **Agent storage** applies to the program files of the agents. New homes use **Home storage**. New agent installs and updates use **Agent storage**.
+**Home storage** and **Agent storage** are two settings on the **Configuration** tab. Each setting has two choices. **Compressed layers** stores changes in compressed layers and a writable layer. **Plain folders** stores files directly in ordinary folders. **Home storage** applies to the homes. **Agent storage** applies to the program files of the agents. New homes use **Home storage**. New agent installs and updates use **Agent storage**.
 
-Under each setting, the line **Now:** shows what is true on disk, not only what the setting says. It reads **Plain folders**, **SquashFS layers**, or **Mixed**. An example is **Mixed: 1 of 2 homes are plain folders**. The line changes when you convert one home with **Convert to plain folders** on its card. When a setting is mixed, a button appears: **Convert the other 1 home to plain folders**. Press it to finish the change for the items that are left.
+Under each setting, the line **Now:** shows what is true on disk, not only what the setting says. It reads **Plain folders**, **Compressed layers**, or **Mixed**. An example is **Mixed: 1 of 2 homes are plain folders**. The line changes when you convert one home with **Convert to plain folders** on its card. When a setting is mixed, a button appears: **Convert the other 1 home to plain folders**. Press it to finish the change for the items that are left.
 
 ### Change one setting
 
@@ -189,11 +191,11 @@ If the server stops during conversion, Configuration and **Boot disk space** sho
 
 **Dismiss** hides only the result for that conversion. A later conversion appears and disables both settings while it runs.
 
-You can open another page while the conversion runs. The **Boot disk space** card also shows the progress and says which kind converts. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
+You can open another page while the conversion runs. The **Boot disk space** card also shows the progress and says which kind converts. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Storage** to see the same status. The page does not block navigation.
 
 The migration of homes includes homes with saved layers, files in a plain home folder or a saved workspace. A user account without saved home storage does not add an item to the migration.
 
-Copies kept when a setting changes from plain folders to SquashFS layers appear in **Boot disk space** under **Left over**. Each row shows its size and age. You can remove a copy after no conversion needs it. The plugin does not remove these copies automatically.
+Copies kept when a setting changes from plain folders to compressed layers appear in **Boot disk space** under **Left over**. Each row shows its size and age. You can remove a copy after no conversion needs it. The plugin does not remove these copies automatically.
 
 The plugin pauses automatic saves, merges and queued storage jobs during the conversion. A storage job that already holds a lock can finish. The migration waits and retries the affected item for a limited time.
 
@@ -201,7 +203,7 @@ The migration also waits for an agent installation that was already running. Whi
 
 If another storage job is using an agent or home, the plugin names that item and refuses before it closes workspaces. Wait for the job to finish, then try again. If a conversion fails after it starts, the status names the item and gives a short reason. The Debug Console keeps the lower-level detail. The plugin keeps the previous setting when it restores the converted items. Read the final message before you try again.
 
-## The setting "Writable layer for homes"
+## The setting "Where unsaved changes are kept"
 
 This setting decides where the writable layer of each home lives. It applies to homes only. Agents keep their own rule.
 
@@ -212,7 +214,7 @@ This setting decides where the writable layer of each home lives. It applies to 
 
 **Disk** is refused when your storage sits on a USB flash drive. The server answers **RAM** there, because disk writes would wear the drive. **RAM** is refused when a home is bigger than 80 percent of the RAM area. The warning names the sizes.
 
-The setting applies when **Home storage** is **SquashFS layers**. Homes in **Plain folders** have no writable layer. They write straight to the chosen path.
+The setting applies when **Home storage** is **Compressed layers**. Homes in **Plain folders** have no writable layer. They write straight to the chosen path.
 
 ### Switch the setting
 
@@ -220,7 +222,7 @@ The setting applies when **Home storage** is **SquashFS layers**. Homes in **Pla
 > A change moves data. The plugin closes your open workspaces, saves each home into a checked layer, and mounts the home again. This can take several minutes for a large home. Do not reload the page and do not restart the server during the move. The plugin deletes nothing. The old writable layer holds only what the checked save already contains.
 
 1. Open the **Configuration** tab.
-2. Change **Writable layer for homes**. Expect: a check runs, then a warning titled **Move the writable layer to RAM?** or **Move the writable layer to disk?**
+2. Change **Where unsaved changes are kept**. Expect: a check runs, then a warning titled **Move the writable layer to RAM?** or **Move the writable layer to disk?**
 3. Read the warning. It lists each home on its own line, for example "root: now on disk, will move (1880 MB)". A yellow box says "Your open workspaces will be closed while the data moves." when something must move.
 4. Press **Close workspaces and move**. If nothing needs to move, the button reads **Save setting**. Expect: a screen "Moving writable layers to RAM..." (or "disk...") with a bar.
 5. Wait for **Writable layer changed**. The page reloads.
@@ -232,39 +234,41 @@ If a home cannot move, the plugin puts the setting back. It shows **Not moved** 
 
 ## The home storage card
 
-The **Home Storage** tab shows one card for each user that has a home. A card with many fields is easy to misread, so this table lists each one.
+The **Storage** tab shows one card for each user that has a home. The title of the card is **Home:** and the name of the user. Click the title to open or close the card. A card with many fields is easy to misread, so this table lists each one.
 
 | Field | What it shows |
 | :-- | :-- |
-| Name (top left) | The Unraid user that owns the home. |
-| "N MB persisted · N Layers" | The size of all saved layers and how many there are. For a home in plain folders: "Plain folders on" and the folder. |
-| Status word (top right) | **Plain folders**: the home is an ordinary folder. It has no layers, no save button and no merge button. **Layered**: nothing is unsaved. **N MB volatile**: that much unsaved data is in RAM. **N MB writable**: that much unsaved data is in the writable layer on disk. **OFFLINE**: the home is not mounted. |
-| Bar | A home in plain folders has no bar. It shows one line: "Saved straight to disk. No saves or tidy-ups needed." For a layered home with a RAM writable layer: how full the RAM area is, with the text "N% ZRAM used". For a disk writable layer: the text "N MB durable writable layer". The disk layer has no fixed size, so the bar never shows a false percentage. |
+| Title (top left) | The Unraid user that owns the home. |
+| Status line (in the header) | One line that stays visible when you close the card. A home in plain folders reads "Plain folders on the boot disk · no saves needed". A layered home reads, for example, "12 layers · 240 MB unsaved", or "12 layers · no unsaved changes". A home that is not mounted starts with "Not mounted". While a job runs, the line ends with the job, for example "Saving…". |
+| **(i)** in the header | Says what a home is and what the buttons of the card do. A layered home and a home in plain folders get different texts. |
+| "N MB persisted · N Layers" (top of the body) | The size of all saved layers and how many there are. For a home in plain folders: "Plain folders on" and the folder. |
+| Status word (top of the body) | **Plain folders**: the home is an ordinary folder. It has no layers, no save button and no merge button. **Layered**: nothing is unsaved. **N MB volatile**: that much unsaved data is in RAM. **N MB writable**: that much unsaved data is in the writable layer on disk. **OFFLINE**: the home is not mounted. |
+| Bar | A home in plain folders has no bar and no note in the body. Its status line in the header says "Plain folders on the boot disk · no saves needed". For a layered home with a RAM writable layer: how full the RAM area is, with the text "N% ZRAM used". For a disk writable layer: the text "N MB durable writable layer". The disk layer has no fixed size, so the bar never shows a false percentage. |
 | Mount line | The folder where the plugin shows the home to the agents. |
 | Folder line | The folder that holds the layer files. |
 | Orange tile | The unsaved changes. In RAM mode it reads "ZRAM changes (volatile, not yet flushed)". In disk mode it reads "Writable changes (durable, not yet compacted)". |
 | Layer rows | One row per layer with its file name and size. |
-| Old layers strip | Appears only after **Convert to plain folders**, while the plugin keeps the old layers for a rollback. It reads "Old layers kept for rollback: 5.00 MB, removed automatically on 5 Nov 2026" and has the button **Remove old layers**. The date is the day the plugin removes the layers by itself. See "Remove the old layers" below. |
-| Backup strip | The state of the config backup of this home and the button **Config backup…** (**Set up config backup…** when no folder is chosen). A config backup is a copy of the home folder: the settings, sign-ins and history of the agents. It is not a backup of the server. See [Home backup and restore](backup-restore.md). |
+| Old layers row | Appears only after **Convert to plain folders**, while the plugin keeps the old layers for a rollback. It reads "Old layers kept for rollback: 5.00 MB, removed automatically on 5 Nov 2026" and has the button **Remove old layers**. The date is the day the plugin removes the layers by itself. See "Remove the old layers" below. |
+| Backup row | The state of the backup of this home and the button **Backup…**. The row reads, for example, "Backup: not yet · to /mnt/datapool/backups", "Backup: last 12 Oct 2026, 02:00 · 3.1 MB (warm)", or "Backup: not set up.". The **(i)** beside the button says what a backup is: a second, plain copy of the home in a folder you choose. Damage to the boot disk does not reach it. It is a copy of the home folder (the settings, sign-ins and history of the agents), not a backup of the server. See [Home backup and restore](backup-restore.md). |
 
 A badge **Awaiting idle** (with an hourglass) means the plugin wants to merge this home but waits until no terminal uses it. A home in plain folders never shows this badge.
 
 ### The four buttons
 
-The buttons are icons at the bottom of the card. On a phone, tap the icon. Hold a finger on it, or hover with a mouse, to read its tooltip.
+The buttons have words. They sit at the bottom of the card, and each is 44 px high on a phone. Hold a finger on a button, or hover with a mouse, to read its tooltip.
 
-| Icon | Tooltip | What it does | Closes workspaces? |
-| :-- | :-- | :-- | :-- |
-| Floppy disk | **Persist to storage** | Saves the writable layer into one new layer. | No |
-| Compress arrows | **Consolidate: save unsaved changes and merge all layers into one** | Saves the unsaved changes and merges all layers into one. | Yes, for a short time. Each workspace reopens by itself. |
-| Wrench | **Repair mount: this home is not mounted** | Unmounts and mounts the home's storage again. | It can interrupt open workspaces. |
-| Red trash can | **Delete home data (permanent)** | Deletes the whole home. | Not allowed while a workspace or a storage job uses the home. |
+| Button | What it does | Closes workspaces? |
+| :-- | :-- | :-- |
+| **Save now** | Saves the writable layer into one new layer. | No |
+| **Merge layers** | Saves the unsaved changes and merges all layers into one. | Yes, for a short time. Each workspace reopens by itself. |
+| **Repair** | Unmounts and mounts the home's storage again. It shows only when the home is not mounted. | It can interrupt open workspaces. |
+| **Delete home…** (red) | Deletes the whole home. A dialog asks you to confirm first. | Not allowed while a workspace or a storage job uses the home. |
 
-All four icons lock while a job runs on that home. The lock comes from the server, so it holds on every device and browser tab. A home in plain folders shows only the wrench (when it is not mounted) and the trash can.
+All buttons are off while a job runs on that home. The lock comes from the server, so it holds on every device and browser tab. **Merge layers** is also off, with the tooltip "Nothing to merge: one layer and no unsaved changes", when there is nothing to merge. A home in plain folders shows only **Repair** (when it is not mounted) and **Delete home…**.
 
-#### Save (Persist)
+#### Save now
 
-1. Press the floppy disk icon. Expect: a dialog **Persist Home Changes?**.
+1. Press **Save now**. Expect: a dialog **Persist Home Changes?**.
 2. Press **Persist Now**. Expect: "Queued — watch the activity tray for progress."
 3. Watch the Activity tray at the bottom right. A pill shows the job: queued, running, done.
 
@@ -274,13 +278,13 @@ If the home has no changes since the last save, the message is **Nothing to save
 
 A second save inside 30 minutes of the last one waits. The card shows "Saving — waiting". When the wait ends, the tray says "Already saved." with the reason. This is not a failure.
 
-The **Configuration** tab also has a **Persist** button beside **Backup Interval**. It saves the home of the terminal user at once.
+The **Configuration** tab also has a **Save now** button beside **Save unsaved home changes every**. It saves the home of the terminal user at once.
 
-#### Consolidate (merge)
+#### Merge layers
 
-The icon is active when the home has two or more layers, or one layer and unsaved changes. Otherwise it is grey, with the tooltip "Nothing to merge: one layer and no unsaved changes".
+The button is on when the home has two or more layers, or one layer and unsaved changes. Otherwise it is off, with the tooltip "Nothing to merge: one layer and no unsaved changes".
 
-1. Press the compress icon. If workspaces are open on that home, a card lists them with their agent icons and folders. Without open workspaces, a plain dialog appears: **Consolidate home layers?** "Save your unsaved changes and merge all saved layers into one layer. This saves memory."
+1. Press **Merge layers**. If workspaces are open on that home, a card lists them with their agent icons and folders. Without open workspaces, a plain dialog appears: **Consolidate home layers?** "Save your unsaved changes and merge all saved layers into one layer. This saves memory."
 2. Read the card. It says that your sessions close briefly and reopen where you left off.
 3. Leave the box **Send Continue to each workspace after it reopens** ticked, or untick it. Unticked, the workspaces reopen with their conversation resumed but get no message. They then use no tokens (the paid units of an AI model) until you tell them to go on. This choice is for this merge only. It changes no setting. Untick the box when you plan to restart the server straight after the merge.
 4. Press **Consolidate**. Expect: "Queued — watch the activity tray for progress."
@@ -290,17 +294,17 @@ The icon is active when the home has two or more layers, or one layer and unsave
 
 During a merge:
 
-- A blue banner shows on the **Home Storage** tab and on the terminal page: "Storage tidy-up in progress".
+- A blue banner shows on the **Storage** tab and on the terminal page: "Storage tidy-up in progress".
 - Each workspace of the home shows "Consolidating this home's storage… Session will resume automatically". Opening or reconnecting a workspace does not restart it until the merge ends. This lets the merge finish.
 - Repair, merge, move, backup and restore are paused. If you press one, a message says that a consolidation is running.
 - When the merge ends, the workspaces reopen by themselves.
 
 #### Repair
 
-The wrench shows only when the home is not mounted. The status word reads **OFFLINE**.
+The button **Repair** shows only when the home is not mounted. The status word reads **OFFLINE**.
 
-1. Press the wrench. Expect: **Repair home storage?** "Unmount and remount the OverlayFS stack ... This may briefly interrupt active sessions." (OverlayFS is the Linux feature that joins the layers into one folder.)
-2. Press **Repair**. Expect: **Repaired**, or **Repair Failed** with the reason.
+1. Press **Repair**. Expect: **Repair home storage?** "Unmount and remount the OverlayFS stack ... This may briefly interrupt active sessions." (OverlayFS is the Linux feature that joins the layers into one folder.)
+2. Press **Repair** in the dialog. Expect: **Repaired**, or **Repair Failed** with the reason.
 
 Repair changes no data. It mounts the same layers again.
 
@@ -309,7 +313,7 @@ Repair changes no data. It mounts the same layers again.
 > [!WARNING]
 > **Delete** removes all layers and session data of that home for good. You lose the agent sign-ins, settings, memory, chat transcripts and secrets of that user. Nothing of the home is kept. You cannot undo it. Snapshots in a backup folder are not part of the home and stay where they are.
 
-1. Press the red trash can. Expect: **Delete home data for 'name'?**
+1. Press the red button **Delete home…**. Expect: **Delete home data for 'name'?**
 2. Press **Delete permanently**. For the primary homes (`root` and `aicliagent`), the dialog also asks you to type `DELETE` in a box. The plugin does not accept other text.
 3. Expect: **Deleted**.
 
@@ -350,7 +354,7 @@ The tray text for a put-off save or merge reads: "Your data is already saved to 
 
 You do not need to press **Persist** often. The plugin saves by itself when one of these happens:
 
-- **On a schedule.** The schedule is the **Backup Interval** field, described below.
+- **On a schedule.** The schedule is the **Save unsaved home changes every** field, described below.
 - **When the last workspace of a home closes.** The save runs when the home is idle.
 - **When much unsaved data builds up in RAM.** With the default settings, about 1 GB starts an immediate save of every home that has changes. At about 2 GB, Unraid shows a warning, "AICliAgents: High storage pressure". At a critical level (about 4 GB), Unraid shows "AICliAgents: Critical storage pressure" and the plugin does not start new workspaces until the data is saved. Workspaces that are open keep working. These limits are lower on a small RAM area, and they apply to a RAM writable layer only.
 - **When you install or upgrade an agent.** The plugin saves the agent's files at once.
@@ -358,14 +362,14 @@ You do not need to press **Persist** often. The plugin saves by itself when one 
 
 A save that happens at an event restarts the timer. The plugin does not save twice in a row.
 
-### The field "Backup Interval"
+### The field "Save unsaved home changes every"
 
 > [!NOTE]
-> Despite its name, **Backup Interval** does not make a backup. It sets how often the plugin saves the writable layer into a layer. A backup is a separate, plain copy. See [Home backup and restore](backup-restore.md).
+> The field **Save unsaved home changes every** does not make a backup. It sets how often the plugin saves the writable layer into a layer. A backup is a separate, plain copy. See [Home backup and restore](backup-restore.md).
 
 The field is in the **Configuration** tab. Its choices are every 15 minutes, every 30 minutes, every hour, every 2 hours, every 4 hours, every 8 hours, every 12 hours and once a day. The default is every 2 hours. The plugin saves only when the home has unsaved changes. The plugin keeps your choice as soon as you change it and uses it from its next check.
 
-### The field "Consolidate Layer Ceiling"
+### The field "Merge layers after"
 
 This number (from 4 to 40, default 30) is how many layers a home may build up. The plugin starts a merge at two layers below the ceiling (28 with the default), or sooner when disk space is low. A higher number gives fewer merges but a slower first load. Agents always use one layer.
 
@@ -394,9 +398,9 @@ The folders are `.npm`, `.cache`, `.bun/install/cache`, `.claude/cache`, `.claud
 
 Three fields in the **Configuration** tab control this:
 
-- **Cache location for plain-folder homes**: **RAM** (the default) or **A folder on a pool**.
+- **Caches of plain-folder homes**: **RAM** (the default) or **A folder on a pool**.
 - **Cache folder on a pool**: the folder for the pool option, for example `/mnt/cache/aicli-caches`. Each home gets its own folder inside it. A user share (`/mnt/user`) is not accepted.
-- **RAM cache size per home**: the most RAM the caches of one home can use, from 256 to 8192 MB. The default is 1024 MB. The RAM is used only while the caches hold data. When a cache is full, the tool gets a "no space" error until you clear the caches.
+- **Memory for caches, per home**: the most RAM the caches of one home can use, from 256 to 8192 MB. The default is 1024 MB. The RAM is used only while the caches hold data. When a cache is full, the tool gets a "no space" error until you clear the caches.
 
 When the pool is not mounted, for example while the array is stopped, the caches use RAM. When you stop the array, the plugin moves the caches from the pool to RAM first. If a program still has a file open in a cache at that moment, Unraid waits for it to close, as for any other open file on the pool; the plugin log names the program. When the array starts again, the caches go back to the pool the next time the home starts.
 
@@ -406,7 +410,7 @@ The first time a home starts after this feature is on, the plugin removes the ol
 
 ## Boot disk space
 
-The plugin keeps its homes and agents on the boot disk, because they must work while the array is stopped. A boot disk is small. The card **Boot disk space** at the top of the **Home Storage** tab shows where the space goes and what frees it.
+The plugin keeps its homes and agents on the boot disk, because they must work while the array is stopped. A boot disk is small. The card **Boot disk space** on the **Storage** tab shows where the space goes and what frees it. Its status line reads, for example, "5.7 GB used of 15 GB · 8.6 GB free". The **(i)** in its header says how to read the card. A small **(i)** beside the name of a line holds the note of that line; for a cache line it also has a link **Go to setting**. The buttons of the card have the same look and the same 44 px height on a phone as the other buttons of the page.
 
 The card shows a bar with the size of the boot disk, how much is used and how much is free. Below the bar is one line for each part, the largest first. Each line has a bar, its size and, when there is something to do, a button. The sizes are the space really used on the disk, so compression is counted.
 
@@ -421,12 +425,12 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | Line | What it counts | Button |
 | :-- | :-- | :-- |
 | **Home** *name*: **conversation history** | The sessions that the agents keep in the home. | **Move old sessions…**. After a move, **Bring back…** also shows. See "Move old conversation sessions". |
-| **Home** *name*: **caches** | The cache content that is still on the boot disk. A note says where the cache lives now (RAM or a pool). | **Clear caches**. A link **Cache setting** opens the field **Cache location for plain-folder homes**. See "Caches of a plain-folder home". |
+| **Home** *name*: **caches** | The cache content that is still on the boot disk. A note says where the cache lives now (RAM or a pool). | **Clear caches**. A link **Cache setting** opens the field **Caches of plain-folder homes**. See "Caches of a plain-folder home". |
 | **Home** *name*: **other** | The rest of the home: your own files and agent settings. | None. |
 | **Home** *name*: **quarantine** | Damaged agent databases that the plugin set aside and replaced. Shown only when the folder holds something. | **Archive…** and **Remove**. See "Archive or remove old data of a home". |
 | **Home** *name*: **data of deleted OpenCode workspaces** | OpenCode keeps one database for each workspace. This line counts the data of workspaces that are not in your workspace list or your favourites any more. Included in the **conversation history** line. | **Archive…** and **Remove**. |
 | **Home** *name*: **large Codex session logs** | Codex session logs of 1 MB or more that did not change for 14 days. Included in the **conversation history** line. | **Archive…** and **Remove**. |
-| **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Consolidate (merge)". |
+| **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Merge layers". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
 | **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. |
@@ -475,28 +479,28 @@ When the boot disk is 85% full, the plugin sends an Unraid notification and show
 - Old agent versions are the biggest: "Remove old agent versions frees space."
 - The agents are the biggest: "The agents use most of it. Remove old agent versions to free space."
 
-Each warning ends with "Open Home Storage, Boot disk space." The notification is a link: a click opens the **Home Storage** tab at the card.
+Each warning ends with "Open Storage, Boot disk space." The notification is a link: a click opens the **Storage** tab at the card.
 
 ## Temporary files of agents in RAM
 
 Agents write temporary files, for example git clones, to a temporary folder. On Unraid that folder is RAM. A large temporary folder uses the memory of the server and can make typing slow.
 
-When the temporary files of agents in RAM pass the limit, the card **Boot disk space** shows an orange warning. The limit is the setting **Warn when agent temporary files in RAM pass** (default 1024 MB). The warning names the size and how much of it belongs to sessions that no longer run.
+When the temporary files of agents in RAM pass the limit, the card **Boot disk space** shows an orange warning. The limit is the setting **Warn when temporary files in memory pass** (default 1024 MB). The warning names the size and how much of it belongs to sessions that no longer run.
 
 1. Press **Clean up temporary files of closed sessions**. Expect: a dialog names the size it frees and the age of the numbers.
 2. Press **Clean up** to continue, or **Cancel** to stop. Expect: a message says that the clean-up is queued. The Activity tray shows the steps ("Looking for closed sessions", "Removing temporary files of closed sessions") and the result.
 
 The clean-up removes only the temporary files of sessions that ended at least a day ago: nothing in them changed for 24 hours. A session that runs stays. The whole temporary folder of a project stays while a program works in that project, or a workspace of the plugin uses it, even when one session in it is idle. Your projects and your home are not touched.
 
-To keep new sessions from filling RAM, set **Agent temporary folder** on the **Configuration** tab to **A folder on a pool**. A new session then keeps its temporary files there.
+To keep new sessions from filling RAM, set **Agent temporary files** on the **Configuration** tab to **A folder on a pool**. A new session then keeps its temporary files there.
 
 ## Old agent versions
 
 Each agent keeps its last version so you can roll back. The old versions use space on the boot disk. The plugin removes the oldest ones by itself. You can also remove them at once.
 
-### The setting "Keep the previous version for rollback"
+### The setting "Keep the previous agent version"
 
-This setting is in the **Configuration** tab, card **Global Configuration**. The default is **Yes**: each agent keeps its last version, so you can roll back. Choose **No** to keep only the version in use. The plugin then removes the previous version at its next clean-up, and you save space on the boot disk. A version that a running workspace uses always stays.
+This setting is in the **Configuration** tab, card **Storage**. The default is **Yes**: each agent keeps its last version, so you can roll back. Choose **No** to keep only the version in use. The plugin then removes the previous version at its next clean-up, and you save space on the boot disk. A version that a running workspace uses always stays.
 
 ### Remove old versions now
 
@@ -549,7 +553,7 @@ When Unraid stops, the plugin does these steps, in this order:
 
 A shutdown never merges layers. It only adds one layer for each home.
 
-The time limit for these steps comes from Unraid. It is the **Shutdown time-out** in Settings, Disk Settings, minus 15 seconds, and at least 30 seconds. With Unraid's default of 90 seconds, the plugin has about 75 seconds. A very large home may not finish saving in that time. Then a little unsaved data in RAM can be lost. A shorter **Backup Interval** reduces that risk. A power cut gives no time at all: with the RAM writable layer, you lose changes since the last save. The disk writable layer keeps them.
+The time limit for these steps comes from Unraid. It is the **Shutdown time-out** in Settings, Disk Settings, minus 15 seconds, and at least 30 seconds. With Unraid's default of 90 seconds, the plugin has about 75 seconds. A very large home may not finish saving in that time. Then a little unsaved data in RAM can be lost. A shorter **Save unsaved home changes every** reduces that risk. A power cut gives no time at all: with the RAM writable layer, you lose changes since the last save. The disk writable layer keeps them.
 
 ## Emergency Mode
 
@@ -596,7 +600,7 @@ For agent storage, the plugin heals itself. If every layer of an agent is missin
 
 The boot check also removes the leftover record of a throwaway test home when its temporary folder is gone. This applies only to homes under the plugin's temporary appdata folder. A home on a pool, the array or the flash drive is never removed this way, even when its drive is missing.
 
-The **Home Storage** tab shows a related banner when the boot check finds something that does not need a full-page halt: "Boot integrity — N entities need attention". For a home it shows **Restore from sibling**. For an agent it shows **Show on Agent Store →**, which opens the agent's card.
+The **Storage** tab shows a related banner when the boot check finds something that does not need a full-page halt: "Boot integrity — N entities need attention". For a home it shows **Restore from sibling**. For an agent it shows **Show on Agent Store →**, which opens the agent's card.
 
 ## Health warnings about storage
 
@@ -625,7 +629,7 @@ The plugin never starts a merge by itself for this warning, because a merge clos
 
 ### RAM caches use much of the RAM
 
-A third check covers the RAM caches of plain-folder homes. It warns when the **RAM cache size per home** of all such homes together is more than 25 percent of the RAM of the server. The text says how many homes it counts. Lower **RAM cache size per home**, or choose **A folder on a pool** for **Cache location for plain-folder homes**. The check only reads.
+A third check covers the RAM caches of plain-folder homes. It warns when the **Memory for caches, per home** of all such homes together is more than 25 percent of the RAM of the server. The text says how many homes it counts. Lower **Memory for caches, per home**, or choose **A folder on a pool** for **Caches of plain-folder homes**. The check only reads.
 
 ## What happens behind the scenes
 
@@ -635,12 +639,12 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
-| The card shows **OFFLINE** | The home is not mounted. | Press the wrench (**Repair**). If it fails, check that the drive is present and press **Retry integrity check**. |
+| The card shows **OFFLINE** | The home is not mounted. | Press **Repair**. If it fails, check that the drive is present and press **Retry integrity check**. |
 | "Saving — waiting" for a long time | The home is in use, or it was saved less than 30 minutes ago. | Wait. The data is already on disk. Close the workspaces of that home to free the memory. |
 | The status word shows a large "MB volatile" and does not drop after a save | Open workspaces hold the old copy of the home in memory. | Close the workspaces, or press **Consolidate** at a quiet time. |
 | The Consolidate icon is grey | The home has one layer and no unsaved changes. | Nothing to do. |
 | A message "Storage tidy-up in progress" blocks a button | A merge is running. | Wait a few minutes. The workspaces reopen by themselves. |
-| An amber note "Recent consolidate failure" shows on the **Home Storage** tab | A merge failed. The plugin retries by itself. After two failures in a row it halts automatic merges for that home. | Read the Debug Console log. Ask for help on the forum if the note stays. |
+| An amber note "Recent consolidate failure" shows on the **Storage** tab | A merge failed. The plugin retries by itself. After two failures in a row it halts automatic merges for that home. | Read the Debug Console log. Ask for help on the forum if the note stays. |
 | An Unraid notice "AICliAgents: not enough boot disk space to save the home", or the tray entry **Not enough boot disk space to save the home** | The boot disk has too little free space for the new layer, so the plugin wrote nothing. Your changes are still only in RAM and are lost if the server restarts. The plugin first tests the layer at the compression of your last saved layer, so it refuses only when even that size does not fit. | Free some space on the boot disk (the card **Boot disk space** shows what uses it), then press **Persist** again. The notice and the tray entry end by themselves after the next good save. |
 | **Not moved** after you change the writable layer | A home was in use or had no room. The setting went back. | Read the reason, free space or close the workspace, and try again. |
 | "Path must include a sub-directory under the Unassigned Device mount" | You chose the top folder of an Unassigned Devices drive. | Create a folder on the drive, for example `aicliagents`, and choose that folder. |
@@ -649,8 +653,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 | An Unraid notice "AICliAgents: a saved layer of your home was damaged" | The newest saved layer of the home is empty or is not a valid file. The plugin moved it to the folder `.bad` inside the storage folder and started the home without it. Only the changes saved in that layer are missing. The file is not deleted. | Check your recent work. Keep the file in `.bad` until you are sure that you do not need it. |
 | A workspace does not start and the Debug Console says "Layer … cannot be mounted" | One saved layer of the home cannot be read. The message names the layer and the reason. The plugin does not skip a layer in the middle of the stack, because the newer layers depend on it. The file is not changed. | Ask for help on the forum and give the layer name. Do not delete the file. |
 | A Health warning about pinned space | Old layers hold disk space. | Restart the workspaces that the text names, or restart the server. |
-| A card **Legacy Migration Artifacts** shows on the **Home Storage** tab | Old files from a past storage conversion are still on disk. | Check that your agents and workspaces work. Then press **Purge All Artifacts**. This deletes the files for good. |
-| A dialog or a button on the **Home Storage** tab shows "Could not reach the server" | The browser could not reach the plugin, or the server answered with an error. The message says which. | Check that the server is up and the Unraid login is still open. Reload the page and try again. A button that was waiting, such as **Measure now**, works again. |
+| A card **Legacy Migration Artifacts** shows on the **Storage** tab | Old files from a past storage conversion are still on disk. | Check that your agents and workspaces work. Then press **Purge All Artifacts**. This deletes the files for good. |
+| A dialog or a button on the **Storage** tab shows "Could not reach the server" | The browser could not reach the plugin, or the server answered with an error. The message says which. | Check that the server is up and the Unraid login is still open. Reload the page and try again. A button that was waiting, such as **Measure now**, works again. |
 | A second click on **Back up now**, **Restore**, **Consolidate**, **Convert** or **Remove old versions** says the job "is already waiting or running" | The same job for the same home or agent is already in the queue. | Watch the Activity tray. Press the button again after the job ends. |
 
 ## Related pages
@@ -665,6 +669,10 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The Configuration fields in this guide use the new labels: **Where homes are stored** and **Where agents are stored** (they were **Home Storage** and **Agent Storage**), next to the settings **Home storage** and **Agent storage**. A home in plain folders no longer shows the body line "Saved straight to disk…"; its status line says it. Issue #750.
+- **2026-10-22** — The tab **Home Storage** is now called **Storage**. Every home is a card with the same header as the cards of the Configuration tab: it opens and closes, shows a one-line status ("Plain folders on the boot disk · no saves needed" or "12 layers · 240 MB unsaved"), has an **(i)**, and can move. The icons of a home became the buttons **Save now**, **Merge layers**, **Repair** and **Delete home…**. The backup row reads "Backup: …" with the button **Backup…**, and the note at the foot of the page is its **(i)**. **Boot disk space** and **System memory** are cards too. The buttons of **Boot disk space** are 44 px high on a phone, and the notes of its lines sit behind an **(i)**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 6), issue #750.
+- **2026-10-22** — The storage choice is now named **Compressed layers** everywhere (it was shown as **SquashFS layers** in some places). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+- **2026-10-22** — The Configuration settings have new labels: **Where unsaved changes are kept**, **Save unsaved home changes every** (with a **Save now** button), **Merge layers after**, **Caches of plain-folder homes**, **Memory for caches, per home** and **Keep the previous agent version**. The heading **User Home Persistence** is now **Homes**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The card **Boot disk space** has lines for the quarantine folder, the data of deleted OpenCode workspaces and large Codex session logs. Each line has **Archive…** (to a folder on a pool, with a checked copy and a list of files) and **Remove**. Agents get the same actions as proposals. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-22** — The banner "Home can change to plain folders" has its own button **Convert to plain folders** and no longer points to the notice at the bottom right. **Later** on the notice ends after 24 hours. Spec `docs/specs/STORAGE_RECLAIM_NOTICE.md`, issue #746.
 - **2026-10-22** — The home card shows the old layers that wait for a rollback, with their size and removal date, and the button **Remove old layers**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #747.

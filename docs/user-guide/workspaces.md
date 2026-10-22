@@ -40,7 +40,7 @@ If you press **Cancel**, the close button (the cross at the top right) or the Es
 
 The **Folder** section is one panel. It holds a path bar, a filter row, the list of folders and a field for a new folder.
 
-- **Where the picker starts.** It starts in the folder of the active workspace. If you have none, it starts in the folder of the workspace you closed last on this page. If there is none, it starts in **Workspace Root** (`/mnt/user` by default). If a folder cannot be read, the picker goes back to `/mnt`.
+- **Where the picker starts.** It starts in the folder of the active workspace. If you have none, it starts in the folder of the workspace you closed last on this page. If there is none, it starts in **Starting folder** (`/mnt/user` by default). If a folder cannot be read, the picker goes back to `/mnt`.
 - **The path bar.** Each part of the path is a button. Select a part to jump to that folder in one click. The current folder is the last part, and it is not a button.
 - **Select a folder.** Click a folder once to select it. The row gets an orange bar and the tag **Selected**. Press Space on a row for the same result.
 - **Open a folder.** Double-click a folder to go into it. Press Enter on a row for the same result. **Up one level** is always the first row of a subfolder.
@@ -268,8 +268,8 @@ The layout changes when the page is 480 pixels wide or less.
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Workspace Root** (Settings, Configuration) | The folder where the picker starts when no other folder applies. | `/mnt/user` | Set it to the folder that holds your projects. |
-| **Workspace working directory** (Settings, Configuration) | Decides where the agent really runs. With **Automatic safe path**, a workspace on a share that only uses the cache pool runs on the pool path. Other folders keep the share path. The row and the favourites keep showing the `/mnt/user` path. | **Automatic safe path** | Leave it. The other choice is an older explicit mode with the same safe rule. |
+| **Starting folder** (Settings, Configuration) | The folder where the picker starts when no other folder applies. | `/mnt/user` | Set it to the folder that holds your projects. |
+| **Which path a workspace runs on** (Settings, Configuration) | Decides where the agent really runs. With **Automatic**, a workspace on a share that only uses the cache pool runs on the pool path. Other folders keep the share path. The row and the favourites keep showing the `/mnt/user` path. | **Automatic** | Leave it. The other choice, "Pool path when the share is on one pool only", is an older mode with the same safe rule. |
 | **Continue after a restart** (Settings, Configuration) | Lets a workspace continue by itself after a restart, upgrade or reload. | On | Turn it off if you want to type the next instruction yourself. |
 | Show hidden folders (the picker, this browser) | Shows or hides the folders that start with a dot. | Hidden | Turn on to pick a folder such as `.config`. |
 | Sort folders (the picker, this browser) | The order of the folder list. | **Name A–Z** | Use the time choices to find a folder you changed lately. |
@@ -324,7 +324,7 @@ For other problems, see [Health, Activity and troubleshooting](health-and-troubl
 <summary>Change history</summary>
 
 - **2026-10-22** — A workspace whose folder was deleted shows **Workspace Folder Missing**, not "Storage Unavailable". The card offers no RAM install and goes away when you open another workspace. Spec `docs/specs/WORKSPACE_PATH_WAIT_RETRY.md`, issue #757.
-
+- **2026-10-22** — The settings have new labels: **Starting folder** and **Which path a workspace runs on**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-18** — A failed start shows the server reason, and a failed close keeps the workspace row and shows an error. Spec `docs/specs/WORKSPACE_SERVER_AUTHORITY.md`, issue #671.
 - **2026-10-18** — The picker says why a folder could not be read, **Close** on an untracked row keeps the row and says why when the stop fails, and **Manage Session** shows a red message and turns saving off when it cannot read the settings. Issue #670.
 

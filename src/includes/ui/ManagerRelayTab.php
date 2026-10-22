@@ -6,10 +6,16 @@
  * administrator only touches occasionally — topics, owners, history, and the
  * opt-out — sits behind progressive disclosure, leaving one genuinely optional
  * decision (connecting another machine) in the open.
- */ ?>
+ *
+ * SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md, Phase 7: the card has the shared header. The intro
+ * (what the Relay does) is behind its (i); the status line in the header is filled by
+ * relayLoadStatus() in ManagerRelayScripts.php.
+ */
+require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open: the shared card header.
+?>
 <div id="tab-relay" class="aicli-tab-content aicli-layout">
-  <div class="aicli-card" style="width:100%;max-width:1100px;">
-    <div class="aicli-card-header"><i class="fa fa-exchange"></i> Agent Relay</div>
+  <div data-aicli-cards="relay" style="width:100%;max-width:1100px;">
+  <?=aicli_card_open('relay', 'fa-exchange', 'Agent Relay', 'Checking…', 'relay-intro', '', ['bodyClass' => 'relay-card-body'])?>
     <div style="padding:16px; display:grid; grid-template-columns:minmax(0,1fr); gap:18px;">
 
       <!-- Status first: the answer to "is this working?" -->
@@ -20,10 +26,7 @@
       <!-- Filled in after a change that running workspaces cannot pick up. -->
       <div id="relay-restart-notice" style="display:none;"></div>
 
-      <p style="margin:0;opacity:.75;font-size:12px;">
-        Your agents share updates and send each other work requests through a shared mailbox.
-        Messages are saved to each workspace's inbox. A short notice is typed into the agent's terminal so it reads the inbox; the wording is a setting on the Configuration tab.
-      </p>
+      <?php /* The intro of the tab is behind the (i) of the card: src/includes/ui/help/relay.php, 'relay-intro'. */ ?>
 
       <details style="border:1px solid var(--border-color,#e0e0e0);border-radius:6px;padding:10px 14px;">
         <summary style="cursor:pointer;font-weight:700;">Connect another machine</summary>
@@ -263,5 +266,6 @@
       </details>
 
     </div>
+  <?=aicli_card_close()?>
   </div>
 </div>

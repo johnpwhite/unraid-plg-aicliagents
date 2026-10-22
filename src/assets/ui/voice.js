@@ -959,7 +959,7 @@
         setInputState('idle', { text: leftover });
     }
 
-    var NO_RECOGNITION_NOTE = 'This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Agent voice.';
+    var NO_RECOGNITION_NOTE = 'This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Dictation.';
     // #484: the sentence shown when dictation moves from the speech server to the browser.
     var ENGINE_DOWN_NOTE = "The transcription engine did not answer; using your browser's speech recognition.";
     var ENGINE_DOWN_NO_BROWSER_NOTE = 'The speech-to-text server is not answering, and this browser has no speech recognition of its own.';

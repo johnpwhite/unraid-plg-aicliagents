@@ -195,7 +195,7 @@ A workspace that still shows an older version has a small orange dot on its agen
 | :-- | :-- | :-- | :-- |
 | **Strict anonymize** (Support menu) | Hides share names, server name and home addresses in the bundle and the summaries. | Off | Turn on when you post in public. |
 | **Level**, **Context**, **Trace**, **Tail** (Debug tab) | Narrow the log. | All, All, empty, 500 | Narrow it to find one problem. |
-| **Plugin management tools** (Settings, Configuration) | Lets agents read the log and the health. | Off | See [Plugin management tools for agents](agent-tools.md). |
+| **Let agents manage the plugin** (Settings, Configuration, General, Advanced) | Lets agents read the log and the health. | Off | See [Plugin management tools for agents](agent-tools.md). |
 
 The background health check runs every 30 minutes. There is no setting for it on the page.
 
@@ -220,7 +220,7 @@ The Health check reads cheap information: files, the mount list and free space. 
 | Copy and paste do not work. | Your browser blocks the clipboard on plain HTTP. | Use the manual paste box that shows. See [The terminal](terminal.md). |
 | The agent speaks nothing. | The browser needs a click first, or voice is off. | Turn the speaker icon on and click the page. See [Voice](voice.md). |
 | A Relay message did not reach an agent. | The agent was busy, so the notice is held. | Look for the pill in the Activity tray. See [Agent Relay](relay.md). |
-| An agent says "Plugin management tools are turned off". | The switch is Off. | Turn on **Plugin management tools**. See [Plugin management tools for agents](agent-tools.md). |
+| An agent says "Plugin management tools are turned off". | The switch is Off. | Turn on **Let agents manage the plugin**. See [Plugin management tools for agents](agent-tools.md). |
 | An Unraid page hangs or freezes while the Notebook is on. | The cause is not known yet. | Open **Settings, AI CLI Agents, Configuration**, find the **Notebook** card and set **Notebook** to Off. The page frees up at once. Then open an issue on GitHub (use **Create GitHub issue** in the Support menu) or ask on the forum thread. Say what hung (every Unraid page, or only the plugin pages), how long it lasted, and what your server was doing. If you can, tick **Performance trace** (in the **Support** menu on the **Debug Console** tab) before it hangs again. See **The Performance trace switch** above. |
 | A browser tab shows errors again and again. | The page code is old or damaged. | Reload the page. Check the **client_errors** check. Send a support bundle if it continues. |
 | You do not know the cause. | — | Build a support bundle, copy the forum post, and ask on the support thread. |
@@ -238,3 +238,10 @@ If the problem is not here, build a support bundle and ask on the forum thread f
 - [Agent Relay](relay.md): held notices and the waiting pill.
 - [Plugin management tools for agents](agent-tools.md): proposals that wait for approval.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-22** — The setting **Plugin management tools** is now called **Let agents manage the plugin** on the Configuration tab. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+
+</details>

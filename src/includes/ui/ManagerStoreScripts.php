@@ -521,6 +521,7 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
     // Nothing is announced to other tabs from here: the Terminal tab follows the
     // install from the server (EVENT_STREAM_MULTIPLEX.md R5), on every device.
     var isSelectBtn = btn && btn.tagName && btn.tagName.toLowerCase() === 'select';
+    av2OpenCard(id);
     function handleProgress(d) {
         if (d.status === 'error') {
             if (nchanSub) { nchanSub.stop(); nchanSub = null; }
@@ -651,7 +652,7 @@ function renderVersionCheckStatus(r, note) {
         el.textContent = 'Check failed for ' + errors + ' agent' + (errors === 1 ? '' : 's') + (firstError ? ': ' + firstError : '') + (checkedAt ? ' \u00b7 last good check ' + _vcAge(checkedAt) : '');
     } else if (checkedAt) {
         var age = _vcAge(checkedAt);
-        el.textContent = (note || (age === 'just now' ? 'Checked online just now' : 'Versions last checked ' + age + ' (cached)'));
+        el.textContent = (note || (age === 'just now' ? 'Checked just now' : 'Checked ' + age));
         if (Date.now() / 1000 - checkedAt > 3600) el.style.color = 'var(--orange, #e68a00)';
     } else {
         el.textContent = note || 'Versions not checked yet';
@@ -1140,8 +1141,18 @@ function applyAgentSort(dir) {
             if (an > bn) return dir === 'desc' ? -1 : 1;
             return 0;
         });
-        cards.forEach(function(c) { grid.appendChild(c); });
+        // Phase 7: the order is the saved card order of the Store tab (settings-cards.js), so a
+        // sort and a move use one list. Without that script the cards are moved here.
+        if (window.aicliCards && typeof window.aicliCards.setOrder === 'function') {
+            window.aicliCards.setOrder(grid, cards.map(function(c) { return c.getAttribute('data-aicli-card'); }));
+        } else {
+            cards.forEach(function(c) { grid.appendChild(c); });
+        }
     }
+    _paintAgentSort(dir);
+}
+
+function _paintAgentSort(dir) {
     var icon  = document.getElementById('agent-sort-icon');
     var label = document.getElementById('agent-sort-label');
     var btn   = document.getElementById('agent-sort-toggle');
@@ -1158,10 +1169,35 @@ function toggleAgentSort() {
     applyAgentSort(next);
 }
 
+// A saved card order (a move or a sort of the person) wins over the A-Z order that the server prints.
+function _storeHasSavedOrder() {
+    try {
+        var key = (window.aicliCards && window.aicliCards.KEY) || 'aicli_settings_layout_v1';
+        var all = JSON.parse(localStorage.getItem(key) || 'null');
+        return !!(all && all.store && Array.isArray(all.store.order) && all.store.order.length);
+    } catch (e) { return false; }
+}
+
 function initAgentSort() {
     var dir = 'asc';
     try { dir = localStorage.getItem(AGENT_SORT_KEY) || 'asc'; } catch (e) {}
+    if (_storeHasSavedOrder() || dir !== 'desc') { _paintAgentSort(dir === 'desc' ? 'desc' : 'asc'); return; }
     applyAgentSort(dir);
+}
+
+// "Reset layout" (settings-cards.js) shows the cards A-Z again. The sort button follows.
+function av2AfterLayoutReset() {
+    setTimeout(function() {
+        try { localStorage.removeItem(AGENT_SORT_KEY); } catch (e) {}
+        _paintAgentSort('asc');
+    }, 0);
+}
+
+// A card that installs shows its progress: open the card while it installs (not saved).
+function av2OpenCard(id) {
+    if (!window.aicliCards || typeof window.aicliCards.setWarning !== 'function') return;
+    var cardId = ('agent-' + String(id).toLowerCase()).replace(/[^a-z0-9-]/g, '');
+    window.aicliCards.setWarning(cardId, true, 'Installing');
 }
 
 function filterAgents() {
@@ -1210,7 +1246,7 @@ function checkUpdates(btn) {
     }
     renderVersionCheckStatus({ checking: true });
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=check_versions&csrf_token=' + csrf, function(r) {
-        if (btn) $(btn).prop('disabled', false).html('<i class="fa fa-refresh"></i> Check for Updates');
+        if (btn) $(btn).prop('disabled', false).html('<i class="fa fa-refresh"></i> Check for updates');
         if (r.status === 'ok' && r.running) {
             // #447: a check started by the page (or another tab) holds the lock.
             // Say so and follow it to the end instead of pretending nothing happened.
@@ -1219,13 +1255,13 @@ function checkUpdates(btn) {
             return;
         }
         if (r.status === 'ok') {
-            renderVersionCheckStatus(r, 'Checked online just now');
+            renderVersionCheckStatus(r, 'Checked just now');
             loadVersionCache(); // Refresh dropdowns with new data
         } else {
             renderVersionCheckStatus({ errors: 1, first_error: r.message || 'unknown error' });
         }
     }).fail(function(xhr) {
-        if (btn) $(btn).prop('disabled', false).html('<i class="fa fa-refresh"></i> Check for Updates');
+        if (btn) $(btn).prop('disabled', false).html('<i class="fa fa-refresh"></i> Check for updates');
         renderVersionCheckStatus({ errors: 1, first_error: 'the request failed (' + (xhr && xhr.status ? xhr.status : 'network') + ')' });
         swal("Error", "Failed to check for updates. Check debug.log", "error");
     });

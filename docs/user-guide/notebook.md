@@ -228,7 +228,7 @@ A connection card keeps a list of addresses, a user name, and up to three secret
 - Press the pulse icon (**Check that ... is up**) next to an address. The card shows the status code and the time. The check works only for addresses on your local network.
 - An agent can set a secret but cannot read one back.
 
-The setting **Allow production keys on connection cards** is **Refuse** by default. With **Refuse**, the vault turns away a value that looks like a live production key. A connection card in the **Global** Notebook cannot hold a secret.
+The setting **Production keys on connection cards** is **Refuse** by default. With **Refuse**, the vault turns away a value that looks like a live production key. A connection card in the **Global** Notebook cannot hold a secret.
 
 The vault lives on this Unraid server. If you move the notebook folder to another server, the card moves but the secrets do not. The card then says "secret not on this server - enter it again".
 
@@ -307,14 +307,14 @@ These settings are on the **Configuration** tab, in the **Notebook** card. Only 
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Notebook** | Shows or hides the Notebook drawer and the agent tools. **Off** hides the drawer and refuses the tools. Nothing is deleted. You do not need **Plugin management tools** for agents to use the Notebook. | On | Turn it off when you do not want agents to use a Notebook. Reload the page after the change. |
-| **Show the Wiki as its own page** | Adds a **Wiki** item to the Tasks menu. | Off | Turn it on to read the wiki without a terminal. See [The wiki](wiki.md). |
+| **Notebook** | Shows or hides the Notebook drawer and the agent tools. **Off** hides the drawer and refuses the tools. Nothing is deleted. You do not need **Let agents manage the plugin** for agents to use the Notebook. | On | Turn it off when you do not want agents to use a Notebook. Reload the page after the change. |
+| **Show the Wiki page** | Adds a **Wiki** item to the Tasks menu. | Off | Turn it on to read the wiki without a terminal. See [The wiki](wiki.md). |
 | **Open the Notebook when an agent asks** | Opens the drawer when an agent adds a note and asks to show it. | No | Turn it on when you want to see notes at once. With **No**, the tab shows a dot only. |
-| **Notebook folder name** | The folder in each project that holds the notebook. Letters, digits, dot, dash and underscore. Up to 40 characters. | notebook | Change it only before you use the Notebook. A change does not move an existing notebook. |
-| **Allow production keys on connection cards** | Lets a card hold a value that looks like a live production key. | Refuse | Allow it only when you really store a production key. |
+| **Folder name** | The folder in each project that holds the notebook. Letters, digits, dot, dash and underscore. Up to 40 characters. | notebook | Change it only before you use the Notebook. A change does not move an existing notebook. |
+| **Production keys on connection cards** | Lets a card hold a value that looks like a live production key. | Refuse | Allow it only when you really store a production key. |
 | **Tell the agent when I answer** | Types one short line into the terminal when you answer a card, finish a checklist, fail a step, comment or save a login. | Yes | Turn it off when you prefer to tell the agent yourself. |
-| **Speak a notice when something needs you** | Speaks one short sentence when an agent adds a note that waits for you. Needs agent voice to be on. | No | Turn it on when you work away from the screen. |
-| **Quiet hours for spoken notices** | A time window, such as 22:00-07:00, in the server's local time. No Notebook notice is spoken in it. The window may cross midnight. | Empty | Set it when you do not want notices at night. |
+| **Speak a notice when a page waits for me** | Speaks one short sentence when an agent adds a note that waits for you. Needs agent voice to be on. | No | Turn it on when you work away from the screen. |
+| **Quiet hours** | A time window, such as 22:00-07:00, in the server's local time. No Notebook notice is spoken in it. The window may cross midnight. | Empty | Set it when you do not want notices at night. |
 | **Agent journal** | Lets agents add lines to the Agent journal note. | Off | Turn it on when you want a timeline of what agents did. |
 
 ## What happens behind the scenes
@@ -350,6 +350,7 @@ A notebook is a folder called notebook in the root of the project. It holds one 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The Notebook settings have new labels: **Show the Wiki page**, **Folder name**, **Production keys on connection cards**, **Speak a notice when a page waits for me** and **Quiet hours**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — Back and Forward buttons (and Alt+Left, Alt+Right) between notes that you open from a link. Spec `docs/specs/NOTEBOOK_WIKI_NAVIGATION.md`, issue #734.
 
 </details>

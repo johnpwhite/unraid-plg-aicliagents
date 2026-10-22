@@ -11,7 +11,7 @@ The wiki is the living documentation of a project. People and agents keep it up 
 ## Where to find it
 
 - **In the Notebook drawer.** Press the **Wiki** button in the drawer header. The button has a network icon. A number on the button counts the wiki pages that need your attention. Press the button again to return to your notes. A pinned drawer has the button in its row of icons at the top. In that row the button reads **Back to your notes** while the wiki view shows.
-- **As its own page.** Turn on the setting **Show the Wiki as its own page**. Reload the Unraid page. A **Wiki** item shows in the **Tasks** menu. See "The Wiki page" below.
+- **As its own page.** Turn on the setting **Show the Wiki page**. Reload the Unraid page. A **Wiki** item shows in the **Tasks** menu. See "The Wiki page" below.
 - **From the Notes list.** A wiki page is never listed in **Inbox**, **Working** or **Notes**. Only the **Archive** area lists archived wiki pages.
 
 For the Notebook itself, see [The Notebook](notebook.md).
@@ -132,10 +132,10 @@ An open page has a header of two lines. The first line holds the title and the a
 
 ### The Wiki page
 
-The setting **Show the Wiki as its own page** adds a **Wiki** item to the **Tasks** menu. You read the wiki there without a terminal.
+The setting **Show the Wiki page** adds a **Wiki** item to the **Tasks** menu. You read the wiki there without a terminal.
 
 1. Open the plugin settings, the **Configuration** tab, the **Notebook** card.
-2. Set **Show the Wiki as its own page** to **On**.
+2. Set **Show the Wiki page** to **On**.
 3. Reload the Unraid page. Expect: **Wiki** shows in the **Tasks** menu.
 4. Open **Wiki**. A **Project** list at the top picks the project. It names each project folder that has a Notebook, by the names of its workspaces, and it offers **Global**.
 
@@ -163,7 +163,7 @@ When both Voice and the Notebook are on, the plugin copies every voice mail mess
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Show the Wiki as its own page** | Adds a **Wiki** item to the **Tasks** menu. The page holds the Notebook of a project, with the wiki view first. | Off | Turn it on when you want to read or edit the wiki without a terminal. Reload the Unraid page after the change. |
+| **Show the Wiki page** | Adds a **Wiki** item to the **Tasks** menu. The page holds the Notebook of a project, with the wiki view first. | Off | Turn it on when you want to read or edit the wiki without a terminal. Reload the Unraid page after the change. |
 | **Notebook** | Turns the whole Notebook on or off, including the wiki view and the Wiki page. | On | Turn it off only if you do not want agents to use a Notebook. |
 | **Agent journal** | Lets agents keep a timeline note. The journal is not listed under **Not linked yet**. | Off | See [The Notebook](notebook.md). |
 
@@ -181,7 +181,7 @@ The wiki is not a separate store. A wiki page is an ordinary Notebook file with 
 | A new link does not show in the tree | The tree is read again after a page changes. | Press **Reload the wiki**. Check that the title matches the page title. |
 | **New wiki page** is not shown | All standard pages exist. | Make the page in another way, or rename a standard page. |
 | The tree keeps a page under the wrong parent | A page shows under the first parent that reaches it. | Remove the link from the wrong parent, or link it from the parent that you want to be first. |
-| No **Wiki** item in the **Tasks** menu | The setting is **Off**, or the page was not reloaded. | Turn on **Show the Wiki as its own page** and reload the Unraid page. |
+| No **Wiki** item in the **Tasks** menu | The setting is **Off**, or the page was not reloaded. | Turn on **Show the Wiki page** and reload the Unraid page. |
 | "The Notebook is switched off" on the Wiki page | The setting **Notebook** is **Off**. | Follow the link on the page and turn the setting on. |
 | "No project has a Notebook yet" | No workspace has a notebook folder yet. | Let an agent make a note in a project, or use the **Global** Notebook. |
 | "Could not mark some pages" | A **Read all** request failed. | Press **Read all** again. |
@@ -196,6 +196,7 @@ The wiki is not a separate store. A wiki page is an ordinary Notebook file with 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The setting **Show the Wiki as its own page** is now called **Show the Wiki page**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The wiki strip has a **Forward** button. Alt+Left and Alt+Right move through the wiki history. Spec `docs/specs/NOTEBOOK_WIKI_NAVIGATION.md`, issue #734.
 
 </details>

@@ -16,27 +16,27 @@ The Agent Store is the page where you install, upgrade and set up the AI agents.
 
 Expect: a page called **AI Agent Marketplace** with a search box, the filters **All**, **Installed** and **Updates**, and one card for each agent.
 
-At the top right of the page you see the button **Check for Updates** and a status line next to it. The status line is described in "Check for updates" below.
+At the top right of the page you see the button **Check for updates** and a status line next to it. The status line is described in "Check for updates" below.
 
 ## The agents
 
-The plugin offers 14 agents. Each card shows the agent name, a short description, its installed version, and a **Release notes** link when the vendor publishes release notes.
+The plugin offers 14 agents. Each card has a header row with the agent icon, the agent name and one line of status, such as "v2.1.302 · update 2.1.307 available" or "Not installed". The (i) button in the header opens the short description, the **Release notes** link when the vendor publishes release notes, the install method and the package name.
 
 | Agent | Installed from | Sign-in and keys |
 | :-- | :-- | :-- |
 | Claude Code | npm (the Node package registry) | Type `/login` in the agent on first launch. The login stays in your home across reboots and upgrades. |
 | Gemini CLI | npm | Run `gemini auth login` on first launch. You sign in with your Google account. |
-| Codex CLI | npm | Run `codex login` (browser sign-in), or add `OPENAI_API_KEY` in the **Envs** panel. |
-| OpenCode | npm | The **Envs** panel shows one API key field. |
-| Kilo Code | npm | The **Envs** panel shows one API key field. |
-| Pi Coder | npm | The **Envs** panel shows one API key field. |
-| GitHub Copilot | npm | The **Envs** panel shows one API key field. |
-| Factory CLI | npm | The **Envs** panel shows one API key field. |
-| NanoCoder | npm | The **Envs** panel shows one API key field. |
-| Qwen Code | npm | The **Envs** panel shows a **DashScope API Key** field. This is the key for the Alibaba Qwen service. |
-| Goose | GitHub release | The **Envs** panel shows **Provider**, **Model** and **API Key**. You choose the provider from a list. The key is saved under the name that fits the provider. |
+| Codex CLI | npm | Run `codex login` (browser sign-in), or add `OPENAI_API_KEY` in the **Variables** panel. |
+| OpenCode | npm | The **Variables** panel shows one API key field. |
+| Kilo Code | npm | The **Variables** panel shows one API key field. |
+| Pi Coder | npm | The **Variables** panel shows one API key field. |
+| GitHub Copilot | npm | The **Variables** panel shows one API key field. |
+| Factory CLI | npm | The **Variables** panel shows one API key field. |
+| NanoCoder | npm | The **Variables** panel shows one API key field. |
+| Qwen Code | npm | The **Variables** panel shows a **DashScope API Key** field. This is the key for the Alibaba Qwen service. |
+| Goose | GitHub release | The **Variables** panel shows **Provider**, **Model** and **API Key**. You choose the provider from a list. The key is saved under the name that fits the provider. |
 | Antigravity CLI | The vendor install script | On first launch the agent prints a Google address. Open it in a browser, approve the access, and paste the code into the terminal. |
-| Grok Build | The vendor install script | Follow the account-linking steps inside the agent. As an option, add **xAI API Key** in the **Envs** panel. |
+| Grok Build | The vendor install script | Follow the account-linking steps inside the agent. As an option, add **xAI API Key** in the **Variables** panel. |
 | Kimi Code | The vendor install script | The agent can already know your account. If it asks, use the login option inside the running agent. |
 
 Notes on this table:
@@ -54,29 +54,39 @@ Notes on this table:
 2. Press **All**, **Installed** or **Updates** to show all cards, only the installed agents, or only the agents that have a newer version on their channel.
 3. Press the sort button to change the card order between A to Z and Z to A. The page remembers your choice in this browser.
 
+### Close, open and move the cards
+
+Each card has a header row. Press the name of the agent (or the arrow before it) to close the card to its header row. Press it again to open the card. A closed card still shows its status line and its buttons (**Install**, **Upgrade**, **Uninstall**).
+
+1. Press the **...** (more) button of a card.
+2. Choose **Move up**, **Move down**, **Move to top**, **Collapse all** or **Expand all**.
+3. Press **Reset layout** in the filter bar to show the cards A to Z again and open all cards.
+
+The page remembers the order and the open cards in this browser only. A card that installs opens itself. On a desktop you can also drag the **...** button. On a phone the header buttons of an agent show icons only.
+
 ### Install an agent
 
-1. Find the card of an agent that shows **available** under its version.
-2. Press **Channel** on the card if you want a channel or version other than the default. A card that is not installed has only this chip active. The other chips are grey until the agent is installed.
-3. Press **Install**.
+1. Find the card of an agent that shows "Not installed" in its status line.
+2. Press **Version** on the card if you want a channel or version other than the default. A card that is not installed has only this chip active. The other chips are grey until the agent is installed.
+3. Press **Install** in the header of the card.
 
-Expect: a progress bar replaces the buttons. When the install ends, the page reloads and the card shows the installed version and its chips.
+Expect: the card opens itself if it was closed, and a progress bar replaces the chips. When the install ends, the page reloads and the card shows the installed version and its chips.
 
 When the agent has nothing to decide, for example no open workspace, the install starts at once. There is no confirm box.
 
 ### Check for updates
 
-The status line next to **Check for Updates** always tells you where the version numbers come from.
+The status line next to **Check for updates** always tells you where the version numbers come from.
 
 | Status line | What it means |
 | :-- | :-- |
-| Versions last checked 3 h ago (cached) | The cards show the result of an earlier check. The line turns orange when the result is more than one hour old. |
+| Checked 3 h ago | The cards show the result of an earlier check. The line turns orange when the result is more than one hour old. |
 | Checking online for new versions… | A check is running. The button is grey until it ends. |
-| Checked online just now | The check you started has ended. |
+| Checked just now | The check you started has ended. |
 | Check failed for 2 agents: (reason) · last good check 1 h ago | The plugin could not reach the source of 2 agents. The cards keep the last good result. The line shows the first reason. |
 | Versions not checked yet | No check has run on this server. |
 
-1. Press **Check for Updates**.
+1. Press **Check for updates**.
 2. Watch the status line.
 
 Expect: the cards refresh by themselves when the check ends. If a check is already running, for example one the page started in the background, your click follows that check to its end.
@@ -85,7 +95,7 @@ The plugin also checks on a schedule. When the check finds a newer version of an
 
 ### Upgrade an agent
 
-An agent with a newer version on its channel shows an up arrow and the new version in its badge. The card also shows an **Upgrade** button.
+An agent with a newer version on its channel shows "update 2.1.307 available" in the status line of its card header. The header also shows an **Upgrade** button.
 
 1. Press **Upgrade** (or pick a newer version in the version picker).
 2. Read the box called **Upgrade to vX?**.
@@ -96,10 +106,10 @@ Expect: the card shows a progress bar and a status line. When the upgrade ends, 
 
 ### Pick an exact version
 
-The **Channel** chip opens a panel with a **Version** list. The list shows each version as `v1.2.3`, with the tags of the vendor, for example `[latest]`. The installed version ends with `(installed)`.
+The **Version** chip opens a panel with the release channel and a list of versions. The list shows each version as `v1.2.3`, with the tags of the vendor, for example `[latest]`. The installed version ends with `(installed)`.
 
-1. Press **Channel** on the card.
-2. Open the **Version** list and pick a version.
+1. Press **Version** on the card.
+2. Open the list of versions and pick a version.
 
 Expect: the plugin opens the confirm box at once. A newer version is an **Upgrade**. An older version is a **Downgrade**. The same version is a **Reinstall**. Choosing a version never changes the channel.
 
@@ -210,7 +220,7 @@ If an install fails, a box called **Failed** shows the reason and the card retur
 
 You have three ways to go back.
 
-1. **Pick an older version.** Open the **Channel** panel, choose an older version in the **Version** list, and confirm **Downgrade**. The plugin installs that version again from the vendor source. It needs the vendor source to still offer it.
+1. **Pick an older version.** Open the **Version** panel, choose an older version in the list of versions, and confirm **Downgrade**. The plugin installs that version again from the vendor source. It needs the vendor source to still offer it.
 2. **Restore a kept copy.** If you ticked "Keep a copy" at an upgrade, the **Version** list has a group called **Restore a kept backup**. Each entry reads like `v1.0.0 — kept 2026-10-01 14:30 UTC (180 MB)`. Choose one and confirm **Restore**. The plugin first keeps a copy of the current version, so you can undo the restore. A kept copy stays available even when the vendor offers no versions.
 3. **Pin the version.** Press **Pinned** to stop the next upgrade.
 
@@ -225,7 +235,7 @@ The storage line of an installed agent card has a link, **Remove old versions**.
 1. Press **Remove old versions** on the card. Expect: a dialog lists the old versions, the space the removal frees, and the versions that stay because a workspace uses them.
 2. Press **Remove**. Expect: a second dialog says how much space you got back.
 
-The action removes old version folders, old storage layers and kept rollback copies. A version that a running workspace uses stays, and the dialog names the workspace. After the removal you cannot roll back to a removed version. The setting **Keep the previous version for rollback** in the **Configuration** tab decides whether the plugin keeps the last version by itself. See [Home and agent storage](storage.md).
+The action removes old version folders, old storage layers and kept rollback copies. A version that a running workspace uses stays, and the dialog names the workspace. After the removal you cannot roll back to a removed version. The setting **Keep the previous agent version** in the **Configuration** tab decides whether the plugin keeps the last version by itself. See [Home and agent storage](storage.md).
 
 ## Uninstall
 
@@ -250,17 +260,17 @@ An installed card has five chips. Press a chip to open its panel. Press it again
 
 | Chip | What it holds |
 | :-- | :-- |
-| **Channel** | The release channel and the version list. |
-| **Envs** | The secrets and environment variables that every workspace of this agent gets at launch. |
-| **Resources** | The memory limit for Node agents, and the storage figures. |
+| **Version** | The release channel and the list of versions. |
+| **Variables** | The secrets and environment variables that every workspace of this agent gets at launch. |
+| **Storage** | The memory limit for Node agents, and the storage figures. |
 | **Terminal** | The tmux defaults for this agent, and the auto-launch switch. |
-| **Args** | The launch arguments for this agent. |
+| **Start options** | The launch arguments for this agent. |
 
-A chip shows a small coloured dot when it holds something. On **Envs**, an amber dot means that a key field has no value. A green dot means that all key fields have values. A cyan dot means that you added your own variables or secrets. On **Terminal** and **Args**, a cyan dot means that you changed the default.
+A chip shows a small coloured dot when it holds something. On **Variables**, an amber dot means that a key field has no value. A green dot means that all key fields have values. A cyan dot means that you added your own variables or secrets. On **Terminal** and **Start options**, a cyan dot means that you changed the default.
 
-### Secrets and environment variables (Envs)
+### Secrets and environment variables (Variables)
 
-The **Envs** panel sets what the plugin passes to the agent each time it starts. It has three parts.
+The **Variables** panel sets what the plugin passes to the agent each time it starts. It has three parts.
 
 | Part | What it is | Stored |
 | :-- | :-- | :-- |
@@ -289,14 +299,14 @@ For a masked value:
 
 | Level | Where you set it | Effect |
 | :-- | :-- | :-- |
-| Agent default | This **Envs** panel | Every workspace of the agent gets it. |
+| Agent default | This **Variables** panel | Every workspace of the agent gets it. |
 | Workspace override | The **...** menu of a workspace, **Session settings**, tab **ENV** | Only that workspace. A workspace value wins over the agent default for the same name. |
 
 In the workspace tab, a row that differs from the agent default carries the mark **● ws**. The trash icon on such a row sets it back to the agent value. The secrets level works the same way.
 
 Two more facts:
 
-- The plugin stores each secret once, by its name. A key such as `OPENAI_API_KEY` reaches every agent that reads that name. Your own secrets also show in the **Envs** panel of every agent.
+- The plugin stores each secret once, by its name. A key such as `OPENAI_API_KEY` reaches every agent that reads that name. Your own secrets also show in the **Variables** panel of every agent.
 - Some agents show a note about a data folder variable. Gemini CLI and Codex CLI are two examples. If you set that variable to a folder outside the plugin home, the history and logins of the agent are lost at the next reboot. Leave it empty.
 
 **Saving, and the "Restart them now" notice.** A save never restarts a workspace by itself. A running workspace keeps the old values until it restarts.
@@ -311,11 +321,11 @@ Expect: each idle workspace stops the agent and starts it again with the new val
 
 A busy workspace is never restarted from here. The list says "kept running; restart it yourself when it is idle". A workspace counts as busy when its terminal showed input or output in the last minute, or when the agent shows that it works. When the plugin cannot read the state, it counts the workspace as busy. The plugin also refuses to restart a workspace while an install of that agent runs.
 
-### Launch arguments (Args)
+### Start options
 
-The **Args** panel holds extra flags that the plugin adds to the launch command of the agent.
+The **Start options** panel holds extra flags that the plugin adds to the launch command of the agent.
 
-1. Press **Args**.
+1. Press **Start options**.
 2. Type the flags, for example `--max-turns 10`.
 3. Press **Save**.
 
@@ -350,9 +360,9 @@ Below the tmux settings, the **Terminal** panel has a section called **Keep save
 
 The page saves the change at once and shows "Saved ✓". The plugin also starts these workspaces again after a plugin upgrade. On a phone, the whole label next to a check box is the touch target.
 
-### Resources and storage
+### Storage
 
-The **Resources** chip shows two things.
+The **Storage** chip shows two things.
 
 - **Max RAM (MB)** shows only for agents that run on Node (the npm agents). It sets the memory limit for the agent. The default is 4096. The allowed range is 512 to 65536. The page saves the value when you leave the field.
 - **Storage** shows **Footprint** (disk space of the agent, with the number of layers), **In-memory** (recent changes that are not yet saved to permanent storage) and **Mount**. When there are unsaved changes, a **Consolidate** button shows the amount. Press it to queue a save.
@@ -375,8 +385,8 @@ The repair buttons are **Restore** (copies a safe backup layer back, with no dow
 
 | Setting | Where | What it does | Default |
 | :-- | :-- | :-- | :-- |
-| **Version Check Schedule** | **Configuration** tab | How often the plugin checks online for new agent versions: every 6 hours, daily at 6am, weekly on Monday at 6am, or disabled. | Daily at 6am |
-| **Version History (months)** | **Configuration** tab | How long past version check results are kept: 1, 3, 6 or 12 months. | 3 months |
+| **Check for new agent versions** | **Configuration** tab | How often the plugin checks online for new agent versions: every 6 hours, daily at 6am, weekly on Monday at 6am, or never. | Daily at 6am |
+| **Keep version check results for** | **Configuration** tab | How long past version check results are kept: 1, 3, 6 or 12 months. | 3 months |
 
 ## Agents that update themselves
 
@@ -394,8 +404,8 @@ The plugin keeps each agent version as an immutable layer. The Agent Store build
 
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
-| The versions look old, or the status line is orange. | The cards show a cached result that is more than one hour old. | Press **Check for Updates**. |
-| **Check failed for N agents**. | The plugin could not reach the source of those agents. | Check the network and the DNS of the server. Press **Check for Updates** again. |
+| The versions look old, or the status line is orange. | The cards show a cached result that is more than one hour old. | Press **Check for updates**. |
+| **Check failed for N agents**. | The plugin could not reach the source of those agents. | Check the network and the DNS of the server. Press **Check for updates** again. |
 | The **Version** list says "No versions available on this channel". | The source offers no version for this channel, or the check has not ended. | Wait for the check, or change the channel. |
 | An upgrade stays queued. | A workspace of that agent is still open and the version cannot go beside it. | Close the workspace, or press **Cancel** and upgrade later, or use the force option. |
 | The bar stops at about 99 percent and lists programs. | Programs still hold the old version. | Close those programs or the workspace that runs them. The upgrade then goes on. |
@@ -404,7 +414,7 @@ The plugin keeps each agent version as an immutable layer. The Agent Store build
 | An action says “Wait for the storage migration to finish before installing, removing, or upgrading agents.” | The plugin is changing how it stores agents and homes. | Wait for the migration status to finish, then try the action again. |
 | After a save, a workspace still uses the old key. | A save does not restart workspaces. | Use **Restart them now**, or restart the workspace when it is idle. |
 | The card shows a red tag. | The agent layers have a problem. | Press the repair button on the card. See "Storage health on a card". |
-| An agent works but shows `v?`. | The agent is installed, but the plugin has not read its version yet. | Open a workspace of the agent, or press **Check for Updates**. |
+| An agent works but shows `v?`. | The agent is installed, but the plugin has not read its version yet. | Open a workspace of the agent, or press **Check for updates**. |
 
 If the problem stays, open the **Debug Console** tab (see [Health, Activity and troubleshooting](health-and-troubleshooting.md)).
 
@@ -422,6 +432,9 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — Each agent card has the same header as the cards of the Configuration tab, with a status line, an (i) button and the buttons **Install**, **Upgrade** and **Uninstall**. The chips are called **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The card foot shows the size and **Remove old versions**; the install method and the package name are behind the (i). The cards can be closed and moved. The button is called **Check for updates** and the status line reads "Checked 7 min ago". Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
+
+- **2026-10-22** — The two version check settings have new names on the Configuration tab: **Check for new agent versions** and **Keep version check results for**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-20** — Installs, upgrades, restores from a kept backup and removals wait until **Persistence engine** conversion ends. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #708.
 - **2026-10-16** — The card has the link **Remove old versions**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R4), issue #536.
 

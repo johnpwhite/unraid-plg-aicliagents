@@ -50,6 +50,60 @@
         return e;
     }
     function clearNode(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+
+    // ---------- card status lines (SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md, Phase 7) ----------
+    // The status of a card is the fact a person wants without opening it. The words are in the
+    // rewrite table "Config Hub tab"; settings-cards.js paints them in the card header.
+    function hubPlural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+    function hubStatus(cardId, text) {
+        if (window.aicliCards && typeof window.aicliCards.setStatus === 'function') window.aicliCards.setStatus(cardId, text);
+    }
+    function hubAgo(ts) {
+        var s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+        if (s < 90) return 'just now';
+        if (s < 3600) return Math.round(s / 60) + ' min ago';
+        if (s < 86400) return Math.round(s / 3600) + ' h ago';
+        return Math.round(s / 86400) + ' d ago';
+    }
+    function hubSizeText(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        var kb = bytes / 1024;
+        return (kb < 10 ? kb.toFixed(1) : String(Math.round(kb))) + ' KB';
+    }
+    function hubUpdateServersStatus() {
+        var names = Object.keys(hubState.servers || {});
+        var on = names.filter(function (n) { return !hubState.servers[n].disabled; }).length;
+        var text = names.length ? hubPlural(names.length, 'server', 'servers') + ' · ' + (on === names.length ? 'on' : (on === 0 ? 'off' : on + ' on')) : 'No servers yet';
+        hubStatus('hub-mcp', text);
+    }
+    function hubUpdateInstrStatus() {
+        var ta = document.getElementById('hub-instr-content');
+        var bytes = ta ? new Blob([ta.value]).size : 0;
+        var n = document.querySelectorAll('.hub-instr-cb:checked').length;
+        hubStatus('hub-instr', hubSizeText(bytes) + ' · ' + hubPlural(n, 'agent', 'agents'));
+    }
+    function hubUpdateTreeStatus() {
+        hubStatus('hub-skills', hubPlural(Object.keys(hubSkills || {}).length, 'skill', 'skills') + ' · ' + hubPlural(Object.keys(hubCommands || {}).length, 'command', 'commands'));
+    }
+    // The Edit action of Global Instructions opens and closes the text editor (closed by default).
+    window.hubToggleInstrEditor = function () {
+        var box = document.getElementById('hub-instr-editor');
+        var btn = document.getElementById('hub-instr-edit-btn');
+        if (!box || !btn) return;
+        var open = box.hidden;
+        box.hidden = !open;
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        var label = btn.querySelector('span');
+        if (label) label.textContent = open ? 'Close editor' : 'Edit';
+        if (open) { var ta = document.getElementById('hub-instr-content'); if (ta) ta.focus(); }
+    };
+    document.addEventListener('input', function (e) {
+        if (e.target && e.target.id === 'hub-instr-content') hubUpdateInstrStatus();
+    });
+    document.addEventListener('change', function (e) {
+        if (e.target && e.target.classList && e.target.classList.contains('hub-instr-cb')) hubUpdateInstrStatus();
+    });
+
     // MOBILE_OVERLAYS.md 2026-09-29: a row's action buttons sit in one wrapper.
     // On a desktop the wrapper is display:contents, so the buttons lay out
     // exactly as before; on a phone (ManagerStyles.php) it becomes a full-width
@@ -101,6 +155,7 @@
         var list = document.getElementById('hub-server-list');
         clearNode(list);
         var names = Object.keys(hubState.servers).sort();
+        hubUpdateServersStatus();
         if (!names.length) {
             list.appendChild(el('div', 'font-size:11px; opacity:0.5;', 'No MCP servers defined yet — click "Add Server".'));
             return;
@@ -217,6 +272,7 @@
             checks.appendChild(hubAgentRow(a, 'hub-instr-cb', (instr.targets || []).indexOf(a.id) >= 0, hubSaveInstructionTargets));
         });
         document.getElementById('hub-instr-agent-checks-empty').style.display = agents.length ? 'none' : 'block';
+        hubUpdateInstrStatus();
     }
 
     // Auto-save on tick — matches the skills/commands surfaces (tick = persisted), so a
@@ -244,6 +300,7 @@
             var bytes = new Blob([ta.value]).size;
             document.getElementById('hub-instr-meta').textContent =
                 bytes + ' / ' + (res.maxBytes || 262144) + ' bytes';
+            hubUpdateInstrStatus();
         });
     }
 
@@ -291,6 +348,7 @@
             hubSkills = res.skills || {};
             hubTreeMeta(res.totalBytes || 0, res.maxTotalBytes || 2097152);
             hubRenderSkills();
+            hubUpdateTreeStatus();
         });
     }
 
@@ -449,6 +507,7 @@
             if (res.status !== 'ok') return;
             hubCommands = res.commands || {};
             hubRenderCommands();
+            hubUpdateTreeStatus();
         });
     }
 
@@ -906,8 +965,12 @@
         var banner = document.getElementById('hub-drift-banner');
         var list = document.getElementById('hub-drift-list');
         clearNode(list);
-        if (!drift || !drift.length) { banner.style.display = 'none'; return; }
+        if (!drift || !drift.length) { banner.style.display = 'none'; hubStatus('hub-drift', 'No changes'); return; }
         banner.style.display = 'block';
+        var driftFiles = {};
+        drift.forEach(function (d) { driftFiles[d.file] = true; });
+        var driftN = Object.keys(driftFiles).length;
+        hubStatus('hub-drift', hubPlural(driftN, 'file', 'files') + ' changed outside the hub');
         drift.forEach(function (d) {
             var row = el('div', 'padding:8px 0; border-top:1px solid rgba(128,128,128,0.2);');
             var head = el('div', 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;');
@@ -995,6 +1058,14 @@
         document.getElementById('hub-git-commit-btn').style.display = ready ? '' : 'none';
         document.getElementById('hub-git-restore-settings-btn').style.display = ready ? '' : 'none';
         document.getElementById('hub-git-enable-btn').disabled = !s.homeAvailable;
+        // The card status: when the last commit was made, or why there is none.
+        if (!s.gitAvailable) hubStatus('hub-history', 'git is not installed');
+        else if (!ready) hubStatus('hub-history', 'Backup is off');
+        else if (s.lastCommit && s.lastCommit.ts) hubStatus('hub-history', 'last commit ' + hubAgo(s.lastCommit.ts));
+        else hubStatus('hub-history', 'No commits yet');
+        if (window.aicliCards && typeof window.aicliCards.setWarning === 'function') {
+            window.aicliCards.setWarning('hub-history', ready && s.healthy === false, 'Not saving');
+        }
         if (!ready) return;
         var line = 'Backup enabled — ' + (s.commits || 0) + ' commit' + (s.commits === 1 ? '' : 's')
             + ' · ' + (s.dirty ? (s.dirty + ' uncommitted change' + (s.dirty === 1 ? '' : 's')) : 'working tree clean')

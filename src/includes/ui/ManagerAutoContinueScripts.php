@@ -76,6 +76,8 @@
             acp.workspaces = res.workspaces || []; acp.kinds = res.kinds || {}; acp.errors = res.errors || [];
             acpRenderList();
             acpRenderBuiltins();
+            // Phase 5: the patterns sit in the Advanced part of the card "Automatic continue".
+            // The status line of that card shows the two switches, so this script does not write it.
             setStatus(document.getElementById('acp-status'), acp.errors.join(' '), acp.errors.length > 0);
         });
     };

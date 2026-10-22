@@ -294,7 +294,7 @@ class AdminMcpTools {
      * branch of call() so the wording can never drift tool-to-tool.
      */
     private static function disabledMessage(): string {
-        return 'Plugin management tools are turned off. Turn on "Plugin management" in Settings > Plugin management to use this tool.';
+        return 'Plugin management tools are turned off. Turn on "Let agents manage the plugin" in Settings > General > Advanced to use this tool.';
     }
 
     /**
@@ -618,12 +618,12 @@ class AdminMcpTools {
                         break;
                     }
                     if ($ssKey === 'stt_url') {
-                        $result = ['status' => 'error', 'message' => 'The transcription engine address changes only on the Settings page, Agent voice; an agent cannot change it.'];
+                        $result = ['status' => 'error', 'message' => 'The transcription engine address changes only on the Settings page, Dictation; an agent cannot change it.'];
                         break;
                     }
                     // VOICE_LIVE_ENGINE.md R1 (#731): the browser streams the microphone to this address.
                     if ($ssKey === 'stt_stream_url') {
-                        $result = ['status' => 'error', 'message' => 'The live transcription endpoint changes only on the Settings page, Agent voice; an agent cannot change it.'];
+                        $result = ['status' => 'error', 'message' => 'The live transcription endpoint changes only on the Settings page, Dictation; an agent cannot change it.'];
                         break;
                     }
                     if ($ssKey === 'voice_enabled' && (string)($args['value'] ?? '') === '1') {

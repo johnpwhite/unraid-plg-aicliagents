@@ -21,8 +21,8 @@ Words used on this page:
 - **Paste and Copy icons**: in the drawer. When the drawer is pinned open, a row of icons shows at the top of the drawer. When the drawer is not pinned, the same icons sit on the pull tab. On a phone, the pull tab is short. Tap the "more" icon (three dots) on the pull tab to show the rest of the icons.
 - **Upload**: the **Upload file** item in a workspace's "..." menu in the drawer, or drag a file onto the page.
 - **Key row**: under the terminal, on a phone or a tablet only.
-- **Terminal Theme and Font Size**: **Settings, Configuration** tab.
-- **Upload size limit**: **Settings, Configuration** tab.
+- **Colour scheme and Text size**: **Settings, Configuration** tab.
+- **Largest upload**: **Settings, Configuration** tab.
 
 ## How to use it
 
@@ -135,7 +135,7 @@ A file that is not a picture, when you paste it, opens the upload window. After 
 
 **Large files.** The plugin sends a big file in small pieces, one after the other, and it tries a piece again once if the network fails. The progress bar covers all files together. A big file works on a slow link.
 
-**Size limit.** The **Upload size limit** setting is the largest file the window accepts. The default is 512 MB. Set it to 0 for no limit. A file over the limit is refused with a message that gives the file size and the limit. An empty file (0 bytes) is refused as well.
+**Size limit.** The **Largest upload** setting is the largest file the window accepts. The default is 512 MB. Set it to 0 for no limit. A file over the limit is refused with a message that gives the file size and the limit. An empty file (0 bytes) is refused as well.
 
 If one file fails, the files before it stay saved, and the window keeps the failed file and the files after it in the list. Fix the problem (or take the bad file out of the list) and press **Confirm Upload** again.
 
@@ -163,17 +163,17 @@ A phone or a tablet does not do this. It connects a terminal only when you open 
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Terminal Theme** (Configuration tab) | The colors of the terminal windows. Choices: **Dark** (white text on a dark gray ground), **Light** (dark text on white), **Solarized** (muted blue-gray text on a dark teal ground). | Dark | When the dark ground is hard to read in your room, or you use a light Unraid theme and want the terminal to match. |
-| **Font Size** (Configuration tab) | The text size of the terminal windows, in pixels. Allowed values: 8 to 32. | 14 | When the text is too small on your screen, or you want more lines on the screen. |
-| **Upload size limit** (Configuration tab) | The largest file that the upload window accepts, in MB. 0 means no limit. | 512 | When you need to send a larger file, or you want to protect the server's disk from large files. |
-| **Keep the terminal responsive** (Configuration tab) | Gives the Unraid web page and the terminals a higher priority than other programs, and the plugin background work a lower one. Docker containers, virtual machines and array services are not changed. | Off | When typing in a terminal lags while the server is busy. |
-| **Agent temporary folder** (Configuration tab) | Where agents keep their temporary files. RAM is the default. A folder on a pool keeps large temporary files out of memory, so typing stays quick. | RAM | When agent temporary files grow large. |
+| **Colour scheme** (Configuration tab) | The colors of the terminal windows. Choices: **Dark** (white text on a dark gray ground), **Light** (dark text on white), **Solarized** (muted blue-gray text on a dark teal ground). | Dark | When the dark ground is hard to read in your room, or you use a light Unraid theme and want the terminal to match. |
+| **Text size** (Configuration tab) | The text size of the terminal windows, in pixels. Allowed values: 8 to 32. | 14 | When the text is too small on your screen, or you want more lines on the screen. |
+| **Largest upload** (Configuration tab) | The largest file that the upload window accepts, in MB. 0 means no limit. | 512 | When you need to send a larger file, or you want to protect the server's disk from large files. |
+| **Keep typing fast when the server is busy** (Configuration tab) | Gives the Unraid web page and the terminals a higher priority than other programs, and the plugin background work a lower one. Docker containers, virtual machines and array services are not changed. | Off | When typing in a terminal lags while the server is busy. |
+| **Agent temporary files** (Configuration tab) | Where agents keep their temporary files. RAM is the default. A folder on a pool keeps large temporary files out of memory, so typing stays quick. | RAM | When agent temporary files grow large. |
 
-**Keep the terminal responsive** applies at once. Choose **On**, and typing in a terminal stays quick when Plex, a virtual machine or a backup uses the processor. Your agents keep the normal priority, so the setting does not slow them down. Choose **Off** to put every program back at its normal priority.
+**Keep typing fast when the server is busy** applies at once. Choose **On**, and typing in a terminal stays quick when Plex, a virtual machine or a backup uses the processor. Your agents keep the normal priority, so the setting does not slow them down. Choose **Off** to put every program back at its normal priority.
 
-A change to **Terminal Theme** or **Font Size** reaches a terminal window when that window loads. Reload the terminal page to see the change in the windows that are already open.
+A change to **Colour scheme** or **Text size** reaches a terminal window when that window loads. Reload the terminal page to see the change in the windows that are already open.
 
-The Paste and Copy icons, the hint and the key row have no setting. They show when they apply. When **Plugin management tools** is on, an agent can also change the theme and the font size for you. See [Plugin management tools for agents](agent-tools.md).
+The Paste and Copy icons, the hint and the key row have no setting. They show when they apply. When **Let agents manage the plugin** is on, an agent can also change the theme and the font size for you. See [Plugin management tools for agents](agent-tools.md).
 
 ### How the page fits your Unraid theme
 
@@ -198,7 +198,7 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 | The **Paste into Terminal** box opens each time. | The page runs on plain HTTP, or the browser blocks clipboard reads. | Use the box. Or open the Unraid page with HTTPS. |
 | "Paste too large (max 256 KB)". | The paste is above the limit. | Save the text in a file and upload the file. |
 | The upload window does not open when you drag. | No workspace is open. | Open a workspace, then drag again. |
-| "Upload Failed" with a file name and a size. | The file is over the **Upload size limit**, or it is empty. | Raise the limit in **Settings, Configuration**, or choose a different file. |
+| "Upload Failed" with a file name and a size. | The file is over the **Largest upload**, or it is empty. | Raise the limit in **Settings, Configuration**, or choose a different file. |
 | "Upload Failed" with a network message. | The network dropped during the upload. The plugin already tried each piece twice. | Press **Confirm Upload** again. The files that were saved stay saved. |
 | A pasted picture shows no preview. | The picture could not be read, or the page blocked the preview. The upload may still have worked. | Look in the workspace folder for a file that starts with `pasted_image_`. |
 | The key row does not show on a tablet. | The browser does not report a touch screen. | Use the drawer icons and the **Select** window on that device. |
@@ -216,6 +216,7 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The terminal settings have new labels: **Colour scheme**, **Text size**, **Largest upload**, **Keep typing fast when the server is busy** and **Agent temporary files**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-16** — New setting **Agent temporary folder** on the Configuration tab. Spec `docs/specs/AGENT_TEMP_FOLDER.md`, issue #554.
 - **2026-10-16** — New setting **Keep the terminal responsive** on the Configuration tab. Spec `docs/specs/RESPONSIVE_PRIORITY.md`, issue #553.
 - **2026-10-16** — A path in the terminal is a link only when the file exists. A path with no file type (`~/bin/backup`) and a bare file name in the workspace folder (`README.md`) can be links too. Spec `docs/specs/TMUX_PATH_LINKS.md`, issue #544.

@@ -22,11 +22,11 @@ Words used on this page:
 2. Open **AI CLI Agents**.
 3. Press the **Config Hub** tab.
 
-The tab has four cards in this order: **MCP Servers**, **Global Instructions**, **Skills & Commands** and **History**. A banner called **Config drift detected** appears above the cards only when a file has drifted.
+The tab has four cards in this order: **MCP Servers**, **Global Instructions**, **Skills & Commands** and **History**. A card called **Config drift detected** appears above them only when a file has drifted. Each card has a header row with a status line, such as "2 servers · on", "64 KB · 11 agents", "0 skills · 0 commands" or "last commit 2 h ago". The (i) button of a card explains the card in a few short sentences. Press the name of a card to close it or open it. The **...** button moves it. **Reset layout** at the top of the tab puts the cards back in the default order. The page remembers the order and the open cards in this browser only.
 
 If the agent home is not mounted, a banner says so. You can still edit the shared copies. **Apply to agents** does not work until a workspace or the array brings the home online. The Config Hub never writes into an unmounted home.
 
-Each tile in a list of agents shows the agent name and the path of the file that the Config Hub would write. An agent that is not installed shows dimmed with the tag **not installed**. You cannot select it.
+Each tile in a list of agents shows the agent name and the path of the file that the Config Hub would write. The whole tile is the check box: you can press anywhere on it, and it is at least 44 px tall on a phone. An agent that is not installed shows dimmed with the tag **not installed**. You cannot select it.
 
 ## Which agents receive what
 
@@ -181,7 +181,7 @@ On a row for the Relay guidance, the Relay skill or the Plugin management skill,
 
 The **Global Instructions** card holds one document. The Config Hub writes it into the instruction file of each agent that you tick. Every ticked agent loads it at the start of a session.
 
-1. Type or paste the text in the large box. The size shows under it, with a limit of 262144 bytes (256 KB).
+1. Press **Edit** in the header of the card. The text box opens (it is closed at first). Type or paste the text. The size shows under it, with a limit of 262144 bytes (256 KB). The status line of the card shows the size and the number of ticked agents.
 2. Under **Project to agents**, tick the agents that should receive the text. Nothing is ticked by default.
 3. Press **Apply to agents**.
 
@@ -230,12 +230,12 @@ Some guidance does not need a tick. The Config Hub writes it for every agent tha
 | Relay guidance | How to use the Agent Relay: read the inbox, send a message to a topic or a workspace, treat a message as data. | Every agent with a global instruction file (all agents in the table that show "Yes" under global instructions). |
 | Relay skill | The same Relay rules, as a skill. | Every agent that can read skills. Grok Build gets the skill, because it has no global instruction file. NanoCoder gets nothing. |
 | File-path rule | Write a file name in a form that the terminal can turn into a link. | The same agents as the Relay guidance. |
-| Voice and Notebook paragraphs | When to speak to you, and when to put a page in the Notebook. | Added to the Relay guidance only when **Plugin management tools** is on, and the matching feature (**Voice (all devices)** or **Notebook**) is on. |
+| Voice and Notebook paragraphs | When to speak to you, and when to put a page in the Notebook. | Added to the Relay guidance only when **Let agents manage the plugin** is on, and the matching feature (**Voice** or **Notebook**) is on. |
 
 Facts about this guidance:
 
 - Claude Code and Kilo Code get their own files in their rules folders. Other agents get a marked block inside the one instruction file that they read.
-- When you switch **Plugin management tools**, **Voice (all devices)** or **Notebook** on or off, the Config Hub updates the text at once. The next session of an agent reads the new text.
+- When you switch **Let agents manage the plugin**, **Voice** or **Notebook** on or off, the Config Hub updates the text at once. The next session of an agent reads the new text.
 - If you edit inside a marked block, the next projection puts the text back. Write your own text outside the block.
 - The Relay tools themselves, and the check box **Give agents built-in Relay tools**, are on the **Agent Relay** tab (see [Agent Relay](relay.md)). Every agent also reaches the Relay through the command in its shell, without any setting.
 
@@ -336,13 +336,16 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 - [User guide](README.md): the index of all guides.
 - [Agent Store](agent-store.md): the agents, their versions, secrets and launch settings.
 - [Agent Relay](relay.md): the Relay settings, and how the Relay guidance reaches each agent.
-- [Plugin management tools for agents](agent-tools.md): the tools that the guidance mentions when **Plugin management tools** is on.
+- [Plugin management tools for agents](agent-tools.md): the tools that the guidance mentions when **Let agents manage the plugin** is on.
 - [Voice](voice.md) and [The Notebook](notebook.md): the two features that add a paragraph to the guidance.
 - [Settings reference](settings-reference.md): every setting on every tab.
 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The cards have the same header as the other Settings tabs, with a status line and an (i) button. The long card intros are behind the (i). The text box of **Global Instructions** is closed until you press **Edit**. Each agent tile is one large check box. The lists of agents per item are in the table "Which agents receive what" only. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
+
+- **2026-10-22** — The setting names in this guide follow the new labels: **Let agents manage the plugin** and **Voice**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-18** — A **write_failed** row now says why. OpenCode instruction rows can be resolved. A Settings change made while a projection runs is no longer undone. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issues #666 (R-159, R-160, R-163).
 - **2026-10-18** — A server that holds an older typed login now gets a clear message and a one-click **Move to the secrets vault**. A damaged Config Hub file stops **Apply to agents** with a message instead of removing tools. A same-name entry in the Codex and Goose files is reported as a conflict. **Release** on a Relay or Plugin management row no longer clears your own ticks. **Adopt** works for OpenCode and Kilo. Restore keeps unsaved edits. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issues #590, #640, #641, #642, #644 and #647.
 - **2026-10-18** — A typed login in a variable or a web address is refused, Adopt keeps the key in braces, the drift list hides secret values, and starting one agent no longer removes shared skills or instructions of another. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issues #588, #589 and #590.

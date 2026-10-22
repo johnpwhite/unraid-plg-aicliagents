@@ -52,9 +52,9 @@
         </button>
         <div class="aicli-vs-note" id="aicli-voice-setup-state" role="status" aria-live="polite" hidden></div>
         <div class="aicli-vs-note">
-            Installs the free Kokoro speech engine as a normal Docker app, then connects it here.
-            You confirm it on Unraid's own Add Container page. The download is about 3.3 GB and already
-            contains the voice model. The engine uses about 1.7 GB of memory while it runs.
+            Installs the free Kokoro speech engine as a Docker app and connects it here.
+            You confirm it on Unraid's Add Container page. The download is about 3.3 GB and the
+            engine uses about 1.7 GB of memory while it runs.
         </div>
         <div class="aicli-vs-note" id="aicli-voice-setup-permission-help">
             If the voice engine container stops with Permission denied, remove its Model cache path in the container settings.

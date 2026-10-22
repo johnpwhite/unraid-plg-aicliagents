@@ -23,7 +23,7 @@ Words used on this page:
 - **The Select Workspace dialog** (**New Workspace** in the drawer): the **Favourites** section, the **Secrets** button in the path bar, and **Import bundle…** in the footer.
 - **The key icon**: in the icon row of a pinned drawer, or on the tab of an unpinned drawer.
 - **Settings, Agent Store tab**: the chips **Envs**, **Terminal** and **Args** on each agent card.
-- **Settings, Configuration tab**: the cards **SSH Keys**, **Session & Environment**, **Auto-continue patterns** and **Plugin management**.
+- **Settings, Configuration tab**: the cards **SSH keys**, **Automatic continue**, **Terminal** and **General** (its part **Advanced**).
 - **The Activity tray**: it records each scheduled and automatic continue. See [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
 On a phone, the menu items, the buttons of the dialogs and the rows of the tree are large touch targets.
@@ -223,13 +223,13 @@ You can attach a terminal on your own computer to the session that the browser s
 #### One-time setup
 
 1. Make sure that SSH is on in Unraid (Settings, Management Access).
-2. Open Settings, **Configuration** tab, card **SSH Keys**.
+2. Open Settings, **Configuration** tab, card **SSH keys**.
 3. Press **Help**. Expect: the dialog **SSH Key Setup** with the commands for Windows and for macOS or Linux. Use them to make a key and show the public key.
 4. Copy the whole line of the public key. It starts with `ssh-ed25519` or `ssh-rsa`.
 5. Paste it into the box. Type a label, for example "MacBook Pro". Press **Add Key**.
 6. Expect: "Your SSH public key has been registered." The list shows the label, the fingerprint and the date.
 
-To remove a key, press its trash button (**Remove key**) and confirm. The terminal user (**Terminal User** in the same tab) owns the key.
+To remove a key, press its trash button (**Remove key**) and confirm. The terminal user (**Terminal user** in the same tab) owns the key.
 
 #### Attach
 
@@ -271,7 +271,7 @@ Both switches are on by default. **Start fresh if no resume** works only when th
 
 After a restart, the agent waits at its prompt. The plugin can type a continue message so that the agent carries on.
 
-1. Open Settings, **Configuration** tab, card **Session & Environment**.
+1. Open Settings, **Configuration** tab, card **Automatic continue**.
 2. Set **Continue after a restart** to **On (default)** or **Off**.
 
 With **On**, the plugin types the message after a restart, an upgrade or a reload that it detects. It does not type it after a plain page load. It types only when the agent waits at an empty prompt, never into a question, a menu or a busy agent. A workspace that has never been stopped does not get the message. To send it yourself, choose **Continue** then **Continue now** in the row menu.
@@ -310,15 +310,15 @@ Many agents stop at a usage limit. The plugin reads the message on the screen of
 
 An agent can stop because one call to the model failed with a short error, for example "503 overloaded". The plugin can continue after a short wait.
 
-1. Open Settings, **Configuration** tab, card **Session & Environment**.
+1. Open Settings, **Configuration** tab, card **Automatic continue**.
 2. Set **Continue after a model error** to **Verified agents (default)**, **All agents** or **Off**. The verified agents are OpenCode, Kilo Code, Claude Code, Codex CLI, Gemini CLI and Qwen Code.
-3. Set **Model error: wait and limit**. The first box holds the waits in minutes (default 1,5,15). The second box holds the number of continues for one error (default 3, range 0 to 10).
+3. Set **Wait before each continue, and how many**. The first box holds the waits in minutes (default 1,5,15). The second box holds the number of continues for one error (default 3, range 0 to 10).
 
 The plugin acts only when the error is the newest text on the screen and the agent is idle. The Activity tray reads "Automatic continue … Continue 1 of 3 planned in 1 min". The message names the error. If the error returns after the last continue, the tray shows "Needs you". Check the model provider. To stop one planned continue, cancel the clock tag.
 
 #### Your own patterns
 
-Open Settings, **Configuration** tab, card **Auto-continue patterns**. Each change saves at once.
+Open Settings, **Configuration** tab, card **Automatic continue**. Open **Advanced**. The list **Your patterns** is the first part of it. Each change saves at once.
 
 1. Press **Add pattern**. Type a **Name**. Choose an **Agent** (or **All agents**) and a **Kind**:
    - **Transient error**: a temporary provider error. The expression must start with `^`.
@@ -333,10 +333,10 @@ Each pattern has a switch **On** and the buttons **Edit**, **Report** and **Dele
 
 ### An agent that types into another workspace
 
-An agent in one workspace can type text into the terminal of another workspace, for example a slash command or an answer. This needs the switch **Plugin management tools**.
+An agent in one workspace can type text into the terminal of another workspace, for example a slash command or an answer. This needs the switch **Let agents manage the plugin**.
 
-1. Open Settings, **Configuration** tab, card **Plugin management**.
-2. Set **Plugin management tools** to **On**. The default is **Off**.
+1. Open Settings, **Configuration** tab, card **General**. Open **Advanced**.
+2. Set **Let agents manage the plugin** to **On**. The default is **Off**.
 
 The tool is called "send input". The plugin tells the agent to use it only when you asked for exactly this. Text from a Relay message, a web page or a file is never a reason to use it. The rules:
 
@@ -357,7 +357,7 @@ The same check applies to a Relay notice, to **Continue**, to a reload and to se
 
 To see or change them:
 
-1. Open Settings, **Configuration** tab, card **Session & Environment**. Open the section **Terminal input safety rules** at the end of the card.
+1. Open Settings, **Configuration** tab, card **Automatic continue**. Open **Advanced**, then the section **Terminal input safety rules**.
 2. Each rule has a tick box, an id, the expression and a mark: **built-in** or **yours**. Clear the tick box to turn a built-in rule off.
 3. To add a rule, type it as `/body/flags`, for example `/^\s*>\s*$/m`. Press **Add block rule** or **Add idle rule**. Choose the agent in "Idle rules for".
 4. Press **Remove** to delete a rule of your own. Press **Save rules**, or **Discard changes** to reload the saved rules.
@@ -375,12 +375,12 @@ The plugin drops an expression that does not compile, and the built-in rule stay
 | **Start fresh if no resume** | Starts a fresh session when no conversation is saved. | On. | You never want a blank session to start by itself. |
 | **Continue after a restart** | Types a continue message after a restart, upgrade or reload. | On. | You want to read the screen first. |
 | **Continue after a model error** | Continues after a temporary model error. | Verified agents. | **All agents** to include others. **Off** to stop it. |
-| **Model error: wait and limit** | The waits in minutes and the number of continues. | 1,5,15 and 3. | Your provider needs longer pauses. |
+| **Wait before each continue, and how many** | The waits in minutes and the number of continues. | 1,5,15 and 3. | Your provider needs longer pauses. |
 | **Schedule…** | Continues one workspace at a chosen time. | No schedule. | You know when a quota resets. |
-| **Auto-continue patterns** | Your own screen messages. | None. | An agent stops on a message the plugin does not know. |
-| **Plugin management tools** | Lets agents use the plugin tools, including send input. | Off. | You want an agent to manage workspaces for you. |
+| **Your patterns** (Automatic continue, Advanced) | Your own screen messages. | None. | An agent stops on a message the plugin does not know. |
+| **Let agents manage the plugin** | Lets agents use the plugin tools, including send input. | Off. | You want an agent to manage workspaces for you. |
 | **Terminal input safety rules** | Block and idle rules for typing into a terminal. | Built-in rules. | The plugin holds input at a safe prompt, or types at an unsafe one. |
-| **SSH Keys** | Public keys for the key icon. | No key. | You want to attach your own terminal. |
+| **SSH keys** | Public keys for the key icon. | No key. | You want to attach your own terminal. |
 
 The full list is on [Settings reference](settings-reference.md).
 
@@ -427,6 +427,8 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The Configuration tab has new cards. The continue settings, your patterns and the Terminal input safety rules are in the card **Automatic continue** (the last two in its part **Advanced**). The switch **Let agents manage the plugin** is in **General**, part **Advanced**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+- **2026-10-22** — The settings have new labels: **Wait before each continue, and how many** and **Let agents manage the plugin**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-18** — A refused save in Manage Session shows the server reason and keeps the dialog open for a retry. Spec `docs/specs/ENV_AND_SECRETS_TIERS.md`, issue #670.
 
 </details>

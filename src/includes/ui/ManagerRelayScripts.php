@@ -462,6 +462,10 @@ function relayLoadStatus() {
     bits.push(s.topics + ' topic' + (s.topics===1?'':'s'));
     if (s.owners) bits.push(s.owners + ' owned');
     if (s.events_24h !== undefined) bits.push(s.events_24h + ' message' + (s.events_24h===1?'':'s') + ' in 24h');
+    // Phase 7: the same facts are the one-line status in the card header.
+    if (window.aicliCards && typeof window.aicliCards.setStatus === 'function') {
+      window.aicliCards.setStatus('relay', (on ? 'Active' : 'Built-in tools off') + ' · ' + bits.join(' · '));
+    }
     box.append($('<div>').css({fontWeight:700}).text(head));
     box.append($('<div>').css({fontSize:'12px',opacity:.75,width:'100%'}).text(bits.join(' · ')));
   });

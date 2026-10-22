@@ -26,7 +26,7 @@ The plugin has two places in the Unraid web interface.
 
 A small coloured dot with the word **Health** sits at the right end of the tab row. Green means all is well. Amber is a warning. Red needs your attention. Select it to open the Debug Console.
 
-If you cannot find the AI CLI Agents tab, open **Settings, AI CLI Agents, Configuration**. Check that **Enable Main Tab** is **Yes**. The choice **No** hides the tab from the top menu. It does not remove the plugin.
+If you cannot find the AI CLI Agents tab, open **Settings, AI CLI Agents, Configuration**. Check that **Show the AI CLI Agents tab** is **Yes**. The choice **No** hides the tab from the top menu. It does not remove the plugin.
 
 ## How to use it
 
@@ -85,7 +85,7 @@ On step 1, the link **Agent Settings → Config tab** opens the Settings page on
 2. Open the drawer. Press the tab at the left edge of the page.
 3. Press **New Workspace**.
 4. Select an agent by its icon and name.
-5. Type or browse to a folder. The picker starts in the folder set as **Workspace Root** (`/mnt/user` by default).
+5. Type or browse to a folder. The picker starts in the folder set as **Starting folder** (`/mnt/user` by default).
 6. Press **Start New**. If the agent has a saved conversation for the folder, the button **Resume** is also there.
 7. Expect: a row for the workspace appears in the drawer. The page shows "Starting" and the name of the agent. Then the terminal of the agent opens.
 
@@ -114,12 +114,12 @@ These settings matter most on the first day. The full list is in [Settings refer
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Enable Main Tab** (Configuration) | Shows or hides the AI CLI Agents tab in the top menu. | Yes | Choose No only if you want to use the plugin through the Settings page. |
+| **Show the AI CLI Agents tab** (Configuration) | Shows or hides the AI CLI Agents tab in the top menu. | Yes | Choose No only if you want to use the plugin through the Settings page. |
 | **Home Storage** (Configuration, **Change…**) | The place where your home is saved. | The flash drive | Move it to a cache pool for speed and less flash wear. |
 | **Agent Storage** (Configuration, **Change…**) | The place where the installed agents are saved. | The flash drive | Move it to a cache pool when you install many agents. |
-| **Workspace Root** (Configuration) | The folder where the folder picker starts when no other folder applies. | `/mnt/user` | Set it to the folder that holds your projects. |
-| **Terminal User** (Configuration) | The Unraid user that runs the terminals. It decides whose home you see. | `root` | Change it only if you want the agents to run as another user. |
-| **Terminal Theme** and **Font Size** (Configuration) | The colours and the text size of the terminal. | Dark, 14 px | Change them for your eyes or your screen. |
+| **Starting folder** (Configuration) | The folder where the folder picker starts when no other folder applies. | `/mnt/user` | Set it to the folder that holds your projects. |
+| **Terminal user** (Configuration) | The Unraid user that runs the terminals. It decides whose home you see. | `root` | Change it only if you want the agents to run as another user. |
+| **Colour scheme** and **Text size** (Configuration) | The colours and the text size of the terminal. | Dark, 14 px | Change them for your eyes or your screen. |
 
 A change on the Configuration tab saves at once. Moving **Home Storage** or **Agent Storage** shows a warning first and then moves the data. See [Home and agent storage](storage.md).
 
@@ -134,7 +134,7 @@ A change on the Configuration tab saves at once. Moving **Home Storage** or **Ag
 | The log | In RAM, in the same folder. The **Debug Console** tab shows it. | No |
 | Choices that belong to one browser: the pinned drawer, the place of the drawer tab, the folder picker choices (hidden folders, sort order, open Favourites), the device label | In that browser. | Until you clear the data of the browser. |
 
-The plugin saves your home to Home Storage in the background. **Backup Interval** on the Configuration tab sets how often (every 2 hours by default). The **Persist** button next to it saves at once. A save is not the same as a backup. For a second copy, see [Home backup and restore](backup-restore.md).
+The plugin saves your home to Home Storage in the background. **Save unsaved home changes every** on the Configuration tab sets how often (every 2 hours by default). The **Save now** button next to it saves at once. A save is not the same as a backup. For a second copy, see [Home backup and restore](backup-restore.md).
 
 ## What happens behind the scenes
 
@@ -166,3 +166,10 @@ Each workspace runs a tmux session on the server. The browser terminal attaches 
 - [Plugin management tools for agents](agent-tools.md): let an agent ask the plugin about its own state.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): when something looks wrong.
 - [Settings reference](settings-reference.md): every setting on every tab.
+
+<details>
+<summary>Change history</summary>
+
+- **2026-10-22** — The settings in this guide follow the new labels on the Configuration tab: **Show the AI CLI Agents tab**, **Starting folder**, **Terminal user**, **Colour scheme**, **Text size** and **Save unsaved home changes every** (with a **Save now** button). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+
+</details>

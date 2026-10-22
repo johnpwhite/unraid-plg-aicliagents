@@ -12,7 +12,7 @@ Words used on this page:
 
 - **Speech engine**: a program in a Docker container on your server. This page uses two: **Kokoro** (it turns text into a natural voice) and **Speaches** (it turns your speech into text).
 - **Browser voice**: the voice that your browser has built in. It needs no engine.
-- **Endpoint URL**: the web address of a speech engine, for example http://speech-server:8880.
+- **Voice server address**: the web address of a speech engine, for example http://speech-server:8880.
 - **Voice mail**: the saved text of what the agents said, with a play button for each message. When an agent spoke for another workspace, the message also shows "(said by ...)" with the name of the agent's own workspace.
 
 ## Where to find it
@@ -21,7 +21,7 @@ Words used on this page:
 - **Microphone icon** (dictation): next to the speaker icon, when a workspace is open.
 - **A workspace's "..." menu, Voice**: the voice choices of that one workspace.
 - **Voice mail button**: at the bottom of the drawer, left of **Help** and **Settings**. It shows a voicemail symbol and the count of messages that you did not play.
-- **Settings, Configuration tab, Agent voice card**: all voice settings. This card has three parts: the voice output settings, **Voice mail** and **Voice input**.
+- **Settings, Configuration tab, Agent voice card and Dictation card**: all voice settings. The **Agent voice** card holds the voice output settings and, in its part **Advanced**, the **Voice mail** limits. The **Dictation** card holds the voice input settings.
 - **A speaker icon on a Notebook note**: reads the note aloud. See [The Notebook](notebook.md).
 
 ## How to use it
@@ -30,7 +30,7 @@ Words used on this page:
 
 Two switches control sound. Both must be on before you hear anything.
 
-1. **The global switch.** Press the speaker icon in the drawer. It also exists in **Settings, Configuration, Agent voice** as **Voice (all devices)**, with the label **Off** or **On**. One switch controls every open tab on every device. Expect: a short test sentence plays in that tab when you turn voice on, and the icons in all your other open tabs change to match. The icon is a loud speaker when voice is on and a quiet speaker when voice is off.
+1. **The global switch.** Press the speaker icon in the drawer. It also exists in **Settings, Configuration, Agent voice** as **Voice**, with the label **Off** or **On**. One switch controls every open tab on every device. Expect: a short test sentence plays in that tab when you turn voice on, and the icons in all your other open tabs change to match. The icon is a loud speaker when voice is on and a quiet speaker when voice is off.
 2. **The switch for each workspace.** Open the "..." menu of a workspace, open **Voice**, and choose one of three modes:
    - **Speak**: the agent's messages play out loud and are kept as voice mail. This is the default.
    - **Voice mail**: the messages are kept as voice mail but do not play. Use this for an agent that talks too much.
@@ -43,13 +43,13 @@ A workspace in **Voice mail** mode shows a small voicemail symbol on its row.
 > - **Safari** needs one tap in each tab. Turn the speaker icon on once in a tab. After that, messages play in that tab.
 > - **Chrome** speaks only after you click in the page since it last loaded. After a reload with voice still on, the first message does not play. A small button shows at the bottom right: **Voice: click to allow speech in this tab**. Click it. The message plays, and later messages play with no more clicks.
 
-An agent speaks with the `speak` tool or the `speak` command of the plugin. This needs **Plugin management tools** to be **On** in **Settings, Configuration**. If it is off, the agent receives a message that names the setting. An agent can say at most 500 characters at a time, and a workspace can speak at most once every three seconds. A message that goes over the limit is refused with one clear sentence.
+An agent speaks with the `speak` tool or the `speak` command of the plugin. This needs **Let agents manage the plugin** to be **On** in **Settings, Configuration**. If it is off, the agent receives a message that names the setting. An agent can say at most 500 characters at a time, and a workspace can speak at most once every three seconds. A message that goes over the limit is refused with one clear sentence.
 
 The Activity tray records each spoken message with the first words of the text.
 
 ### Use the browser voice or a natural voice
 
-With **Endpoint URL** empty, your browser speaks every message in its own voice. This works at once and costs nothing. The **Voice id**, **Speed** and **API key** fields do nothing in this mode.
+With **Voice server address** empty, your browser speaks every message in its own voice. This works at once and costs nothing. The **Voice** (the voice name), **Speed** and **API key** fields do nothing in this mode.
 
 For a natural voice, use the guided setup. It installs the free Kokoro engine as a normal Docker container.
 
@@ -59,20 +59,20 @@ For a natural voice, use the guided setup. It installs the free Kokoro engine as
 4. Expect: Unraid's own **Add Container** page opens in a new tab. If the browser blocks the new tab, press the **Open Add Container** link in the card.
 5. Check the settings on that page and press **Apply**. Unraid downloads the image. This can take several minutes. A free port is chosen for you (the first free port from 8880).
 6. Go back to the **Agent voice** card. Expect: a list of steps shows the progress: **Container running**, **Engine answers**, **Voices ready**, **Settings saved**. The page checks every four seconds.
-7. Expect: the card says it connected to Kokoro at an address with a voice, and it plays a test sentence. The plugin has saved the **Endpoint URL** and the **Voice id** for you. If Folder View 3 is on your server, the container goes into a folder named **aicliagents** on the Docker tab.
+7. Expect: the card says it connected to Kokoro at an address with a voice, and it plays a test sentence. The plugin has saved the **Voice server address** and the **Voice** (the voice name) for you. If Folder View 3 is on your server, the container goes into a folder named **aicliagents** on the Docker tab.
 
 Press **Cancel** at any time to stop the wait. Nothing is saved, and a container that was already made stays on the Docker tab. After 20 minutes with no answer, the card stops and tells you to press the button again.
 
 If a Kokoro container already exists (the card sees it at once), the button reads **Connect natural voice** and a line shows the state of the container: running, stopped, not answering yet. Connect reads the settings of the container, saves the address, and tests it. If the container is stopped or keeps stopping, the card shows the last line from its log. If the container stops with "Permission denied", remove its **Model cache** path in the container settings.
 
-You can also use your own engine. Any server that speaks the same interface as Kokoro-FastAPI (OpenAI-compatible text to speech) works. Type its address in **Endpoint URL**.
+You can also use your own engine. Any server that speaks the same interface as Kokoro-FastAPI (OpenAI-compatible text to speech) works. Type its address in **Voice server address**.
 
 If the engine does not answer, the plugin speaks the message with the browser voice instead, so you still hear it. **Health** shows a warning while the last attempt with the engine failed. See [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
 ### Pick a voice and a speed
 
-1. In **Settings, Configuration, Agent voice**, look at **Voice id**.
-2. When the engine can list its voices (Kokoro can), **Voice id** is a list. Each entry shows the voice name and a quality grade when the engine gives one. Choose one. The choice is saved at once. To type a voice name by hand, choose **Other…**.
+1. In **Settings, Configuration, Agent voice**, look at **Voice** (the voice name).
+2. When the engine can list its voices (Kokoro can), **Voice** (the voice name) is a list. Each entry shows the voice name and a quality grade when the engine gives one. Choose one. The choice is saved at once. To type a voice name by hand, choose **Other…**.
 3. Set **Speed**. 1.0 is normal. Allowed values: 0.5 to 2.0.
 4. Press **Test**. Expect: the card plays a fixed sentence, and a result line shows below the button.
 
@@ -91,7 +91,7 @@ Each spoken message starts with "(name) says:". The name is the name of the work
 
 Claude Code can call a hook (a small command) when it needs you and when it finishes. The plugin has a hook script for this. The script turns the hook data into one short sentence, for example "AI Plugin has finished." or "AI Plugin needs you: (the agent's message)".
 
-1. Turn on **Plugin management tools** in **Settings, Configuration**.
+1. Turn on **Let agents manage the plugin** in **Settings, Configuration**.
 2. Add these lines to the file `~/.claude/settings.json` of the Claude Code home:
 
 ```
@@ -134,15 +134,15 @@ Both options are kept in this browser, per device. The **i** icon of the bubble 
 | **Transcription engine** (**Transcription endpoint URL** is set) | The page records your speech and sends it to a server on your network. The server returns the text. The plugin cuts the recording at a pause of about 0.7 seconds, or every 8 seconds, so you see the words come in piece by piece. A pause with no speech types nothing. The words do not appear while you speak and are not corrected afterwards; only browser recognition does that. If the engine does not answer, the rest of the recording uses browser recognition, and the bubble says: "The transcription engine did not answer; using your browser's speech recognition." The next recording tries the engine again. | Firefox, Chrome on iPhone, and any browser without built-in recognition. Also when you want the audio to stay on your own server. |
 | **Live engine** (**Live transcription endpoint** is set) | The page streams your speech to a live engine on your network. Your words appear while you speak, and the last word changes as the engine hears more. When you pause, the sentence is final. If the live engine cannot be reached, dictation uses the transcription engine, or the browser, and the bubble says so. | You want to see the words as you speak, and the audio must stay on your own network. On the remote-access page, use a **wss://** address. |
 
-A browser without recognition gets the message "This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Agent voice." If the microphone is blocked, the message is "The browser refused microphone access; allow it in the site settings and try again."
+A browser without recognition gets the message "This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Dictation." If the microphone is blocked, the message is "The browser refused microphone access; allow it in the site settings and try again."
 
 To set up a transcription engine with a guide:
 
-1. In **Settings, Configuration, Agent voice**, find **Voice input** and the row **Local dictation**.
+1. In **Settings, Configuration, Dictation**, find the row **Local dictation**.
 2. Press **Set up local dictation**. This installs the free Speaches server (Whisper) as a Docker container. Unraid's **Add Container** page opens in a new tab. Press **Apply** there.
 3. Go back to the card. Expect: the steps **Container running**, **Server answers**, **Whisper model downloaded**, **Settings saved** show the progress. The model download is about 500 MB and can take several minutes. You may leave the page and press **Connect local dictation** later.
 4. Expect: the card says it connected to Speaches with a model name. The plugin has saved **Transcription endpoint URL** and **Model**.
-5. Press **Test (records 3 s, 8 s live)** and say a sentence. Expect: the result line shows "Listening… 3 s left", then "Transcribing…", then the text that it heard. If nothing was heard, it says "Nothing was recognised." With a **Live transcription endpoint**, the line shows "Listening (live)… 8 s left" and the words appear and change while you speak.
+5. Press **Test** and say a sentence. Expect: the result line shows "Listening… 3 s left", then "Transcribing…", then the text that it heard. If nothing was heard, it says "Nothing was recognised." With a **Live transcription endpoint**, the line shows "Listening (live)… 8 s left" and the words appear and change while you speak.
 
 To set it up by hand, install **Speaches** from Community Applications (the CPU build), then fill in the fields yourself. Speaches has no model installed at first. Open its web page once and install a model, for example `Systran/faster-whisper-small`. Type that exact name in **Model**. If you give a name that the engine does not know, **Test** shows "The engine does not know the model", with the name. The Speaches appdata folder must belong to user ID 1000, or the model download fails with a permission error. Some other Community Applications engines speak the same interface (SenseVoice-API, Fun-ASR-Nano-API, Qwen3-ASR-API). The linuxserver **faster-whisper** template does not work, because it uses a different protocol.
 
@@ -212,7 +212,7 @@ Every message that an agent speaks is saved as text, with the time, the workspac
 > [!WARNING]
 > **Delete all** removes every message that the panel shows (all workspaces, or the workspace that you picked), heard or not. It asks first: "Delete all voice mail?" with the number of messages. It cannot be undone. The text is the only record of what the agent said. A copy in the Notebook (see below) is not removed.
 
-**Keep a copy in the Notebook.** When **Voice (all devices)** is on and the Notebook is on, each message that voice mail records is also copied to the Notebook of that workspace's project. There is one note for each message. The note is in the **Notes** area (it is not a wiki page). Its title is "Voice mail:" and the first words of the message, 80 characters at most. The note holds the workspace name, the agent name, the date and time (in UTC), and the full text. The tags are `voicemail` and an id.
+**Keep a copy in the Notebook.** When **Voice** is on and the Notebook is on, each message that voice mail records is also copied to the Notebook of that workspace's project. There is one note for each message. The note is in the **Notes** area (it is not a wiki page). Its title is "Voice mail:" and the first words of the message, 80 characters at most. The note holds the workspace name, the agent name, the date and time (in UTC), and the full text. The tags are `voicemail` and an id.
 
 The copy is separate from voice mail. Deleting a message, the age limit and the count limit never change or remove a note. A note stays in the Notebook until you archive and delete it like any other note. See [The Notebook](notebook.md). A failure to copy never delays the spoken message.
 
@@ -220,13 +220,13 @@ The copy is separate from voice mail. Deleting a message, the age limit and the 
 
 ## Choices and settings
 
-All in **Settings, Configuration, Agent voice**. Each field saves when you leave it. A short "Saved." shows under the card.
+All in **Settings, Configuration**, in the cards **Agent voice** and **Dictation**. Each field saves when you leave it. A short "Saved." shows under the card.
 
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
-| **Voice (all devices)** | Turns speech on or off for every tab on every device. | Off | Turn on to hear agents. Turn off in a meeting. |
-| **Endpoint URL** | Address of a text-to-speech engine. Empty means the browser voice. | Empty | After you set up natural voice, or to use your own engine. |
-| **Voice id** | The engine's voice. A list when the engine can name its voices. Ignored with the browser voice. | af_heart | To pick a different voice. |
+| **Voice** | Turns speech on or off for every tab on every device. | Off | Turn on to hear agents. Turn off in a meeting. |
+| **Voice server address** | Address of a text-to-speech engine. Empty means the browser voice. | Empty | After you set up natural voice, or to use your own engine. |
+| **Voice** (the voice name) | The engine's voice. A list when the engine can name its voices. Ignored with the browser voice. | af_heart | To pick a different voice. |
 | **Speed** | How fast the engine speaks. 0.5 to 2.0. Ignored with the browser voice. | 1.0 | When the voice is too fast or too slow. |
 | **API key** (voice output) | A key for an engine that needs one. The page never shows the stored key. **Clear** removes it after a question. | None | Only when your engine needs a key. |
 | **Test** | Speaks a fixed sentence by the way that you set. | — | After a change. |
@@ -236,7 +236,7 @@ All in **Settings, Configuration, Agent voice**. Each field saves when you leave
 | **Model** | The model name that the transcription engine uses. | whisper-1 | Set it to a model that your engine has (the guide does it). |
 | **Language** | The language that you speak, for example "en". Empty lets the browser or the engine detect it. | Empty | When detection picks the wrong language. |
 | **API key** (voice input) | A key for a transcription engine that needs one. | None | Only when your engine needs a key. |
-| **Test (records 3 s, 8 s live)** | Records three seconds and shows the text that it heard. With a live endpoint, it streams for eight seconds and shows the words while you speak. It types nothing. | — | After a change. |
+| **Test** | Records three seconds and shows the text that it heard. With a live endpoint, it streams for eight seconds and shows the words while you speak. It types nothing. | — | After a change. |
 
 Choices that live outside this card:
 
@@ -248,7 +248,7 @@ Choices that live outside this card:
 | **Type while I speak** | The dictation bubble | On by default. Kept per browser. |
 | **Send when I stop talking** | The dictation bubble | Off by default. Kept per browser. |
 | **Notebook** | **Settings, Configuration** | When off, no voice mail copies are made in the Notebook. |
-| **Plugin management tools** | **Settings, Configuration** | Must be on for agents to speak. Default: Off. |
+| **Let agents manage the plugin** | **Settings, Configuration** | Must be on for agents to speak. Default: Off. |
 
 ## What happens behind the scenes
 
@@ -262,7 +262,7 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 | "Voice: click to allow speech in this tab" shows. | The browser needs one click before it plays sound. | Click the button. |
 | An agent says that voice is off. | The global switch is off. The agent can not turn it on. | Turn on the speaker icon in the drawer. |
 | An agent says that its workspace is muted. | The workspace is set to **Off**. | Choose **Speak** in the workspace's **Voice** menu. |
-| The agent's tool says that plugin management is off. | **Plugin management tools** is off. | Turn it on in **Settings, Configuration**. |
+| The agent's tool says that plugin management is off. | **Let agents manage the plugin** is off. | Turn it on in **Settings, Configuration**. |
 | When you dictate, a note says "The transcription engine did not answer; using your browser's speech recognition." | The transcription engine is stopped or does not answer. The plugin moved the rest of this recording to your browser's own recognition, and it types your words as usual. The piece that failed is not typed. If you stop at once and the last piece fails, the error shows and nothing is typed. A browser with no recognition (Firefox) shows the engine error instead. | Start the engine (see **Local dictation** in **Settings, Configuration, Agent voice**). The next recording uses the engine again when it answers. |
 | The microphone icon keeps pulsing after you stop. | Older versions kept the pulsing look until the last piece was transcribed. | Reload the page after the update. The icon now changes to the spinner at once, and goes back to normal when the text is typed. |
 | The voice sounds like the browser, but you set up an engine. | The engine did not answer, so the browser voice took over. **Health** shows a warning. | Check that the container runs on the Docker tab, then press **Test**. |
@@ -270,9 +270,9 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 | The Kokoro container keeps stopping. | See the last log line in the card. "Permission denied" means the model cache path is wrong. | Remove the **Model cache** path in the container settings. |
 | The guided setup waits and does not end. | Unraid is still downloading the image, or the **Add Container** page is closed. | Look at the Docker tab. Press **Set up natural voice** again after 20 minutes. |
 | The mic icon shows a crossed-out microphone. | Voice input was refused. The bubble tells you why. | Allow the microphone in the browser's site settings, open a workspace that runs, or set a transcription endpoint. |
-| "Nothing was recognised." | The recording had no speech, or the engine returned an empty text. | Speak closer to the microphone. Press **Test (records 3 s, 8 s live)**. |
+| "Nothing was recognised." | The recording had no speech, or the engine returned an empty text. | Speak closer to the microphone. Press **Test**. |
 | "The transcription server did not answer." | The endpoint is wrong or the engine is stopped or busy. When this happens on the last part of a recording, after you press stop, the plugin waits about 2 seconds and sends that part once more. The message shows only if the second try fails too. The words of that last part are then lost. | Check the **Transcription endpoint URL** and the container. Say the words again. |
-| "The transcription engine at … returned HTTP 400." The red line stays for 6 seconds, and the recording goes on. | The engine refused the recording. The plugin sends each piece as a WAV recording, which engines read; a browser that cannot convert the sound sends its own format, which some engines refuse. | Press **Test (records 3 s, 8 s live)** in another browser, such as Chrome or Safari. Check that **Model** is a model the engine lists. |
+| "The transcription engine at … returned HTTP 400." The red line stays for 6 seconds, and the recording goes on. | The engine refused the recording. The plugin sends each piece as a WAV recording, which engines read; a browser that cannot convert the sound sends its own format, which some engines refuse. | Press **Test** in another browser, such as Chrome or Safari. Check that **Model** is a model the engine lists. |
 | "Typed, not sent: the agent is busy". | **Send when I stop talking** is on, but the agent was not at its prompt. | Press Enter when the agent is ready. |
 | Voice mail shows no messages for a workspace. | The workspace was set to **Off** when the agent spoke, or the messages are older than **Days kept**. | Set the mode to **Speak** or **Voice mail**. Raise **Days kept**. |
 | The drawer has no voice mail button. | The server did not answer the voice mail request. | Reload the page. If it stays, look in the **Debug Console**. See [Health, Activity and troubleshooting](health-and-troubleshooting.md). |
@@ -289,6 +289,8 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The voice input settings (**Voice input**) now have their own card, **Dictation**, on the Configuration tab. The **Voice mail** limits are in the part **Advanced** of the card **Agent voice**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+- **2026-10-22** — The voice settings have new labels: **Voice**, **Voice server address**, **Transcription server address**, **Live transcription server (optional)** and **Test**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — When the transcription engine does not answer, dictation carries on with your browser's speech recognition and the bubble says so. The next recording tries the engine again. Spec `docs/specs/VOICE_INPUT.md`, issue #726.
 - **2026-10-22** — If the transcription engine fails on the last part of a recording, the plugin sends that part to the engine once more after about 2 seconds. Before, the words were lost at once. Spec `docs/specs/VOICE_INPUT.md`, issue #754.
 

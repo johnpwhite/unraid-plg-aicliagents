@@ -50,10 +50,9 @@
         </button>
         <div class="aicli-vs-note" id="aicli-stt-setup-state" role="status" aria-live="polite" hidden></div>
         <div class="aicli-vs-note">
-            Installs the free Speaches server (Whisper) as a normal Docker app, then connects it here.
-            Dictation then stays on your own server and works in every browser. You confirm it on
-            Unraid's own Add Container page. Connect then downloads the Whisper model
-            (about 500 MB), which can take several minutes. You can leave this page; press Connect again later.
+            Installs the free Speaches speech-to-text server as a Docker app and connects it here.
+            You confirm it on Unraid's Add Container page. The first model (about 500 MB) downloads
+            when it starts. You can leave this page; press Connect again later.
         </div>
         <div id="aicli-stt-setup-panel" class="aicli-vs-panel" hidden>
             <ol id="aicli-stt-setup-steps" class="aicli-vs-steps" aria-label="Setup progress" hidden></ol>

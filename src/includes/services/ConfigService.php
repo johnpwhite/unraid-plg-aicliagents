@@ -46,7 +46,7 @@ class ConfigService {
             'agent_storage_path' => SecretPaths::flashRoot() . '/persistence',
             // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two storage settings, one for homes
             // (storage_backend_homes) and one for agents (storage_backend_agents). Each is
-            // 'layering' (SquashFS layers) or 'passthrough' (plain folders). getConfig() adds
+            // 'layering' (Compressed layers) or 'passthrough' (plain folders). getConfig() adds
             // both keys. It reads the old keys storage_backend_mode and keep_agents_compressed
             // as a fallback for one more release. A change runs a migration for that kind only.
             // #456: where a home's writable layer lives under the layering engine:

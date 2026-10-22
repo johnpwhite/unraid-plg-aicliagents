@@ -19,9 +19,17 @@
  * </module_context>
  */
 ?>
+<?php
+require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open and aicli_help_btn: the cards use the shared header (Phase 7).
+?>
 <!-- TAB: CONFIG HUB -->
 <div id="tab-hub" class="aicli-tab-content aicli-layout">
     <div style="width:100%;">
+
+        <?php /* Phase 7: the cards can be collapsed and moved. Reset layout forgets the saved order and the open state. */ ?>
+        <div class="aicli-settings-toolbar">
+            <button type="button" class="aicli-btn-slim" data-aicli-card-action="reset-layout" data-testid="reset-layout-hub">Reset layout</button>
+        </div>
 
         <!-- Home-unavailable warning (shown when the agent home overlay is not mounted) -->
         <div id="hub-home-banner" style="display:none; margin-bottom:12px; padding:10px 14px; border:1px solid rgba(255,140,0,0.5); border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">
@@ -31,62 +39,39 @@
             Nothing is ever written to an unmounted home.
         </div>
 
-        <!-- Drift banner (populated when hub_get_drift / hub_project report conflicts) -->
-        <div id="hub-drift-banner" class="aicli-card" style="display:none; border-color:rgba(255,140,0,0.6);">
-            <div class="aicli-card-header"><i class="fa fa-code-fork" style="color:var(--orange, #ff8c00);"></i> Config drift detected</div>
-            <div class="aicli-card-body">
-                <p style="font-size:11px; opacity:0.7; margin-top:0;">
-                    A vendor config file was edited outside the hub. Drifted keys are never overwritten automatically —
-                    choose per key: <strong>Adopt</strong> (pull the edit into the hub), <strong>Overwrite</strong>
-                    (re-assert the hub value), or <strong>Release</strong> (stop managing the key).
-                </p>
+        <div data-aicli-cards="hub">
+
+        <!-- Drift card (populated when hub_get_drift / hub_project report conflicts). It is hidden until a drift shows, and then it opens itself. -->
+        <?=aicli_card_open('hub-drift', 'fa-code-fork', 'Config drift detected', 'Loading…', 'hub-drift', '',
+            ['domId' => 'hub-drift-banner', 'style' => 'display:none; border-color:rgba(255,140,0,0.6);', 'class' => 'aicli-card--warn'])?>
                 <div id="hub-drift-list"></div>
-            </div>
-        </div>
+        <?=aicli_card_close()?>
 
         <!-- Canonical MCP server list -->
-        <div class="aicli-card">
-            <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between;">
-                <span><i class="fa fa-plug"></i> MCP Servers</span>
-                <span style="display:flex; gap:8px;">
-                    <button type="button" class="aicli-btn-slim" onclick="hubOpenEditor(null)"><i class="fa fa-plus"></i> Add Server</button>
-                    <button type="button" class="aicli-btn-slim" id="hub-apply-btn" onclick="hubApply('mcp')"><i class="fa fa-paper-plane"></i> Apply to agents</button>
-                    <button type="button" class="aicli-btn-slim" onclick="hubLoadState()" title="Refresh"><i class="fa fa-refresh"></i></button>
-                </span>
-            </div>
-            <div class="aicli-card-body">
-                <p style="font-size:11px; opacity:0.6; margin-top:0;">
-                    One canonical definition per MCP server, projected into each targeted agent's own config format
-                    (JSON for Claude, Gemini, Qwen, OpenCode, Kilo Code, Copilot, Factory, Nanocoder, Antigravity
-                    and Kimi Code; TOML for Codex and Grok; YAML for Goose). Keys you created by
-                    hand in vendor files are never touched.
-                </p>
+        <?=aicli_card_open('hub-mcp', 'fa-plug', 'MCP Servers', 'Loading…', 'hub-mcp',
+            '<span class="aicli-card-actions">'
+            . '<button type="button" class="aicli-btn-slim" onclick="hubOpenEditor(null)"><i class="fa fa-plus"></i> Add Server</button>'
+            . '<button type="button" class="aicli-btn-slim" id="hub-apply-btn" onclick="hubApply(\'mcp\')"><i class="fa fa-paper-plane"></i> Apply to agents</button>'
+            . '<button type="button" class="aicli-btn-slim" onclick="hubLoadState()" title="Refresh" aria-label="Refresh"><i class="fa fa-refresh"></i></button>'
+            . '</span>')?>
                 <div id="hub-server-list" style="display:flex; flex-direction:column; gap:6px;">
                     <div style="font-size:11px; opacity:0.5;">Loading…</div>
                 </div>
                 <div id="hub-apply-results" style="display:none; margin-top:12px; padding:10px; border-radius:4px; background:rgba(255,255,255,0.03); font-size:11px;"></div>
-            </div>
-        </div>
+        <?=aicli_card_close()?>
 
-        <!-- Global instructions (OP #1363 / H-02 phase 2) -->
-        <div class="aicli-card">
-            <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between;">
-                <span><i class="fa fa-file-text-o"></i> Global Instructions</span>
-                <span style="display:flex; gap:8px;">
-                    <button type="button" class="aicli-btn-slim" id="hub-instr-apply-btn" onclick="hubApply('instr')"><i class="fa fa-paper-plane"></i> Apply to agents</button>
-                </span>
-            </div>
-            <div class="aicli-card-body">
-                <p style="font-size:11px; opacity:0.6; margin-top:0;">
-                    One canonical instruction document (<code>hub/instructions/global.md</code>) projected into each
-                    targeted agent's instruction file inside a managed fence. Claude Code receives a native
-                    <code>@import</code> line (content stays single-sourced); Gemini and Codex&nbsp;/&nbsp;Copilot
-                    (shared <code>AGENTS.md</code>) receive a copy of the content. Text outside the fence is never touched.
-                </p>
-                <textarea id="hub-instr-content" rows="20" spellcheck="false"
-                          style="width:100%; font-family:monospace; font-size:11px; resize:vertical;"
-                          placeholder="# Global agent instructions&#10;&#10;Shared guidance every targeted agent loads at session start…"></textarea>
-                <div id="hub-instr-meta" style="font-size:10px; opacity:0.5; margin-top:2px;"></div>
+        <!-- Global instructions (OP #1363 / H-02 phase 2). The editor is closed until the person presses Edit. -->
+        <?=aicli_card_open('hub-instr', 'fa-file-text-o', 'Global Instructions', 'Loading…', 'hub-instr',
+            '<span class="aicli-card-actions">'
+            . '<button type="button" class="aicli-btn-slim" id="hub-instr-edit-btn" data-testid="hub-instr-edit" aria-expanded="false" aria-controls="hub-instr-editor" onclick="hubToggleInstrEditor()"><i class="fa fa-pencil"></i> <span>Edit</span></button>'
+            . '<button type="button" class="aicli-btn-slim" id="hub-instr-apply-btn" onclick="hubApply(\'instr\')"><i class="fa fa-paper-plane"></i> Apply to agents</button>'
+            . '</span>')?>
+                <div id="hub-instr-editor" data-testid="hub-instr-editor" hidden>
+                    <textarea id="hub-instr-content" rows="20" spellcheck="false" aria-label="Global instructions"
+                              style="width:100%; font-family:monospace; font-size:11px; resize:vertical;"
+                              placeholder="# Global agent instructions&#10;&#10;Shared guidance every targeted agent loads at session start…"></textarea>
+                    <div id="hub-instr-meta" style="font-size:10px; opacity:0.5; margin-top:2px;"></div>
+                </div>
                 <div style="margin-top:10px;">
                     <span style="font-size:11px;">Project to agents <span style="opacity:0.5;">(opt-in — no agents are targeted by default)</span></span>
                     <div id="hub-instr-agent-checks" class="hub-agent-grid"></div>
@@ -95,40 +80,16 @@
                     </div>
                 </div>
                 <div id="hub-instr-apply-results" style="display:none; margin-top:12px; padding:10px; border-radius:4px; background:rgba(255,255,255,0.03); font-size:11px;"></div>
-            </div>
-        </div>
+        <?=aicli_card_close()?>
 
         <!-- Skills & Commands (OP #1364 / H-03 phase 3 — mirrored-tree projection) -->
-        <div class="aicli-card">
-            <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between;">
-                <span><i class="fa fa-magic"></i> Skills &amp; Commands</span>
-                <span style="display:flex; gap:8px;">
-                    <button type="button" class="aicli-btn-slim" onclick="hubOpenSkillEditor(null)"><i class="fa fa-plus"></i> Add Skill</button>
-                    <button type="button" class="aicli-btn-slim" onclick="hubOpenCommandEditor(null)"><i class="fa fa-plus"></i> Add Command</button>
-                    <button type="button" class="aicli-btn-slim" id="hub-tree-apply-btn" onclick="hubApply('tree')"><i class="fa fa-paper-plane"></i> Apply to agents</button>
-                </span>
-            </div>
-            <div class="aicli-card-body">
-                <?php
-                // #470: list the agents from the projector registries, so the help text cannot go stale.
-                $hubSurfaceNames = static function (string $surface): string {
-                    if (!class_exists('\AICliAgents\Services\Hub\HubProjector')) return '';
-                    $names = [];
-                    foreach (array_keys(\AICliAgents\Services\Hub\HubProjector::treeAgentMeta($surface)) as $id) {
-                        $names[] = \AICliAgents\Services\Hub\HubProjector::agentDisplayName((string)$id);
-                    }
-                    return htmlspecialchars(implode(', ', $names), ENT_QUOTES, 'UTF-8');
-                };
-                ?>
-                <p style="font-size:11px; opacity:0.6; margin-top:0;">
-                    Hub-stored skills (a folder with <code>SKILL.md</code> + optional extra files) and slash
-                    commands (one markdown file each), mirrored into the agents that have such a surface.
-                    Skills go to: <span id="hub-help-skill-agents"><?=$hubSurfaceNames('skills')?></span>.
-                    Commands go to: <span id="hub-help-command-agents"><?=$hubSurfaceNames('commands')?></span>.
-                    The hub only ever touches
-                    the copies it projected — skills/commands you placed in those directories yourself are
-                    never modified or removed.
-                </p>
+        <?=aicli_card_open('hub-skills', 'fa-magic', 'Skills & Commands', 'Loading…', 'hub-skills',
+            '<span class="aicli-card-actions">'
+            . '<button type="button" class="aicli-btn-slim" onclick="hubOpenSkillEditor(null)"><i class="fa fa-plus"></i> Add Skill</button>'
+            . '<button type="button" class="aicli-btn-slim" onclick="hubOpenCommandEditor(null)"><i class="fa fa-plus"></i> Add Command</button>'
+            . '<button type="button" class="aicli-btn-slim" id="hub-tree-apply-btn" onclick="hubApply(\'tree\')"><i class="fa fa-paper-plane"></i> Apply to agents</button>'
+            . '</span>')?>
+                <?php /* The agents of each surface are listed in the user guide page (ug-config-hub.md), no longer in this card. */ ?>
                 <div style="display:flex; flex-wrap:wrap; gap:18px;">
                     <div style="flex:1; min-width:280px;">
                         <div style="font-size:11px; font-weight:700; margin-bottom:4px;">Skills</div>
@@ -190,20 +151,15 @@
                         <button type="button" class="aicli-btn-slim" onclick="hubCloseCommandEditor()">Cancel</button>
                     </div>
                 </div>
-            </div>
-        </div>
+        <?=aicli_card_close()?>
 
         <!-- History — git-backed home config (OP #1365 / H-04, opt-in) -->
-        <div class="aicli-card" id="hub-git-card">
-            <div class="aicli-card-header" style="display:flex; align-items:center; justify-content:space-between;">
-                <span><i class="fa fa-history"></i> History <span style="font-size:10px; opacity:0.5; font-weight:400;">(git config backup)</span></span>
-                <span style="display:flex; gap:8px;">
-                    <button type="button" class="aicli-btn-slim" id="hub-git-commit-btn" style="display:none;" onclick="hubGitCommit()"><i class="fa fa-save"></i> Commit now</button>
-                    <button type="button" class="aicli-btn-slim" id="hub-git-restore-settings-btn" style="display:none;" onclick="hubGitRestoreSettings()" title="Overwrite the live plugin settings on flash with the last committed backup"><i class="fa fa-download"></i> Restore settings</button>
-                    <button type="button" class="aicli-btn-slim" onclick="hubGitRefresh()" title="Refresh"><i class="fa fa-refresh"></i></button>
-                </span>
-            </div>
-            <div class="aicli-card-body">
+        <?=aicli_card_open('hub-history', 'fa-history', 'History', 'Loading…', 'hub-history',
+            '<span class="aicli-card-actions">'
+            . '<button type="button" class="aicli-btn-slim" id="hub-git-commit-btn" style="display:none;" onclick="hubGitCommit()"><i class="fa fa-save"></i> Commit now</button>'
+            . '<button type="button" class="aicli-btn-slim" id="hub-git-restore-settings-btn" style="display:none;" onclick="hubGitRestoreSettings()" title="Overwrite the live plugin settings on flash with the last committed backup"><i class="fa fa-download"></i> Restore settings</button>'
+            . '<button type="button" class="aicli-btn-slim" onclick="hubGitRefresh()" title="Refresh" aria-label="Refresh"><i class="fa fa-refresh"></i></button>'
+            . '</span>', ['domId' => 'hub-git-card'])?>
                 <!-- git missing on the host -->
                 <div id="hub-git-unavailable" style="display:none; padding:10px 14px; border:1px solid rgba(255,140,0,0.5); border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">
                     <i class="fa fa-exclamation-triangle" style="color:var(--orange, #ff8c00); margin-right:6px;"></i>
@@ -227,7 +183,6 @@
                 </div>
                 <!-- enabled: status + timeline -->
                 <div id="hub-git-enabled-ui" style="display:none;">
-                    <p style="margin:2px 0 8px;opacity:.7;font-size:12px;">Every change here is committed automatically. Use Commit now to save one right away, or Restore settings to overwrite your current plugin settings with the last saved backup.</p>
                     <div id="hub-git-statusline" style="font-size:11px; opacity:0.75; margin-bottom:8px;"></div>
                     <div id="hub-git-timeline" style="display:flex; flex-direction:column; gap:4px;"></div>
                     <div id="hub-git-diffwrap" style="display:none; margin-top:10px;">
@@ -254,8 +209,10 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
+        <?=aicli_card_close()?>
+
+        </div><!-- /data-aicli-cards="hub" -->
+
 
         <!-- Add / edit form (hidden until opened) -->
         <div id="hub-editor" class="aicli-card" style="display:none;">

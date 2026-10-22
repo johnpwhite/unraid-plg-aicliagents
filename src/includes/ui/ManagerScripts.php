@@ -124,6 +124,8 @@ function resetStatsTimer() {
 
 // D-405: Auto-save with debounce — called by onchange on all non-secret, non-path inputs
 var _autoSaveTimer = null;
+// The control that the person changed last. The "Saved" tick appears next to it after the save.
+document.addEventListener('change', function (e) { window.__aicliLastChanged = e.target; }, true);
 function autoSaveConfig() {
     clearTimeout(_autoSaveTimer);
     _autoSaveTimer = setTimeout(function() {
@@ -270,8 +272,11 @@ function saveAICliAgentsManager(form, silent = false) {
             safeReload();
         } else if (!silent) {
             safeReload();
-        } else {
-            swal({ title: "Saved", text: "Configuration updated.", type: "success", timer: 1000, showConfirmButton: false });
+        } else if (window.aicliCards && typeof window.aicliCards.saved === 'function') {
+            // SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md "Save model": a routine save shows a "Saved" tick next to
+            // the control for two seconds, updates the status of its card, and says "Saved" in the live
+            // region. No pop-up. A dialog stays for an error (above) and for a change that needs a confirm.
+            window.aicliCards.saved(window.__aicliLastChanged || null, form);
         }
     });
 }
@@ -349,12 +354,18 @@ function aicliCurrentStorageMode(kind) { return window._aicliCurrentStorage[kind
 function aicliStorageSelects() { return $('select[name="storage_backend_homes"], select[name="storage_backend_agents"]'); }
 function aicliKindSelect(kind) { return $('select[name="storage_backend_' + kind + '"]'); }
 function aicliKindWord(kind) { return kind === 'agents' ? 'agent storage' : 'home storage'; }
-function aicliKindModeLabel(mode) { return mode === 'passthrough' ? 'Plain folders' : 'SquashFS layers'; }
+function aicliKindModeLabel(mode) { return mode === 'passthrough' ? 'Plain folders' : 'Compressed layers'; }
 
 // Show the REAL state of each kind under its select. It comes from the storage status, not
 // from the saved value, so a home that was converted by hand shows at once ("Mixed: ...").
 // When the kind is mixed, or the saved value and the real state differ, a button finishes the job.
 function aicliRenderKindState(r) {
+    // Phase 5: "Save unsaved home changes every" (and Save now) has no use when every home is a plain folder.
+    if (r && r.homes) {
+        var allPlain = r.homes.state === 'plain';
+        $('#aicli-bake-hide').remove(); // the render-time guess from the saved kind gives way to the real state
+        $('[data-aicli-hide-plain-homes]').each(function () { this.hidden = allPlain; });
+    }
     ['homes', 'agents'].forEach(function (kind) {
         var box = $('#aicli-kind-state-' + kind);
         var s = r && r[kind];
@@ -471,7 +482,7 @@ function renderBackendMigrationStatus(s) {
         : (s.phase === 'rolling_back' ? 'Restoring ' + kindWord.toLowerCase() + ' after a conversion problem'
         : (interrupted ? kindWord + ' migration stopped' : (running ? kindWord + ' migration in progress'
         : (s.status === 'complete' ? kindWord + ' migration complete' : kindWord + ' migration needs attention'))));
-    var target = s.target === 'passthrough' ? 'Plain folders' : (s.target === 'layering' ? 'SquashFS layers' : '');
+    var target = s.target === 'passthrough' ? 'Plain folders' : (s.target === 'layering' ? 'Compressed layers' : '');
     $('<strong>').text(title).appendTo(box);
     $('<div>').text((target ? 'Target: ' + target + '. ' : '') + (s.message || '')).appendTo(box);
     if (running && Number(s.total) > 0) {

@@ -10,7 +10,7 @@
  *   estimated size as plain folders, the total extra space and the free space after,
  *   refuses when less than 10% of the disk or 2 GB would stay free, and then starts the
  *   conversion (AJAX convert_agents). Offered on an internal boot disk while
- *   Agent storage is not set to SquashFS layers.
+ *   Agent storage is not set to Compressed layers.
  * Dependencies: jQuery, SweetAlert, CommonLogging.php (aicliAjax), ManagerStorageScripts.php (escapeHtml, refreshStats).
  * Constraints: Atomic UI fragment.
  * </module_context>
@@ -44,7 +44,7 @@
 
     var WHY = {
         usb_boot: 'Agents on a USB boot stick keep compressed layers. Nothing to convert.',
-        keep_agents_compressed: 'Agent storage is set to SquashFS layers (Configuration tab). Set it to Plain folders to convert agents.',
+        keep_agents_compressed: 'Agent storage is set to Compressed layers (Configuration tab). Set it to Plain folders to convert agents.',
         no_layered_agents: 'No agent uses compressed layers. Every installed agent already uses plain folders.',
         not_boot_disk: 'The agents are not on the boot disk. This conversion is for an internal boot disk.'
     };

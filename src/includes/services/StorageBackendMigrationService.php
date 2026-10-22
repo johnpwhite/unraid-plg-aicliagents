@@ -66,9 +66,9 @@ final class StorageBackendMigrationService
         $noun = self::kindNoun($kind);
         $message = $target === StorageBackendPolicyService::PASSTHROUGH
             ? 'All ' . $noun . ' that are not plain folders yet will be converted to plain folders. Existing sessions will be closed safely, old SquashFS data will be retained in the migration archive, and new installs can activate side by side.'
-            : 'All ' . $noun . ' that are not SquashFS layers yet will be converted to SquashFS layers with writable zram state. Existing plain folders will be archived only after the layer and manifest are verified.';
+            : 'All ' . $noun . ' that are not compressed layers yet will be converted to compressed layers with writable zram state. Existing plain folders will be archived only after the layer and manifest are verified.';
         if ($usb !== []) {
-            $message .= ' The probe identified removable/USB-backed storage (' . implode(', ', $usb) . '); SquashFS layers are recommended to reduce wear.';
+            $message .= ' The probe identified removable/USB-backed storage (' . implode(', ', $usb) . '); Compressed layers are recommended to reduce wear.';
         }
         $message .= ' The migration needs about ' . BootSpaceService::human((int)$capacity['capacity']['forward_bytes'])
             . ' for the new storage and ' . BootSpaceService::human((int)$capacity['capacity']['rollback_bytes'])
@@ -129,7 +129,7 @@ final class StorageBackendMigrationService
         $noun = ucfirst(self::kindNoun($kind));
         return $mode === StorageBackendPolicyService::PASSTHROUGH
             ? $noun . ' already use plain folders.'
-            : $noun . ' already use SquashFS layers.';
+            : $noun . ' already use compressed layers.';
     }
 
     /**
@@ -880,7 +880,7 @@ final class StorageBackendMigrationService
         $migrated = is_array($status['migrated'] ?? null) ? $status['migrated'] : [];
         $total = max(0, (int)($status['total'] ?? 0));
         if ($migrated !== []) {
-            $engine = ($status['target'] ?? '') === StorageBackendPolicyService::PASSTHROUGH ? 'plain folders' : 'SquashFS layers';
+            $engine = ($status['target'] ?? '') === StorageBackendPolicyService::PASSTHROUGH ? 'plain folders' : 'compressed layers';
             return 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not finish: ' . count($migrated) . ' of ' . $total . ' items are ' . $engine . '. Continue or put them back.';
         }
         return 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not finish. No items changed. Continue or put them back.';

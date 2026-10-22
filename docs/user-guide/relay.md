@@ -19,13 +19,13 @@ Words used on this page:
 
 ## Where to find it
 
-- **Settings, Agent Relay tab**: the full control page. Most sections are closed until you open them.
+- **Settings, Agent Relay tab**: the full control page. It is one card. The header of the card shows one line of status, such as "Active · 12 workspaces connected · 4 topics". The (i) button explains what the Relay does. Most sections of the card are closed until you open them.
 - **A workspace's "..." menu, Relay, Inbox**: the message history of that one workspace.
 - **A workspace's "..." menu, Relay, Settings**: the topics that one workspace listens to, and two switches for it.
 - **Settings, Configuration**: the wording of the notices that the plugin types into agents, the resend time, the screen-sample switch, and the Terminal input safety rules.
 - **The Activity tray**: a small pill appears when a Relay notice is waiting for an agent that was busy. See [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
-On a phone, the Agent Relay tab uses larger touch targets, and the table of linked boxes becomes a list of stacked cards.
+On a phone, the Agent Relay tab uses larger touch targets, and the table of linked boxes becomes a list of stacked cards. Each check box, for example **Start at boot**, is part of a label that is at least 44 px tall: press the text or the box.
 
 ## How a message reaches an agent
 
@@ -45,7 +45,7 @@ An agent that must act on a topic gets a different notice. It says that a reques
 
 ### The wording presets
 
-Open **Settings, Configuration** and find **Wording of Relay notices typed into agents**. A shorter notice saves the agent tokens (the units that an AI service counts and bills) on every message.
+Open **Settings, Configuration** and find **Notice typed into an agent**. A shorter notice saves the agent tokens (the units that an AI service counts and bills) on every message.
 
 | Choice | What the notice is | When to use it |
 | :-- | :-- | :-- |
@@ -67,7 +67,7 @@ Under the box, a preview shows both notices and their word counts. If the text b
 
 ### How often a notice is sent
 
-After the plugin types one notice, it types no new notice for that workspace until the agent reads its inbox. The agent reads the whole inbox, so more notices add nothing. If the agent has not read after some time, the plugin types a fresh notice. Set that time in **Resend a Relay notice after (minutes)**. The default is 10. The range is 1 to 240.
+After the plugin types one notice, it types no new notice for that workspace until the agent reads its inbox. The agent reads the whole inbox, so more notices add nothing. If the agent has not read after some time, the plugin types a fresh notice. Set that time in **Resend a notice after**. The default is 10. The range is 1 to 240.
 
 ### The waiting pill
 
@@ -91,7 +91,7 @@ The instructions that the plugin gives to every agent say this: when a `[Relay]`
 
 ### Choices for screen samples
 
-**Record a screen sample when I deliver a waiting message** is Off by default. When On, pressing **Force inject** also keeps a scrubbed sample of the agent's screen on this server. The plugin uses samples to learn what an idle screen looks like for an agent it knows little about. Nothing is sent anywhere. The plugin removes secrets from the sample before it saves it, but this cleaning is best effort. Read a sample before you share it.
+**Keep a screen sample when I deliver a message** is Off by default. When On, pressing **Force inject** also keeps a scrubbed sample of the agent's screen on this server. The plugin uses samples to learn what an idle screen looks like for an agent it knows little about. Nothing is sent anywhere. The plugin removes secrets from the sample before it saves it, but this cleaning is best effort. Read a sample before you share it.
 
 ## How to use it
 
@@ -253,9 +253,9 @@ If the clocks of the two boxes differ, the row shows a note to check NTP (the ne
 | **Listen on** | The network address of the listener. | `0.0.0.0` | Set one address to limit the listener to one network. |
 | **Allow linked boxes** | Allows pairing with other servers. | Off | Turn on to link boxes. |
 | **Mirror notifications into the Relay** | Copies plugin notifications to a topic. | Off | Turn on to let agents read Unraid news. |
-| **Wording of Relay notices typed into agents** | Chooses the notice style. | Short | Change it to save tokens or to use your own words. |
-| **Resend a Relay notice after (minutes)** | How long an unread notice blocks a new one. | 10 | Lower it for fast work; raise it to type fewer notices. |
-| **Record a screen sample when I deliver a waiting message** | Keeps a scrubbed screen sample. | Off | Turn on only to help the plugin learn an agent's idle screen. |
+| **Notice typed into an agent** | Chooses the notice style. | Short | Change it to save tokens or to use your own words. |
+| **Resend a notice after** | How long an unread notice blocks a new one. | 10 | Lower it for fast work; raise it to type fewer notices. |
+| **Keep a screen sample when I deliver a message** | Keeps a scrubbed screen sample. | Off | Turn on only to help the plugin learn an agent's idle screen. |
 
 The **Terminal input safety rules** in **Settings, Configuration** decide when the plugin may type into a terminal. They apply to Relay notices, Continue and Reload. A block rule holds the input when the screen shows a question, a menu, a yes/no prompt, a pager or a settings overlay. An idle rule describes an agent's empty prompt. **Check screen now** tests a workspace.
 
@@ -290,6 +290,9 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-22** — The Agent Relay card has the same header as the other Settings tabs, with a status line and an (i) button. The intro text is behind the (i). Each check box is part of a label that is at least 44 px tall. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
+
+- **2026-10-22** — The Relay settings have new labels: **Notice typed into an agent** (with a **Show example** link), **Resend a notice after** and **Keep a screen sample when I deliver a message**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-18** — The unread view no longer drops messages past its limits, a deleted message stays deleted, and a linked-box sender shows by id only. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #664.
 - **2026-10-18** — A workspace that sent a request now sees in its unread messages when the request was answered or cancelled. The Relay removes read messages and closed requests that are older than 60 days. Unread messages stay twice as long. Spec `docs/specs/AGENT_RELAY_POC.md`, issues #630 and #634.
 - **2026-10-16** — The Contacts list hides closed workspaces after 3 days, shows one row for each name on each box, and drops linked-box contacts that their box no longer lists. Messages are not deleted. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #546.

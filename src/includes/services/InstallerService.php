@@ -248,7 +248,7 @@ class InstallerService {
                 // it half way (on .4 that failed the vendor's extraction and the
                 // settings saves too). Fail clearly; the version in use stays.
                 $reason = 'No space on the boot disk for the new version. The version in use is kept. '
-                    . 'Open Home Storage, Boot disk space, or set Agent storage to SquashFS layers. Then try again.';
+                    . 'Open Storage, Boot disk space, or set Agent storage to Compressed layers. Then try again.';
                 LogService::log("Install of $agentId not started: $reason", LogService::LOG_ERROR, "InstallerService");
                 setInstallStatus("Install failed", 0, $agentId, $reason);
                 return ['status' => 'error', 'message' => $reason];

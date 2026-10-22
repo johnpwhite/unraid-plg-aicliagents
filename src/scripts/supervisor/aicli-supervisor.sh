@@ -1863,7 +1863,7 @@ _bake_no_space_alert() {
     f="${MOUNT_ROOT}/.bake_no_space_${type}_${safe_id}"
     [ -f "$f" ] && read -r need free < "$f" 2>/dev/null
     _supervisor_notify "warning" "AICliAgents: not enough boot disk space to save the home" \
-        "Saving '$id' needs about ${need} MB of free space on the boot disk and only ${free} MB is free. Nothing was saved; your changes stay in RAM and are lost if the server restarts. Free some space (Home Storage, Boot disk space, shows what uses it), then save again." \
+        "Saving '$id' needs about ${need} MB of free space on the boot disk and only ${free} MB is free. Nothing was saved; your changes stay in RAM and are lost if the server restarts. Free some space (Storage, Boot disk space, shows what uses it), then save again." \
         "bake_no_space_${id}" 21600
     mkdir -p "$_NOTIFIED_DIR" 2>/dev/null || true
     if [ ! -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" ]; then
@@ -2500,7 +2500,7 @@ _op_graduate() {
                 "graduate_ok_${entity}" 3600
         elif [ "$closes_agent" -eq 1 ]; then
             _supervisor_notify "normal" "AICliAgents: Agent is now plain folders" \
-                "The agent $id is now plain folders. It starts faster and needs no merges. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days; you can remove them sooner in Home Storage, Boot disk space." \
+                "The agent $id is now plain folders. It starts faster and needs no merges. The old layers are kept for ${GRADUATED_RETENTION_DAYS} days; you can remove them sooner in Storage, Boot disk space." \
                 "graduate_ok_${entity}" 3600
         else
             _supervisor_notify "normal" "AICliAgents: Storage graduated" \

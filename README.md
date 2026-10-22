@@ -189,7 +189,7 @@ Two switches control voice, and both must be on before anyone hears
 anything:
 
 - **One global switch, for every device.** Click the speaker icon docked
-  next to Copy in the terminal drawer, or the "Voice (all devices)" toggle
+  next to Copy in the terminal drawer, or the "Voice" toggle
   in Settings — either one turns voice on or off everywhere at once. There
   is no separate per-device choice: turning the drawer icon on also unlocks
   sound in that tab (a browser only allows sound after a click), and every
@@ -212,12 +212,12 @@ engine answers, connects it, and plays a test sentence. The download is about
 while it runs. If Folder View 3 is installed, the container goes into an
 `aicliagents` folder. If you already run Kokoro-FastAPI, the button just
 connects it. You can also install it yourself and type its address as the
-Endpoint URL.
+Voice server address.
 
-**Settings.** Voice (all devices), Endpoint URL (empty means browser mode),
-Voice id, Speed, and an API key field (only needed if your engine requires one;
+**Settings.** Voice (on or off), Voice server address (empty means browser mode),
+Voice, Speed, and an API key field (only needed if your engine requires one;
 never shown back to you once set). When your engine can list its own voices
-(Kokoro-FastAPI can), the Voice id field becomes a dropdown filled from the
+(Kokoro-FastAPI can), the Voice field becomes a dropdown filled from the
 engine, with an "Other…" choice for a hand-typed id.
 
 **Hooks for your agent.** Wire the plugin's `speak` command into your

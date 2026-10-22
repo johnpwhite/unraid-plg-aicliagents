@@ -141,7 +141,7 @@ class TaskService {
             case 'no_space':
                 // #338: a bake or agent pack is not started when its result cannot fit.
                 // F14 (#599): say it is the boot disk, that nothing is saved yet, and what to do.
-                return 'Not saved: there is not enough free space on the boot disk (the storage device) for the new layer, so nothing was written. Your changes are still in RAM and are lost if the server restarts. Free some space (Home Storage, Boot disk space, shows what uses it), then save again.';
+                return 'Not saved: there is not enough free space on the boot disk (the storage device) for the new layer, so nothing was written. Your changes are still in RAM and are lost if the server restarts. Free some space (Storage, Boot disk space, shows what uses it), then save again.';
             case 'upper_not_empty':
                 // S-10 (#1354): graduate found unflushed writes after its flush+consolidate.
                 return 'Graduation deferred: new writes landed during the flush. The migration will retry automatically once the home is idle.';
@@ -175,7 +175,7 @@ class TaskService {
                 $what  = $first !== '' ? " (first: $first)" : '';
                 return "Refused: $where already has files$what. Move them away, then try again. Nothing was changed.";
             case 'keep_agents_compressed':
-                return 'Refused: Agent storage is set to SquashFS layers. Set it to Plain folders on the Configuration tab, then try again. Nothing was changed.';
+                return 'Refused: Agent storage is set to Compressed layers. Set it to Plain folders on the Configuration tab, then try again. Nothing was changed.';
             case 'no_layers_to_convert':
             case 'no_layers':
                 return 'Refused: this home has no saved layers to convert. Nothing was changed.';

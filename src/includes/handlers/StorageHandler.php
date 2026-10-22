@@ -1895,7 +1895,7 @@ class StorageHandler {
         if (empty($estimate['offered'])) {
             $why = [
                 'usb_boot' => 'Agents on a USB boot stick keep compressed layers.',
-                'keep_agents_compressed' => 'Agent storage is set to SquashFS layers. Set it to Plain folders on the Configuration tab to convert the agents.',
+                'keep_agents_compressed' => 'Agent storage is set to Compressed layers. Set it to Plain folders on the Configuration tab to convert the agents.',
                 'no_layered_agents' => 'No agent uses compressed layers.',
                 'not_boot_disk' => 'The agents are not on the boot disk.',
             ][(string)($estimate['reason'] ?? '')] ?? 'Agents cannot be converted now.';
@@ -1916,7 +1916,7 @@ class StorageHandler {
             $short = (int)substr($fits, strlen('no_room:'));
             return ['status' => 'error', 'reason' => 'no_room', 'shortfall_bytes' => $short,
                     'message' => 'There is not enough room. After the conversion at least 10% of the boot disk and 2 GB must stay free. About '
-                        . number_format($short / 1048576, 0) . ' MB are missing. Remove old versions or left-over files first (Home Storage, Boot disk space).'];
+                        . number_format($short / 1048576, 0) . ' MB are missing. Remove old versions or left-over files first (Storage, Boot disk space).'];
         }
         require_once __DIR__ . '/AgentHandler.php';
         $installBusy = $installBusy ?? [\AICliAgents\Handlers\AgentHandler::class, 'isInstallInProgress'];

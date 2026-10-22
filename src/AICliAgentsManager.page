@@ -33,6 +33,9 @@ if ($voice_ver === "0") { $voice_ver = $version; }
 // SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md: the (i) help script busts the cache on its own mtime too.
 $help_ver = (string) (@filemtime("/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui/settings-help.js") ?: 0);
 if ($help_ver === "0") { $help_ver = $version; }
+// Phase 3: the collapsible cards script busts the cache on its own mtime as well.
+$cards_ver = (string) (@filemtime("/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui/settings-cards.js") ?: 0);
+if ($cards_ver === "0") { $cards_ver = $version; }
 $var = @parse_ini_file("/var/local/emhttp/var.ini");
 $csrf_token = $var['csrf_token'] ?? '';
 $users = getUnraidUsers();
@@ -77,5 +80,7 @@ require_once "$ui_path/NchanSubscribers.php";
 <script src="/plugins/unraid-aicliagents/assets/ui/activity-tray.js?v=<?= htmlspecialchars($tray_ver) ?>"></script>
 <!-- SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md: the (i) help buttons of the settings rows -->
 <script src="/plugins/unraid-aicliagents/assets/ui/settings-help.js?v=<?= htmlspecialchars($help_ver) ?>"></script>
+<!-- SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md Phase 3: collapsible cards, Reset layout, the inline Saved tick -->
+<script src="/plugins/unraid-aicliagents/assets/ui/settings-cards.js?v=<?= htmlspecialchars($cards_ver) ?>"></script>
 <!-- AGENT_VOICE.md R4/R7/R8: agent voice — subscribes aicli_voice, owns the per-device toggle -->
 <script src="/plugins/unraid-aicliagents/assets/ui/voice.js?v=<?= htmlspecialchars($voice_ver) ?>"></script>
