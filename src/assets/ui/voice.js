@@ -92,6 +92,9 @@
     // to the engine is capped at 30 s (VOICE_INPUT.md R2); this is that bound
     // plus one round trip, so a wedged request ends like an engine failure.
     var TRANSCRIBE_TIMEOUT_MS = 45000;
+    // #754: the engine failed on the LAST piece (after Stop). The browser cannot read a recorded clip,
+    // so the same clip goes to the engine ONE more time after this short wait.
+    var LAST_PIECE_RETRY_WAIT_MS = 2000;
     // VOICE_SWITCHES.md: the confirmation sentence when voice is turned on. The
     // server picks the same fixed text for purpose=switch (VoiceHandler).
     var VOICE_CONFIRM_TEXT = 'Voice enabled.';
@@ -1145,8 +1148,19 @@
             if (isFinal) setInputState('transcribing', { seconds: inputSeconds });
             var reader = new FileReader();
             var sendMime = mimeType;
+            var retried = false;
+            var resend = null; // set by onloadend: sends the same clip once more
             var onDone = function (text, error, engineFailure) {
                 if (gen !== inputGeneration) { resolve(); return; }
+                if (isFinal && error && engineFailure && !retried && resend) {
+                    // #754: keep the clip and try the engine once more. Nothing was typed yet.
+                    retried = true;
+                    setTimeout(function () {
+                        if (gen !== inputGeneration) { resolve(); return; }
+                        resend();
+                    }, LAST_PIECE_RETRY_WAIT_MS);
+                    return;
+                }
                 if (isFinal) {
                     setInputState('idle', error ? { text: text || '', error: error } : { text: text || '' });
                 } else if (error) {
@@ -1172,6 +1186,7 @@
                     '&seconds=' + encodeURIComponent(String(pieceSeconds)) +
                     '&workspaceId=' + encodeURIComponent(inputOpts.workspaceId || '') +
                     '&csrf_token=' + encodeURIComponent(inputCsrf());
+                var sendOnce = function () {
                 var settled = false;
                 var timer = null;
                 var finish = function (text, error, engineFailure) {
@@ -1200,6 +1215,9 @@
                 }).catch(function () {
                     finish('', 'The transcription server did not answer.', true);
                 });
+                };
+                resend = sendOnce;
+                sendOnce();
             };
             reader.onerror = function () { onDone('', 'The transcription server did not answer.'); };
             toWavPiece(blob, mimeType).then(function (piece) {
