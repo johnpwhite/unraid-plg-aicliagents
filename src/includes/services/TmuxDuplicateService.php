@@ -23,12 +23,12 @@ namespace AICliAgents\Services;
 final class TmuxDuplicateService
 {
     /** Session name the plugin gives every agent tmux session. */
-    private const NAME_RE = '/^aicli-agent-([A-Za-z0-9_-]+)$/';
+    private const NAME_RE = '/^aicli-agent-([A-Za-z0-9_-]+)$/D';
     /** The run script the plugin starts in each session: aicli-run-<id>.sh */
     private const RUN_RE = '/aicli-run-([A-Za-z0-9_-]+)\.sh$/';
     /** The path that tmux binds when it runs with TMUX_TMPDIR or /tmp. */
     private const BOUND_RE = '#/tmux-\d+/default$#';
-    private const ID_RE = '/^[A-Za-z0-9_-]{1,64}$/';
+    private const ID_RE = '/^[A-Za-z0-9_-]{1,64}$/D';
     /** __SO_ACCEPTCON: the flag of a listening socket in /proc/net/unix. */
     private const SO_ACCEPTCON = 0x10000;
     private const MAX_LINES = 200;
@@ -207,7 +207,7 @@ final class TmuxDuplicateService
             foreach (@scandir("$proc/$e/fd") ?: [] as $fd) {
                 if (!ctype_digit((string)$fd)) continue;
                 $l = @readlink("$proc/$e/fd/$fd");
-                if (is_string($l) && preg_match('/^socket:\[(\d+)\]$/', $l, $m)) $sockets[] = (int)$m[1];
+                if (is_string($l) && preg_match('/^socket:\[(\d+)\]$/D', $l, $m)) $sockets[] = (int)$m[1];
             }
             if ($btime === null) $btime = self::bootTime();
             $parsed['sockets'] = $sockets;
@@ -407,12 +407,12 @@ final class TmuxDuplicateService
         for ($i = 0; $i < count($args); $i++) {
             $a = $args[$i];
             foreach (['--resume', '--session-id', '--session'] as $flag) {
-                if ($a === $flag && isset($args[$i + 1]) && preg_match('/^[A-Za-z0-9._:-]{4,128}$/', $args[$i + 1])) {
+                if ($a === $flag && isset($args[$i + 1]) && preg_match('/^[A-Za-z0-9._:-]{4,128}$/D', $args[$i + 1])) {
                     return $args[$i + 1];
                 }
                 if (strncmp($a, $flag . '=', strlen($flag) + 1) === 0) {
                     $v = substr($a, strlen($flag) + 1);
-                    if (preg_match('/^[A-Za-z0-9._:-]{4,128}$/', $v)) return $v;
+                    if (preg_match('/^[A-Za-z0-9._:-]{4,128}$/D', $v)) return $v;
                 }
             }
         }
@@ -508,7 +508,7 @@ final class TmuxDuplicateService
         foreach (@scandir("$proc/$pid/fd") ?: [] as $fd) {
             if (!ctype_digit((string)$fd)) continue;
             $l = @readlink("$proc/$pid/fd/$fd");
-            if (is_string($l) && preg_match('/^socket:\[(\d+)\]$/', $l, $m) && ($vfs[(int)$m[1]] ?? -1) === $ino) return true;
+            if (is_string($l) && preg_match('/^socket:\[(\d+)\]$/D', $l, $m) && ($vfs[(int)$m[1]] ?? -1) === $ino) return true;
         }
         return false;
     }

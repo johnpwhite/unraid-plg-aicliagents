@@ -40,7 +40,7 @@ class VersionClassifier
         if ($agentId === 'opencode') {
             foreach ($tags as $tag) {
                 $t = (string)$tag;
-                if (strpos($t, 'snapshot-') === 0 || $t === 'ci' || preg_match('/^latest-\d+$/', $t)) {
+                if (strpos($t, 'snapshot-') === 0 || $t === 'ci' || preg_match('/^latest-\d+$/D', $t)) {
                     return 'platform_variant';
                 }
             }
@@ -63,7 +63,7 @@ class VersionClassifier
 
     private static function isPlatformTag(string $tag): bool
     {
-        return (bool)preg_match('/^(linux|darwin|win32|win64)(-|$)|-(x64|arm64|x86|x86_64)$/i', $tag);
+        return (bool)preg_match('/^(linux|darwin|win32|win64)(-|$)|-(x64|arm64|x86|x86_64)$/iD', $tag);
     }
 
     /**

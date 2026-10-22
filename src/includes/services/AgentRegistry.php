@@ -379,7 +379,7 @@ class AgentRegistry {
             $idQuoted = preg_quote($id, '/');
             $kindAlt  = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';
             foreach ($allSqshBasenames as $basename) {
-                if (preg_match("/^agent_{$idQuoted}_{$kindAlt}\.sqsh$/", $basename)) {
+                if (preg_match("/^agent_{$idQuoted}_{$kindAlt}\.sqsh$/D", $basename)) {
                     $sqshExists = true;
                     break;
                 }
@@ -1539,7 +1539,7 @@ class AgentRegistry {
             $sqshExists = false;
             $idQuoted = preg_quote($id, '/');
             foreach ($allSqshBasenames as $bn) {
-                if (preg_match("/^agent_{$idQuoted}_{$kindAlt}\.sqsh$/", $bn)) {
+                if (preg_match("/^agent_{$idQuoted}_{$kindAlt}\.sqsh$/D", $bn)) {
                     $sqshExists = true;
                     break;
                 }

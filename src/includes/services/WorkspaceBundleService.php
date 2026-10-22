@@ -262,7 +262,7 @@ class WorkspaceBundleService
     {
         $raw = (string)$raw;
         if ($raw === '' || basename($raw) !== $raw) return null;
-        if (!preg_match('/^aicli-workspace-[A-Za-z0-9._-]+-[0-9]+\.tar\.gz$/', $raw)) return null;
+        if (!preg_match('/^aicli-workspace-[A-Za-z0-9._-]+-[0-9]+\.tar\.gz$/D', $raw)) return null;
         if (strpos($raw, '..') !== false) return null;
         return $raw;
     }
@@ -474,7 +474,7 @@ class WorkspaceBundleService
                 if (is_array($parsed) && !empty($parsed)) {
                     $clean = [];
                     foreach ($parsed as $k => $v) {
-                        if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) {
+                        if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', (string)$k)) {
                             $clean[$k] = (string)$v;
                         }
                     }

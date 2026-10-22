@@ -91,7 +91,7 @@ class NotebookSecretGuard {
         $hasDigit = (bool)preg_match('/\d/', $v);
         $hasLower = (bool)preg_match('/[a-z]/', $v);
         $hasUpper = (bool)preg_match('/[A-Z]/', $v);
-        $isHex = (bool)preg_match('/^[0-9a-fA-F]{16,}$/', $v);
+        $isHex = (bool)preg_match('/^[0-9a-fA-F]{16,}$/D', $v);
         if ($isHex) return true;
         return $hasDigit && ($hasLower || $hasUpper) && ((int)$hasLower + (int)$hasUpper + (int)$hasDigit) >= 2;
     }

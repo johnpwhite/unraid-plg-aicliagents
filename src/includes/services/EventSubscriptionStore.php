@@ -89,7 +89,7 @@ final class EventSubscriptionStore {
         if ($sessionId === '') return ['ok' => false, 'error' => 'No session id.'];
 
         foreach ($kinds as $kind) {
-            if (!is_string($kind) || $kind === '' || !preg_match('/^[A-Za-z0-9_.*]+$/', $kind)) {
+            if (!is_string($kind) || $kind === '' || !preg_match('/^[A-Za-z0-9_.*]+$/D', $kind)) {
                 $label = is_string($kind) ? $kind : gettype($kind);
                 return ['ok' => false, 'error' => "Invalid event kind pattern '$label'. Use letters, digits, '.', '_' and '*' only, e.g. 'workspace.*'."];
             }

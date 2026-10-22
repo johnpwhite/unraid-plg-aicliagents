@@ -650,7 +650,7 @@ class ConfigService {
         $fields = preg_split('/\s+/', $schedule);
         if (!is_array($fields) || count($fields) !== 5) return '';
         foreach ($fields as $field) {
-            if (!preg_match('#^[0-9*/,\-]+$#', $field)) return '';
+            if (!preg_match('#^[0-9*/,\-]+$#D', $field)) return '';
         }
         return $schedule;
     }
@@ -1641,7 +1641,7 @@ class ConfigService {
         if (!is_file($script)) return '';
         if (!preg_match('/^export AICLI_CHAT_SESSION_ID=(\S*)$/m', (string)@file_get_contents($script), $m)) return '';
         $chat = trim($m[1], "'\"");
-        return ($chat !== '_fresh_' && preg_match('/^[A-Za-z0-9_-]{1,128}$/', $chat)) ? $chat : '';
+        return ($chat !== '_fresh_' && preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $chat)) ? $chat : '';
     }
 
     /**

@@ -73,9 +73,9 @@ class McpConnectionTester {
         // Both values come from the remote server, so they go only into later request
         // headers after a strict shape check, and never back to the UI.
         $follow = $headers;
-        if ($init['session'] !== '' && preg_match('/^[\x21-\x7E]{1,256}$/', $init['session'])) $follow['Mcp-Session-Id'] = $init['session'];
+        if ($init['session'] !== '' && preg_match('/^[\x21-\x7E]{1,256}$/D', $init['session'])) $follow['Mcp-Session-Id'] = $init['session'];
         $ver = (string)($res['protocolVersion'] ?? '');
-        $follow['MCP-Protocol-Version'] = preg_match('/^\d{4}-\d{2}-\d{2}$/', $ver) ? $ver : self::PROTOCOL_VERSION;
+        $follow['MCP-Protocol-Version'] = preg_match('/^\d{4}-\d{2}-\d{2}$/D', $ver) ? $ver : self::PROTOCOL_VERSION;
         self::post($url, $follow, ['jsonrpc' => '2.0', 'method' => 'notifications/initialized'], null);
         $list = self::post($url, $follow, ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list'], 2);
         if ($list['error'] === null && isset($list['message']['result']['tools']) && is_array($list['message']['result']['tools'])) {

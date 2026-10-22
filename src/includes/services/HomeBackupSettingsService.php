@@ -259,7 +259,7 @@ class HomeBackupSettingsService {
         switch ($key) {
             case 'target':
                 if ($raw === '') return ['ok' => true, 'value' => ''];
-                if (!preg_match('#^/\S+$#', $raw)) {
+                if (!preg_match('#^/\S+$#D', $raw)) {
                     return ['ok' => false, 'message' => 'The backup folder must be an absolute path with no spaces.'];
                 }
                 $check = self::resolveTarget($raw);
@@ -273,17 +273,17 @@ class HomeBackupSettingsService {
                     ? ['ok' => true, 'value' => $raw]
                     : ['ok' => false, 'message' => "Mode must be 'cold' or 'warm'."];
             case 'keep':
-                if (!preg_match('/^\d+$/', $raw) || (int)$raw < 1 || (int)$raw > 50) {
+                if (!preg_match('/^\d+$/D', $raw) || (int)$raw < 1 || (int)$raw > 50) {
                     return ['ok' => false, 'message' => 'Keep must be a whole number from 1 to 50.'];
                 }
                 return ['ok' => true, 'value' => (int)$raw];
             case 'schedule':
-                return preg_match('#^(off|daily:([01]\d|2[0-3]):([0-5]\d)|weekly:[0-6]:([01]\d|2[0-3]):([0-5]\d))$#', $raw)
+                return preg_match('#^(off|daily:([01]\d|2[0-3]):([0-5]\d)|weekly:[0-6]:([01]\d|2[0-3]):([0-5]\d))$#D', $raw)
                     ? ['ok' => true, 'value' => $raw]
                     : ['ok' => false, 'message' => "Schedule must be 'off', 'daily:HH:MM' or 'weekly:D:HH:MM'."];
             case 'excludes':
                 $norm = str_replace(["\r\n", "\r"], "\n", (string)$value);
-                if (!preg_match("#^[A-Za-z0-9_./*\n -]*$#", $norm)) {
+                if (!preg_match("#^[A-Za-z0-9_./*\n -]*$#D", $norm)) {
                     return ['ok' => false, 'message' => 'Excluded patterns may use only letters, digits, . / * - _ and spaces, one per line.'];
                 }
                 $lines = array_values(array_filter(array_map('trim', explode("\n", $norm)), static fn($l) => $l !== ''));
@@ -340,7 +340,7 @@ class HomeBackupSettingsService {
         // seed from the old global key was validated by aicli_set_setting); a
         // run-time pre-flight in backupHome() re-checks it anyway.
         $t = trim((string)($in['target'] ?? ''));
-        if ($t === '' || preg_match('#^/\S+$#', $t)) $out['target'] = rtrim($t, '/') === '' ? $t : rtrim($t, '/');
+        if ($t === '' || preg_match('#^/\S+$#D', $t)) $out['target'] = rtrim($t, '/') === '' ? $t : rtrim($t, '/');
         foreach (['quiesce', 'keep', 'schedule', 'excludes', 'nudge_working'] as $k) {
             if (!array_key_exists($k, $in)) continue;
             $v = self::validate($k, $in[$k]);

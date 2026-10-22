@@ -105,7 +105,7 @@ class AgentSettingsSeedService {
 
         foreach ($values as $path => $value) {
             $path = (string)$path;
-            if ($path === '' || !preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/', $path)) {
+            if ($path === '' || !preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/D', $path)) {
                 $skipped[] = [$path, 'invalid key'];
                 continue;
             }

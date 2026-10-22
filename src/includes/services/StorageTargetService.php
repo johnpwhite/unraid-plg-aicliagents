@@ -82,7 +82,7 @@ class StorageTargetService {
         }
         // 5. Array direct disks — advanced only (bypasses FUSE, pins one spindle).
         foreach (self::subdirs($mnt) as $d) {
-            if (!preg_match('/^disk\d+$/', basename($d))) continue;
+            if (!preg_match('/^disk\d+$/D', basename($d))) continue;
             if (!self::mounted($d)) continue;
             $cands[] = self::candidate("$d/aicliagents", 'Array disk: ' . basename($d), 'array_disk', $kind, $config, $current, true);
         }
@@ -228,7 +228,7 @@ class StorageTargetService {
         // Resolve an exclusive /mnt/user share path onto its pool/disk path —
         // never rsync a home across the FUSE share.
         $resolved = $path;
-        if (preg_match('#^/mnt/user0?(/.*)?$#', $path)) {
+        if (preg_match('#^/mnt/user0?(/.*)?$#D', $path)) {
             $verdict = self::validateTarget('home', $path, $config);
             if (!empty($verdict['resolved_path'])) {
                 $resolved = (string)$verdict['resolved_path'];
@@ -468,7 +468,7 @@ class StorageTargetService {
         $cfg = self::shareCacheConfig($share);
         if ($cfg === null || $cfg['useCache'] !== 'only') return null;
         $pool = $cfg['cachePool'] !== '' ? $cfg['cachePool'] : 'cache';
-        if (!preg_match('/^[A-Za-z0-9_.-]+$/', $pool)) return null;
+        if (!preg_match('/^[A-Za-z0-9_.-]+$/D', $pool)) return null;
         $target = "$mnt/$pool/$share";
         if (!is_dir($target)) return null;
         $resolved = $target . $rest;

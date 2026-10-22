@@ -263,7 +263,7 @@ class StoragePathResolver {
         // UD device (/mnt/disks/<label>/<sub>, /mnt/addons/<label>/<sub>) is a valid
         // persist target. The device mount point itself and the bare roots are not —
         // only a sub-path under the device is useful as a target root.
-        if (preg_match('#^/mnt/(disks|addons)(/[^/]+)?$#', $path)) {
+        if (preg_match('#^/mnt/(disks|addons)(/[^/]+)?$#D', $path)) {
             return ['ok' => false, 'reason' => 'Path must include a sub-directory under the Unassigned Device mount (e.g. /mnt/addons/my-ssd/aicliagents)'];
         }
 
@@ -274,7 +274,7 @@ class StoragePathResolver {
         }
 
         // /mnt/<pool> without a sub-path — reject (too close to array root)
-        if (preg_match('#^/mnt/[^/]+$#', $path)) {
+        if (preg_match('#^/mnt/[^/]+$#D', $path)) {
             return ['ok' => false, 'reason' => 'Path must include a sub-directory under the pool (e.g. /mnt/cache/aicliagents)'];
         }
 

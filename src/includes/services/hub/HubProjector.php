@@ -1443,7 +1443,7 @@ class HubProjector {
         foreach ($vault as $name => $secret) {
             $value = str_replace($secret, '{' . $name . '}', $value);
         }
-        if ($secretMap && !preg_match('/^(?:Bearer |Basic )?\{[A-Z][A-Z0-9_]{1,127}\}$/', $value)) {
+        if ($secretMap && !preg_match('/^(?:Bearer |Basic )?\{[A-Z][A-Z0-9_]{1,127}\}$/D', $value)) {
             return '[masked:' . substr(hash('sha256', $value), 0, 8) . ']';
         }
         // A secret in a URL query part.
@@ -1500,7 +1500,7 @@ class HubProjector {
         if ($pairs === null) {
             $pairs = [];
             foreach (SecretService::getAgentSecrets() as $k => $v) {
-                if (strlen((string)$v) >= 6 && preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) $pairs[(string)$k] = (string)$v;
+                if (strlen((string)$v) >= 6 && preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', (string)$k)) $pairs[(string)$k] = (string)$v;
             }
             uasort($pairs, static fn($a, $b) => strlen($b) <=> strlen($a));
         }

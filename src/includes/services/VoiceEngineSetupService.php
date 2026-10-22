@@ -196,7 +196,7 @@ class VoiceEngineSetupService
      */
     public static function lastLogLine(string $containerId): string
     {
-        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $containerId)) return '';
+        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $containerId)) return '';
         $raw = self::dockerRawBody('/containers/' . $containerId . '/logs?stdout=1&stderr=1&tail=5');
         if ($raw === null || $raw === '') return '';
         $text = '';
@@ -230,7 +230,7 @@ class VoiceEngineSetupService
      */
     public static function stoppedState(string $containerId): array
     {
-        $info = preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $containerId) ? self::docker('/containers/' . $containerId . '/json') : null;
+        $info = preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $containerId) ? self::docker('/containers/' . $containerId . '/json') : null;
         $st = is_array($info) ? (array)($info['State'] ?? []) : [];
         $exit = (int)($st['ExitCode'] ?? 0);
         $err = trim((string)($st['Error'] ?? ''));
@@ -279,7 +279,7 @@ class VoiceEngineSetupService
      */
     public static function engineUrlFor(string $containerId, string $engine = 'tts'): ?string
     {
-        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $containerId)) return null;
+        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $containerId)) return null;
         $info = self::docker('/containers/' . $containerId . '/json');
         if (!is_array($info)) return null;
         $cport = self::profile($engine)['port'];
@@ -761,7 +761,7 @@ class VoiceEngineSetupService
             $ids = [];
             foreach ((array)($data['data'] ?? []) as $m) {
                 $id = is_array($m) ? (string)($m['id'] ?? '') : (string)$m;
-                if ($id !== '' && preg_match('#^[\w.\-/]{1,64}$#', $id)) $ids[] = $id;
+                if ($id !== '' && preg_match('#^[\w.\-/]{1,64}$#D', $id)) $ids[] = $id;
             }
             return $ids;
         }
@@ -771,7 +771,7 @@ class VoiceEngineSetupService
         $ids = [];
         foreach ((array)($data['voices'] ?? []) as $v) {
             $id = is_array($v) ? (string)($v['id'] ?? $v['name'] ?? '') : (string)$v;
-            if ($id !== '' && preg_match('/^[a-z][a-z0-9_]{0,63}$/', $id)) $ids[] = $id;
+            if ($id !== '' && preg_match('/^[a-z][a-z0-9_]{0,63}$/D', $id)) $ids[] = $id;
         }
         return $ids;
     }

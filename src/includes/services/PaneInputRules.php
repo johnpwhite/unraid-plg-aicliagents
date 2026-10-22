@@ -160,7 +160,7 @@ class PaneInputRules {
     public static function patternError($re): ?string {
         if (!is_string($re) || $re === '') return 'pattern must be a non-empty string';
         if (strlen($re) > self::MAX_PATTERN_LEN) return 'pattern longer than ' . self::MAX_PATTERN_LEN . ' bytes';
-        if (!preg_match('#^/.*/[imsuxU]*$#s', $re)) return 'pattern must be written as /body/flags (allowed flags: i m s u x U)';
+        if (!preg_match('#^/.*/[imsuxU]*$#sD', $re)) return 'pattern must be written as /body/flags (allowed flags: i m s u x U)';
         // Nested quantifiers ((a+)+, (\w*)*, (x+){2,}) are the classic catastrophic
         // backtracking shape; refuse them outright rather than rely on the limit.
         if (preg_match('/\([^()]*[+*}]\)\s*[+*{]/', $re)) return 'nested quantifier (catastrophic backtracking risk)';
@@ -254,13 +254,13 @@ class PaneInputRules {
             $out = ['add' => [], 'disable' => []];
             if (!is_array($sec)) return $out;
             foreach ((array)($sec['disable'] ?? []) as $id) {
-                if (is_string($id) && preg_match('/^[a-z0-9][a-z0-9_-]{0,47}$/', $id)) $out['disable'][] = $id;
+                if (is_string($id) && preg_match('/^[a-z0-9][a-z0-9_-]{0,47}$/D', $id)) $out['disable'][] = $id;
                 else $errors[] = "$where: ignored invalid disable id";
             }
             foreach ((array)($sec['add'] ?? []) as $i => $p) {
                 $id = is_array($p) ? (string)($p['id'] ?? '') : '';
                 $re = is_array($p) ? ($p['re'] ?? null) : null;
-                if ($id === '' || !preg_match('/^[a-z0-9][a-z0-9_-]{0,47}$/', $id)) $id = 'user-' . substr(md5((string)json_encode($p)), 0, 8);
+                if ($id === '' || !preg_match('/^[a-z0-9][a-z0-9_-]{0,47}$/D', $id)) $id = 'user-' . substr(md5((string)json_encode($p)), 0, 8);
                 if (++$count > self::MAX_USER_PATTERNS) { $errors[] = "$where: too many user patterns (max " . self::MAX_USER_PATTERNS . ")"; break; }
                 $err = self::patternError($re);
                 // R-114: a user pattern that backtracks without end on a long line is refused here,
@@ -273,7 +273,7 @@ class PaneInputRules {
         };
         $clean['block'] = $section($layer['block'] ?? [], 'block');
         foreach ((array)($layer['idle'] ?? []) as $agentId => $sec) {
-            if (!is_string($agentId) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) { $errors[] = 'idle: ignored invalid agent id'; continue; }
+            if (!is_string($agentId) || !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) { $errors[] = 'idle: ignored invalid agent id'; continue; }
             $clean['idle'][$agentId] = $section($sec, "idle/$agentId");
         }
         return ['clean' => $clean, 'errors' => $errors];

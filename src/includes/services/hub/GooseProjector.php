@@ -66,7 +66,7 @@ class GooseProjector extends VendorProjector {
         // Names in our block are its keys at the first indent level.
         $mine = [];
         foreach (preg_split('/\R/', $value) ?: [] as $line) {
-            if (preg_match('/^  (?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_.-]+)):[ \t]*$/', $line, $k)) {
+            if (preg_match('/^  (?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_.-]+)):[ \t]*$/D', $line, $k)) {
                 $k = array_pad($k, 4, '');
                 $mine[] = $k[1] !== '' ? $k[1] : ($k[2] !== '' ? $k[2] : $k[3]);
             }

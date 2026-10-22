@@ -313,7 +313,7 @@ final class FileStorage
         if ($persistPath !== '' && is_file($script)) {
             // nosemgrep: php.lang.security.exec-use.exec-use
             // #456: the type ('home') lets the person's storage_upper_mode apply to homes only.
-            $typeArg = preg_match('/^(home|agent)$/', $type) === 1 ? ' ' . $type : '';
+            $typeArg = preg_match('/^(home|agent)$/D', $type) === 1 ? ' ' . $type : '';
             $out = trim((string) @shell_exec('bash ' . escapeshellarg($script) . ' --upper-mode ' . escapeshellarg($persistPath) . $typeArg . ' 2>/dev/null'));
             if ($out === 'zram' || $out === 'disk') { $mode = $out; }
         }
@@ -993,7 +993,7 @@ final class FileStorage
      */
     public static function deleteHomeEntity(string $id): array
     {
-        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/', $id)) {
+        if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $id)) {
             return ['ok' => false, 'reason' => 'invalid_id', 'message' => 'Invalid home id'];
         }
 

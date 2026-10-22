@@ -18,7 +18,7 @@ class PerfTrace {
     public static function file(): string { return SecretPaths::stateRoot() . '/perf.log'; }
     /** Rotate perf.log to perf.log.1 above this size (tmpfs: bounded RAM). */
     public const MAX_BYTES = 1048576;
-    public const STAGE_PATTERN = '/^[a-z0-9][a-z0-9._-]{0,47}$/';
+    public const STAGE_PATTERN = '/^[a-z0-9][a-z0-9._-]{0,47}$/D';
     public const DETAIL_MAX = 200;
 
     /** @var callable|null  Test hook: receives the finished line (no newline). */

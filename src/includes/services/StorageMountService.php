@@ -484,7 +484,7 @@ class StorageMountService {
      * null when the agent is not a versioned plain directory.
      */
     public static function passthroughStableGeneration(string $agentId, ?string $persistPath = null): ?string {
-        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/', $agentId)) return null;
+        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/D', $agentId)) return null;
         $persistPath = $persistPath ?? StoragePathResolver::agentPersistPath();
         $stable = rtrim($persistPath, '/') . "/passthrough/agents/$agentId";
         if (!is_link($stable)) return null;
@@ -1157,7 +1157,7 @@ class StorageMountService {
         $data = json_decode(trim($json), true);
         if (!is_array($data)) return '';
         $r = $data['defer_reason'] ?? '';
-        return (is_string($r) && preg_match('/^[a-z_]{1,40}$/', $r)) ? $r : '';
+        return (is_string($r) && preg_match('/^[a-z_]{1,40}$/D', $r)) ? $r : '';
     }
 
     /**

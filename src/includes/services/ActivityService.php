@@ -86,7 +86,7 @@ class ActivityService {
     /** opId is used as a filename — restrict to a safe charset. Returns null when invalid. */
     private static function safeOpId($opId): ?string {
         $opId = (string)$opId;
-        return preg_match('/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/', $opId) ? $opId : null;
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/D', $opId) ? $opId : null;
     }
 
     private static function pathFor(string $opId): string {
@@ -182,7 +182,7 @@ class ActivityService {
         $key = strtolower($step);
         if (in_array($key, ['done', 'completed'], true)) return '';
         if (isset($map[$key])) return $map[$key];
-        if (preg_match('/^[a-z0-9]+(_[a-z0-9]+)+$/', $step)) return ucfirst(str_replace('_', ' ', $step));
+        if (preg_match('/^[a-z0-9]+(_[a-z0-9]+)+$/D', $step)) return ucfirst(str_replace('_', ' ', $step));
         return $step;
     }
 
@@ -606,7 +606,7 @@ class ActivityService {
 
         // F12 (#619): a queued upgrade that is cancelled never touched the binary. The sessions that
         // were closed for it come back, and the closed-set file stops acting as an install barrier.
-        if ($waiting && $pgid > 1 && preg_match('/^install_([A-Za-z0-9._-]+)$/', $opId, $m) === 1
+        if ($waiting && $pgid > 1 && preg_match('/^install_([A-Za-z0-9._-]+)$/D', $opId, $m) === 1
             && class_exists(UpgradeRelaunchService::class)) {
             try { UpgradeRelaunchService::reopenAfterFailedInstall($m[1]); } catch (\Throwable $e) { /* the row is cancelled either way */ }
         }

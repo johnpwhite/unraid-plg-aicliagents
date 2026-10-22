@@ -67,7 +67,7 @@ class AgentTempService
     /** The warning limit in MB: a whole number from 64 to 1048576; default 1024. */
     public static function normaliseWarnMb($value): string
     {
-        if (!is_scalar($value) || preg_match('/^\d{1,8}$/', trim((string)$value)) !== 1) return '1024';
+        if (!is_scalar($value) || preg_match('/^\d{1,8}$/D', trim((string)$value)) !== 1) return '1024';
         return (string)max(64, min(1048576, (int)trim((string)$value)));
     }
 

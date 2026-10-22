@@ -19,7 +19,7 @@ namespace AICliAgents\Services;
 
 class HomeBackupSnapshotService {
     /** A snapshot directory name: the UTC time the backup started. */
-    public const NAME_RE = '/^\d{8}T\d{6}Z$/';
+    public const NAME_RE = '/^\d{8}T\d{6}Z$/D';
 
     /**
      * Delete one snapshot.

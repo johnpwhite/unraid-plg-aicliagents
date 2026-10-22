@@ -14,7 +14,7 @@ require_once __DIR__ . '/../../includes/services/HistoryMoveService.php';
 require_once __DIR__ . '/../../includes/services/HistoryJobService.php';
 
 $jobId = (string)($argv[1] ?? '');
-if ($jobId === '' || preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/', $jobId) !== 1) {
+if ($jobId === '' || preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/D', $jobId) !== 1) {
     fwrite(STDERR, "usage: history-move.php <jobId>\n");
     exit(2);
 }

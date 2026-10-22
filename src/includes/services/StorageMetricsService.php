@@ -315,8 +315,8 @@ class StorageMetricsService {
         $n = count($fields);
         if ($n < 5) return $zero;
         [$size, $used, $avail, $pct] = [$fields[$n - 5], $fields[$n - 4], $fields[$n - 3], $fields[$n - 2]];
-        if (preg_match('/^\d+$/', $size) !== 1 || preg_match('/^\d+$/', $used) !== 1
-            || preg_match('/^\d+$/', $avail) !== 1 || preg_match('/^\d+%$/', $pct) !== 1) {
+        if (preg_match('/^\d+$/D', $size) !== 1 || preg_match('/^\d+$/D', $used) !== 1
+            || preg_match('/^\d+$/D', $avail) !== 1 || preg_match('/^\d+%$/D', $pct) !== 1) {
             return $zero;
         }
         return ['total_mb' => (int)$size, 'used_mb' => (int)$used];
@@ -497,7 +497,7 @@ class StorageMetricsService {
     public static function agentIdFromLayerFilename(string $filename): ?string
     {
         $agentKindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_(?:\d+_)?\d{8}T\d{6}Z|consolidated_(?:\d+_)?\d{8}T\d{6}Z)';
-        if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/", basename($filename), $match) !== 1) {
+        if (preg_match("/^agent_(.*?)_{$agentKindAlt}\.sqsh\$/D", basename($filename), $match) !== 1) {
             return null;
         }
         return $match[1];
@@ -546,7 +546,7 @@ class StorageMetricsService {
             $days = (int)$seams['retention_days'];
         } else {
             $raw = trim((string)(ConfigService::getConfig()['graduated_retention_days'] ?? '14'));
-            $days = preg_match('/^\d+$/', $raw) === 1 ? (int)$raw : 14;   // the supervisor also falls back to 14
+            $days = preg_match('/^\d+$/D', $raw) === 1 ? (int)$raw : 14;   // the supervisor also falls back to 14
         }
         try {
             return BootSpaceService::graduatedCopyForHome($persist, $user, $days, $seams);

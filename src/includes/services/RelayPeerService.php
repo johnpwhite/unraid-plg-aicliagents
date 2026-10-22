@@ -109,7 +109,7 @@ class RelayPeerService {
 
     /** A contact id for a workspace on a linked box: peer_<12 hex>__<remote session id>. */
     public static function isPeerContactId(string $id): bool {
-        return (bool)preg_match('/^peer_[a-f0-9]{12}__[A-Za-z0-9_-]{1,109}$/', $id);
+        return (bool)preg_match('/^peer_[a-f0-9]{12}__[A-Za-z0-9_-]{1,109}$/D', $id);
     }
 
     /** @return array{0:string,1:string} [peer row id, remote session id] */
@@ -240,7 +240,7 @@ class RelayPeerService {
 
     /** A local id that may be offered to a peer: a plain saved workspace id that fits a contact id. */
     private static function exportable(string $sid): bool {
-        if (!preg_match('/^[A-Za-z0-9_-]{1,109}$/', $sid)) return false;
+        if (!preg_match('/^[A-Za-z0-9_-]{1,109}$/D', $sid)) return false;
         if (strpos($sid, 'peer_') === 0 || strpos($sid, 'remote_') === 0) return false;
         return AgentRelayService::remoteName($sid) === '';
     }
@@ -296,8 +296,8 @@ class RelayPeerService {
         $joinBox = (string)($req['box_id'] ?? ''); $joinSpki = (string)($req['spki'] ?? ''); $joinUrl = (string)($req['url'] ?? '');
         $ts = (string)($req['ts'] ?? ''); $nonce = (string)($req['nonce'] ?? '');
         $proof = (string)($req['proof'] ?? '');
-        $valid = preg_match('/^[a-f0-9]{16}$/', $joinBox) && RelayPeerCrypto::validSpki($joinSpki) && RelayPeerClient::validBaseUrl($joinUrl)
-            && preg_match('/^[a-f0-9]{16}$/', $nonce) && RelayPeerCrypto::clockSkew($ts, self::now()) === 0;
+        $valid = preg_match('/^[a-f0-9]{16}$/D', $joinBox) && RelayPeerCrypto::validSpki($joinSpki) && RelayPeerClient::validBaseUrl($joinUrl)
+            && preg_match('/^[a-f0-9]{16}$/D', $nonce) && RelayPeerCrypto::clockSkew($ts, self::now()) === 0;
         $expected = $valid ? RelayPeerCrypto::pairRequestProof($secret, $d['box_id'], $joinBox, $joinSpki, $joinUrl, $ts, $nonce) : '';
         if (!$valid || !hash_equals($expected, $proof)) {
             $p['failures'] = (int)($p['failures'] ?? 0) + 1;
@@ -378,7 +378,7 @@ class RelayPeerService {
         // Check the format BEFORE unwrapping: wrapKey() refuses anything that is
         // not a 32-byte hex key, and a malformed answer must fail as "no proof".
         $keyEnc = (string)($data['key_enc'] ?? '');
-        $key = preg_match('/^[a-f0-9]{64}$/', $keyEnc) ? RelayPeerCrypto::wrapKey($keyEnc, $c['secret'], 'pair', $nonce) : '';
+        $key = preg_match('/^[a-f0-9]{64}$/D', $keyEnc) ? RelayPeerCrypto::wrapKey($keyEnc, $c['secret'], 'pair', $nonce) : '';
         $proofOk = $key !== ''
             && ($data['box_id'] ?? '') === $c['box_id']
             && hash_equals(RelayPeerCrypto::pairResponseProof($c['secret'], $c['box_id'], $self, $nonce, $key), (string)($data['proof'] ?? ''));
@@ -442,12 +442,12 @@ class RelayPeerService {
         $ts = (string)($headers['x-aicli-ts'] ?? '');
         $nonce = (string)($headers['x-aicli-nonce'] ?? '');
         $sig = (string)($headers['x-aicli-sig'] ?? '');
-        $row = preg_match('/^[a-f0-9]{16}$/', $box) ? RelayPeerStore::findByBox($box) : null;
+        $row = preg_match('/^[a-f0-9]{16}$/D', $box) ? RelayPeerStore::findByBox($box) : null;
         if ($row === null || in_array($row['state'], ['unlinked', 'unlinked_by_peer'], true)) return self::fail($ip, 401, 'unknown_peer');
         $key = RelayPeerStore::linkKey($row['id']);
         if ($key === '') return self::fail($ip, 401, 'unknown_peer');
         $self = RelayPeerStore::boxId();
-        if (!preg_match('/^[a-f0-9]{16}$/', $nonce) || !preg_match('/^[a-f0-9]{64}$/', $sig)) return self::fail($ip, 401, 'bad_signature');
+        if (!preg_match('/^[a-f0-9]{16}$/D', $nonce) || !preg_match('/^[a-f0-9]{64}$/D', $sig)) return self::fail($ip, 401, 'bad_signature');
         $verifyKey = '';
         foreach ([$key, $row['old_key_until'] > self::now() ? RelayPeerStore::oldLinkKey($row['id']) : ''] as $k) {
             if ($k !== '' && hash_equals(RelayPeerCrypto::signRequest($k, $box, $self, $method, $path, $ts, $nonce, $body), $sig)) { $verifyKey = $k; break; }
@@ -504,7 +504,7 @@ class RelayPeerService {
 
     private static function handleRekey(array $row, array $req, string $verifyKey, string $nonce): array {
         $enc = (string)($req['key_enc'] ?? '');
-        if (!preg_match('/^[a-f0-9]{64}$/', $enc)) return [400, ['error' => 'bad_key']];
+        if (!preg_match('/^[a-f0-9]{64}$/D', $enc)) return [400, ['error' => 'bad_key']];
         $new = RelayPeerCrypto::wrapKey($enc, $verifyKey, 'rekey', $nonce);
         if (!RelayPeerStore::setLinkKey($row['id'], $new, true)) return [500, ['error' => 'could_not_save']];
         RelayPeerStore::update($row['id'], ['old_key_until' => self::now() + self::REKEY_GRACE]);
@@ -534,7 +534,7 @@ class RelayPeerService {
     public static function acceptDirect(array $row, array $env, ?array $exported = null): array {
         $id = (string)($env['id'] ?? '');
         $out = static fn(string $state, string $reason = '', array $extra = []): array => ['id' => $id, 'state' => $state] + ($reason !== '' ? ['reason' => $reason] : []) + $extra;
-        if (!preg_match('/^msg_[a-f0-9]{24}$/', $id)) return $out('rejected', 'bad_id');
+        if (!preg_match('/^msg_[a-f0-9]{24}$/D', $id)) return $out('rejected', 'bad_id');
         $principal = RelayGrants::principal(RelayGrants::KIND_PEER, $row);
         if (!RelayGrants::allows($principal, 'dm.send')) return self::rejectItem($row, $out('rejected', 'not_granted'));
 
@@ -544,12 +544,12 @@ class RelayPeerService {
 
         if ((int)($env['hop'] ?? 0) !== 1) return self::rejectItem($row, $out('rejected', 'hop'));
         $recipient = (string)($env['recipient_session'] ?? '');
-        if (strpos($recipient, 'peer_') === 0 || strpos($recipient, 'remote_') === 0 || !preg_match('/^[A-Za-z0-9_-]{1,128}$/', $recipient)) return self::rejectItem($row, $out('rejected', 'no_forwarding'));
+        if (strpos($recipient, 'peer_') === 0 || strpos($recipient, 'remote_') === 0 || !preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $recipient)) return self::rejectItem($row, $out('rejected', 'no_forwarding'));
         $senderSession = (string)($env['sender_session'] ?? '');
         $senderId = self::contactId($row['id'], $senderSession);
         if (!self::isPeerContactId($senderId)) return self::rejectItem($row, $out('rejected', 'bad_sender'));
         $threadId = (string)($env['thread_id'] ?? '');
-        if (!preg_match('/^dm_[a-f0-9]{24}$/', $threadId)) return self::rejectItem($row, $out('rejected', 'bad_thread'));
+        if (!preg_match('/^dm_[a-f0-9]{24}$/D', $threadId)) return self::rejectItem($row, $out('rejected', 'bad_thread'));
         $summary = trim((string)($env['summary'] ?? ''));
         if ($summary === '' || strlen($summary) > AgentRelayService::MAX_SUMMARY) return self::rejectItem($row, $out('rejected', 'size'));
         // The recipient must be a saved workspace that this peer is allowed to see.
@@ -590,7 +590,7 @@ class RelayPeerService {
     }
 
     private static function rememberSeen(string $peerId, string $id, array $result): void {
-        if (!preg_match('/^msg_[a-f0-9]{24}$/', $id)) return;
+        if (!preg_match('/^msg_[a-f0-9]{24}$/D', $id)) return;
         $seen = RelayPeerStore::readRuntime($peerId, 'seen', []);
         $seen[$id] = $result + ['at' => self::now()];
         $cut = self::now() - self::EXPIRE_AFTER - 86400;
@@ -755,7 +755,7 @@ class RelayPeerService {
             $clean[] = [
                 'session_id' => $sid,
                 'name' => substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($c['name'] ?? $sid)), 0, 48),
-                'agent_id' => preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', (string)($c['agent_id'] ?? '')) ? (string)$c['agent_id'] : '',
+                'agent_id' => preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', (string)($c['agent_id'] ?? '')) ? (string)$c['agent_id'] : '',
                 'online' => !empty($c['online']),
             ];
         }

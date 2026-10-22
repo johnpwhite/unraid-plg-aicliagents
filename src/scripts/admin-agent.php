@@ -416,7 +416,7 @@ function adminAgentSplitFlags(array $args, array $known): array {
     $pos = [];
     foreach ($args as $a) {
         $a = (string)$a;
-        if (preg_match('/^--([a-z-]+)(?:=(.*))?$/s', $a, $m) && in_array($m[1], $known, true)) {
+        if (preg_match('/^--([a-z-]+)(?:=(.*))?$/sD', $a, $m) && in_array($m[1], $known, true)) {
             $flags[$m[1]] = array_key_exists(2, $m) ? $m[2] : true;
             continue;
         }
@@ -580,7 +580,7 @@ try {
             $subKinds = [];
             $subReplace = true;
             foreach (array_slice($argv, 2) as $a) {
-                if (preg_match('/^--replace=(.+)$/', (string)$a, $m)) {
+                if (preg_match('/^--replace=(.+)$/D', (string)$a, $m)) {
                     $subReplace = filter_var($m[1], FILTER_VALIDATE_BOOLEAN);
                     continue;
                 }
@@ -592,9 +592,9 @@ try {
             $evCall = ['ack' => true];
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--since=(\d+)$/', $a, $m)) { $evCall['since_seq'] = (int)$m[1]; continue; }
-                if (preg_match('/^--kinds=(.+)$/', $a, $m)) { $evCall['kinds'] = array_values(array_filter(explode(',', $m[1]), fn($k) => $k !== '')); continue; }
-                if (preg_match('/^--limit=(\d+)$/', $a, $m)) { $evCall['limit'] = (int)$m[1]; continue; }
+                if (preg_match('/^--since=(\d+)$/D', $a, $m)) { $evCall['since_seq'] = (int)$m[1]; continue; }
+                if (preg_match('/^--kinds=(.+)$/D', $a, $m)) { $evCall['kinds'] = array_values(array_filter(explode(',', $m[1]), fn($k) => $k !== '')); continue; }
+                if (preg_match('/^--limit=(\d+)$/D', $a, $m)) { $evCall['limit'] = (int)$m[1]; continue; }
                 if ($a === '--no-ack') { $evCall['ack'] = false; continue; }
             }
             $result = AdminMcpTools::call('aicli_get_events', $evCall);
@@ -615,7 +615,7 @@ try {
             $cwPositional = [];
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--favourite=(.+)$/', $a, $m)) { $cwFavouriteId = $m[1]; continue; }
+                if (preg_match('/^--favourite=(.+)$/D', $a, $m)) { $cwFavouriteId = $m[1]; continue; }
                 $cwPositional[] = $a;
             }
             // path/agentId are passed through even when empty (an omitted
@@ -707,8 +707,8 @@ try {
             $spWords = [];
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--voice=(.*)$/', $a, $m)) { $spVoice = $m[1]; continue; }
-                if (preg_match('/^--workspace=(.*)$/', $a, $m)) { $spWorkspace = $m[1]; continue; }
+                if (preg_match('/^--voice=(.*)$/D', $a, $m)) { $spVoice = $m[1]; continue; }
+                if (preg_match('/^--workspace=(.*)$/D', $a, $m)) { $spWorkspace = $m[1]; continue; }
                 $spWords[] = $a;
             }
             $spArgs = ['text' => implode(' ', $spWords)];
@@ -722,8 +722,8 @@ try {
             $pvWords = [];
             foreach (array_slice($argv, 3) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--workspace=(.*)$/', $a, $m)) { $pvWorkspace = $m[1]; continue; }
-                if (preg_match('/^--speed=(.*)$/', $a, $m)) { $pvSpeed = $m[1]; continue; }
+                if (preg_match('/^--workspace=(.*)$/D', $a, $m)) { $pvWorkspace = $m[1]; continue; }
+                if (preg_match('/^--speed=(.*)$/D', $a, $m)) { $pvSpeed = $m[1]; continue; }
                 $pvWords[] = $a;
             }
             $pvArgs = ['voice' => (string)($argv[2] ?? '')];
@@ -763,7 +763,7 @@ try {
             $vhArgs = [];
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--workspace=(.+)$/', $a, $m)) { $vhArgs['workspaceId'] = $m[1]; continue; }
+                if (preg_match('/^--workspace=(.+)$/D', $a, $m)) { $vhArgs['workspaceId'] = $m[1]; continue; }
                 if ($a === '--all') { $vhArgs['all'] = true; continue; }
                 if ($a !== '' && !isset($vhArgs['id'])) $vhArgs['id'] = $a;
             }
@@ -832,9 +832,9 @@ try {
             $bhScheduled = false;
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--user=(.*)$/', $a, $m)) { $bhUser = $m[1]; continue; }
-                if (preg_match('/^--quiesce=(.*)$/', $a, $m)) { $bhQuiesce = $m[1]; continue; }
-                if (preg_match('/^--target=(.*)$/', $a, $m)) { $bhTarget = $m[1]; continue; }
+                if (preg_match('/^--user=(.*)$/D', $a, $m)) { $bhUser = $m[1]; continue; }
+                if (preg_match('/^--quiesce=(.*)$/D', $a, $m)) { $bhQuiesce = $m[1]; continue; }
+                if (preg_match('/^--target=(.*)$/D', $a, $m)) { $bhTarget = $m[1]; continue; }
                 if ($a === '--scheduled') { $bhScheduled = true; continue; }
                 if (strpos($a, '--') !== 0 && $bhUser === '') { $bhUser = $a; continue; }
             }
@@ -876,8 +876,8 @@ try {
             $rhYes = false;
             foreach (array_slice($argv, 3) as $a) {
                 $a = (string)$a;
-                if (preg_match('/^--snapshot=(.*)$/', $a, $m)) { $rhSnapshot = $m[1]; continue; }
-                if (preg_match('/^--mode=(.*)$/', $a, $m)) { $rhMode = $m[1]; continue; }
+                if (preg_match('/^--snapshot=(.*)$/D', $a, $m)) { $rhSnapshot = $m[1]; continue; }
+                if (preg_match('/^--mode=(.*)$/D', $a, $m)) { $rhMode = $m[1]; continue; }
                 if ($a === '--no-safety-snapshot') { $rhSafety = false; continue; }
                 if ($a === '--yes') { $rhYes = true; continue; }
             }

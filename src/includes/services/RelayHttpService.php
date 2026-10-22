@@ -89,7 +89,7 @@ class RelayHttpService {
         if (strlen($body) > self::MAX_BODY_BYTES) return self::refuse($peer, 413, ['error'=>'request too large']);
 
         $auth = (string)($headers['authorization'] ?? '');
-        if (!preg_match('/^Bearer\s+([A-Fa-f0-9]{64})$/', $auth, $m)) return self::refuse($peer, 401, ['error'=>'unauthorized']);
+        if (!preg_match('/^Bearer\s+([A-Fa-f0-9]{64})$/D', $auth, $m)) return self::refuse($peer, 401, ['error'=>'unauthorized']);
         $principal = AgentRelayService::httpPrincipalForToken($m[1]);
         if ($principal === null) return self::refuse($peer, 401, ['error'=>'unauthorized']);
         $session = (string)$principal['id'];

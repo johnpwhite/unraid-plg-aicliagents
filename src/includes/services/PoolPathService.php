@@ -67,14 +67,14 @@ class PoolPathService {
      */
     public static function resolvePoolPath(string $path): ?string {
         $path = rtrim($path, '/');
-        if (!preg_match('#^/mnt/user/([^/]+)(/.*)?$#', $path, $m)) return null;
+        if (!preg_match('#^/mnt/user/([^/]+)(/.*)?$#D', $path, $m)) return null;
         $share = $m[1]; $rest = $m[2] ?? '';
         $cfg = self::readShareCfg($share);
         if ($cfg === null) return null;
         if (($cfg['shareUseCache'] ?? '') !== 'only') return null;
         $pool = (string)($cfg['shareCachePool'] ?? '');
         if ($pool === '') $pool = 'cache';
-        if (!preg_match('/^[A-Za-z0-9_.-]+$/', $pool)) return null;
+        if (!preg_match('/^[A-Za-z0-9_.-]+$/D', $pool)) return null;
         $target = self::mntRoot() . "/$pool/$share";
         if (!is_dir($target)) return null;
         $resolved = $target . $rest;
@@ -83,12 +83,12 @@ class PoolPathService {
 
     /** @return array<string,string>|null key=value pairs from `<share>.cfg`, null when absent. */
     public static function readShareCfg(string $share): ?array {
-        if (!preg_match('/^[A-Za-z0-9_. -]+$/', $share)) return null;
+        if (!preg_match('/^[A-Za-z0-9_. -]+$/D', $share)) return null;
         $file = self::sharesDir() . "/$share.cfg";
         if (!is_file($file)) return null;
         $out = [];
         foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
-            if (!preg_match('/^([A-Za-z0-9_]+)="?([^"]*)"?$/', trim($line), $kv)) continue;
+            if (!preg_match('/^([A-Za-z0-9_]+)="?([^"]*)"?$/D', trim($line), $kv)) continue;
             $out[$kv[1]] = $kv[2];
         }
         return $out;

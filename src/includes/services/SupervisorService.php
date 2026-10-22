@@ -474,13 +474,13 @@ class SupervisorService {
         $reason   = preg_replace('/[^A-Za-z0-9_\-]/', '_', $reason);
         $priority = max(0, min(99, $priority));
         $jobArg   = '';
-        if ($jobId !== null && preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/', $jobId)) {
+        if ($jobId !== null && preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/D', $jobId)) {
             // positional arg 6 (trace) passed as '' so queue_enqueue keeps its
             // AICLI_TRACE_ID env default (the ${6:-default} fallback fires on '').
             $jobArg = " '' $jobId";
         }
         $epochArg = '';
-        if ($consolidateEpoch !== null && preg_match('/^[A-Za-z0-9._\-]{1,128}$/', $consolidateEpoch)) {
+        if ($consolidateEpoch !== null && preg_match('/^[A-Za-z0-9._\-]{1,128}$/D', $consolidateEpoch)) {
             // Passed as 8th positional to queue_enqueue (after job_id at position 7).
             // $jobArg already has a leading space + '' + space + job_id, so only append
             // when jobArg is non-empty (an untracked consolidate won't carry an epoch).
@@ -652,7 +652,7 @@ class SupervisorService {
      * @return array<string,mixed>|null
      */
     public static function getJob(string $jobId): ?array {
-        if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/', $jobId)) {
+        if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/D', $jobId)) {
             return null;
         }
         return self::readJsonFile(self::jobsDir() . "/$jobId.json");
@@ -896,7 +896,7 @@ class SupervisorService {
 
     /** R14: "13.40MB/s" → bytes per second (rsync uses kB, MB, GB with 1024 steps). 0 when odd. */
     public static function rateBytesPerSecond(string $rate): float {
-        if (!preg_match('/^([\d.]+)([kMG]?)B\/s$/', $rate, $m)) return 0.0;
+        if (!preg_match('/^([\d.]+)([kMG]?)B\/s$/D', $rate, $m)) return 0.0;
         $mult = ['' => 1, 'k' => 1024, 'M' => 1048576, 'G' => 1073741824][$m[2]];
         return (float)$m[1] * $mult;
     }

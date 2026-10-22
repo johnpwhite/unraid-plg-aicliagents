@@ -544,7 +544,7 @@ class InstallerService {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         // #591: refuse a bad id here, before any path or shell string. This no
         // longer relies on agentPath() throwing a few lines below.
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', (string)$agentId)) {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', (string)$agentId)) {
             return ['status' => 'error', 'message' => 'Invalid agent id'];
         }
 
@@ -672,7 +672,7 @@ class InstallerService {
      * as the stable mount always was. Best-effort; never throws.
      */
     private static function unmountAgentGenerations(string $agentId): void {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return;
         $base = AgentRegistry::agentBase();
         $versions = "$base/.versions/$agentId";
         $out = [];
@@ -704,7 +704,7 @@ class InstallerService {
      */
     public static function purgeAgentStorage(string $agentId, string $persistPath): array {
         $bytes = 0; $removed = []; $failed = [];
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return ['bytes' => 0, 'removed' => [], 'failed' => ["invalid id"]];
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return ['bytes' => 0, 'removed' => [], 'failed' => ["invalid id"]];
         $persist = rtrim($persistPath, '/');
         $q = preg_quote($agentId, '/');
         $files = [];
@@ -1066,9 +1066,9 @@ class InstallerService {
      * id, or null (nothing changed) on failure.
      */
     public static function activatePassthroughRestoreGeneration(string $agentId, string $stableLink, string $staged, string $stamp): ?string {
-        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/', $agentId)) return null;
+        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/D', $agentId)) return null;
         if (!is_link($stableLink) || !is_dir($staged)) return null;
-        if (!preg_match('/^[A-Za-z0-9._-]+$/', $stamp)) return null;
+        if (!preg_match('/^[A-Za-z0-9._-]+$/D', $stamp)) return null;
         $gen = "restore-$stamp";
         $versions = dirname($stableLink) . "/.versions/$agentId";
         if (!is_dir($versions) && !@mkdir($versions, 0755, true)) return null;

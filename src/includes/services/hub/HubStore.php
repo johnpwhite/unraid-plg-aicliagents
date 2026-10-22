@@ -46,7 +46,7 @@ class HubStore {
     /** One vault placeholder, the same shape HubProjector::resolvePlaceholders() resolves. */
     const PLACEHOLDER_RE = '/\{[A-Z][A-Z0-9_]{1,127}\}/';
     const TRANSPORTS = ['stdio', 'http', 'sse'];
-    const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/i';
+    const AGENT_ID_RE = '/^[a-z0-9][a-z0-9-]{0,63}$/iD';
     /** Size cap for the canonical instruction doc (H-02). */
     const INSTRUCTIONS_MAX_BYTES = 262144; // 256 KB
     /** Per-file size cap for skill/command files (H-03). */
@@ -58,7 +58,7 @@ class HubStore {
     /** Max path depth of a file inside a skill (SKILL.md=1, scripts/run.sh=2, …). */
     const TREE_MAX_DEPTH = 3;
     /** One path segment of a skill file: no leading dot, no traversal, ≤64 chars. */
-    const TREE_SEGMENT_RE = '/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/';
+    const TREE_SEGMENT_RE = '/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/D';
 
     // ---------- Paths ----------
 
@@ -223,7 +223,7 @@ class HubStore {
         $ids = [];
         foreach ($enabledFor as $id) {
             $id = (string)$id;
-            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/i', $id)) { $errors[] = "invalid agent id '$id'"; continue; }
+            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/iD', $id)) { $errors[] = "invalid agent id '$id'"; continue; }
             $ids[] = $id;
         }
         $out['enabledFor'] = array_values(array_unique($ids));
@@ -339,7 +339,7 @@ class HubStore {
         foreach ((array)($def['headers'] ?? []) as $k => $v) {
             if (self::headerSecretProblem((string)$k, (string)$v) === null) continue;
             $scheme = ''; $raw = (string)$v;
-            if (preg_match('/^(Bearer|Basic|Token)\s+(.*)$/i', $raw, $m)) { $scheme = $m[1] . ' '; $raw = $m[2]; }
+            if (preg_match('/^(Bearer|Basic|Token)\s+(.*)$/iD', $raw, $m)) { $scheme = $m[1] . ' '; $raw = $m[2]; }
             $def['headers'][$k] = $scheme . '{' . $reserve((string)$k, $raw) . '}';
             $fields[] = "header '$k'";
         }

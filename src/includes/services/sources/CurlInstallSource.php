@@ -367,7 +367,7 @@ class CurlInstallSource implements AgentSource {
         if ($v === '') return null;
         if (in_array(strtolower($v), ['latest', 'stable', 'beta', 'next', 'nightly'], true)) return null;
         $v = ltrim($v, 'vV');
-        return preg_match('/^\d+\.\d+\.\d+(?:[-+][\w.]+)?$/', $v) ? $v : null;
+        return preg_match('/^\d+\.\d+\.\d+(?:[-+][\w.]+)?$/D', $v) ? $v : null;
     }
 
     /**
@@ -387,7 +387,7 @@ class CurlInstallSource implements AgentSource {
                 // Quote the VALUE, not the whole assignment. A shell does not
                 // classify a fully-quoted `KEY=value` word as an environment
                 // assignment and instead tries to execute it as a command.
-                if (!is_string($k) || !preg_match('/^[A-Z_][A-Z0-9_]*$/', $k)) return null;
+                if (!is_string($k) || !preg_match('/^[A-Z_][A-Z0-9_]*$/D', $k)) return null;
                 $envPairs[] = $k . '=' . escapeshellarg((string)$v);
             }
         }
@@ -396,7 +396,7 @@ class CurlInstallSource implements AgentSource {
         if ($pinned !== null) {
             $venv = (string)($src['version_env'] ?? '');
             if ($venv !== '') {
-                if (!preg_match('/^[A-Z_][A-Z0-9_]*$/', $venv)) return null;
+                if (!preg_match('/^[A-Z_][A-Z0-9_]*$/D', $venv)) return null;
                 $envPairs[] = $venv . '=' . escapeshellarg($pinned);
             }
             if (!empty($src['version_args']) && is_array($src['version_args'])) {
@@ -475,7 +475,7 @@ class CurlInstallSource implements AgentSource {
         $lines = preg_split('/[\r\n]+/', $clean) ?: [];
         for ($i = count($lines) - 1; $i >= 0; $i--) {
             $l = trim($lines[$i]);
-            if ($l === '' || preg_match('/^__RC=\d+$/', $l) || preg_match('/^[#=\-\s.%0-9]+$/', $l)) continue;
+            if ($l === '' || preg_match('/^__RC=\d+$/D', $l) || preg_match('/^[#=\-\s.%0-9]+$/D', $l)) continue;
             return strlen($l) > 120 ? substr($l, 0, 117) . '…' : $l;
         }
         return '';

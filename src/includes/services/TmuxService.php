@@ -344,7 +344,7 @@ class TmuxService {
             if (strpos($base, 'tmux_agent_') === 0) continue;
             if (strpos($base, 'tmux_ws_') === 0) continue;
             // Match only the legacy 32-char hex hash pattern.
-            if (preg_match('/^tmux_[a-f0-9]{32}\.json$/', $base)) {
+            if (preg_match('/^tmux_[a-f0-9]{32}\.json$/D', $base)) {
                 if (@rename($f, "$f.legacy")) {
                     $count++;
                     LogService::log("Renamed legacy tmux config: $base -> $base.legacy", LogService::LOG_WARN, "TmuxService");
@@ -850,7 +850,7 @@ class TmuxService {
      * the durable inbox itself before acting.
      */
     public static function notifyRelayActor(string $agentId, string $sessionId, string $topic, string $itemKind = '', string $itemId = ''): array {
-        if (!preg_match('/^[a-z][a-z0-9_.-]{1,127}$/',$topic)) return ['status'=>'error','message'=>'Invalid Relay topic.'];
+        if (!preg_match('/^[a-z][a-z0-9_.-]{1,127}$/D',$topic)) return ['status'=>'error','message'=>'Invalid Relay topic.'];
         return self::submitFixedRelayNotice($agentId, $sessionId, self::relayActorNotice($topic, $itemKind, $itemId, RelayNoticeWording::resolve($agentId)));
     }
 
@@ -864,7 +864,7 @@ class TmuxService {
         $kind = in_array($itemKind, ['event','request'], true) ? $itemKind : '';
         // Topic events are 'rel_' ids (AgentRelayService::publish); accepting only
         // msg_/req_ dropped the item id from every event notice (found 2026-09-24).
-        $id   = preg_match('/^(?:msg|req|rel)_[a-f0-9]{8,64}$/', $itemId) ? $itemId : '';
+        $id   = preg_match('/^(?:msg|req|rel)_[a-f0-9]{8,64}$/D', $itemId) ? $itemId : '';
         $what = $kind !== '' && $id !== ''
             ? "A Relay $kind ($id) is waiting on topic $topic"
             : 'A durable event or request is waiting on topic ' . $topic;
@@ -891,7 +891,7 @@ class TmuxService {
      * contents as untrusted data.
      */
     public static function deliverTrustedRelayDirect(string $agentId, string $sessionId, string $sender, string $senderName = ''): array {
-        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/', $sender)) return ['status'=>'error','message'=>'Invalid Relay sender.'];
+        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sender)) return ['status'=>'error','message'=>'Invalid Relay sender.'];
         // #148: first flush anything that was deferred while the pane was mid-decision
         // and may now be safe to surface. Opportunistic self-heal — every fresh
         // delivery attempt also drains the backlog for this session.
@@ -924,7 +924,7 @@ class TmuxService {
      * A sender on a linked box ("peer_…") is shown by id only (#664 R-151).
      */
     private static function relaySenderLabel(string $id, string $name): string {
-        $id   = preg_match('/^[A-Za-z0-9_-]{1,128}$/', $id) ? $id : 'a peer';
+        $id   = preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) ? $id : 'a peer';
         // #664 R-151: a sender on a LINKED BOX (id "peer_…") chose its own name on the other
         // box, so no part of that name reaches the terminal. Only the id is shown. The name of
         // a workspace on THIS box is the operator's own and is still shown.
@@ -943,7 +943,7 @@ class TmuxService {
         $labels = [];
         foreach ($entries as $e) {
             $id = (string)($e['id'] ?? '');
-            if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/', $id)) continue;
+            if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id)) continue;
             $labels[$id] = self::relaySenderLabel($id, (string)($e['name'] ?? ''));   // dedupe by id
         }
         $labels = array_values($labels);
@@ -1807,7 +1807,7 @@ class TmuxService {
 
     /** The agent id inside a plugin session name "aicli-agent-<agentId>-<sessionId>", or null. */
     private static function agentIdFromSessionName(string $name): ?string {
-        return preg_match('/^aicli-agent-(.+)-[A-Za-z0-9_]+$/', $name, $m) ? $m[1] : null;
+        return preg_match('/^aicli-agent-(.+)-[A-Za-z0-9_]+$/D', $name, $m) ? $m[1] : null;
     }
 
     /**
@@ -2841,7 +2841,7 @@ class TmuxService {
      * the tray's own reconcile poll and the supervisor's own tick.
      */
     private static function enqueuePendingRelay(string $agentId, string $sessionId, string $sender, string $senderName, string $reason): void {
-        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/', $sender)) return;
+        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sender)) return;
         $file = self::pendingFile($agentId, $sessionId);
         @mkdir(dirname($file), 0770, true);
         $cur = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
@@ -2885,7 +2885,7 @@ class TmuxService {
     private static function normalizeSenders(array $sendersMap): array {
         $out = [];
         foreach ($sendersMap as $id => $meta) {
-            if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/', (string)$id)) continue;
+            if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', (string)$id)) continue;
             $out[] = [
                 'id'     => (string)$id,
                 'name'   => (string)(is_array($meta) ? ($meta['name'] ?? '') : ''),

@@ -24,7 +24,7 @@ require_once $srcRoot . '/includes/services/TmuxService.php';
 
 $jsonfile = $argv[1] ?? '';
 $target = $argv[2] ?? '';
-if ($jsonfile === '' || !is_file($jsonfile) || !preg_match('/^[A-Za-z0-9_-]{1,160}$/', $target)) {
+if ($jsonfile === '' || !is_file($jsonfile) || !preg_match('/^[A-Za-z0-9_-]{1,160}$/D', $target)) {
     exit(0); // nothing to apply — mirrors the shell helper's [ -f ] guard
 }
 

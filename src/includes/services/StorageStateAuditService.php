@@ -411,7 +411,7 @@ class StorageStateAuditService {
     private static function loopAutoclearPending(string $dev): bool {
         $root = getenv('AICLI_SL_LOOP_SYSFS_ROOT') ?: '/sys/block';
         $name = basename($dev);
-        if ($name === '' || !preg_match('/^loop[0-9]+$/', $name)) return false;
+        if ($name === '' || !preg_match('/^loop[0-9]+$/D', $name)) return false;
         $value = @file_get_contents(rtrim($root, '/') . '/' . $name . '/loop/autoclear');
         return $value !== false && trim($value) === '1';
     }

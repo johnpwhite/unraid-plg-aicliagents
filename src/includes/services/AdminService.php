@@ -1003,14 +1003,14 @@ class AdminService {
         'debug_logging'    => ['0', '1'],
         'debug_log_format' => ['text', 'jsonl'],
         'voice_enabled'    => ['0', '1'],
-        'tts_url'          => ['regex' => '#^https?://[^\s/]+(/v1)?/?$#i', 'allowEmpty' => true, 'hint' => "empty (browser mode), or an http(s) URL with no path beyond an optional '/v1'"],
-        'tts_voice'        => ['regex' => '/^[a-z][a-z0-9_]{0,63}$/', 'hint' => 'a lowercase voice id (letters, digits, underscore)'],
+        'tts_url'          => ['regex' => '#^https?://[^\s/]+(/v1)?/?$#iD', 'allowEmpty' => true, 'hint' => "empty (browser mode), or an http(s) URL with no path beyond an optional '/v1'"],
+        'tts_voice'        => ['regex' => '/^[a-z][a-z0-9_]{0,63}$/D', 'hint' => 'a lowercase voice id (letters, digits, underscore)'],
         'tts_speed'        => ['minf' => 0.5, 'maxf' => 2.0],
-        'stt_url'          => ['regex' => '#^https?://[^\s/]+(/v1)?/?$#i', 'allowEmpty' => true, 'hint' => "empty (browser mode), or an http(s) URL with no path beyond an optional '/v1'"],
-        'stt_model'        => ['regex' => '#^[\w.\-/]{1,64}$#', 'hint' => "a model name the engine lists (letters, digits, . _ - and, for a vendor-style id, /, e.g. Systran/faster-whisper-small)"],
-        'stt_language'     => ['regex' => '/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/', 'allowEmpty' => true, 'hint' => 'empty (detect), or a short language tag such as en or en-US'],
+        'stt_url'          => ['regex' => '#^https?://[^\s/]+(/v1)?/?$#iD', 'allowEmpty' => true, 'hint' => "empty (browser mode), or an http(s) URL with no path beyond an optional '/v1'"],
+        'stt_model'        => ['regex' => '#^[\w.\-/]{1,64}$#D', 'hint' => "a model name the engine lists (letters, digits, . _ - and, for a vendor-style id, /, e.g. Systran/faster-whisper-small)"],
+        'stt_language'     => ['regex' => '/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/D', 'allowEmpty' => true, 'hint' => 'empty (detect), or a short language tag such as en or en-US'],
         // VOICE_LIVE_ENGINE.md R1 (#731).
-        'stt_stream_url'   => ['regex' => '#^wss?://[^\s/]+(/[\w./-]*)?$#i', 'allowEmpty' => true, 'hint' => "empty (off), or a ws:// or wss:// URL such as ws://192.168.1.9:8012"],
+        'stt_stream_url'   => ['regex' => '#^wss?://[^\s/]+(/[\w./-]*)?$#iD', 'allowEmpty' => true, 'hint' => "empty (off), or a ws:// or wss:// URL such as ws://192.168.1.9:8012"],
         // VOICE_MAIL.md R8: a retention POLICY for kept messages (text only, a few
         // hundred bytes each). The upper bounds keep the store small on Flash;
         // VoiceMailService::HARD_MAX_TOTAL still caps the whole store at 2000.
@@ -1031,18 +1031,18 @@ class AdminService {
         // accepts only 'off'/'daily:HH:MM'/'weekly:D:HH:MM', which
         // BackupCronService::parseScheduleToCron() then turns into the real cron
         // expression server-side, so there is no cron-injection surface here.
-        'backup_target'       => ['regex' => '#^/\S+$#', 'allowEmpty' => true, 'hint' => "empty, or an absolute path with no whitespace to a non-FUSE backup target (the default a home without backup settings of its own inherits once; each home's own folder is set with Backup on its Home card)"],
+        'backup_target'       => ['regex' => '#^/\S+$#D', 'allowEmpty' => true, 'hint' => "empty, or an absolute path with no whitespace to a non-FUSE backup target (the default a home without backup settings of its own inherits once; each home's own folder is set with Backup on its Home card)"],
         'backup_quiesce'      => ['cold', 'warm'],
         'backup_keep'         => ['min' => 1, 'max' => 50],
-        'backup_schedule'     => ['regex' => '#^(off|daily:([01]\d|2[0-3]):([0-5]\d)|weekly:[0-6]:([01]\d|2[0-3]):([0-5]\d))$#', 'hint' => "'off', 'daily:HH:MM', or 'weekly:D:HH:MM' (D is 0-6, Sunday=0)"],
-        'backup_excludes'     => ['regex' => "#^[A-Za-z0-9_./*\r\n -]*$#", 'allowEmpty' => true, 'hint' => 'a newline-separated list of relative glob patterns (letters, digits, . / * - _ and spaces only)'],
+        'backup_schedule'     => ['regex' => '#^(off|daily:([01]\d|2[0-3]):([0-5]\d)|weekly:[0-6]:([01]\d|2[0-3]):([0-5]\d))$#D', 'hint' => "'off', 'daily:HH:MM', or 'weekly:D:HH:MM' (D is 0-6, Sunday=0)"],
+        'backup_excludes'     => ['regex' => "#^[A-Za-z0-9_./*\r\n -]*$#D", 'allowEmpty' => true, 'hint' => 'a newline-separated list of relative glob patterns (letters, digits, . / * - _ and spaces only)'],
         'backup_nudge_working' => ['0', '1'],
 
         // WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3: a size POLICY only — it never
         // moves data or changes where it lives, so it belongs in this
         // cosmetic/verbosity-style group. A whole number of bytes, or '0' for
         // no cap (the Settings page shows/edits it in MB and converts).
-        'upload_max_bytes' => ['regex' => '/^[0-9]+$/', 'hint' => 'a whole number of bytes, or 0 for no limit'],
+        'upload_max_bytes' => ['regex' => '/^[0-9]+$/D', 'hint' => 'a whole number of bytes, or 0 for no limit'],
 
         // AGENT_SELF_SERVICE.md R6: preferences with no effect on where data lives.
         // NOT here, on purpose: admin_tools_enabled (an agent must not widen or
@@ -1051,7 +1051,7 @@ class AdminService {
         'history'                         => ['min' => 100, 'max' => 10000],
         'auto_continue_on_restart'        => ['0', '1'],
         'transient_error_continue'        => ['recommended', 'all', 'off'],
-        'transient_error_backoff_minutes' => ['regex' => '/^(?:[1-9]\d?|1[01]\d|120)(?:,(?:[1-9]\d?|1[01]\d|120)){0,2}$/', 'hint' => 'one to three whole minutes from 1 to 120, separated by commas (for example 1,5,15)'],
+        'transient_error_backoff_minutes' => ['regex' => '/^(?:[1-9]\d?|1[01]\d|120)(?:,(?:[1-9]\d?|1[01]\d|120)){0,2}$/D', 'hint' => 'one to three whole minutes from 1 to 120, separated by commas (for example 1,5,15)'],
         'transient_error_max_continues'   => ['min' => 0, 'max' => 10],
         'relay_gate_sampling_enabled'     => ['0', '1'],
     ];
@@ -1067,7 +1067,7 @@ class AdminService {
      */
     private static function settingRule(string $key): ?array {
         if (array_key_exists($key, self::SETTINGS_ALLOWLIST)) return self::SETTINGS_ALLOWLIST[$key];
-        if (preg_match('/^node_memory_([a-z0-9-]+)$/', $key, $m) && self::agentExists($m[1])) return self::NODE_MEMORY_RULE;
+        if (preg_match('/^node_memory_([a-z0-9-]+)$/D', $key, $m) && self::agentExists($m[1])) return self::NODE_MEMORY_RULE;
         return null;
     }
 
@@ -1436,7 +1436,7 @@ class AdminService {
             }
 
             if ($secret) {
-                if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', $key)) {
+                if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $key)) {
                     return ['error' => "Invalid secret name '$key' — secrets must be UPPER_SNAKE (A-Z, 0-9, _)."];
                 }
                 if (EnvService::isReservedKey($key)) {

@@ -54,7 +54,7 @@ final class AgentCaptiveStateService
     /** The store directory of one agent. */
     public static function agentStore(string $agentId): string
     {
-        if (!preg_match('/^[a-z0-9][a-z0-9_-]{0,63}$/i', $agentId)) {
+        if (!preg_match('/^[a-z0-9][a-z0-9_-]{0,63}$/iD', $agentId)) {
             throw new \InvalidArgumentException("AgentCaptiveStateService: invalid agent id '$agentId'");
         }
         return self::storeRoot() . '/' . $agentId;
@@ -74,7 +74,7 @@ final class AgentCaptiveStateService
             if ($seg === '' || $seg === '.' || $seg === '..') {
                 return false;
             }
-            if (!preg_match('/^[A-Za-z0-9._@+-]+$/', $seg)) {
+            if (!preg_match('/^[A-Za-z0-9._@+-]+$/D', $seg)) {
                 return false;
             }
         }

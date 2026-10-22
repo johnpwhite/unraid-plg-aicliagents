@@ -22,7 +22,7 @@ class VersionCheckService {
      * a hostile registry answer is never cached.
      */
     public static function isSafeVersion($v): bool {
-        return is_string($v) && preg_match('/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/', $v) === 1;
+        return is_string($v) && preg_match('/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/D', $v) === 1;
     }
 
     /** R-171: keep only the dist-tags whose name and version are safe. */
@@ -30,7 +30,7 @@ class VersionCheckService {
         $clean = [];
         if (!is_array($tags)) return $clean;
         foreach ($tags as $tag => $ver) {
-            if (is_string($tag) && preg_match('/^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/', $tag) === 1 && self::isSafeVersion($ver)) {
+            if (is_string($tag) && preg_match('/^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/D', $tag) === 1 && self::isSafeVersion($ver)) {
                 $clean[$tag] = $ver;
             }
         }

@@ -211,7 +211,7 @@ class RedactionService {
             if (!$anchored) return "\u{AB}redacted:b64\u{BB}";   // opaque blob: unchanged strength
             $parts = explode('/', $m[0]);
             foreach ($parts as $i => $part) {
-                if (preg_match('/^[A-Za-z0-9+=_-]{40,}$/', $part)) $parts[$i] = "\u{AB}redacted:b64\u{BB}";
+                if (preg_match('/^[A-Za-z0-9+=_-]{40,}$/D', $part)) $parts[$i] = "\u{AB}redacted:b64\u{BB}";
             }
             return implode('/', $parts);
         }, $text);
@@ -340,7 +340,7 @@ class RedactionService {
         if (!is_array($parsed)) return [];
         $out = [];
         foreach ($parsed as $k => $v) {
-            if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) {
+            if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', (string)$k)) {
                 $out[$k] = (string)$v;
             }
         }

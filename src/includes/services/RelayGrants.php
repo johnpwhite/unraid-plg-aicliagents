@@ -37,7 +37,7 @@ class RelayGrants {
     const REQUEST_PREFIX = 'request:';
     const REQUEST_CANCEL = 'request.cancel';
     /** Topic grammar, the same as AgentRelayService::validTopic() without the `.*` wildcard. */
-    const TOPIC_PATTERN = '/^[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){1,5}$/';
+    const TOPIC_PATTERN = '/^[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){1,5}$/D';
     const TOPIC_MAX = 128;
 
     /** MCP tool that each remote grant opens. relay_request* come with request:<topic> (Phase 2, see toolsFor()). */
@@ -70,7 +70,7 @@ class RelayGrants {
 
     /** Clamp a stored rate. A missing or bad value gets the kind default. */
     public static function normaliseRate(string $kind, $rate): int {
-        if (!is_int($rate) && !(is_string($rate) && preg_match('/^\d+$/', $rate))) return self::defaultRate($kind);
+        if (!is_int($rate) && !(is_string($rate) && preg_match('/^\d+$/D', $rate))) return self::defaultRate($kind);
         return max(self::RATE_MIN, min(self::RATE_MAX, (int)$rate));
     }
 
@@ -144,7 +144,7 @@ class RelayGrants {
         $ids = [];
         foreach ((array)($value['sessions'] ?? []) as $id) {
             $id = (string)$id;
-            if (preg_match('/^[A-Za-z0-9_-]{1,128}$/', $id) && strpos($id, 'peer_') !== 0) $ids[$id] = true;
+            if (preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) && strpos($id, 'peer_') !== 0) $ids[$id] = true;
         }
         return ['scope' => 'list', 'sessions' => array_keys($ids)];
     }

@@ -121,7 +121,7 @@ class SshKeyService {
         if (!is_array($parts) || count($parts) < 2) return null;
         [$type, $b64] = $parts;
         if (!in_array($type, self::VALID_TYPES, true)) return null;
-        if (!preg_match('/^[A-Za-z0-9+\/]+={0,2}$/', $b64)) return null;
+        if (!preg_match('/^[A-Za-z0-9+\/]+={0,2}$/D', $b64)) return null;
         $blob = base64_decode($b64, true);
         if ($blob === false || strlen($blob) < 4 + strlen($type)) return null;
         $nameLen = unpack('N', substr($blob, 0, 4))[1];

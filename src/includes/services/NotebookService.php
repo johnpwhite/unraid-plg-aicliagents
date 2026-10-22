@@ -81,7 +81,7 @@ class NotebookService {
     private static function stateDirFlash(): string { return SecretPaths::flashRoot() . '/notebook-state'; }
 
     /** Setting notebook_quiet_hours: HH:MM-HH:MM (may wrap midnight) or empty. */
-    private const QUIET_RE = '/^(?:|([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d)$/';
+    private const QUIET_RE = '/^(?:|([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d)$/D';
     private const JOURNAL_TITLE = 'Agent journal';
     private const JOURNAL_KEEP = 500;
     private const JOURNAL_MAX_CHARS = 500;
@@ -127,7 +127,7 @@ class NotebookService {
             if ($settings['enabled'] !== '1') return ['error' => 'The Notebook is turned off in the plugin settings.', 'disabled' => true];
             $workspaceId = trim($workspaceId);
             if ($workspaceId === '') return ['error' => 'A workspace id is needed.'];
-            if ($workspaceId !== 'global' && !preg_match('/^[A-Za-z0-9_\-]{1,64}$/', $workspaceId)) return ['error' => 'That is not a valid workspace id.'];
+            if ($workspaceId !== 'global' && !preg_match('/^[A-Za-z0-9_\-]{1,64}$/D', $workspaceId)) return ['error' => 'That is not a valid workspace id.'];
             $scope = $workspaceId === 'global' ? 'global' : 'notebook';
             $project = '';
             $wsName = '';
@@ -559,7 +559,7 @@ class NotebookService {
                     if (in_array($k, ['id', 'type', 'title', 'tags', 'owner', 'createdAt', 'updatedAt', 'pinned', 'needsYou', 'secrets', 'editedBy'], true)) continue;
                     // Only a person locks a page (section 10).
                     if (in_array($k, ['locked', 'lockedBy'], true) && ($author['kind'] ?? '') === 'agent') continue;
-                    if (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,40}$/', (string)$k)) $meta[$k] = $v;
+                    if (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,40}$/D', (string)$k)) $meta[$k] = $v;
                 }
                 // A template may carry meta keys (wiki-home: kind home; the section templates: section).
                 if ($tpl !== null) {
@@ -817,11 +817,11 @@ class NotebookService {
         }
         if (NotebookFormat::isJsonType($type)) {
             if ($data === null) return 'This file does not hold a valid JSON object.';
-            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,60}$/', $field)) return "'$field' is not a valid field name.";
+            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]{0,60}$/D', $field)) return "'$field' is not a valid field name.";
             $data[$field] = $value;
             return null;
         }
-        if (!preg_match('/^[A-Za-z][A-Za-z0-9_]{0,40}$/', $field)) return "'$field' is not a valid field name.";
+        if (!preg_match('/^[A-Za-z][A-Za-z0-9_]{0,40}$/D', $field)) return "'$field' is not a valid field name.";
         if (!is_scalar($value) && !is_array($value) && $value !== null) return 'The value must be text, a number, true or false, a list or an object.';
         $meta[$field] = $value;
         return null;
@@ -945,7 +945,7 @@ class NotebookService {
     public static function remove(array $ctx, string $id, ?string $expectedVersion, array $author): array {
         if (isset($ctx['error'])) return $ctx;
         if (($author['kind'] ?? '') === 'agent') return ['error' => 'Only a person can remove a note for good. An agent proposes a purge and a person approves it.'];
-        if (!preg_match('/^a_[0-9a-f]{12}$/', $id)) return ['error' => "'$id' is not an artefact id."];
+        if (!preg_match('/^a_[0-9a-f]{12}$/D', $id)) return ['error' => "'$id' is not an artefact id."];
         try {
             $rec = self::findRecord($ctx, $id);
             if ($rec === null) return ['error' => "There is no artefact with id '$id' in this notebook."];
@@ -970,7 +970,7 @@ class NotebookService {
         try {
             $ws = (string)($params['workspaceId'] ?? '');
             $id = (string)($params['id'] ?? '');
-            if ($ws === '' || !preg_match('/^a_[0-9a-f]{12}$/', $id)) return ['error' => 'This pending item has no valid workspace or artefact id.'];
+            if ($ws === '' || !preg_match('/^a_[0-9a-f]{12}$/D', $id)) return ['error' => 'This pending item has no valid workspace or artefact id.'];
             $ctx = self::contextFor($ws);
             if (isset($ctx['error'])) return ['error' => 'The notebook of this item is no longer available: ' . $ctx['error']];
             $res = self::withLock($ctx, function () use ($ctx, $id) {
@@ -1130,7 +1130,7 @@ class NotebookService {
         foreach ($m[1] as $raw) {
             $t = trim(explode('|', $raw, 2)[0]);
             if ($t === '') continue;
-            if (preg_match('/^a_[0-9a-f]{12}$/i', $t)) {
+            if (preg_match('/^a_[0-9a-f]{12}$/iD', $t)) {
                 $id = strtolower($t);
                 if (isset($byId[$id])) $out[$id] = true;
                 continue;
@@ -1395,7 +1395,7 @@ class NotebookService {
 
     /** Append moved journal lines to archive/agent-journal-<yyyy-mm>.md (skips lines already there). Runs inside the notebook lock. @return ?string error */
     private static function journalArchive(array $ctx, string $ym, array $lines, array $author): ?string {
-        if (!preg_match('/^\d{4}-\d{2}$/', $ym)) return 'A journal line has an unreadable date, so it was not archived.';
+        if (!preg_match('/^\d{4}-\d{2}$/D', $ym)) return 'A journal line has an unreadable date, so it was not archived.';
         $dir = $ctx['root'] . '/archive';
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return 'The archive folder could not be created.';
         $name = 'agent-journal-' . $ym . '.md';
@@ -1804,7 +1804,7 @@ class NotebookService {
                 if (!(json_decode($data, false) instanceof \stdClass)) return ['error' => 'not a JSON object'];
                 if ($meta === null) { $o = json_decode($data, false); unset($o->_meta); $body = NotebookFormat::encodeJson($o); }
             }
-            if (!is_array($meta) || !preg_match('/^a_[0-9a-f]{12}$/', (string)($meta['id'] ?? ''))) {
+            if (!is_array($meta) || !preg_match('/^a_[0-9a-f]{12}$/D', (string)($meta['id'] ?? ''))) {
                 $title = NotebookFormat::firstHeading($body) ?: pathinfo($fname, PATHINFO_FILENAME);
                 $meta = ['title' => $title, 'type' => NotebookFormat::typeForExt($ext), 'tags' => [], 'owner' => ['kind' => 'human', 'agentId' => '', 'name' => 'Person', 'workspace' => ''], 'createdAt' => $now, 'pinned' => false];
                 $meta['id'] = 'a_' . bin2hex(random_bytes(6));
@@ -2023,7 +2023,7 @@ class NotebookService {
         $p = NotebookFormat::parse($raw, $ext);
         $meta = $p['meta'];
         $derived = false;
-        if (!is_array($meta) || !preg_match('/^a_[0-9a-f]{12}$/', (string)($meta['id'] ?? ''))) {
+        if (!is_array($meta) || !preg_match('/^a_[0-9a-f]{12}$/D', (string)($meta['id'] ?? ''))) {
             $derived = true;
             $title = NotebookFormat::firstHeading($p['body']) ?: pathinfo($name, PATHINFO_FILENAME);
             $meta = ['id' => 'a_' . substr(sha1($name), 0, 12), 'title' => $title, 'type' => NotebookFormat::typeForExt($ext)];
@@ -2065,7 +2065,7 @@ class NotebookService {
     }
 
     private static function findRecord(array $ctx, string $id): ?array {
-        if (!preg_match('/^a_[0-9a-f]{12}$/', $id) || !is_dir($ctx['root'])) return null;
+        if (!preg_match('/^a_[0-9a-f]{12}$/D', $id) || !is_dir($ctx['root'])) return null;
         $best = null;
         foreach (self::scan($ctx) as $rec) {
             if ($rec['id'] !== $id) continue;
@@ -2087,7 +2087,7 @@ class NotebookService {
     private static function mutate(array $ctx, string $id, ?string $expected, array $author, string $kind, array $extra, bool $confirm, callable $fn): array {
         try {
             if ($e = self::rateCheck($ctx, $author)) return ['error' => $e];
-            if (!preg_match('/^a_[0-9a-f]{12}$/', $id)) return ['error' => "'$id' is not an artefact id."];
+            if (!preg_match('/^a_[0-9a-f]{12}$/D', $id)) return ['error' => "'$id' is not an artefact id."];
             $res = self::withLock($ctx, function () use ($ctx, $id, $expected, $fn, $confirm, $author) {
                 $rec = self::findRecord($ctx, $id);
                 if ($rec === null) return ['error' => "There is no artefact with id '$id' in this notebook."];
@@ -2364,7 +2364,7 @@ class NotebookService {
         $out = [];
         if (!is_dir($dir)) return $out;
         foreach (@scandir($dir) ?: [] as $f) {
-            if (!preg_match('/^(a_[0-9a-f]{12})\.json$/', $f, $m)) continue;
+            if (!preg_match('/^(a_[0-9a-f]{12})\.json$/D', $f, $m)) continue;
             $d = json_decode((string)@file_get_contents($dir . '/' . $f), true);
             foreach ((array)($d['comments'] ?? []) as $c) {
                 if (empty($c['resolved']) && ($c['by']['kind'] ?? '') === 'agent') $out[$m[1]] = ($out[$m[1]] ?? 0) + 1;
@@ -2381,7 +2381,7 @@ class NotebookService {
         $f = $root . '/.notebook.json';
         if (!is_file($f)) return [];
         $d = json_decode((string)@file_get_contents($f), true);
-        if (!is_array($d) || !preg_match('/^nb_[0-9a-f]{12}$/', (string)($d['id'] ?? ''))) return [];
+        if (!is_array($d) || !preg_match('/^nb_[0-9a-f]{12}$/D', (string)($d['id'] ?? ''))) return [];
         return $d;
     }
 
@@ -2700,7 +2700,7 @@ class NotebookService {
         foreach ($sessions as $s) {
             if (!is_array($s)) continue;
             $id = (string)($s['id'] ?? '');
-            if ($id === '' || !preg_match('/^[A-Za-z0-9_\-]{1,64}$/', $id)) continue;
+            if ($id === '' || !preg_match('/^[A-Za-z0-9_\-]{1,64}$/D', $id)) continue;
             $path = rtrim((string)($s['path'] ?? ''), '/');
             if ($path === '' || !is_dir($path)) continue;
             $project = PoolPathService::resolvePoolPath($path) ?? $path;
@@ -2839,7 +2839,7 @@ class NotebookService {
             $c = [];
         }
         $folder = (string)($c['notebook_folder'] ?? 'notebook');
-        if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$/', $folder) || strpos($folder, '..') !== false) $folder = 'notebook';
+        if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$/D', $folder) || strpos($folder, '..') !== false) $folder = 'notebook';
         $quiet = trim((string)($c['notebook_quiet_hours'] ?? ''));
         if (!preg_match(self::QUIET_RE, $quiet)) $quiet = '';
         $flag = static fn(string $k, string $d): string => (string)($c[$k] ?? $d) === '1' ? '1' : (isset($c[$k]) && (string)$c[$k] !== '' ? '0' : $d);
@@ -2856,7 +2856,7 @@ class NotebookService {
      */
     public static function inQuietHours(string $spec, ?int $now = null): bool {
         $spec = trim($spec);
-        if ($spec === '' || !preg_match('/^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/', $spec, $m)) return false;
+        if ($spec === '' || !preg_match('/^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/D', $spec, $m)) return false;
         $a = (int)$m[1] * 60 + (int)$m[2];
         $b = (int)$m[3] * 60 + (int)$m[4];
         if ($a === $b) return false;

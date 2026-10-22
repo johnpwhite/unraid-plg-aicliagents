@@ -126,7 +126,7 @@ class TarballSource implements AgentSource {
         $body = @shell_exec($cmd);
         if (empty($body)) return null;
         $body = trim((string)$body);
-        if (preg_match('/^(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/', $body, $m)) return $m[1];
+        if (preg_match('/^(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/D', $body, $m)) return $m[1];
         $data = json_decode($body, true);
         if (is_array($data) && !empty($data['latest'])) return (string)$data['latest'];
         return null;

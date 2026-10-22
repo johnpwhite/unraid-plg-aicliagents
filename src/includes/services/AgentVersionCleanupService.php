@@ -30,7 +30,7 @@ class AgentVersionCleanupService {
     /** The agent id of one agent, or null for all agents. Throws on a bad id. */
     private static function target(?string $agentId): string {
         if ($agentId === null || $agentId === '' || $agentId === 'all') return 'all';
-        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/', $agentId)) {
+        if (!preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/D', $agentId)) {
             throw new \InvalidArgumentException('invalid_agent');
         }
         return $agentId;

@@ -22,8 +22,8 @@ const RELAY_HTTP_MAX_CONNECTIONS = 64;
 
 /** Return the address from PHP's remote socket name, without its port. */
 function relayHttpPeerAddress(string $peerName): string {
-    if (preg_match('/^\[([^]]+)\]:[0-9]+$/', $peerName, $match)) return $match[1];
-    if (preg_match('/^([^:]+):[0-9]+$/', $peerName, $match)) return $match[1];
+    if (preg_match('/^\[([^]]+)\]:[0-9]+$/D', $peerName, $match)) return $match[1];
+    if (preg_match('/^([^:]+):[0-9]+$/D', $peerName, $match)) return $match[1];
     return $peerName !== '' ? $peerName : 'unknown';
 }
 
@@ -70,7 +70,7 @@ function relayHttpResponse(array $result): string {
     // Linked-box responses carry a signature header (RELAY_LINKED_BOXES.md §3).
     $extra = '';
     foreach ((array)($result['headers'] ?? []) as $hk => $hv) {
-        if (preg_match('/^[A-Za-z0-9-]{1,64}$/', (string)$hk) && preg_match('/^[\x20-\x7E]{0,256}$/', (string)$hv)) $extra .= "$hk: $hv\r\n";
+        if (preg_match('/^[A-Za-z0-9-]{1,64}$/D', (string)$hk) && preg_match('/^[\x20-\x7E]{0,256}$/D', (string)$hv)) $extra .= "$hk: $hv\r\n";
     }
     return "HTTP/1.1 {$result['status']}\r\n"
         . "Content-Type: application/json\r\n"

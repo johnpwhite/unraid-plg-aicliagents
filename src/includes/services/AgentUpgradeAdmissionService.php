@@ -14,7 +14,7 @@ class AgentUpgradeAdmissionService
     /** @return resource|null */
     public static function acquire(string $agentId)
     {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return null;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return null;
         $tmpBase = getenv('AICLI_TMP_BASE');
         $base = rtrim($tmpBase !== false && $tmpBase !== '' ? $tmpBase : SecretPaths::stateRoot(), '/');
         @mkdir($base, 0755, true);

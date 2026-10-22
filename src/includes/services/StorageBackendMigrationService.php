@@ -1195,7 +1195,7 @@ final class StorageBackendMigrationService
                 foreach (ActivityService::listAll() as $entry) {
                     $opId = (string)($entry['opId'] ?? '');
                     if (in_array((string)($entry['status'] ?? ''), ['running', 'stalled'], true)
-                        && preg_match('/^install_([A-Za-z0-9._-]{1,128})$/', $opId, $m)) {
+                        && preg_match('/^install_([A-Za-z0-9._-]{1,128})$/D', $opId, $m)) {
                         $ids[] = $m[1];
                     }
                 }
@@ -1428,7 +1428,7 @@ final class StorageBackendMigrationService
         $out = [];
         $seen = [];
         $add = static function (string $type, string $id) use (&$out, &$seen): void {
-            if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $id) || $id === '.' || $id === '..') return;
+            if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $id) || $id === '.' || $id === '..') return;
             $key = $type . '/' . $id;
             if (isset($seen[$key])) return;
             $seen[$key] = true;
@@ -1436,7 +1436,7 @@ final class StorageBackendMigrationService
         };
         $manifestEntities = $seams['manifest_entities'] ?? LayerManifestService::getAllEntities();
         foreach ($manifestEntities as $entity => $_entry) {
-            if (preg_match('#^(agent|home)/([A-Za-z0-9_.-]+)$#', (string)$entity, $m) !== 1) continue;
+            if (preg_match('#^(agent|home)/([A-Za-z0-9_.-]+)$#D', (string)$entity, $m) !== 1) continue;
             if ($m[1] === 'agent' || self::homeHasStorage($m[2], (string)$paths['home'], $seams)) $add($m[1], $m[2]);
         }
         foreach ($paths as $type => $path) {
@@ -1471,7 +1471,7 @@ final class StorageBackendMigrationService
     /** A user record counts only when a layer, non-empty plain home, or workspace exists. */
     private static function homeHasStorage(string $user, string $path, array $seams): bool
     {
-        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $user) || $user === '.' || $user === '..') return false;
+        if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $user) || $user === '.' || $user === '..') return false;
         $layers = $seams['home_layer_files'] ?? (trim($path) === '' ? [] : (glob(rtrim($path, '/') . '/home_' . $user . '_*.sqsh') ?: []));
         if ($layers !== []) return true;
         $plain = rtrim($path, '/') . '/passthrough/homes/' . $user;

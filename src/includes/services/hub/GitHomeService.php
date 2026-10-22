@@ -508,7 +508,7 @@ class GitHomeService {
     public static function applySecretFilter(string $mode, string $content, array $secrets): string {
         $valid = [];
         foreach ($secrets as $k => $v) {
-            if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) $valid[(string)$k] = (string)$v;
+            if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', (string)$k)) $valid[(string)$k] = (string)$v;
         }
         if ($mode === 'clean') {
             $pairs = [];
@@ -1233,7 +1233,7 @@ class GitHomeService {
         if (strpos($url, '@') !== false) {
             return ['status' => 'error', 'message' => 'remove the credentials from the URL — your token is added automatically and securely at push time (via GIT_ASKPASS), so the URL must be the bare repo address with no user:token@ part'];
         }
-        if (!preg_match('#^https?://[A-Za-z0-9._~:/?\#\[\]!$&\'()*+,;=%-]+$#', $url)) {
+        if (!preg_match('#^https?://[A-Za-z0-9._~:/?\#\[\]!$&\'()*+,;=%-]+$#D', $url)) {
             return ['status' => 'error', 'message' => 'remote must be an http:// or https:// URL'];
         }
         $insecure = (strncmp($url, 'http://', 7) === 0);
@@ -1299,10 +1299,10 @@ class GitHomeService {
     /** Repo-relative path + ref validation shared by diff/restore. */
     private static function validatePathRef(string $path, string $ref): ?string {
         if ($path === '' || $path[0] === '/' || $path[0] === '-' || strpos($path, '..') !== false
-            || !preg_match('#^[A-Za-z0-9._/ -]{1,256}$#', $path)) {
+            || !preg_match('#^[A-Za-z0-9._/ -]{1,256}$#D', $path)) {
             return 'invalid path';
         }
-        if (!preg_match('/^[0-9a-f]{4,40}$/i', $ref) && $ref !== 'HEAD') {
+        if (!preg_match('/^[0-9a-f]{4,40}$/iD', $ref) && $ref !== 'HEAD') {
             return 'invalid ref (commit hash or HEAD)';
         }
         return null;

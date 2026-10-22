@@ -12,7 +12,7 @@ namespace AICliAgents\Services;
 
 class TraceContext {
     /** Strict id shape — lowercase alnum, 4–16 chars. Shell-safe by construction. */
-    public const ID_PATTERN = '/^[a-z0-9]{4,16}$/';
+    public const ID_PATTERN = '/^[a-z0-9]{4,16}$/D';
 
     private static ?string $id = null;
 

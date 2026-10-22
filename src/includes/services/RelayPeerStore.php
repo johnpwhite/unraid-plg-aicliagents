@@ -44,7 +44,7 @@ class RelayPeerStore {
         $d = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
         if (!is_array($d)) $d = [];
         $d['schema'] = 1;
-        $d['box_id'] = preg_match('/^[a-f0-9]{16}$/', (string)($d['box_id'] ?? '')) ? (string)$d['box_id'] : '';
+        $d['box_id'] = preg_match('/^[a-f0-9]{16}$/D', (string)($d['box_id'] ?? '')) ? (string)$d['box_id'] : '';
         $rows = [];
         foreach ((is_array($d['peers'] ?? null) ? $d['peers'] : []) as $r) {
             if (!is_array($r) || !self::validId((string)($r['id'] ?? ''))) continue;
@@ -84,13 +84,13 @@ class RelayPeerStore {
         return self::write($d) ? $d['box_id'] : '';
     }
 
-    public static function validId(string $id): bool { return (bool)preg_match('/^peer_[a-f0-9]{12}$/', $id); }
+    public static function validId(string $id): bool { return (bool)preg_match('/^peer_[a-f0-9]{12}$/D', $id); }
 
     private static function normaliseRow(array $r): array {
         $state = in_array((string)($r['state'] ?? ''), self::STATES, true) ? (string)$r['state'] : 'linked';
         return [
             'id' => (string)$r['id'],
-            'box_id' => preg_match('/^[a-f0-9]{16}$/', (string)($r['box_id'] ?? '')) ? (string)$r['box_id'] : '',
+            'box_id' => preg_match('/^[a-f0-9]{16}$/D', (string)($r['box_id'] ?? '')) ? (string)$r['box_id'] : '',
             'name' => self::cleanLabel((string)($r['name'] ?? ''), 'box'),
             'label' => self::cleanLabel((string)($r['label'] ?? ''), ''),
             'url' => (string)($r['url'] ?? ''),
@@ -172,12 +172,12 @@ class RelayPeerStore {
 
     public static function linkKey(string $id): string {
         $k = (string)(SecretService::getAgentSecrets()[self::vaultKey($id)] ?? '');
-        return preg_match('/^[a-f0-9]{64}$/', $k) ? $k : '';
+        return preg_match('/^[a-f0-9]{64}$/D', $k) ? $k : '';
     }
 
     public static function oldLinkKey(string $id): string {
         $k = (string)(SecretService::getAgentSecrets()[self::vaultKey($id) . '_OLD'] ?? '');
-        return preg_match('/^[a-f0-9]{64}$/', $k) ? $k : '';
+        return preg_match('/^[a-f0-9]{64}$/D', $k) ? $k : '';
     }
 
     /** Set the current key; $keepOld keeps the previous key as _OLD (rekey grace). */
@@ -196,7 +196,7 @@ class RelayPeerStore {
 
     public static function pairingSecret(): string {
         $s = (string)(SecretService::getAgentSecrets()[self::PAIRING_VAULT_KEY] ?? '');
-        return preg_match('/^[a-f0-9]{32}$/', $s) ? $s : '';
+        return preg_match('/^[a-f0-9]{32}$/D', $s) ? $s : '';
     }
 
     public static function setPairingSecret(?string $hex): bool {

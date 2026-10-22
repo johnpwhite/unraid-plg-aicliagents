@@ -12,7 +12,7 @@ namespace AICliAgents\Services;
 
 class EnvService {
 
-    private const KEY_REGEX  = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/';
+    private const KEY_REGEX  = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/D';
     private const VALUE_MAX  = 4096; // bytes
     private const SIDECAR_KEYS_LIST = '__seeded_keys';
     /** Vault keys with this prefix are Relay credentials and never enter an agent's environment. */

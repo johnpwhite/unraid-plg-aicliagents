@@ -1081,7 +1081,7 @@ class BootIntegrityService {
         if (strpos($name, $prefix) !== 0) {
             return null;
         }
-        if (!preg_match('/^(\d{10})_\d{8}T\d{6}Z\.sqsh$/', substr($name, strlen($prefix)), $m)) {
+        if (!preg_match('/^(\d{10})_\d{8}T\d{6}Z\.sqsh$/D', substr($name, strlen($prefix)), $m)) {
             return null;
         }
         return (int)$m[1];

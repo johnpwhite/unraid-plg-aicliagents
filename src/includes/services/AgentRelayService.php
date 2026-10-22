@@ -105,7 +105,7 @@ class AgentRelayService {
         return ($test !== false && $test !== '') ? rtrim($test, '/') : ConfigService::getUserStatePath() . '/relay';
     }
     public static float $lockWait = 3.0;
-    private static function cleanId(string $id): string { return preg_match('/^[A-Za-z0-9_-]{1,128}$/', $id) ? $id : ''; }
+    private static function cleanId(string $id): string { return preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) ? $id : ''; }
     private static function path(string $part): string { return self::baseDir() . '/' . ltrim($part, '/'); }
     private static function readJson(string $file, array $fallback): array {
         $v = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
@@ -145,7 +145,7 @@ class AgentRelayService {
         return substr($filter, -2) === '.*' ? strpos($topic, substr($filter, 0, -1)) === 0 : $topic === $filter;
     }
     private static function validTopic(string $topic): bool {
-        return (bool)preg_match('/^[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){1,5}$/', $topic) && strlen($topic) <= 128;
+        return (bool)preg_match('/^[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){1,5}$/D', $topic) && strlen($topic) <= 128;
     }
     private static function customTopics(): array {
         $data = self::readJson(self::path('topics.json'), ['schema'=>self::SCHEMA, 'topics'=>[]]);
@@ -618,7 +618,7 @@ class AgentRelayService {
      * user may hand-edit, so they are re-validated on read as well as on write.
      */
     private static function validPort($port): ?int {
-        if (!is_int($port) && !(is_string($port) && preg_match('/^\d+$/', $port))) return null;
+        if (!is_int($port) && !(is_string($port) && preg_match('/^\d+$/D', $port))) return null;
         $port = (int)$port;
         return ($port >= 1024 && $port <= 65535) ? $port : null;
     }
@@ -1369,8 +1369,8 @@ class AgentRelayService {
     }
     /** Request states after which nothing may change the request again (RELAY_LINKED_BOXES.md Phase 2). */
     const REQUEST_CLOSED = ['resolved', 'failed', 'cancelled'];
-    const REQUEST_ID_PATTERN = '/^req_[a-f0-9]{24}$/';
-    const CLIENT_REQUEST_ID_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/';
+    const REQUEST_ID_PATTERN = '/^req_[a-f0-9]{24}$/D';
+    const CLIENT_REQUEST_ID_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /**
      * $clientRequestId (optional, #299): the caller's own id, for example an A2A
@@ -1613,7 +1613,7 @@ class AgentRelayService {
      * line. The ledger is cleared at reboot; the file keeps the last 1 000 lines.
      */
     public static function remoteAudit(string $remoteId, string $event, array $data = []): void {
-        $remoteId=self::cleanId($remoteId); if ($remoteId==='' || !preg_match('/^[a-z_]{1,40}$/',$event)) return;
+        $remoteId=self::cleanId($remoteId); if ($remoteId==='' || !preg_match('/^[a-z_]{1,40}$/D',$event)) return;
         $f=self::path("remotes/$remoteId/audit.jsonl");
         @mkdir(dirname($f), 0770, true);
         @file_put_contents($f, json_encode(['at'=>gmdate('c'),'event'=>$event]+$data, JSON_UNESCAPED_SLASHES)."\n", FILE_APPEND);
@@ -1831,7 +1831,7 @@ class AgentRelayService {
      * plugin-minted id (s<random>) and stays listed.
      */
     public static function isTestSessionId(string $id): bool {
-        return (bool)preg_match('/^(?:peer_[a-f0-9]{12}__)?e2e[A-Za-z0-9_-]*$/', $id);
+        return (bool)preg_match('/^(?:peer_[a-f0-9]{12}__)?e2e[A-Za-z0-9_-]*$/D', $id);
     }
 
     /** #334: a history-only contact with no message for this long (and not running) is not listed. */
@@ -2050,7 +2050,7 @@ class AgentRelayService {
         if ($summary==='') return ['status'=>'error','message'=>'Empty message. Provide the message text as the final argument (1–'.self::MAX_SUMMARY.' bytes).'];
         if (strlen($summary)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Message too long: '.strlen($summary).' bytes (max '.self::MAX_SUMMARY.').'];
         if (!array_filter(self::agentContacts($sender, false), fn($contact) => $contact['session_id']===$recipient)) return ['status'=>'error','message'=>'Recipient is not an available saved workspace.'];
-        if ($threadId!=='' && !preg_match('/^dm_[a-f0-9]{24}$/',$threadId)) return ['status'=>'error','message'=>'Invalid private thread.'];
+        if ($threadId!=='' && !preg_match('/^dm_[a-f0-9]{24}$/D',$threadId)) return ['status'=>'error','message'=>'Invalid private thread.'];
         if ($threadId==='') $threadId='dm_'.bin2hex(random_bytes(12));
         // Stamp the sender's workspace name so the recipient can name this peer in
         // its contact list even when the sender lives on another box (#137).
@@ -2070,7 +2070,7 @@ class AgentRelayService {
      */
     public static function storeDirect(array $message): bool {
         $id=(string)($message['id'] ?? ''); $threadId=(string)($message['thread_id'] ?? '');
-        if (!preg_match('/^msg_[a-f0-9]{24}$/',$id) || !preg_match('/^dm_[a-f0-9]{24}$/',$threadId)) return false;
+        if (!preg_match('/^msg_[a-f0-9]{24}$/D',$id) || !preg_match('/^dm_[a-f0-9]{24}$/D',$threadId)) return false;
         if (!AtomicWriteService::writeJson(self::path("direct/$threadId/$id.json"),$message)) return false;
         // Only advance the marker when the index actually landed; a failed write must
         // leave the marker behind so the next read rebuilds it.
@@ -2122,14 +2122,14 @@ class AgentRelayService {
 
     /** The canonical copy of one direct message, or null. */
     public static function directMessageRecord(string $threadId, string $id): ?array {
-        if (!preg_match('/^dm_[a-f0-9]{24}$/',$threadId) || !preg_match('/^msg_[a-f0-9]{24}$/',$id)) return null;
+        if (!preg_match('/^dm_[a-f0-9]{24}$/D',$threadId) || !preg_match('/^msg_[a-f0-9]{24}$/D',$id)) return null;
         $m=self::readJson(self::path("direct/$threadId/$id.json"),[]);
         return $m ?: null;
     }
 
     /** Every session id that has sent or received in one thread (bounded read). */
     public static function threadParticipants(string $threadId): array {
-        if (!preg_match('/^dm_[a-f0-9]{24}$/',$threadId)) return [];
+        if (!preg_match('/^dm_[a-f0-9]{24}$/D',$threadId)) return [];
         $out=[];
         foreach (array_slice(glob(self::path("direct/$threadId/msg_*.json")) ?: [],0,2000) as $f) {
             $m=self::readJson($f,[]);
@@ -2220,7 +2220,7 @@ class AgentRelayService {
      */
     public static function directCursorKey(string $sessionId, string $cursor, bool $isAfter): ?string {
         $sessionId=self::cleanId($sessionId); $cursor=trim($cursor); if ($sessionId===''||$cursor==='') return null;
-        if (preg_match('/^msg_[a-f0-9]{24}$/', $cursor)) {
+        if (preg_match('/^msg_[a-f0-9]{24}$/D', $cursor)) {
             foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) {
                 $hit=glob(self::path("direct/$box/$sessionId/*_$cursor.json")) ?: [];
                 if ($hit) return basename($hit[0],'.json');
@@ -2238,7 +2238,7 @@ class AgentRelayService {
     public static function inboxMessage(string $sessionId, string $id): array {
         $sessionId=self::cleanId($sessionId);
         $no=['status'=>'error','message'=>'No such direct message in this inbox.'];
-        if ($sessionId===''||!preg_match('/^msg_[a-f0-9]{24}$/', $id)) return $no;
+        if ($sessionId===''||!preg_match('/^msg_[a-f0-9]{24}$/D', $id)) return $no;
         self::ensureDirectIndex();
         $hit=glob(self::path("direct/_inbox/$sessionId/*_$id.json")) ?: [];
         if (!$hit) return $no;
@@ -2595,7 +2595,7 @@ class AgentRelayService {
         $sessionId = self::cleanId($sessionId);
         if ($sessionId === '') return ['status'=>'error','message'=>'Invalid session.'];
         $removed = 0;
-        if (preg_match('/^msg_[a-f0-9]{24}$/', $id)) {
+        if (preg_match('/^msg_[a-f0-9]{24}$/D', $id)) {
             foreach (array_keys(self::DIRECT_INDEX_BOXES) as $box) {
                 foreach (glob(self::path("direct/$box/$sessionId/*_$id.json")) ?: [] as $f) {
                     if (@unlink($f)) $removed++;
@@ -2605,7 +2605,7 @@ class AgentRelayService {
             $tomb = self::path("direct/_deleted/$sessionId/$id");
             if (!is_dir(dirname($tomb))) @mkdir(dirname($tomb), 0777, true);
             @file_put_contents($tomb, gmdate('c'));
-        } elseif (preg_match('/^rel_[a-f0-9]{24}$/', $id)) {
+        } elseif (preg_match('/^rel_[a-f0-9]{24}$/D', $id)) {
             $f = self::path("deliveries/$sessionId/$id.json");
             if (is_file($f) && @unlink($f)) $removed++;
         } else {
@@ -2659,7 +2659,7 @@ class AgentRelayService {
         return ['events'=>$events,'requests'=>array_slice($requests,0,$limit),'direct_messages'=>array_slice($directs,0,$limit),'limit'=>$limit];
     }
     public static function setState(string $sessionId, string $messageId, string $state): bool {
-        $sessionId=self::cleanId($sessionId); if ($sessionId==='' || !preg_match('/^rel_[a-f0-9]{24}$/',$messageId) || !in_array($state,['acknowledged','deferred'],true)) return false;
+        $sessionId=self::cleanId($sessionId); if ($sessionId==='' || !preg_match('/^rel_[a-f0-9]{24}$/D',$messageId) || !in_array($state,['acknowledged','deferred'],true)) return false;
         $file=self::path("deliveries/$sessionId/$messageId.json");
         return (bool)self::locked('deliveries', function () use ($file,$state): bool {
             $d=self::readJson($file, []); if (!$d) return false;

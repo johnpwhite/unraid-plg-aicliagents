@@ -759,7 +759,7 @@ class TerminalService {
                 // Rows are DESC by time; the first well-formed id is this db's newest.
                 while (is_array($row = $res->fetchArray(SQLITE3_ASSOC))) {
                     $id = (string)($row['id'] ?? '');
-                    if (!preg_match('/^ses_[A-Za-z0-9_-]+$/', $id)) continue;
+                    if (!preg_match('/^ses_[A-Za-z0-9_-]+$/D', $id)) continue;
                     $t = (int)($row['time_updated'] ?? 0);
                     if ($t > $bestTime) { $bestTime = $t; $bestId = $id; }
                     break;
@@ -793,7 +793,7 @@ class TerminalService {
         $data = @json_decode((string) @file_get_contents($cacheFile), true);
         if (!is_array($data)) return null;
         $id = $data[$path] ?? null;
-        if (!is_string($id) || !preg_match('/^[A-Za-z0-9-]{20,}$/', $id)) return null;
+        if (!is_string($id) || !preg_match('/^[A-Za-z0-9-]{20,}$/D', $id)) return null;
         if (!is_file("$home/.gemini/antigravity-cli/conversations/$id.pb")) return null;
         return $id;
     }
@@ -813,7 +813,7 @@ class TerminalService {
             if (!is_array($row)) continue;
             $workDir = rtrim(str_replace('\\', '/', (string)($row['workDir'] ?? $row['work_dir'] ?? '')), '/');
             $id = (string)($row['sessionId'] ?? $row['session_id'] ?? $row['id'] ?? '');
-            if ($workDir !== $wanted || !preg_match('/^[A-Za-z0-9_-]{8,}$/', $id)) continue;
+            if ($workDir !== $wanted || !preg_match('/^[A-Za-z0-9_-]{8,}$/D', $id)) continue;
             $updatedAt = (int)($row['updatedAt'] ?? $row['updated_at'] ?? 0);
             if ($updatedAt >= $newestAt) {
                 $newestAt = $updatedAt;
@@ -837,7 +837,7 @@ class TerminalService {
             if ($decoded !== $wanted) continue;
             foreach (glob("$workspaceDir/*", GLOB_ONLYDIR) ?: [] as $sessionDir) {
                 $id = basename($sessionDir);
-                if (!preg_match('/^[A-Za-z0-9_-]{8,}$/', $id)) continue;
+                if (!preg_match('/^[A-Za-z0-9_-]{8,}$/D', $id)) continue;
                 $mtime = @filemtime($sessionDir) ?: 0;
                 foreach (['summary.json', 'updates.jsonl', 'chat_history.jsonl'] as $marker) {
                     $mtime = max($mtime, @filemtime("$sessionDir/$marker") ?: 0);
@@ -967,7 +967,7 @@ class TerminalService {
     {
         $legacyResolver = $legacyResolver ?? static function (string $agent): ?string {
             $g = trim((string)@file_get_contents(SecretPaths::stateRoot() . '/passthrough-legacy-' . $agent));
-            return preg_match('/^[A-Za-z0-9][A-Za-z0-9._@-]*$/', $g) ? $g : null;
+            return preg_match('/^[A-Za-z0-9][A-Za-z0-9._@-]*$/D', $g) ? $g : null;
         };
         $legacy = [];   // agentId => moved old-layout generation|null
         $root = $procRoot ?? '/proc';

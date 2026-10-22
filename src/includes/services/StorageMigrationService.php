@@ -49,8 +49,8 @@ class StorageMigrationService {
      */
     public static function isValidWipeTarget($type, $id): bool {
         if (!is_string($type) || !is_string($id)) return false;
-        if ($type === 'agent') return (bool)preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $id);
-        if ($type === 'home')  return (bool)preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/', $id);
+        if ($type === 'agent') return (bool)preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $id);
+        if ($type === 'home')  return (bool)preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/D', $id);
         return false;
     }
 

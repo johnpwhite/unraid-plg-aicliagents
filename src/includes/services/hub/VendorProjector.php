@@ -32,7 +32,9 @@ abstract class VendorProjector {
      * Desired managed-key map for the given canonical servers (env placeholders
      * already resolved). JSON vendors: 'mcpServers.<name>' => vendor-shape array.
      * Fenced vendors: single fence key => full fenced block string.
-     * An empty $servers map MUST return [] (nothing managed → managed keys removed).
+     * An empty $servers map MUST return [] (nothing managed → managed keys removed),
+     * except for a vendor that owns a block of its own that does not depend on the servers
+     * (Codex: the shell_environment_policy block, #688).
      * @param array<string,array> $servers
      * @return array<string,mixed>
      */

@@ -174,7 +174,7 @@ class AgentStorageService
         foreach (glob($ptRoot . '/*', GLOB_NOSORT) ?: [] as $entry) {
             $id = basename($entry);
             if ($id === '' || $id[0] === '.' || isset($out[$id])) continue;
-            if (!preg_match('/^[a-z0-9][a-z0-9-]*$/', $id)) continue;
+            if (!preg_match('/^[a-z0-9][a-z0-9-]*$/D', $id)) continue;
             $active = null;
             if (is_link($entry)) {
                 $link = (string)readlink($entry);
@@ -237,7 +237,7 @@ class AgentStorageService
         if ($fst !== 'zfs') return 1.0;
         // nosemgrep: php.lang.security.exec-use.exec-use
         $src = trim((string)@shell_exec('findmnt -no SOURCE -T ' . escapeshellarg($path) . ' 2>/dev/null | head -1'));
-        if ($src === '' || !preg_match('#^[A-Za-z0-9._/:-]+$#', $src)) return 1.0;
+        if ($src === '' || !preg_match('#^[A-Za-z0-9._/:-]+$#D', $src)) return 1.0;
         // nosemgrep: php.lang.security.exec-use.exec-use
         $raw = trim((string)@shell_exec('zfs get -H -p -o value compressratio ' . escapeshellarg($src) . ' 2>/dev/null'));
         $ratio = (float)rtrim($raw, 'x');
@@ -349,7 +349,7 @@ class AgentStorageService
         $agents = []; $refused = [];
         foreach ((array)$requested as $id) {
             $id = (string)$id;
-            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $id)) { $refused[$id] = 'invalid_id'; continue; }
+            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $id)) { $refused[$id] = 'invalid_id'; continue; }
             if (!in_array($id, $layered, true)) { $refused[$id] = 'not_layered'; continue; }
             $agents[] = $id;
         }

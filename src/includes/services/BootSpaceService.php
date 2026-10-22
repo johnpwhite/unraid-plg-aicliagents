@@ -238,7 +238,7 @@ class BootSpaceService
         $protectedRetirePaths = self::openConversionRetirePaths($persist);
         foreach (glob($persist . '/.graduated/*', GLOB_NOSORT) ?: [] as $p) {
             $name = basename($p);
-            if (preg_match('/^[A-Za-z0-9._-]{1,128}$/', $name) !== 1) continue;
+            if (preg_match('/^[A-Za-z0-9._-]{1,128}$/D', $name) !== 1) continue;
             $item = ['key' => 'graduated:' . $name, 'label' => 'Old layers of a converted home or agent (' . $name . ')',
                      'bytes' => $du($p), 'path' => $p];
             $items[] = self::protectOpenConversionItem($item, $protectedRetirePaths);
@@ -325,7 +325,7 @@ class BootSpaceService
         foreach (array_merge(glob($persist . '/.graduated/home_' . $safe, GLOB_NOSORT) ?: [],
                              glob($persist . '/.graduated/home_' . $safe . '.*', GLOB_NOSORT) ?: []) as $p) {
             if (is_link($p) || !is_dir($p)) continue;
-            if (preg_match('/^[A-Za-z0-9._-]{1,128}$/', basename($p)) !== 1) continue;
+            if (preg_match('/^[A-Za-z0-9._-]{1,128}$/D', basename($p)) !== 1) continue;
             $t = (int)@filemtime($p);
             if ($t > $bestTime) { $best = $p; $bestTime = $t; }
         }

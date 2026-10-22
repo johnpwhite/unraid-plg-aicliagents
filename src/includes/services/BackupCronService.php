@@ -45,9 +45,9 @@ class BackupCronService {
         if ($schedule === '' || $schedule === 'off') return null;
 
         $cron = null;
-        if (preg_match('/^daily:([01]\d|2[0-3]):([0-5]\d)$/', $schedule, $m)) {
+        if (preg_match('/^daily:([01]\d|2[0-3]):([0-5]\d)$/D', $schedule, $m)) {
             $cron = "{$m[2]} {$m[1]} * * *";
-        } elseif (preg_match('/^weekly:([0-6]):([01]\d|2[0-3]):([0-5]\d)$/', $schedule, $m)) {
+        } elseif (preg_match('/^weekly:([0-6]):([01]\d|2[0-3]):([0-5]\d)$/D', $schedule, $m)) {
             $cron = "{$m[3]} {$m[2]} * * {$m[1]}";
         } else {
             return null;
@@ -134,7 +134,7 @@ class BackupCronService {
     public static function cronLines(array $users, callable $scheduleFor): array {
         $lines = [];
         foreach ($users as $user) {
-            if (!preg_match('/^[A-Za-z0-9_.-]+$/', $user)) continue;
+            if (!preg_match('/^[A-Za-z0-9_.-]+$/D', $user)) continue;
             try {
                 $schedule = trim((string)$scheduleFor($user));
             } catch (\Throwable $e) {

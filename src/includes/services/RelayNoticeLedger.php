@@ -75,7 +75,7 @@ final class RelayNoticeLedger
 
     private static function file(string $sid): ?string
     {
-        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/', $sid)) return null;
+        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sid)) return null;
         $base = self::$dir ?? (AgentRelayService::baseDir() . '/system/notice-ledger');
         return rtrim($base, '/') . '/' . $sid . '.json';
     }

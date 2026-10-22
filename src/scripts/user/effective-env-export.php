@@ -23,7 +23,7 @@ foreach ($env as $key => $value) {
     if (\AICliAgents\Services\EnvService::isReservedKey($key)) {
         continue;
     }
-    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $key)) {
+    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $key)) {
         continue;
     }
     echo 'export ' . $key . '=' . escapeshellarg($value) . PHP_EOL;

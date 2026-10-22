@@ -31,7 +31,7 @@ final class PinnedLayersService
             if (strpos($line, 'unraid-aicliagents') === false) continue;
             if (!preg_match('#\(([^()]*\.sqsh)\s*\(deleted\)\)#', $line, $m)) continue;
             $dev = basename(trim((string)(explode(':', $line, 2)[0] ?? '')));
-            if (!preg_match('/^loop[0-9]+$/', $dev)) continue;
+            if (!preg_match('/^loop[0-9]+$/D', $dev)) continue;
             $sectors = (int)trim((string)@file_get_contents($root . '/' . $dev . '/size'));
             $loops++;
             $bytes += $sectors * 512;

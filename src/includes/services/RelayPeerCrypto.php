@@ -56,7 +56,7 @@ class RelayPeerCrypto {
      */
     public static function encodePairingCode(string $boxId, string $spkiB64, string $secretHex, string $name, string $url): string {
         $spki = base64_decode($spkiB64, true);
-        if (!preg_match('/^[a-f0-9]{16}$/', $boxId) || $spki === false || strlen($spki) !== 32 || !preg_match('/^[a-f0-9]{32}$/', $secretHex)) {
+        if (!preg_match('/^[a-f0-9]{16}$/D', $boxId) || $spki === false || strlen($spki) !== 32 || !preg_match('/^[a-f0-9]{32}$/D', $secretHex)) {
             throw new \InvalidArgumentException('bad pairing code fields');
         }
         $name = substr($name, 0, self::NAME_MAX);
@@ -110,8 +110,8 @@ class RelayPeerCrypto {
         // hex2bin() returns false for bad input. The wrapped key must be exactly
         // 32 bytes (the length of the HMAC stream it is XORed with); the wrapping
         // key is the 16-byte pairing secret or a 32-byte link key.
-        $key = preg_match('/^[0-9a-f]{64}$/i', $keyHex) ? hex2bin($keyHex) : false;
-        $wrap = preg_match('/^(?:[0-9a-f]{2}){16,}$/i', $wrapKeyHex) ? hex2bin($wrapKeyHex) : false;
+        $key = preg_match('/^[0-9a-f]{64}$/iD', $keyHex) ? hex2bin($keyHex) : false;
+        $wrap = preg_match('/^(?:[0-9a-f]{2}){16,}$/iD', $wrapKeyHex) ? hex2bin($wrapKeyHex) : false;
         if ($key === false || $wrap === false) {
             throw new \InvalidArgumentException('RelayPeerCrypto::wrapKey needs a 32-byte hex key and a hex wrapping key of at least 16 bytes');
         }
@@ -139,7 +139,7 @@ class RelayPeerCrypto {
     /** Timestamp check. Returns the skew in seconds when outside the window, else 0. */
     public static function clockSkew(string $ts, ?int $now = null): int {
         $now = $now ?? time();
-        if (!preg_match('/^\d{9,11}$/', $ts)) return PHP_INT_MAX;
+        if (!preg_match('/^\d{9,11}$/D', $ts)) return PHP_INT_MAX;
         $d = (int)$ts - $now;
         return abs($d) > self::TS_WINDOW ? $d : 0;
     }

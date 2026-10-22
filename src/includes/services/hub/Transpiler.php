@@ -211,7 +211,7 @@ class Transpiler {
         // reserved YAML indicator, so an npm scope such as '@scope/pkg' must be quoted
         // (a bare one makes the whole Goose file unreadable); '@' inside a value is fine.
         $boolNullNum = '/^(?:true|false|yes|no|on|off|null|~|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|0x[0-9a-fA-F]+)$/i';
-        if (preg_match('#^[A-Za-z0-9_./+-][A-Za-z0-9_./@+ -]*$#', $v)
+        if (preg_match('#^[A-Za-z0-9_./+-][A-Za-z0-9_./@+ -]*$#D', $v)
             && !preg_match('/^-( |$)/', $v)
             && !preg_match($boolNullNum, $v)
             && $v === trim($v)

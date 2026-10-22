@@ -49,7 +49,7 @@ class HomeCacheService
     public static function normaliseRamMb($value): string
     {
         $v = is_scalar($value) ? trim((string)$value) : '';
-        if ($v === '' || preg_match('/^\d+$/', $v) !== 1) return (string)self::RAM_MB_DEFAULT;
+        if ($v === '' || preg_match('/^\d+$/D', $v) !== 1) return (string)self::RAM_MB_DEFAULT;
         return (string)max(self::RAM_MB_MIN, min(self::RAM_MB_MAX, (int)$v));
     }
 
@@ -66,7 +66,7 @@ class HomeCacheService
         if ($v === '') return '';
         $v = rtrim($v, '/');
         if ($v === ''
-            || preg_match('#^/mnt/[A-Za-z0-9._-]+(/[A-Za-z0-9._ +-]+)*$#', $v) !== 1
+            || preg_match('#^/mnt/[A-Za-z0-9._-]+(/[A-Za-z0-9._ +-]+)*$#D', $v) !== 1
             || strpos($v, '..') !== false
             || preg_match('#(^|/)\.(/|$)#', $v) === 1   // R-123 (#662): a "." segment hides "user" from the next check
             || preg_match('#^/mnt/(user|user0|disks|remotes|rootshare|addons|disk[0-9]+)(/|$)#', $v) === 1) {

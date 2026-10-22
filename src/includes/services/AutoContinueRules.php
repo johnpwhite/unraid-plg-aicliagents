@@ -62,7 +62,7 @@ final class AutoContinueRules
         $re = trim($re);
         if ($re === '') return '';
         // Written as /body/flags: keep it, so the loader can report a bad flag.
-        if ($re[0] === '/' && preg_match('#^/.+/[A-Za-z]*$#s', $re)) return $re;
+        if ($re[0] === '/' && preg_match('#^/.+/[A-Za-z]*$#sD', $re)) return $re;
         return '/' . preg_replace('#(?<!\\\\)/#', '\\/', $re) . '/iu';
     }
 
@@ -146,7 +146,7 @@ final class AutoContinueRules
 
         $agent = strtolower(trim((string)($in['agent'] ?? ($in['agentId'] ?? '*'))));
         if ($agent === '' || $agent === 'all') $agent = self::ALL_AGENTS;
-        if ($agent !== self::ALL_AGENTS && !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agent)) $errors[] = 'The agent must be an agent id or "all".';
+        if ($agent !== self::ALL_AGENTS && !preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agent)) $errors[] = 'The agent must be an agent id or "all".';
 
         $kind = strtolower(trim((string)($in['kind'] ?? '')));
         if (!in_array($kind, self::KINDS, true)) $errors[] = 'The kind must be one of: ' . implode(', ', self::KINDS) . '.';
@@ -176,7 +176,7 @@ final class AutoContinueRules
         if ($errors !== []) return ['errors' => $errors];
 
         $id = (string)($in['id'] ?? '');
-        if (!preg_match('/^u-[a-f0-9]{8}$/', $id)) $id = '';
+        if (!preg_match('/^u-[a-f0-9]{8}$/D', $id)) $id = '';
         return ['errors' => [], 'pattern' => [
             'id' => $id,
             'name' => $name,
@@ -325,7 +325,7 @@ final class AutoContinueRules
                     $re = (string)($p['re'] ?? '');
                     $id = (string)($p['id'] ?? '');
                     $err = in_array($kind, self::KINDS, true) ? self::runtimeError($re, $kind) : 'unknown kind';
-                    if (!preg_match('/^u-[a-f0-9]{8}$/', $id)) {
+                    if (!preg_match('/^u-[a-f0-9]{8}$/D', $id)) {
                         // A hand-edited id: give it a stable one, so the row can be edited or deleted.
                         $id = 'u-' . substr(md5($kind . '|' . (string)($p['name'] ?? '') . '|' . $re), 0, 8);
                         $err = $err ?? 'bad id';

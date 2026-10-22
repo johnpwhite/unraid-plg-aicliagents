@@ -24,7 +24,7 @@ final class WorkspaceScreenService
     /** Byte cap for the returned text; the NEWEST lines are kept. */
     public const MAX_BYTES = 16384;
     /** Workspace ids are [A-Za-z0-9_-]; anything else is refused before a lookup. */
-    private const ID_RE = '/^[A-Za-z0-9_-]{1,64}$/';
+    private const ID_RE = '/^[A-Za-z0-9_-]{1,64}$/D';
 
     /** Test seam: replaces the known-secret map (null = read the real vault files). */
     public static ?array $knownSecrets = null;

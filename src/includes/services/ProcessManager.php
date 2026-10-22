@@ -670,7 +670,7 @@ class ProcessManager {
             if ($dash === false) return ['', ''];
             $id = substr($rest, $dash + 1);
         }
-        if ($id === '' || !preg_match('/^[A-Za-z0-9_-]+$/', $id)) return ['', ''];
+        if ($id === '' || !preg_match('/^[A-Za-z0-9_-]+$/D', $id)) return ['', ''];
         $agentId = substr($rest, 0, -(strlen($id) + 1));
         if ($agentId === '') return ['', ''];
         return [$id, $agentId];
@@ -1182,7 +1182,7 @@ class ProcessManager {
         // Close event → immediate activation attempt (the supervisor tick's idle
         // probe and the backoff pen stay as the fallback). Best-effort, never
         // lets a nudge failure break the close.
-        if ($closedAgentId !== '' && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $closedAgentId)) {
+        if ($closedAgentId !== '' && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $closedAgentId)) {
             try {
                 require_once __DIR__ . '/UpgradeRelaunchService.php';
                 if (UpgradeRelaunchService::nudgeActivation($closedAgentId)) {

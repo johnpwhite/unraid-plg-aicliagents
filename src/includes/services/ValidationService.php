@@ -229,7 +229,7 @@ class ValidationService {
      * @param int $maxLen Maximum length (default: 64).
      * @return string|false The validated ID, or false if invalid.
      */
-    public static function validateId($id, $pattern = '/^[a-zA-Z0-9_-]+$/', $maxLen = 64) {
+    public static function validateId($id, $pattern = '/^[a-zA-Z0-9_-]+$/D', $maxLen = 64) {
         if (empty($id) || !is_string($id) || strlen($id) > $maxLen) {
             return false;
         }
@@ -260,7 +260,7 @@ class ValidationService {
         if (empty($key) || !is_string($key) || strlen($key) > 128) {
             return false;
         }
-        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $key) ? $key : false;
+        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $key) ? $key : false;
     }
 
     /**
@@ -308,7 +308,7 @@ class ValidationService {
         $expect = [];
         foreach ($map as $key => $value) {
             $key = (string)$key;
-            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_.-]*$/', $key) || self::isReservedIniKey($key)
+            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_.-]*$/D', $key) || self::isReservedIniKey($key)
                 || (!is_scalar($value) && $value !== null)) {
                 $skipped[] = $key;
                 continue;
@@ -337,7 +337,7 @@ class ValidationService {
             return false;
         }
         // Standard Unix username: lowercase, digits, hyphens, underscores, 1-32 chars
-        if (!preg_match('/^[a-z_][a-z0-9_-]{0,31}$/', $username)) {
+        if (!preg_match('/^[a-z_][a-z0-9_-]{0,31}$/D', $username)) {
             return false;
         }
         // Reject system accounts

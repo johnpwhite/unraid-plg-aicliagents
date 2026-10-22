@@ -856,7 +856,7 @@ class LayerManifestService {
 
     /** Smoke-test entity ids are never rebuilt (see supervisor cleanup-phantoms). */
     private static function isSmokeId(string $id): bool {
-        return preg_match('/^smoke[a-z]*[0-9]*$/', $id) === 1;
+        return preg_match('/^smoke[a-z]*[0-9]*$/D', $id) === 1;
     }
 
     /**
@@ -866,7 +866,7 @@ class LayerManifestService {
      * @return array{type: string, id: string, kind: string}|null
      */
     public static function parseLayerName(string $filename): ?array {
-        if (preg_match('/^(home|agent)_(.+)_(delta|consolidated)_\d{10}_\d{8}T\d{6}Z\.sqsh$/', basename($filename), $m) !== 1) {
+        if (preg_match('/^(home|agent)_(.+)_(delta|consolidated)_\d{10}_\d{8}T\d{6}Z\.sqsh$/D', basename($filename), $m) !== 1) {
             return null;
         }
         return ['type' => $m[1], 'id' => $m[2], 'kind' => $m[3]];
@@ -889,7 +889,7 @@ class LayerManifestService {
             return false;
         }
         $rest = substr($name, strlen($prefix));
-        return preg_match('/^(?:(?:delta|consolidated)_\d{10}_\d{8}T\d{6}Z|(?:delta|consolidated)_\d{8}T\d{6}Z|delta_\d+|(?:v\d+_)?vol\d+)$/', $rest) === 1;
+        return preg_match('/^(?:(?:delta|consolidated)_\d{10}_\d{8}T\d{6}Z|(?:delta|consolidated)_\d{8}T\d{6}Z|delta_\d+|(?:v\d+_)?vol\d+)$/D', $rest) === 1;
     }
 
     /**

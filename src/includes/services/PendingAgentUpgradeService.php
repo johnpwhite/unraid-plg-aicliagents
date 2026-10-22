@@ -20,7 +20,7 @@ class PendingAgentUpgradeService
 
     private static function safeId(string $agentId): string
     {
-        return preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId) ? $agentId : '';
+        return preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId) ? $agentId : '';
     }
 
     public static function requestPath(string $agentId): string
@@ -280,7 +280,7 @@ class PendingAgentUpgradeService
         // grep string, where a quote in the id ran commands as root. The process
         // list is read from /proc and compared in PHP. An id that is not an
         // agent id shape cannot name a running install.
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return false;
         return in_array($agentId, self::runningInstallIds($procRoot), true);
     }
 
@@ -296,7 +296,7 @@ class PendingAgentUpgradeService
             $args = explode("\0", rtrim($raw, "\0"));
             foreach ($args as $i => $arg) {
                 $id = (string)($args[$i + 1] ?? '');
-                if (substr($arg, -14) === 'install-bg.php' && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $id)) {
+                if (substr($arg, -14) === 'install-bg.php' && preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $id)) {
                     $ids[$id] = true;
                 }
             }

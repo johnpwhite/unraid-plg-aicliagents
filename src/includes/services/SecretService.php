@@ -128,7 +128,7 @@ class SecretService {
             // Defence: strip anything that doesn't look like a legitimate env name.
             // The vault was written with the same shape constraint; this just
             // protects against external edits.
-            if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) {
+            if (preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', (string)$k)) {
                 $out[$k] = (string)$v;
             }
         }
@@ -171,7 +171,7 @@ class SecretService {
         $clean = [];
         foreach ($map as $k => $v) {
             // Final shape gate at write time.
-            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/', (string)$k)) continue;
+            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', (string)$k)) continue;
             if (ValidationService::isReservedIniKey($k)) {
                 LogService::log("Secret store: refused the key '$k': it is an INI reserved word.", LogService::LOG_WARN, 'SecretService');
                 return false;

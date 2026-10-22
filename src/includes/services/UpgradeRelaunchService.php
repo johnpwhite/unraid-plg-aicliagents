@@ -118,7 +118,7 @@ class UpgradeRelaunchService
      */
     public static function activationBlocked(string $agentId, ?callable $installRunning = null): bool
     {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return false;
         if ($installRunning === null) {
             require_once __DIR__ . '/PendingAgentUpgradeService.php';
             $installRunning = static fn(): bool =>
@@ -156,7 +156,7 @@ class UpgradeRelaunchService
         $reaped = 0;
         foreach (glob(self::baseDir() . '/install-status-*') ?: [] as $file) {
             $base = basename($file);
-            if (!preg_match('/^install-status-([a-z0-9][a-z0-9-]{0,63})$/', $base, $m)) continue;
+            if (!preg_match('/^install-status-([a-z0-9][a-z0-9-]{0,63})$/D', $base, $m)) continue;
             $agentId = $m[1];
             $status = @json_decode((string)@file_get_contents($file), true);
             if (!is_array($status)) continue;
@@ -194,7 +194,7 @@ class UpgradeRelaunchService
             $data = json_decode((string)@file_get_contents($file), true);
             if (!is_array($data) || empty($data['closed']) || !is_array($data['closed'])) continue;
             $agentId = (string)($data['agentId'] ?? '');
-            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) continue;
+            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) continue;
             // A browser/user may have recovered every closed workspace under
             // fresh session ids before a deferred layer activation succeeds.
             // Such a manifest can never make progress while those healthy
@@ -303,7 +303,7 @@ class UpgradeRelaunchService
         ?callable $enqueue = null,
         ?callable $wake = null
     ): bool {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return false;
         if ($enqueue === null) {
             $enqueue = static function (string $id, string $jobId): bool {
                 return SupervisorService::enqueue(
@@ -351,7 +351,7 @@ class UpgradeRelaunchService
 
     public static function markActivationPending(string $agentId, string $layer, bool $hasClosedSet): bool
     {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return false;
         @mkdir(self::baseDir(), 0755, true);
         $payload = [
             'agentId'       => $agentId,
@@ -403,7 +403,7 @@ class UpgradeRelaunchService
         foreach (glob(self::baseDir() . '/pending-activation-*.json') ?: [] as $file) {
             $data = json_decode((string)@file_get_contents($file), true);
             $agentId = is_array($data) ? (string)($data['agentId'] ?? '') : '';
-            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) continue;
+            if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) continue;
             // The content must name the agent the file is for (a foreign or
             // mis-filed record is ignored, never acted on).
             if (basename($file) !== basename(self::pendingActivationPath($agentId))) continue;
@@ -420,7 +420,7 @@ class UpgradeRelaunchService
      */
     public static function completeActivation(string $agentId, ?callable $publishComplete = null): void
     {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return;
         $record = self::readPendingActivation($agentId);
         if ($publishComplete === null) {
             $publishComplete = static function (string $id): void {
@@ -458,7 +458,7 @@ class UpgradeRelaunchService
         ?callable $wake = null,
         ?callable $schedule = null
     ): bool {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/', $agentId)) return false;
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return false;
         if (!self::activationPending($agentId)) return false;
         $safe   = preg_replace('/[^A-Za-z0-9._-]/', '_', $agentId);
         $jobId  = "upgrade-agent-$safe";

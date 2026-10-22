@@ -42,7 +42,7 @@ class OpencodeClaudeInstructionsProjector extends VendorProjector {
     const DISABLE_ENV = ['OPENCODE_DISABLE_CLAUDE_CODE', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT'];
 
     /** The plugin's own Claude rule projections (content duplicated in AGENTS.md). */
-    const OWN_RULE_PATTERN = '/^aicli-.*\.md$/';
+    const OWN_RULE_PATTERN = '/^aicli-.*\.md$/D';
 
     /** Directory-walk guards. */
     const MAX_DEPTH = 8;

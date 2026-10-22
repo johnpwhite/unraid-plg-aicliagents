@@ -152,7 +152,7 @@ class VoiceService {
      * Settings `tts_voice` field (AdminService::SETTINGS_ALLOWLIST), used for the
      * per-workspace voice and for a replay's stored voice.
      */
-    public const VOICE_ID_PATTERN = '/^[a-z][a-z0-9_]{0,63}$/';
+    public const VOICE_ID_PATTERN = '/^[a-z][a-z0-9_]{0,63}$/D';
 
     /** Test seam: overrides RUNTIME_DIR. Null uses the real path. */
     public static ?string $dir = null;
@@ -352,7 +352,7 @@ class VoiceService {
      */
     public static function normaliseSpeed(string $speed): ?string {
         $speed = trim($speed);
-        if (!preg_match('/^\d(\.\d{1,2})?$/', $speed)) return null;
+        if (!preg_match('/^\d(\.\d{1,2})?$/D', $speed)) return null;
         $f = (float)$speed;
         if ($f < self::SPEED_MIN || $f > self::SPEED_MAX) return null;
         return rtrim(rtrim(number_format($f, 2, '.', ''), '0'), '.');

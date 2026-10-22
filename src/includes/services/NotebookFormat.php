@@ -326,7 +326,7 @@ class NotebookFormat {
                     $n++;
                     $qid = (string)($q['id'] ?? '');
                     if ($qid === '') $qid = 'q' . $n;
-                    if (!preg_match('/^[A-Za-z0-9_\-]{1,40}$/', $qid)) return [null, "Question id '$qid' is not valid."];
+                    if (!preg_match('/^[A-Za-z0-9_\-]{1,40}$/D', $qid)) return [null, "Question id '$qid' is not valid."];
                     if (isset($seen[$qid])) return [null, "Question id '$qid' is used twice."];
                     $seen[$qid] = true;
                     $kind = (string)($q['kind'] ?? 'text');
@@ -405,7 +405,7 @@ class NotebookFormat {
             if (preg_match(self::ITEM_RE, rtrim($line, "\r"), $m) && ($m[3] ?? '') !== '') {
                 if (isset($used[$m[3]])) return [$body, "Step id '{$m[3]}' is used twice."];
                 $used[$m[3]] = true;
-                if (preg_match('/^s(\d+)$/', $m[3], $n)) $max = max($max, (int)$n[1]);
+                if (preg_match('/^s(\d+)$/D', $m[3], $n)) $max = max($max, (int)$n[1]);
             }
         }
         $inFence = false;
@@ -641,7 +641,7 @@ class NotebookFormat {
                 if (!is_numeric($value)) return 'Answer with a number.';
                 $value = $value + 0; break;
             case 'date':
-                if (!is_string($value) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) || !checkdate((int)substr($value, 5, 2), (int)substr($value, 8, 2), (int)substr($value, 0, 4))) return 'Answer with a date as YYYY-MM-DD.';
+                if (!is_string($value) || !preg_match('/^\d{4}-\d{2}-\d{2}$/D', $value) || !checkdate((int)substr($value, 5, 2), (int)substr($value, 8, 2), (int)substr($value, 0, 4))) return 'Answer with a date as YYYY-MM-DD.';
                 break;
             default:
                 if (!is_scalar($value)) return 'Answer with text.';
