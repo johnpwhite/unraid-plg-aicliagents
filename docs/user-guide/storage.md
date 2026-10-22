@@ -6,7 +6,7 @@
 
 ## In plain words
 
-The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. On an internal boot disk, a new agent also installs as plain folders unless you turn on **Keep agents compressed**. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
+The plugin keeps two kinds of data on your server. The first is the home: the sign-ins, memory and chat history of each agent. The second is agent storage: the program files of the agents you install. The plugin does not write this data to disk file by file. It keeps it in a few compressed files called layers, and it catches your day-to-day changes in a writable layer on top. This design protects your USB flash drive from constant small writes. On a boot disk that is not a USB flash drive, a home does not need layers: it can be **plain folders**, an ordinary folder with no saves and no tidy-ups. On an internal boot disk, a new agent also installs as plain folders unless **Agent storage** is set to **SquashFS layers**. You choose where the layers live, how the writable layer works, and when the plugin saves. This page explains each choice and what to do when the plugin asks for your attention.
 
 ## The basics
 
@@ -46,7 +46,8 @@ Open the **AI CLI Agents** page under Unraid's Settings menu. It has these tabs:
 | :-- | :-- |
 | Choose where home and agent data live | **Configuration** tab, card **Global Configuration**, fields **Home Storage** and **Agent Storage** (button **Change…**) |
 | Choose the writable layer for homes | **Configuration** tab, field **Writable layer for homes** |
-| Choose the persistence engine | **Configuration** tab, field **Persistence engine** |
+| Choose how homes are stored | **Configuration** tab, field **Home storage** |
+| Choose how agents are stored | **Configuration** tab, field **Agent storage** |
 | Choose how often the plugin saves | **Configuration** tab, field **Backup Interval** |
 | Choose when the plugin merges | **Configuration** tab, field **Consolidate Layer Ceiling** |
 | See where the boot disk space goes, and free it | **Home Storage** tab, card **Boot disk space** (at the top). It includes homes and agents from their configured storage paths. See "Boot disk space" below. |
@@ -82,7 +83,7 @@ The plugin does not block `/mnt/user`, because some servers have no other choice
 > [!WARNING]
 > A move copies your data to the new place and then switches to it. The plugin saves and merges first, and it checks every file after the copy. It does not delete the old data until the copy is safe. A large home can take several minutes. Open workspaces on that home close during the move.
 
-Wait for a **Persistence engine** conversion to finish before you move storage. The plugin refuses a move while the conversion is queued or running.
+Wait for a **Home storage** or **Agent storage** conversion to finish before you move storage. The plugin refuses a move while the conversion is queued or running.
 
 1. Open the **Configuration** tab.
 2. Press **Change…** next to **Home Storage** or **Agent Storage**. Expect: a panel opens and the plugin probes your storage targets.
@@ -136,19 +137,21 @@ The plugin copies the home with every workspace closed. It does not save or merg
 
 The plugin never overwrites files that are already in the plain folder of the home. If that folder holds files, the conversion stops and changes nothing. The Activity tray then says, for example: "Could not finish. Refused: the plain folder /mnt/cache/aicliagents/passthrough/homes/root already has files (first: notes.txt). Move them away, then try again. Nothing was changed." Move or archive the named files, then press **Convert to plain folders** again. Small empty marker files that the plugin keeps in the hidden folder `.aicli` do not count as files.
 
+This conversion changes one home. It does not change the setting **Home storage**. After it, the line under **Home storage** on the **Configuration** tab reads, for example, **Mixed: 1 of 2 homes are plain folders**. To convert the other homes, press the button under that line, or choose **Plain folders** in **Home storage**.
+
 The home stays on the boot disk, so the plugin works while the array is stopped. Backups work as before. A home on a USB flash drive is never offered the conversion; use **Move off USB flash drive** for that. Agents have their own conversion. See "Convert agents to plain folders" below.
 
 You can also start the conversion from the notice in the Activity tray (see "The notice to close workspaces") or from the Unraid notification "AICliAgents: homes can move to plain folders". That notification comes once after a plugin install or update when one or more homes can convert. It comes again only when that set of homes changes. Its link opens this dialog for the first such home.
 
 ### Agents on an internal boot disk
 
-The program files of an agent follow the same rule as a home. On a USB boot stick, every agent keeps compressed layers. On an internal boot disk (for example a small ZFS mirror), a new agent installs as **plain folders**. Plain folders start faster and need no merges. They also use more space on the boot disk, because a layer is compressed more than a folder is. Open **Configuration** and look at **Keep agents compressed**. Choose **Yes: keep new agents in compressed layers** when your boot disk is small. Then new installs and updates use layers again. The setting does not move an agent that is installed.
+The program files of an agent follow the same rule as a home. On a USB boot stick, every agent keeps compressed layers. On an internal boot disk (for example a small ZFS mirror), a new agent installs as **plain folders**. Plain folders start faster and need no merges. They also use more space on the boot disk, because a layer is compressed more than a folder is. Open **Configuration** and look at **Agent storage**. Choose **SquashFS layers** when your boot disk is small. Then new installs and updates use layers again. Choosing it converts the agents that are in plain folders back to layers, as the dialog explains.
 
-When the boot disk has no room for a new agent, the install stops and says "No space on the boot disk". The message names the **Boot disk space** card on the Storage tab and the setting **Keep agents compressed**. The version in use stays.
+When the boot disk has no room for a new agent, the install stops and says "No space on the boot disk". The message names the **Boot disk space** card on the Storage tab and the setting **Agent storage**. The version in use stays.
 
 ### Convert agents to plain folders
 
-An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Keep agents compressed** is off, and when at least one agent has layers. It is not offered on a USB boot stick.
+An agent that was installed with layers stays layered until you convert it. The conversion is offered on an internal boot disk while **Agent storage** is not set to **SquashFS layers**, and when at least one agent has layers. The setting **Agent storage** then shows **Mixed** until you convert the rest. It is not offered on a USB boot stick.
 
 1. On the **Boot disk space** card (see "Boot disk space" above), press **Convert to plain folders** on the line **Agents: current versions**. Expect: a dialog **Convert agents to plain folders?**.
 2. Read the dialog before you press anything. It lists each agent with **Size now** and **As plain folders**. Below the list it shows the extra space, the free space now and the free space after. The size as plain folders is an estimate: the size of the layer files times 5.8, divided by the compression of the boot disk. The dialog does not measure anything. It shows the numbers of the last measure, with the line "Measured at 14:05 (3 min ago)". When the numbers are more than 10 minutes old, or there are none, the dialog shows the button **Measure now**. Press it once, wait for the measure to end, and the dialog opens again with new numbers.
@@ -161,32 +164,36 @@ The plugin converts one agent at a time. It closes only the workspaces that run 
 
 The old layers move to a backup folder. They stay for 14 days, then the plugin removes them. They use space until then. You can remove them sooner with **Remove** on the **Left over** line.
 
-## The setting "Persistence engine"
+## The settings "Home storage" and "Agent storage"
 
-**Persistence engine** applies to saved agent and home storage. **SquashFS layers + zram (recommended)** stores changes in compressed layers and a writable layer. **Plain directories (advanced)** stores files directly in ordinary folders. When **Keep agents compressed** is on, agents stay in SquashFS layers during a change to plain directories. Homes still change.
+**Home storage** and **Agent storage** are two settings on the **Configuration** tab. Each setting has two choices. **SquashFS layers** stores changes in compressed layers and a writable layer. **Plain folders** stores files directly in ordinary folders. **Home storage** applies to the homes. **Agent storage** applies to the program files of the agents. New homes use **Home storage**. New agent installs and updates use **Agent storage**.
 
-### Change the persistence engine
+Under each setting, the line **Now:** shows what is true on disk, not only what the setting says. It reads **Plain folders**, **SquashFS layers**, or **Mixed**. An example is **Mixed: 1 of 2 homes are plain folders**. The line changes when you convert one home with **Convert to plain folders** on its card. When a setting is mixed, a button appears: **Convert the other 1 home to plain folders**. Press it to finish the change for the items that are left.
+
+### Change one setting
 
 > [!WARNING]
-> This change closes open workspaces and converts saved storage. When **Keep agents compressed** is on, agents stay in SquashFS layers while homes change to plain directories. The conversion can take several minutes. Keep the server running until the status says the migration is complete.
+> This change closes open workspaces and converts saved storage. It converts only the kind you changed: homes for **Home storage**, agents for **Agent storage**. Items that are already on the new choice stay as they are. The conversion can take several minutes. Keep the server running until the status says the migration is complete.
 
 1. Open the **Configuration** tab.
-2. Change **Persistence engine**. Expect: the dialog **Change persistence engine?** explains the conversion.
-3. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every item it will convert. It keeps at least 2 GB or 10% of each disk free, whichever is larger. If **Keep agents compressed** is on, the check leaves agents out because they stay layered. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
-4. Press **Migrate all storage**. Expect: the confirmation closes when the conversion starts. A status appears beside the setting. It shows the target engine, current item and number of completed items.
-5. Wait for **Storage migration complete**. The saved setting changes only after all selected items convert. Workspaces that ran before the change open again after success or a complete put-back, even when **Auto-launch workspaces** is off.
+2. Change **Home storage** or **Agent storage**. Expect: the dialog **Change home storage?** or **Change agent storage?** explains the conversion.
+3. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every item it will convert. It keeps at least 2 GB or 10% of each disk free, whichever is larger. It leaves out the other kind and the items that are already on the new choice. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
+4. Press **Convert homes** or **Convert agents**. Expect: the confirmation closes when the conversion starts. A status appears under the settings. It names the kind, shows the target, the current item and the number of completed items.
+5. Wait for **Home storage migration complete** or **Agent storage migration complete**. The saved setting changes only after all items of that kind convert. Workspaces that ran before the change open again after success or a complete put-back, even when **Auto-launch workspaces** is off.
 
-If this page stays open while another tab changes the engine, the next save uses the completed engine value. It does not start the same conversion again.
+When every item of the kind is on the new choice already, the plugin only saves the setting. No workspace closes.
 
-If the server stops during conversion, Configuration and **Boot disk space** show the changed items. Press **Continue** to finish the change. Press **Put back** to restore the changed items to the saved engine. Workspaces and storage actions stay paused until recovery ends.
+If this page stays open while another tab changes a setting, the next save uses the completed value. It does not start the same conversion again.
 
-**Dismiss** hides only the result for that conversion. A later conversion appears and disables **Persistence engine** while it runs.
+If the server stops during conversion, Configuration and **Boot disk space** show the changed items. Press **Continue** to finish the change. Press **Put back** to restore the changed items to the saved choice. Workspaces and storage actions stay paused until recovery ends.
 
-You can open another page while the conversion runs. The **Boot disk space** card also shows the progress. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
+**Dismiss** hides only the result for that conversion. A later conversion appears and disables both settings while it runs.
 
-The migration includes homes with saved layers, files in a plain home folder or a saved workspace. A user account without saved home storage does not add an item to the migration.
+You can open another page while the conversion runs. The **Boot disk space** card also shows the progress and says which kind converts. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Home Storage** to see the same status. The page does not block navigation.
 
-Copies kept when the engine changes from plain folders to SquashFS layers appear in **Boot disk space** under **Left over**. Each row shows its size and age. You can remove a copy after no conversion needs it. The plugin does not remove these copies automatically.
+The migration of homes includes homes with saved layers, files in a plain home folder or a saved workspace. A user account without saved home storage does not add an item to the migration.
+
+Copies kept when a setting changes from plain folders to SquashFS layers appear in **Boot disk space** under **Left over**. Each row shows its size and age. You can remove a copy after no conversion needs it. The plugin does not remove these copies automatically.
 
 The plugin pauses automatic saves, merges and queued storage jobs during the conversion. A storage job that already holds a lock can finish. The migration waits and retries the affected item for a limited time.
 
@@ -205,7 +212,7 @@ This setting decides where the writable layer of each home lives. It applies to 
 
 **Disk** is refused when your storage sits on a USB flash drive. The server answers **RAM** there, because disk writes would wear the drive. **RAM** is refused when a home is bigger than 80 percent of the RAM area. The warning names the sizes.
 
-The setting applies when the persistence engine is **SquashFS layers + zram (recommended)**. The other engine, **Plain directories (advanced)**, writes straight to the chosen path.
+The setting applies when **Home storage** is **SquashFS layers**. Homes in **Plain folders** have no writable layer. They write straight to the chosen path.
 
 ### Switch the setting
 
@@ -634,6 +641,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 
 - **2026-10-22** — The banner "Home can change to plain folders" has its own button **Convert to plain folders** and no longer points to the notice at the bottom right. **Later** on the notice ends after 24 hours. Spec `docs/specs/STORAGE_RECLAIM_NOTICE.md`, issue #746.
 - **2026-10-22** — The home card shows the old layers that wait for a rollback, with their size and removal date, and the button **Remove old layers**. Spec `docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md`, issue #747.
+- **2026-10-22** — **Persistence engine** and **Keep agents compressed** are replaced by **Home storage** and **Agent storage**. Each shows what is true on disk, such as **Mixed: 1 of 2 homes are plain folders**, and a change converts only its own kind. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #748.
 - **2026-10-20** — The migration lists only homes with saved storage or a saved workspace. A user account alone does not add an empty home. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #723.
 - **2026-10-20** — The migration waits for workspaces to stop before it moves storage. A forced agent conversion also waits for its mount to become idle. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #722.
 - **2026-10-20** — The agent conversion compares the full copied tree and checks sample file hashes before it switches storage. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #721.
