@@ -137,7 +137,7 @@ function saveAICliAgentsManager(form, silent = false) {
     var newAgentPath = $(form).find('[name="agent_storage_path"]').val() || '';
     var newHomePath = $(form).find('[name="home_storage_path"]').val() || '';
     var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
-    var curHomePath = '<?= addslashes($config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
+    var curHomePath = '<?= addslashes(\AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config)) ?>';
     var newUpperMode = $(form).find('[name="storage_upper_mode"]').val() || 'zram';
     var curUpperMode = '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
 

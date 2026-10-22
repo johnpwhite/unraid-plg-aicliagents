@@ -2002,7 +2002,7 @@ class StorageHandler {
 
         $config       = getAICliConfig();
         $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
-        $oldHomePath  = $config['home_storage_path']  ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath  = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         aicli_log("AJAX Request: Move $kind storage off USB flash drive to durable target '$target'", AICLI_LOG_INFO);
         \AICliAgents\Services\LifecycleLogService::log(
@@ -2189,7 +2189,7 @@ class StorageHandler {
         $newAgentPath = $_GET['agent_storage_path'] ?? '';
         $newHomePath = $_GET['home_storage_path'] ?? '';
         $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
-        $oldHomePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         // #341 → S-11 (#1355): validate any new path via the capability probe
         // (StorageTargetService::validateTarget → FileStorage::probeTarget).
@@ -2350,7 +2350,11 @@ class StorageHandler {
         require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
         $config = getAICliConfig();
         foreach (['old_agent_path' => 'agent_storage_path', 'old_home_path' => 'home_storage_path'] as $param => $key) {
-            if (isset($_GET[$param]) && (string)$_GET[$param] !== (string)($config[$key] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence')) {
+            // #753: the home path is the resolved one (the shell uses the same rule).
+            $live = $key === 'home_storage_path'
+                ? \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config)
+                : (string)($config[$key] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence');
+            if (isset($_GET[$param]) && (string)$_GET[$param] !== $live) {
                 aicli_log("Storage Migration: refusing — $param from the browser differs from the live settings", AICLI_LOG_WARN);
                 return ['status' => 'error', 'message' => 'The storage settings changed since this page was loaded. Reload the page and try again.'];
             }
@@ -2394,7 +2398,7 @@ class StorageHandler {
         // #652: the old paths are the live settings (the move saves the new paths only
         // after the copy). The browser's old_* values are never used, only compared.
         $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
-        $oldHomePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         aicli_log("Storage Migration: Starting path migration...", AICLI_LOG_INFO);
 
@@ -2563,7 +2567,7 @@ class StorageHandler {
     public static function runPathMove(string $newAgentPath, string $newHomePath): array {
         $config = getAICliConfig();
         $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
-        $oldHomePath = $config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldHomePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         // Follow-on #1: a settings path change is an EXPLICIT, crash-safe TOLD
         // migration. migratePath() marker-BRACKETS this proven copy flow (it does
@@ -2623,6 +2627,14 @@ class StorageHandler {
                     $__migResult = ['status' => 'error', 'message' => "Failed to copy $name"];
                     return false;
                 }
+                // #753: the copy must match the original by sha256, not only by size. The
+                // settings are not saved yet, so a mismatch leaves the originals and the old setting as they were.
+                if (!self::filesMatch($src, $dst, true)) {
+                    @unlink($dst);
+                    aicli_log("Storage Migration: the copy of $name does not match the original (sha256); originals kept", AICLI_LOG_ERROR);
+                    $__migResult = ['status' => 'error', 'message' => "The copy of $name does not match the original. The original files were kept and the setting was not changed."];
+                    return false;
+                }
                 aicli_log("Storage Migration: Successfully copied $name", AICLI_LOG_INFO);
                 $done++;
             }
@@ -2644,6 +2656,13 @@ class StorageHandler {
                 if ($res !== 0) {
                     aicli_log("Storage Migration: FAILED to copy $name", AICLI_LOG_ERROR);
                     $__migResult = ['status' => 'error', 'message' => "Failed to copy $name"];
+                    return false;
+                }
+                // #753: same check as for the agent layers above.
+                if (!self::filesMatch($src, $dst, true)) {
+                    @unlink($dst);
+                    aicli_log("Storage Migration: the copy of $name does not match the original (sha256); originals kept", AICLI_LOG_ERROR);
+                    $__migResult = ['status' => 'error', 'message' => "The copy of $name does not match the original. The original files were kept and the setting was not changed."];
                     return false;
                 }
                 aicli_log("Storage Migration: Successfully copied $name", AICLI_LOG_INFO);
@@ -2728,11 +2747,12 @@ class StorageHandler {
             foreach (glob("$oldAgentPath/agent_*.sqsh") as $oldFile) {
                 $name = basename($oldFile);
                 $newFile = "$newAgentPath/$name";
-                if (file_exists($newFile) && filesize($newFile) > 0 && filesize($newFile) === filesize($oldFile)) {
+                // #753: remove the original only when the copy has the same sha256.
+                if (self::filesMatch($oldFile, $newFile)) {
                     @unlink($oldFile);
                     $cleanedUp++;
                 } else {
-                    aicli_log("Storage Migration: Keeping $name at old path (not confirmed at new path)", AICLI_LOG_WARN);
+                    aicli_log("Storage Migration: Keeping $name at old path (the copy at the new path is missing or does not match, sha256)", AICLI_LOG_WARN);
                 }
             }
         }
@@ -2740,11 +2760,11 @@ class StorageHandler {
             foreach (glob("$oldHomePath/home_*.sqsh") as $oldFile) {
                 $name = basename($oldFile);
                 $newFile = "$newHomePath/$name";
-                if (file_exists($newFile) && filesize($newFile) > 0 && filesize($newFile) === filesize($oldFile)) {
+                if (self::filesMatch($oldFile, $newFile)) {
                     @unlink($oldFile);
                     $cleanedUp++;
                 } else {
-                    aicli_log("Storage Migration: Keeping $name at old path (not confirmed at new path)", AICLI_LOG_WARN);
+                    aicli_log("Storage Migration: Keeping $name at old path (the copy at the new path is missing or does not match, sha256)", AICLI_LOG_WARN);
                 }
             }
         }
@@ -2792,6 +2812,21 @@ class StorageHandler {
             ]);
         }
         return $__ret;
+    }
+
+    /**
+     * #753: true when $copy is a faithful copy of $original. Both must be files, the copy
+     * must not be empty, the sizes must be equal and the sha256 hashes must be equal.
+     * A copy with the same size and other content is NOT a match. A path move calls this
+     * before it keeps the copy and again before it removes an original.
+     */
+    public static function filesMatch(string $original, string $copy, bool $allowEmpty = false): bool {
+        if (!is_file($original) || !is_file($copy)) return false;
+        $size = filesize($copy);
+        if ($size === false || ($size <= 0 && !$allowEmpty) || $size !== filesize($original)) return false;
+        $a = @hash_file('sha256', $original);
+        $b = @hash_file('sha256', $copy);
+        return is_string($a) && is_string($b) && hash_equals($a, $b);
     }
 
     /**

@@ -175,9 +175,34 @@
                 tray._startHomeJob('convert_storage', u, 'storage_reclaim_' + u.replace(/[^A-Za-z0-9_-]/g, '_'));
                 return;
             }
-            fetch(ajaxUrl('convert_storage', { type: 'home', id: u })).catch(function () { /* the banner stays; press the button again */ });
+            // #753: no tray on this page. Show the server's reason when it refuses, as the
+            // tray row does; a silent refusal looked like a button that does nothing.
+            fetch(ajaxUrl('convert_storage', { type: 'home', id: u }))
+                .then(function (r) {
+                    return Promise.resolve().then(function () { return r.json(); }).then(
+                        function (res) { return res; },
+                        function () { return undefined; }
+                    );
+                })
+                .then(function (res) {
+                    if (!res || typeof res !== 'object') { bannerRefusal('Could not reach the server.'); return; }
+                    if (res.status === 'error') {
+                        var m = typeof res.message === 'string' ? res.message.trim() : '';
+                        bannerRefusal(m || 'The server did not accept this.');
+                    }
+                })
+                .catch(function () { bannerRefusal('Could not reach the server.'); });
         });
     };
+
+    // #753: one plain sentence for a refusal on the banner path (there is no tray row).
+    function bannerRefusal(message) {
+        if (typeof window.swal === 'function') {
+            window.swal({ title: 'Convert to plain folders', text: message, type: 'error' });
+        } else if (typeof window.alert === 'function') {
+            window.alert(message);
+        }
+    }
 
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {

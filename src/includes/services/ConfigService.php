@@ -508,7 +508,9 @@ class ConfigService {
         $oldAgentPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
         $newAgentPath = $newConfig['agent_storage_path'] ?? $oldAgentPath;
         
-        $oldHomePath = $config['home_storage_path'] ?? (SecretPaths::flashRoot() . '/persistence');
+        // #753: the same rule as the shell (home path, then agent path, then the flash default).
+        require_once __DIR__ . '/StoragePathResolver.php';
+        $oldHomePath = StoragePathResolver::homePersistPathFromConfig($config);
         $newHomePath = $newConfig['home_storage_path'] ?? $oldHomePath;
         $oldVersionSchedule = $config['version_check_schedule'] ?? '0 6 * * *';
         $oldHealthSchedule  = $config['health_check_schedule'] ?? '*/30 * * * *';
