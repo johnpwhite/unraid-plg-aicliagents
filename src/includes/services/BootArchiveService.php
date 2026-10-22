@@ -427,8 +427,8 @@ class BootArchiveService
             $why = self::unitGuard($home, $realHome, $u, $seams, false);
             if ($why !== null) { $res['skipped'][] = ['id' => $u['id'], 'reason' => $why]; continue; }
 
+            $made = [];   // the checked copies of this item (archive mode)
             if ($mode === 'archive') {
-                $made = [];
                 $why = null;
                 foreach ($u['rels'] as $rel) {
                     $why = self::copyChecked($rel, $home . '/' . $rel, $base . '/' . $user . '/' . $kind . '/' . $rel, $copier, $made);

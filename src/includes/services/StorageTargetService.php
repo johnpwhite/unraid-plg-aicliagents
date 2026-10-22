@@ -325,6 +325,7 @@ class StorageTargetService {
         stream_set_blocking($pipes[1], false);
         $out = '';
         $deadline = microtime(true) + 40.0;
+        $code = -1;
         while (true) {
             $out .= (string)stream_get_contents($pipes[1]);
             $st = proc_get_status($proc);
