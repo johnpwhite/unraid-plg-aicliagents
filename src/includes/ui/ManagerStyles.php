@@ -2179,4 +2179,58 @@
         #tab-debug #autoscroll-status { font-size: 11px; margin-right: auto; }
         #tab-debug .log-body { font-size: 12px; height: min(710px, 75vh) !important; }
     }
+
+    /* =========================================================================
+       SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md, Phase 1: the (i) help button and the
+       help panel (src/includes/ui/SettingsCard.php, assets/ui/settings-help.js).
+       Colours come only from tokens the page already uses. The panel text is 12 px
+       at full text colour (--aicli-text), so it keeps 4.5:1 in white, black, azure
+       and gray. The panel is in the page flow, under the control of its row.
+       ========================================================================= */
+    .aicli-help-btn {
+        appearance: none; -webkit-appearance: none;
+        display: inline-flex; align-items: center; justify-content: center;
+        box-sizing: border-box; vertical-align: middle;
+        width: 20px; height: 20px; min-width: 20px; min-height: 20px;
+        margin: 0 0 0 4px !important; padding: 0 !important;
+        border: 0 !important; border-radius: 50% !important;
+        background: transparent !important; box-shadow: none !important;
+        color: var(--aicli-text, var(--text-color, #1c1b1b)) !important;
+        font-size: 16px !important; font-weight: normal !important; line-height: 1 !important;
+        letter-spacing: 0 !important; text-transform: none !important;
+        cursor: pointer;
+    }
+    .aicli-help-btn:hover, .aicli-help-btn[aria-expanded="true"] {
+        background: var(--mild-background-color, rgba(128,128,128,0.18)) !important;
+    }
+    .aicli-help-btn:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    .aicli-help-panel[hidden] { display: none !important; }
+    .aicli-help-panel {
+        box-sizing: border-box; width: 100%; min-width: 0;
+        padding: 8px 10px;
+        border: 1px solid var(--border-color, rgba(128,128,128,0.35));
+        border-left: 3px solid var(--orange, #ff8c00);
+        border-radius: 4px;
+        font-size: 12px; line-height: 1.45; text-align: left; font-weight: normal; opacity: 1;
+        color: var(--aicli-text, var(--text-color, #1c1b1b));
+        overflow-wrap: anywhere;
+        animation: aicli-help-in 0.12s ease-out;
+    }
+    .aicli-help-panel p { margin: 0 0 6px; font-size: inherit; color: inherit; }
+    .aicli-help-panel p:last-child { margin-bottom: 0; }
+    .aicli-help-panel code { font-size: 12px; color: inherit; }
+    /* A short format hint that stays visible next to a control. */
+    .aicli-hint { width: 100%; margin-top: 3px; font-size: 12px; color: var(--aicli-text, var(--text-color, #1c1b1b)); }
+    @keyframes aicli-help-in { from { opacity: 0; } to { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) {
+        .aicli-help-panel { animation: none; }
+    }
+    /* A touch screen, also a tablet wider than a phone: the hit area is 44 x 44 px.
+       The negative margin keeps the height and the width of the label line. */
+    @media (pointer: coarse) {
+        .aicli-help-btn {
+            width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+            margin: -14px -12px -14px -8px !important;
+        }
+    }
 </style>
