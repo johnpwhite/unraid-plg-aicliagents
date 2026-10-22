@@ -51,6 +51,34 @@ class ValidationService {
     }
 
     /**
+     * True when $user is safe to put in the task-status file name (get_task_status).
+     * Accepts only a POSIX-like user name or the sentinel "agents". The `D` flag
+     * stops a trailing newline from passing. "../x" and an empty value fail.
+     */
+    public static function isTaskStatusUser($user): bool {
+        return is_string($user) && preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $user) === 1;
+    }
+
+    /**
+     * Fatal-error shutdown handler of the AJAX dispatcher, as pure data.
+     * Give it the result of error_get_last(). It returns null when the error is
+     * not fatal. Otherwise it returns the debug log line and the JSON body the
+     * browser receives: status=error, a fixed message, and the details.
+     *
+     * @return array{log:string,body:array<string,string>}|null
+     */
+    public static function fatalErrorResponse(?array $error): ?array {
+        if ($error === null) return null;
+        $fatal = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR];
+        if (!in_array($error['type'] ?? null, $fatal, true)) return null;
+        $msg = "FATAL PHP ERROR: {$error['message']} in {$error['file']} on line {$error['line']}";
+        return [
+            'log' => $msg,
+            'body' => ['status' => 'error', 'message' => 'PHP Fatal Error: Check debug.log', 'details' => $msg],
+        ];
+    }
+
+    /**
      * Allowed base directories for filesystem operations. The plugin folders are the live roots in
      * production, and the test sandbox roots under test (SecretPaths), so a test writes only into the sandbox.
      */

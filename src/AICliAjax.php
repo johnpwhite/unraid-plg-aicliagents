@@ -17,14 +17,18 @@ require_once __DIR__ . '/includes/services/SecretPaths.php';
 
 // Fatal Error Handler
 register_shutdown_function(function() {
-    $error = error_get_last();
-    if ($error !== NULL && ($error['type'] === E_ERROR || $error['type'] === E_PARSE || $error['type'] === E_CORE_ERROR || $error['type'] === E_COMPILE_ERROR)) {
-        $msg = "FATAL PHP ERROR: {$error['message']} in {$error['file']} on line {$error['line']}";
+    // A fatal error can stop the page before the includes below load. Load the
+    // pure decision class here so the handler never fails on its own.
+    if (!class_exists('AICliAgents\\Services\\ValidationService', false)) {
+        @require_once __DIR__ . '/includes/services/ValidationService.php';
+    }
+    $fatal = \AICliAgents\Services\ValidationService::fatalErrorResponse(error_get_last());
+    if ($fatal !== null) {
         $logFile = \AICliAgents\Services\SecretPaths::stateRoot() . '/debug.log';
-        @file_put_contents($logFile, "[" . date("Y-m-d H:i:s") . "] $msg\n", FILE_APPEND);
+        @file_put_contents($logFile, "[" . date("Y-m-d H:i:s") . "] " . $fatal['log'] . "\n", FILE_APPEND);
         if (!headers_sent()) {
             header('Content-Type: application/json');
-            echo json_encode(['status' => 'error', 'message' => 'PHP Fatal Error: Check debug.log', 'details' => $msg]);
+            echo json_encode($fatal['body']);
         }
     }
 });
@@ -271,7 +275,7 @@ if (isset($_GET['action'])) {
                 $user = ($type === 'agents') ? 'agents' : getAICliConfig()['user'];
             }
             ob_end_clean();
-            if (!preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', (string)$user)) {
+            if (!ValidationService::isTaskStatusUser((string)$user)) {
                 header('Content-Type: application/json');
                 echo json_encode(['progress' => 0, 'step' => 'invalid user']);
             } else {
