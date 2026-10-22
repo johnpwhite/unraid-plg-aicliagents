@@ -1673,6 +1673,15 @@ layer_loops_of() {
 # container). For the log only.
 _loop_holders() {
     local dev="$1" f pid out=""
+    # AICLI_PROC_MOUNTINFO is the same single-file fixture used by the mount
+    # table tests. In this mode, report whether the fixture holds the loop; it
+    # has no real PID or command name to report.
+    if [ -n "${AICLI_PROC_MOUNTINFO:-}" ]; then
+        if grep -Fq " $dev " "$AICLI_PROC_MOUNTINFO" 2>/dev/null; then
+            printf 'fixture'
+        fi
+        return 0
+    fi
     for f in /proc/[0-9]*/mountinfo; do
         grep -q " $dev " "$f" 2>/dev/null || continue
         pid="${f#/proc/}"; pid="${pid%/mountinfo}"
