@@ -523,6 +523,16 @@ class AgentRegistry {
                 // To block all update paths, including manual updates, set
                 // DISABLE_UPDATES instead." We use the stronger of the two on purpose.
                 'default_envs' => ['IS_SANDBOX' => '1', 'DISABLE_UPDATES' => '1'],
+                // AGENT_SPAWN_WORKSPACE.md R4: how a helper workspace of this agent gets its model, its
+                // unattended flag and its first prompt. Flags checked against the Claude Code CLI reference
+                // (https://code.claude.com/docs/en/cli-reference): `--model`, `--dangerously-skip-permissions`
+                // and the positional `claude "query"` prompt. Claude Code has no flag for effort: a spawn that
+                // asks for an effort is refused.
+                'launch_profile' => [
+                    'model'      => ['flag' => '--model {model}'],
+                    'unattended' => ['flags' => '--dangerously-skip-permissions', 'needs_setting' => 'spawn_allow_unattended'],
+                    'prompt'     => ['mode' => 'positional'],
+                ],
                 // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys
                 // for Shift+Enter to be delivered as a distinct key chord (vs. plain Enter).
                 // This is agent-specific: applied as tier 1.5 (after BUILTIN, before user JSON
@@ -569,6 +579,14 @@ class AgentRegistry {
                 // overlay). Primary-evidence verified per CLAUDE.md; flag as
                 // undocumented if the vendor ever changes this.
                 'default_envs' => ['OPENCODE_DISABLE_AUTOUPDATE' => 'true'],
+                // AGENT_SPAWN_WORKSPACE.md R4: a helper workspace of OpenCode. `-m provider/model` and `--prompt`
+                // are the flags of the OpenCode TUI (https://opencode.ai/docs/cli/). There is no effort flag and
+                // no unattended flag here: OpenCode asks the person for permission by its own rules, and a
+                // spawn that asks for either is refused.
+                'launch_profile' => [
+                    'model'  => ['flag' => '-m {model}'],
+                    'prompt' => ['mode' => 'flag:--prompt'],
+                ],
             ],
             'kilocode' => [
                 'id' => 'kilocode',
@@ -705,6 +723,27 @@ class AgentRegistry {
                 // every Codex this plugin installs (checked on 0.153.4 and 0.158.0:
                 // an unknown flag exits 2, this one does not).
                 'plugin_args' => '--no-alt-screen -c sandbox_mode=danger-full-access -c approval_policy=on-request -c check_for_update_on_startup=false',
+                // AGENT_SPAWN_WORKSPACE.md R4: how a helper workspace of Codex gets its model, its effort, its
+                // unattended flag and its first prompt. `-m`, `-c key=value`, the positional `[PROMPT]` and
+                // `--dangerously-bypass-approvals-and-sandbox` are Codex CLI options
+                // (https://developers.openai.com/codex/cli/reference). The bypass flag is the "unattended" flag:
+                // on Unraid the bwrap sandbox cannot start, and without the bypass a helper cannot run a command.
+                'launch_profile' => [
+                    'model'      => ['flag' => '-m {model}'],
+                    'effort'     => ['flag' => '-c model_reasoning_effort={effort}', 'values' => ['low', 'medium', 'high', 'xhigh']],
+                    'unattended' => ['flags' => '--dangerously-bypass-approvals-and-sandbox', 'needs_setting' => 'spawn_allow_unattended'],
+                    'prompt'     => ['mode' => 'positional'],
+                    // R20: Codex asks "Trust this folder?" for a new folder. The spawn tool adds the table
+                    // [projects."<worktree>"] trust_level = "trusted" to ~/.codex/config.toml (CodexTrustService)
+                    // for a worktree it made, and removes it when the helper closes.
+                    'trust'      => ['mode' => 'codex_toml'],
+                ],
+                // R21 (issue #688): Codex builds the environment of its command tool from
+                // [shell_environment_policy]. Without `inherit = "all"` the AICLI_* variables, and so
+                // $AICLI_RELAY_COMMAND, are gone. The shared launcher (aicli-shell.sh) runs
+                // ensure-command-env.php before every launch, and AgentCommandEnvService adds the plugin's
+                // fenced policy block when the file has none. A policy that the user wrote always wins.
+                'command_env' => ['mode' => 'codex_policy'],
                 // Codex 0.144.1 grammar is `codex [OPTIONS] resume [SESSION_ID]`.
                 // Keep user and plugin global options before the subcommand;
                 // a plain Codex invocation starts a new conversation.

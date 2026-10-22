@@ -42,13 +42,15 @@ class TerminalHandler {
             case 'list_sessions_for_agent': return self::listSessionsForAgent();
             case 'view_unreachable': return self::viewUnreachable($id);
             case 'stop_unreachable': return self::stopUnreachable($id);
+            // AGENT_SPAWN_WORKSPACE.md R16: what the confirm overlay says when a person closes a helper. Reads only.
+            case 'spawn_close_info': return \AICliAgents\Services\SpawnService::closeInfo((string)$id);
             default:                 return null;
         }
     }
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'restart_fresh', 'reload_onto_current', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_sessions_running', 'get_asset_version', 'refresh_bridge', 'reconnect_stale_bridges', 'attach_bridge', 'continue_session', 'set_scheduled_continue', 'clear_scheduled_continue', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent', 'view_unreachable', 'stop_unreachable'];
+        return ['start', 'emergency_start', 'stop', 'graceful_close', 'restart', 'restart_fresh', 'reload_onto_current', 'agent_signal_reload', 'get_chat_session', 'get_session_status', 'get_sessions_running', 'get_asset_version', 'refresh_bridge', 'reconnect_stale_bridges', 'attach_bridge', 'continue_session', 'set_scheduled_continue', 'clear_scheduled_continue', 'get_resume_id', 'log', 'get_log', 'get_log_contexts', 'clear_log', 'list_sessions_for_agent', 'view_unreachable', 'stop_unreachable', 'spawn_close_info'];
     }
 
     /**

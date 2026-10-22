@@ -135,6 +135,18 @@ class ConfigService {
             // '0' here makes that explicit instead of relying on the service's
             // own fallback. Settings > Configuration > Plugin management.
             'admin_tools_enabled'                  => '0',
+            // AGENT_SPAWN_WORKSPACE.md: an agent starts a helper workspace (aicli_spawn_workspace and its
+            // three companion tools). A person changes these on Settings only: none is on the Tier 2
+            // allow-list, so an agent cannot raise its own limits. Off on a fresh install.
+            // spawn_max_children: running helpers for each parent. spawn_max_total: running helpers on
+            // the box. spawn_max_per_agent: running helpers of one agent kind. spawn_allow_unattended:
+            // the launch profile's unattended flags (for example the Codex sandbox bypass) may be used,
+            // and only for a worktree that the tool made.
+            'spawn_enabled'                        => '0',
+            'spawn_max_children'                   => '3',
+            'spawn_max_total'                      => '6',
+            'spawn_max_per_agent'                  => '2',
+            'spawn_allow_unattended'               => '0',
             // ARTEFACTS.md (Notebook): humans change these on Settings > Notebook
             // only. An agent may not: none of them is on AdminService::SETTINGS_ALLOWLIST.
             // notebook_folder is the folder name in each project root
@@ -483,6 +495,22 @@ class ConfigService {
         // RESPONSIVE_PRIORITY.md: responsive_priority is 0 or 1. Anything else is 0.
         if (array_key_exists('responsive_priority', $newConfig)) {
             $newConfig['responsive_priority'] = ((string)$newConfig['responsive_priority'] === '1') ? '1' : '0';
+        }
+
+        // AGENT_SPAWN_WORKSPACE.md: the helper-workspace settings. The two switches are 0 or 1. Each cap is a
+        // whole number inside its range; a bad value becomes the default, never a stored odd number.
+        foreach (['spawn_enabled', 'spawn_allow_unattended'] as $spawnFlag) {
+            if (array_key_exists($spawnFlag, $newConfig)) {
+                $newConfig[$spawnFlag] = ((string)$newConfig[$spawnFlag] === '1') ? '1' : '0';
+            }
+        }
+        foreach (['spawn_max_children' => [1, 10, 3], 'spawn_max_total' => [1, 20, 6], 'spawn_max_per_agent' => [1, 10, 2]] as $spawnCap => [$capMin, $capMax, $capDefault]) {
+            if (array_key_exists($spawnCap, $newConfig)) {
+                $capRaw = $newConfig[$spawnCap];
+                $capOk = is_scalar($capRaw) && preg_match('/^\d{1,3}$/D', (string)$capRaw) === 1
+                    && (int)$capRaw >= $capMin && (int)$capRaw <= $capMax;
+                $newConfig[$spawnCap] = (string)($capOk ? (int)$capRaw : $capDefault);
+            }
         }
 
         // BOOT_DISK_SPACE.md R4: keep_previous_version is 0 or 1.
@@ -1372,6 +1400,14 @@ class ConfigService {
                 // AGENT_SELF_SERVICE.md R8: and for the workspace's own speed.
                 if (!array_key_exists('tts_speed', $session) && array_key_exists('tts_speed', $prior)) {
                     $session['tts_speed'] = $prior['tts_speed'];
+                }
+                // AGENT_SPAWN_WORKSPACE.md: a page loaded before a helper existed resends the record
+                // without the helper marks. Keep them, or a browser save would turn a helper into an
+                // ordinary workspace (no autoClose, no parent, no spawn rules).
+                foreach (['spawned', 'spawn'] as $spawnKey) {
+                    if (!array_key_exists($spawnKey, $session) && array_key_exists($spawnKey, $prior)) {
+                        $session[$spawnKey] = $prior[$spawnKey];
+                    }
                 }
             } else {
                 // A genuinely new workspace — stamp it now if the caller did not.

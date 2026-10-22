@@ -152,6 +152,35 @@ The command `restore-home` has a second use for you. Run in your own shell, `res
 
 `aicli_speak` says one short sentence aloud, up to 500 characters, on every browser tab that has voice turned on. It obeys the switches. If the global voice switch is off, or the workspace is muted, the tool refuses and the agent hears why. Voice mail keeps what an agent said, so you can read it later. `aicli_preview_voice` lets an agent hear a voice before it picks one for itself. An agent can also choose its own spoken name and voice. The plugin warns, but does not block, when two workspaces get the same name or voice. See [Voice](voice.md).
 
+## Helper workspaces
+
+An agent can start a second agent to do one task in a separate folder. The second agent is a **helper workspace**. The agent that starts it is its **parent**. One tool call makes the workspace, sets its model and effort, gives it the task and starts it. The task is a file in the helper's folder, so the helper needs no other message to know what to do.
+
+To allow it, open **Settings**, then the **Configuration** tab, then the card **General**, part **Advanced**.
+
+1. Turn on **Let agents manage the plugin**. The helper tools need it.
+2. Turn on **Let agents start helper workspaces**. The default is **Off (default)**.
+3. Set **Helpers allowed at once** if you want other limits. The defaults are 3 per workspace, 2 per agent kind and 6 on the whole server.
+4. Leave **Let helpers run without asking** on **Off (default)** unless you trust the task. It lets a helper skip the permission questions of its agent. It works only in a worktree that the plugin made.
+
+What you see: a notice in the Activity tray, for example "Helper workspace started: docs-codex". The grey line names the parent and the helper's agent and model. The helper appears in the drawer under the workspace that started it, with an indent. A workspace that has helpers shows a small button with the number of helpers. Press it to hide or show them; the drawer remembers your choice. If the parent is closed, the helper stays in the list on its own.
+
+The rules:
+
+- Only a workspace that you opened can start helpers. A helper cannot start another helper.
+- With a **worktree**, the plugin makes a new git branch and folder under `<repo>/.claude/worktrees`. It never pushes, merges or resets.
+- A start is refused when a limit is reached, when the agent shows a usage limit (the answer gives the time it resets), or when the folder is a plugin state folder.
+- Two workspaces of one agent in one folder are not allowed. Use a worktree.
+- Only the workspace that started a helper, or you, can start or close it again. Another agent is refused.
+- The helper reports with one tool call when its task is over, with the result **done**, **failed** or **blocked** and a short summary. The parent gets a Relay message. The Activity tray shows one notice that names the parent. By default the plugin then closes the helper when it is idle again.
+- A helper may stop and ask for permission, for example to read a folder outside its own. The parent can answer for you, but only with a short "allow once" answer such as **1** or **yes**. The plugin refuses to let a parent answer a question about a push, a delete, the boot disk, the plugin's own state, another workspace or a remote shell. Those wait for you. Each answer is recorded with the question.
+- Text that a parent types into its helper starts with a tag, for example `[from parent main]`. The plugin writes the tag, so the helper knows the words come from its parent, and you see who typed them in the terminal.
+- When you close a helper yourself, in the drawer, a question opens first if the close may lose work. It says which agent started the helper and for what task, and it lists the reasons: the task is not reported as done, files are not committed, or commits are not merged. Choose **Close anyway** or **Cancel**. A workspace that you made never shows this question. A helper that reported done, with all its work merged, closes with no question.
+- A parent can give a helper a time limit with `maxMinutes` (1 to 1440). When the helper passes the limit without a report, the parent gets one message and the Activity tray shows one notice. The plugin does not stop the helper.
+- A Codex helper in a worktree starts with that folder already trusted, so it does not stop on the "trust this folder" question. The plugin removes the trust again when the helper closes. The plugin also makes sure the Relay command works inside a Codex helper.
+- When you close a helper yourself, in the drawer, the plugin finishes the job a little later, when the helper has stopped. It removes the helper's flags file, and it removes the worktree under the same rule as below: only when all work is merged and nothing is uncommitted.
+- When a parent closes a helper, the helper stops and leaves the list. The plugin removes its worktree only when all its work is merged and nothing is uncommitted. Otherwise the worktree stays, and the parent is told which branch holds the work. No approval is needed for this, because only the parent or you can do it.
+
 ## The Notebook tools
 
 The Notebook tools put pages in the Notebook drawer beside the terminal: a test script, a design, a decision, a checklist. An agent should use them for things that you must follow, keep, compare or decide. It should keep short answers in the terminal. The limits are 1 MB for a file, 2,000 pages in a Notebook and 60 changes a minute. A save that looks like a secret is refused. An agent puts a secret on a connection card with `aicli_set_artefact_secret`, and the value is kept in the vault only. A page that an agent makes or changes appears in the Activity tray with an **Open note** button. See [The Notebook](notebook.md) and [The wiki](wiki.md).
@@ -197,6 +226,12 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — A helper can have a time limit (`maxMinutes`); the parent gets one message when it passes. A Codex helper starts with its folder already trusted, so it does not stop on a trust question. The Relay command works inside a Codex helper. When you close a helper in the drawer, the plugin later removes its flags file and its worktree if all work is merged. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
+- **2026-10-23** — In the drawer, a helper workspace shows under the workspace that started it, with an indent. A workspace with helpers has a small button that hides or shows them. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
+- **2026-10-23** — A parent can answer a permission question of its helper (allow once only). You see a question before you close a helper that may lose work. A message to a stopped workspace waits and is delivered when the workspace starts. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
+- **2026-10-23** — A helper reports when its task is over, and by default the plugin then closes it. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
+- **2026-10-23** — A parent can start and close the helper it started, and a closed helper leaves the list. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
+- **2026-10-23** — An agent can start a helper workspace with one tool call. Three new settings in **General**, part **Advanced**: **Let agents start helper workspaces**, **Helpers allowed at once** and **Let helpers run without asking**. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-22** — The switch **Let agents manage the plugin** moved from the card **Plugin management** (it is gone) to the card **General**, part **Advanced**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The switch **Plugin management tools** is now called **Let agents manage the plugin** on the Configuration tab. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — New tools `aicli_get_boot_space`, `aicli_archive_boot_data` and `aicli_remove_boot_data`. The last two only propose. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.

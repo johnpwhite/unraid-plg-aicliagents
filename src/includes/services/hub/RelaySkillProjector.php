@@ -47,12 +47,15 @@ on the server (every agent runs as root): keep to it.
 - **`status: ok` means stored, not delivered.** A send to a live session returns
   `status: ok`. A send to an offline/dead session returns
   `status: recipient_offline` with `delivered: false` — the message is stored
-  but nobody reads it until that workspace restarts. Never treat a returned
-  message id as proof of delivery; check the status.
-- **Re-run `contacts` immediately before every send; never cache a session id.**
-  Session ids change on restart, and a cached id sends into the void. Names are
-  the stable identifier — and a name that fails to resolve is a strong signal the
-  session is dead (a dead session also shows its own id where the name should be).
+  in the inbox. When the workspace is saved, the plugin also queues a notice and
+  types it when the workspace starts and its pane is ready; the reply then has
+  `will_deliver_on_start: true`. **Do not send the message again**: a second
+  send makes a duplicate. Never treat a returned message id as proof of
+  delivery; check the status.
+- **A workspace id stays the same when the workspace restarts.** Run `contacts`
+  before a send to find the right id, and to see that the workspace exists. A name
+  that fails to resolve is a strong signal that the workspace is gone (a missing
+  workspace also shows its own id where the name should be).
 - **Over ~2048 bytes: write a file, send a pointer.** Messages are capped at
   1–2048 bytes; oversize is rejected or truncated. Commit the full content to
   your repo and DM a summary plus absolute path and commit SHA. This is the

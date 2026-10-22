@@ -23,7 +23,7 @@
  *     auto-launch, set-channel, check-updates, set-setting, speak
  *     (AGENT_VOICE.md, 2026-09-11), send-input (WORKSPACE_SEND_INPUT.md,
  *     2026-09-12), favourite-add, favourite-remove (WORKSPACE_FAVOURITES.md,
- *     2026-09-12).
+ *     2026-09-12), spawn (AGENT_SPAWN_WORKSPACE.md, 2026-10-23).
  *
  *   overview                    no arguments
  *   workspaces                  no arguments
@@ -151,9 +151,38 @@
  *                                the readiness gate (the pane need not look
  *                                idle) the way the Manager UI tray's Force
  *                                inject does; it does not make an
- *                                unreachable workspace reachable. Refuses if
+ *                                unreachable workspace reachable. `--answer`
+ *                                (AGENT_SPAWN_WORKSPACE.md R13) answers a permission
+ *                                prompt of a helper that you started: the text is a
+ *                                short allow-once answer such as 1 or yes. Refuses if
  *                                `workspaceId` does not name a known,
  *                                running workspace.
+ *   spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>])
+ *         [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended]
+ *         [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...]
+ *                                CHANGES state (AGENT_SPAWN_WORKSPACE.md). Starts a
+ *                                helper workspace in ONE call: it makes the workspace,
+ *                                builds the launch flags from --model, --effort and
+ *                                --unattended, writes the task to .aicli-task/TASK.md,
+ *                                starts it and gives it a first prompt. The task is
+ *                                --file, or the words after the flags, or stdin. With
+ *                                --repo the tool makes a git worktree under
+ *                                <repo>/.claude/worktrees (it never pushes). --unattended
+ *                                needs the Settings switch and a tool-made worktree.
+ *                                --no-auto-close keeps the helper after its report.
+ *                                Refused: when the feature is off, from a helper, when a
+ *                                cap is reached or the agent shows a usage limit.
+ *   start-workspace <id>        CHANGES state (AGENT_SPAWN_WORKSPACE.md). Starts a closed
+ *                                workspace. Only the workspace that created it, or a
+ *                                person, may do this.
+ *   stop-workspace <id>         CHANGES state. Closes a workspace that you created. A
+ *                                helper made with autoClose also leaves the list, and its
+ *                                worktree is removed when merged and clean. Any other
+ *                                workspace is stopped and kept. No approval step.
+ *   finish-task <done|failed|blocked> <summary...>
+ *                                CHANGES state. Run from a helper workspace: reports that
+ *                                its task is over. Writes .aicli-task/RESULT.json and sends
+ *                                the parent a Relay message. Closes nothing itself.
  *   favourite-add <workspaceId> CHANGES state (WORKSPACE_FAVOURITES.md,
  *                                2026-09-12). Bookmarks `workspaceId`'s agent
  *                                and folder as a favourite. A favourite
@@ -376,13 +405,17 @@ const ADMIN_AGENT_USAGE = [
     'set-setting' => 'set-setting <key> <value> -- CHANGES state; key must be on the allow-list',
     'preview-voice' => 'preview-voice <voiceId> [text...] [--speed=<0.5-2.0>] [--workspace=<id>] -- CHANGES state; speaks one short line in that voice so you can hear it, saves nothing',
     'speak' => 'speak [--voice=<id>] [--workspace=<id>] <text...> -- CHANGES state; speaks on every voice-enabled tab',
-    'send-input' => 'send-input <workspaceId> [--no-enter] [--force] <text...> -- CHANGES state; types into a running workspace and presses Enter',
+    'send-input' => 'send-input <workspaceId> [--no-enter] [--force] [--answer] <text...> -- CHANGES state; types into a running workspace and presses Enter; --answer gives an allow-once answer to a permission prompt of a helper that you started',
     'favourite-add' => 'favourite-add <workspaceId> -- CHANGES state; bookmarks a workspace\'s agent and folder',
     'favourite-remove' => 'favourite-remove <id> -- CHANGES state; removes one favourite by id',
     'voicemail-heard' => 'voicemail-heard <id> | voicemail-heard --workspace=<id> --all -- CHANGES state; marks voice mail heard on every device',
     'persist-home' => 'persist-home [user] -- CHANGES state; queues a save of the home to its storage layers, closes no session',
     'schedule-continue' => 'schedule-continue <workspaceId> <at-epoch> [none|daily|weekly] -- CHANGES state; fire a Continue at a wall-clock time (e.g. when the quota resets)',
     'clear-scheduled-continue' => 'clear-scheduled-continue <workspaceId> -- CHANGES state; remove a scheduled Continue',
+    'spawn' => 'spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>]) [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended] [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...] -- CHANGES state; starts a helper workspace; the task is --file, the words, or stdin',
+    'start-workspace' => 'start-workspace <id> -- CHANGES state; starts a closed workspace that you created (or any, for a person)',
+    'stop-workspace' => 'stop-workspace <id> -- CHANGES state; closes a workspace that you created; a helper with autoClose also leaves the list and its merged, clean worktree is removed',
+    'finish-task' => 'finish-task <done|failed|blocked> <summary...> -- CHANGES state; a helper workspace reports that its task is over; the parent gets a Relay message',
     'propose-pattern' => 'propose-pattern <agentId|all> <error|quota|busy|chrome> <name> <regex> [sample...] -- CHANGES state; adds an auto-continue pattern and prints its GitHub report URL',
     'delete-workspace' => 'delete-workspace <id> -- PROPOSES ONLY; a human must approve in the Manager UI',
     'upgrade-agent' => 'upgrade-agent <agentId> [version] -- PROPOSES ONLY; a human must approve in the Manager UI',
@@ -747,12 +780,14 @@ try {
         case 'send-input':
             $siEnter = true;
             $siForce = false;
+            $siAnswer = false;
             $siWorkspace = null;
             $siWords = [];
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
                 if ($a === '--no-enter') { $siEnter = false; continue; }
                 if ($a === '--force') { $siForce = true; continue; }
+                if ($a === '--answer') { $siAnswer = true; continue; }
                 if ($siWorkspace === null) { $siWorkspace = $a; continue; }
                 $siWords[] = $a;
             }
@@ -761,6 +796,7 @@ try {
                 'text' => implode(' ', $siWords),
                 'enter' => $siEnter,
                 'force' => $siForce,
+                'answerPrompt' => $siAnswer,
             ]);
             break;
         case 'favourite-add':
@@ -809,11 +845,45 @@ try {
         case 'clear-scheduled-continue':
             $result = AdminMcpTools::call('aicli_clear_scheduled_continue', ['workspaceId' => (string)($argv[2] ?? '')]);
             break;
+        case 'spawn':
+            // AGENT_SPAWN_WORKSPACE.md. The task is the words after the flags, or --file=<path>, or stdin.
+            [$spf, $spw] = adminAgentSplitFlags(array_slice($argv, 2),
+                ['agent', 'name', 'path', 'repo', 'branch', 'base', 'model', 'effort', 'title', 'file', 'unattended', 'no-auto-close', 'max-minutes']);
+            $spTask = adminAgentReadBody($spf['file'] ?? null);
+            if (($spTask === null || trim($spTask) === '') && $spw !== []) $spTask = implode(' ', $spw);
+            $spArgs = ['agentId' => (string)($spf['agent'] ?? ''), 'task' => (string)($spTask ?? '')];
+            foreach (['name' => 'name', 'path' => 'path', 'model' => 'model', 'effort' => 'effort', 'title' => 'taskTitle'] as $fk => $tk) {
+                if (isset($spf[$fk]) && is_string($spf[$fk]) && $spf[$fk] !== '') $spArgs[$tk] = $spf[$fk];
+            }
+            if (isset($spf['repo']) && is_string($spf['repo'])) {
+                $spArgs['worktree'] = ['repo' => $spf['repo'], 'branch' => (string)($spf['branch'] ?? '')];
+                if (isset($spf['base']) && is_string($spf['base']) && $spf['base'] !== '') $spArgs['worktree']['base'] = $spf['base'];
+            }
+            if (isset($spf['max-minutes']) && is_string($spf['max-minutes']) && $spf['max-minutes'] !== '') $spArgs['maxMinutes'] = $spf['max-minutes'];
+            if (!empty($spf['unattended'])) $spArgs['unattended'] = true;
+            if (!empty($spf['no-auto-close'])) $spArgs['autoClose'] = false;
+            $result = AdminMcpTools::call('aicli_spawn_workspace', $spArgs);
+            break;
         case 'read-screen':
             // AUTO_CONTINUE_PATTERNS.md. Positional: <workspaceId> [lines].
             $rsArgs = ['workspaceId' => (string)($argv[2] ?? '')];
             if (isset($argv[3]) && $argv[3] !== '') $rsArgs['lines'] = (int)$argv[3];
             $result = AdminMcpTools::call('aicli_read_workspace_screen', $rsArgs);
+            break;
+        case 'start-workspace':
+            // AGENT_SPAWN_WORKSPACE.md R2. Only the creator of the workspace, or a person, may start it.
+            $result = AdminMcpTools::call('aicli_start_workspace', ['id' => (string)($argv[2] ?? '')]);
+            break;
+        case 'stop-workspace':
+            // AGENT_SPAWN_WORKSPACE.md R2, R14. A helper with autoClose leaves the list; any other workspace is kept.
+            $result = AdminMcpTools::call('aicli_stop_workspace', ['id' => (string)($argv[2] ?? '')]);
+            break;
+        case 'finish-task':
+            // AGENT_SPAWN_WORKSPACE.md R8. Run from a helper workspace: finish-task <done|failed|blocked> <summary...>
+            $result = AdminMcpTools::call('aicli_finish_task', [
+                'status'  => (string)($argv[2] ?? ''),
+                'summary' => implode(' ', array_map('strval', array_slice($argv, 3))),
+            ]);
             break;
         case 'propose-pattern':
             // AUTO_CONTINUE_PATTERNS.md. Positional: <agentId|all> <kind> <name> <regex> [sample...].

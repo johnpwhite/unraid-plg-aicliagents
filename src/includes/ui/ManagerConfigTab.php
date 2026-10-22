@@ -161,6 +161,38 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
                             <?=aicli_help_panel('admin-tools')?>
                         </dd>
 
+                        <?php /* AGENT_SPAWN_WORKSPACE.md: the master switch, the three caps and the unattended switch of the helper-workspace tools. A person sets them here; none is on the agent allow-list. They save through the same autoSaveConfig()/`save` path, and ConfigService::saveConfig() replaces a bad value. */ ?>
+                        <dt>Let agents start helper workspaces <?=aicli_help_btn('spawn-enabled', 'Let agents start helper workspaces')?></dt>
+                        <dd>
+                            <select name="spawn_enabled" aria-label="Let agents start helper workspaces" data-testid="spawn-enabled" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['spawn_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['spawn_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('spawn-enabled')?>
+                        </dd>
+
+                        <dt>Helpers allowed at once <?=aicli_help_btn('spawn-caps', 'Helpers allowed at once')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="spawn_max_children" aria-label="Helpers for each workspace" data-testid="spawn-max-children" value="<?=htmlspecialchars((string)($config['spawn_max_children'] ?? '3'), ENT_QUOTES, 'UTF-8')?>" min="1" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">per workspace ·</span>
+                                <input type="number" name="spawn_max_per_agent" aria-label="Helpers for each agent kind" data-testid="spawn-max-per-agent" value="<?=htmlspecialchars((string)($config['spawn_max_per_agent'] ?? '2'), ENT_QUOTES, 'UTF-8')?>" min="1" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">per agent ·</span>
+                                <input type="number" name="spawn_max_total" aria-label="Helpers on this server" data-testid="spawn-max-total" value="<?=htmlspecialchars((string)($config['spawn_max_total'] ?? '6'), ENT_QUOTES, 'UTF-8')?>" min="1" max="20" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">in total</span>
+                            </div>
+                            <?=aicli_help_panel('spawn-caps')?>
+                        </dd>
+
+                        <dt>Let helpers run without asking <?=aicli_help_btn('spawn-unattended', 'Let helpers run without asking')?></dt>
+                        <dd>
+                            <select name="spawn_allow_unattended" aria-label="Let helpers run without asking" data-testid="spawn-allow-unattended" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['spawn_allow_unattended'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['spawn_allow_unattended'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('spawn-unattended')?>
+                        </dd>
+
                         <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
                            only — stored in localStorage, never sent to the server on its own, and
                            never round-tripped through this form's own action=save. It travels only

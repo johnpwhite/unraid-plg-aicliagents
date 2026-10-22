@@ -210,6 +210,12 @@ frozen_effective_args=""
 _ARGS_WS_HASH=$(echo -n "$ROOT_DIR" | md5sum | cut -d' ' -f1)
 _ARGS_WS_FILE="$HOME_DIR/.aicli/args/args_ws_${_ARGS_WS_HASH}_${AGENT_ID}.json"
 _ARGS_AGENT_FILE="$HOME_DIR/.aicli/args/args_agent_${AGENT_ID}.json"
+# docs/specs/AGENT_SPAWN_WORKSPACE.md R5: a helper workspace has its own flags file, named by the
+# workspace id. It wins over the folder file, so two workspaces of one agent in one folder keep
+# their own flags. Same name rule as ArgsService::getIdArgsPath().
+_ARGS_ID_SAFE=$(printf '%s' "$ID" | tr -cd 'A-Za-z0-9_-')
+_ARGS_ID_FILE=""
+[ -n "$_ARGS_ID_SAFE" ] && _ARGS_ID_FILE="$HOME_DIR/.aicli/args/args_id_${_ARGS_ID_SAFE}.json"
 _load_args_with_warn() {
     local _path="$1"
     php -r "
@@ -225,7 +231,9 @@ _load_args_with_warn() {
     rm -f "${MOUNT_ROOT}/.args-load-err.$$"
     [ -n "$_err" ] && log_aicli "WARN" 1 "Failed to load args from $_path: $_err — proceeding with empty args"
 }
-if [ -f "$_ARGS_WS_FILE" ]; then
+if [ -n "$_ARGS_ID_FILE" ] && [ -f "$_ARGS_ID_FILE" ]; then
+    frozen_effective_args=$(_load_args_with_warn "$_ARGS_ID_FILE")
+elif [ -f "$_ARGS_WS_FILE" ]; then
     frozen_effective_args=$(_load_args_with_warn "$_ARGS_WS_FILE")
 elif [ -f "$_ARGS_AGENT_FILE" ]; then
     frozen_effective_args=$(_load_args_with_warn "$_ARGS_AGENT_FILE")
@@ -638,6 +646,7 @@ PRIOEOF
     # them on every Ctrl-C relaunch without re-computing the md5(path) hash.
     # Lets the user change workspace args from the UI and have them apply on
     # the next agent launch (no workspace destroy needed).
+    printf 'export AICLI_ARGS_ID_FILE=%q\n' "$_ARGS_ID_FILE" >> "$RUN_SCRIPT"
     printf 'export AICLI_ARGS_WS_FILE=%q\n' "$_ARGS_WS_FILE" >> "$RUN_SCRIPT"
     printf 'export AICLI_ARGS_AGENT_FILE=%q\n' "$_ARGS_AGENT_FILE" >> "$RUN_SCRIPT"
     printf 'export DEBUG_LOG=%q\n' "$DEBUG_LOG" >> "$RUN_SCRIPT"
@@ -820,6 +829,32 @@ _build_fresh_cmd() {
     [ -n "$_eff" ]    && _cmd="$_cmd $_eff"
     [ -n "$_plugin" ] && _cmd="$_cmd $_plugin"
     printf '%s' "$_cmd"
+}
+
+# docs/specs/AGENT_SPAWN_WORKSPACE.md R6 and R22: the first prompt of a helper workspace.
+# The spawn tool writes the fixed first line to <workspace>/.aicli-task/PROMPT.once and the mode
+# ("positional", "flag:<--name>" or "none") into the workspace id flags file. This helper prints the
+# quoted prompt as a suffix for the fresh-launch command. It renames the file to PROMPT.consumed, so
+# a relaunch or a resume never sends it twice. It prints nothing when there is no prompt to send.
+# The shell does this, not the saved arguments, because the argument check refuses a "$".
+_aicli_task_prompt_suffix() {
+    local _file="$ROOT_DIR/.aicli-task/PROMPT.once" _mode _flag _text
+    [ -n "${_ARGS_ID_FILE:-}" ] && [ -f "$_ARGS_ID_FILE" ] && [ -f "$_file" ] || return 0
+    # Same rule as AgentLaunchProfile::promptModeValid(): any other text means "no prompt".
+    _mode=$(php -r '$d=json_decode(@file_get_contents($argv[1]),true);$m=is_array($d)?(string)($d["prompt_mode"]??""):"";echo preg_match("/^(positional|flag:--[a-z][a-z-]{0,30})$/D",$m)?$m:"";' "$_ARGS_ID_FILE" 2>/dev/null)
+    case "$_mode" in
+        positional) _flag="" ;;
+        flag:--[a-z]*) _flag="${_mode#flag:}" ;;
+        *) return 0 ;;
+    esac
+    _text=$(cat "$_file" 2>/dev/null)
+    [ -n "$_text" ] || return 0
+    mv -f "$_file" "$ROOT_DIR/.aicli-task/PROMPT.consumed" 2>/dev/null || rm -f "$_file" 2>/dev/null
+    if [ -n "$_flag" ]; then
+        printf ' %s %q' "$_flag" "$_text"
+    else
+        printf ' %q' "$_text"
+    fi
 }
 
 # Deterministic repair of agent state at every start (damaged SQLite files,
@@ -1016,6 +1051,19 @@ _aicli_build_resume_cmd() {
     printf '%s' "$_tpl"
 }
 
+# AGENT_SPAWN_WORKSPACE.md R21: make sure the commands that the agent runs keep the AICLI_* variables
+# (AICLI_RELAY_COMMAND, AICLI_ADMIN_COMMAND, AICLI_SESSION_ID). An agent builds the environment of its
+# command tool from its own settings; Codex does it from [shell_environment_policy] in its config file.
+# When that policy is missing, the Relay command is not there and the agent falls back to the slow MCP tool.
+# This runs for every agent and every launch (the shared launch path). The script reads the registry key
+# `command_env` and does nothing for an agent that has none. It never stops the launch.
+_aicli_ensure_command_env() {
+    local _s="$PLUGIN_SRC/scripts/ensure-command-env.php"
+    [ -f "$_s" ] && [ "$(command -v php)" ] || return 0
+    timeout 20 php -d display_errors=0 "$_s" "$AGENT_ID" "${HOME_DIR:-$HOME}" >/dev/null 2>&1 || true
+    return 0
+}
+
 # WP #736 hot-apply: re-read the 5-tier effective env via EnvService on every
 # loop iteration. Diffs against $AICLI_EXPORTED_KEYS_FILE: unsets any key we
 # previously exported but is no longer present; re-exports the current set.
@@ -1100,7 +1148,10 @@ while true; do
     # in, so this is one cheap PHP -r call, not a re-hash). Falls back to
     # empty when the workspace override is removed (correct: args cleared).
     _refresh_args=""
-    if [ -n "$AICLI_ARGS_WS_FILE" ] && [ -f "$AICLI_ARGS_WS_FILE" ]; then
+    if [ -n "${AICLI_ARGS_ID_FILE:-}" ] && [ -f "$AICLI_ARGS_ID_FILE" ]; then
+        # Per-workspace-id flags of a helper workspace win over the folder file.
+        _refresh_args=$(php -r "\$d=json_decode(file_get_contents('$AICLI_ARGS_ID_FILE'),true);echo is_array(\$d)?(\$d['args']??''):'';" 2>/dev/null)
+    elif [ -n "$AICLI_ARGS_WS_FILE" ] && [ -f "$AICLI_ARGS_WS_FILE" ]; then
         _refresh_args=$(php -r "\$d=json_decode(file_get_contents('$AICLI_ARGS_WS_FILE'),true);echo is_array(\$d)?(\$d['args']??''):'';" 2>/dev/null)
     elif [ -n "$AICLI_ARGS_AGENT_FILE" ] && [ -f "$AICLI_ARGS_AGENT_FILE" ]; then
         _refresh_args=$(php -r "\$d=json_decode(file_get_contents('$AICLI_ARGS_AGENT_FILE'),true);echo is_array(\$d)?(\$d['args']??''):'';" 2>/dev/null)
@@ -1125,6 +1176,7 @@ while true; do
     # Ctrl-C-driven reload (UI's agent_signal_reload + Apply now), the new
     # env values are picked up here before the agent execs below.
     _aicli_load_envs
+    _aicli_ensure_command_env
 
     # #144: OpenCode single-instance DB safety + per-workspace isolation.
     # OpenCode keeps ONE sqlite DB per data dir; two server processes writing it at
@@ -1614,6 +1666,8 @@ while true; do
         # args so codex's last-`-c`-wins makes the plugin value override any
         # user workspace arg. These are plugin-injected and not user-editable.
         FRESH_CMD=$(_build_fresh_cmd "$frozen_binary" "$frozen_effective_args" "$frozen_plugin_args")
+        # Helper workspace: the first prompt goes in once, on the first fresh launch only.
+        FRESH_CMD="$FRESH_CMD$(_aicli_task_prompt_suffix)"
         log_aicli "INFO" 2 "Attempting Fresh Launch: $FRESH_CMD"
 
         # 1. Command-based Execution

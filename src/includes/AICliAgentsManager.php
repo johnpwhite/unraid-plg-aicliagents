@@ -142,6 +142,10 @@ require_once __DIR__ . '/services/ClaudeSessionNameResolver.php';
 require_once __DIR__ . '/services/VoiceService.php';
 require_once __DIR__ . '/services/VoiceEngineSetupService.php';
 require_once __DIR__ . '/services/AdminService.php';
+require_once __DIR__ . '/services/AgentLaunchProfile.php'; // AGENT_SPAWN_WORKSPACE.md R4 — model, effort and unattended flags of a helper workspace
+require_once __DIR__ . '/services/CodexTrustService.php'; // AGENT_SPAWN_WORKSPACE.md R20 — pre-trust of a helper's worktree for Codex
+require_once __DIR__ . '/services/AgentCommandEnvService.php'; // AGENT_SPAWN_WORKSPACE.md R21 — the AICLI_* variables reach the agent's commands
+require_once __DIR__ . '/services/SpawnService.php'; // AGENT_SPAWN_WORKSPACE.md — the helper-workspace tools (AdminService calls it)
 require_once __DIR__ . '/services/QuotaDetectionService.php'; // #281 — all-running-session quota polling
 require_once __DIR__ . '/services/RelayNoticeWording.php'; // #461 — Relay notice wording styles
 require_once __DIR__ . '/services/RelayNoticeLedger.php'; // RELAY_TOKEN_SAVINGS.md R9 — one notice per unread batch

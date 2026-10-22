@@ -327,9 +327,18 @@ class UtilityHandler {
         $data = json_decode($_POST['workspaces'] ?? '[]', true);
         $removedIds = json_decode($_POST['removed_ids'] ?? '[]', true);
         if (is_array($data)) {
+            // AGENT_SPAWN_WORKSPACE.md (gap 5): read the helper records among the closed workspaces BEFORE the save
+            // removes them, so a helper that a person closed gets the same clean-up as an autoClose helper.
+            $closedHelpers = is_array($removedIds) ? \AICliAgents\Services\SpawnService::helperRecordsAmong($removedIds) : [];
             if (!aicli_save_workspaces($data, is_array($removedIds) ? $removedIds : [])) {
                 return ['status' => 'error', 'message' => \AICliAgents\Services\ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save workspace state'];
             }
+            // The browser saves the list while the close is still under way, so the clean-up is queued and runs when the
+            // session has stopped (here when it already has, else at the next supervisor tick).
+            foreach ($closedHelpers as $helperRecord) {
+                \AICliAgents\Services\SpawnService::queuePersonClosed($helperRecord);
+            }
+            if ($closedHelpers !== []) \AICliAgents\Services\SpawnService::sweepPersonClosed();
             // #137: a closed (removed) workspace must not linger as a ghost Relay
             // contact — sweep its non-owner relay traces on close.
             if (is_array($removedIds)) {

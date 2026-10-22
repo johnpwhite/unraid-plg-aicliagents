@@ -69,6 +69,10 @@ Under the box, a preview shows both notices and their word counts. If the text b
 
 After the plugin types one notice, it types no new notice for that workspace until the agent reads its inbox. The agent reads the whole inbox, so more notices add nothing. If the agent has not read after some time, the plugin types a fresh notice. Set that time in **Resend a notice after**. The default is 10. The range is 1 to 240.
 
+### A message for a workspace that is not running
+
+A message to a saved workspace that is closed is kept in its inbox. The plugin also queues the notice. When the workspace starts and its screen is ready, the plugin types the notice once. The sender gets the answer "Saved. That workspace is not running. The message is delivered when it starts. Do not send it again." The workspace keeps the same id when it restarts, so the sender never needs to send the message again.
+
 ### The waiting pill
 
 If the agent is busy, the plugin does not type into its terminal. It holds the notice and shows a pill in the Activity tray. The pill names the receiving workspace first, then the sender and the reason, for example "the agent looked busy". The message itself is already safe in the inbox.
@@ -290,6 +294,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — A parent can answer a permission question of its helper (allow once only). You see a question before you close a helper that may lose work. A message to a stopped workspace waits and is delivered when the workspace starts. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-22** — The Agent Relay card has the same header as the other Settings tabs, with a status line and an (i) button. The intro text is behind the (i). Each check box is part of a label that is at least 44 px tall. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
 
 - **2026-10-22** — The Relay settings have new labels: **Notice typed into an agent** (with a **Show example** link), **Resend a notice after** and **Keep a screen sample when I deliver a message**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

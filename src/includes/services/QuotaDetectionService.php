@@ -304,6 +304,49 @@ final class QuotaDetectionService
         return $result;
     }
 
+    /**
+     * AGENT_SPAWN_WORKSPACE.md decision 1: does this agent kind show a usage limit now? A spawn of such an
+     * agent is refused, and the reply gives the reset time. Two sources, as the spec names them: a running
+     * workspace of the agent whose last poll saw a quota state with a reset still ahead, and a pending
+     * `quota-detect` entry in the scheduled-continue list for a workspace of that agent. Reads only.
+     *
+     * @param array<string,string>|null $agentBySession Test seam: workspace id => agent id. Null reads the registry.
+     * @param array<string,array<string,mixed>>|null $scheduled Test seam: the scheduled-continue map. Null reads it.
+     * @param callable|null $isRunning Test seam: fn(string $sid): bool. Null uses ProcessManager.
+     * @return array{reset_at:int,workspaceId:string}|null The earliest reset among the limits found, or null.
+     */
+    public static function activeLimit(string $agentId, ?int $now = null, ?array $agentBySession = null, ?array $scheduled = null, ?callable $isRunning = null): ?array
+    {
+        $now ??= time();
+        if ($agentId === '') return null;
+        if ($agentBySession === null) {
+            $agentBySession = [];
+            foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $s) {
+                if (is_array($s) && (string)($s['id'] ?? '') !== '') $agentBySession[(string)$s['id']] = (string)($s['agentId'] ?? '');
+            }
+        }
+        $scheduled ??= ConfigService::getScheduledContinueMap();
+        $isRunning ??= static fn(string $sid): bool => ProcessManager::isRunning($sid);
+
+        $best = null;
+        $consider = static function (int $at, string $sid) use (&$best, $now): void {
+            if ($at <= $now) return;
+            if ($best === null || $at < $best['reset_at']) $best = ['reset_at' => $at, 'workspaceId' => $sid];
+        };
+        foreach ($scheduled as $sid => $entry) {
+            if (!is_array($entry) || ($entry['source'] ?? '') !== 'quota-detect') continue;
+            if (($agentBySession[(string)$sid] ?? '') !== $agentId) continue;
+            $consider((int)($entry['at'] ?? 0), (string)$sid);
+        }
+        foreach ((self::readState()['sessions'] ?? []) as $sid => $row) {
+            if (!is_array($row) || (string)($row['agent_id'] ?? '') !== $agentId) continue;
+            if (($row['state'] ?? '') === 'native-agent-owned' || ($row['state'] ?? '') === 'cancelled') continue;
+            if (!isset($agentBySession[(string)$sid]) || !$isRunning((string)$sid)) continue;
+            $consider((int)($row['reset_at'] ?? 0), (string)$sid);
+        }
+        return $best;
+    }
+
     /** @return array<int,array{id:string,agentId:string}> */
     public static function runningSessions(): array
     {

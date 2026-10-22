@@ -280,6 +280,7 @@ class ProcessManager {
         'scripts/tmux-session-closed.sh',
         'scripts/priority.sh',      // RESPONSIVE_PRIORITY.md: runs after a tmux server starts
         'scripts/agent-tmp.sh',     // AGENT_TEMP_FOLDER.md: runs while the run script is written
+        'scripts/ensure-command-env.php', // AGENT_SPAWN_WORKSPACE.md R21: runs before each agent launch
     ];
 
     /**

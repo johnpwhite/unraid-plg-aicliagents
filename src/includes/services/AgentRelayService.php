@@ -2117,7 +2117,16 @@ class AgentRelayService {
                 elseif (($dres['status'] ?? '') === 'deferred') $deferReason = (string)($dres['reason'] ?? 'not-ready');
             }
         }
-        return self::deliveryEnvelope($online, $delivered, $id, $threadId, $deferReason);
+        // AGENT_SPAWN_WORKSPACE.md R9: a SAVED workspace that is not running gets its notice queued. It is typed when
+        // the workspace runs and its pane is ready. Nothing is queued for an id that is not a saved workspace.
+        $queued = false;
+        if (!$online) foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) {
+            if (($w['id'] ?? '')===$recipient && (string)($w['agentId'] ?? '')!=='') {
+                $queued = TmuxService::queueNoticeForStoppedWorkspace((string)$w['agentId'],$recipient,$sender,$senderName);
+                break;
+            }
+        }
+        return self::deliveryEnvelope($online, $delivered, $id, $threadId, $deferReason, $queued);
     }
 
     /** The canonical copy of one direct message, or null. */
@@ -2166,12 +2175,22 @@ class AgentRelayService {
      * without a real process. relay-agent.php exits non-zero on any non-'ok' status,
      * so an offline send surfaces loudly at the CLI too.
      */
-    public static function deliveryEnvelope(bool $online, bool $delivered, string $id, string $threadId, string $deferReason = ''): array {
-        if (!$online) return [
-            'status'=>'recipient_offline','delivered'=>false,'recipient_online'=>false,
-            'id'=>$id,'thread_id'=>$threadId,
-            'message'=>'Stored, but that workspace session is not running — it will not be seen unless the workspace restarts with this session id. Re-check contacts for a live session of that workspace and resend.',
-        ];
+    public static function deliveryEnvelope(bool $online, bool $delivered, string $id, string $threadId, string $deferReason = '', bool $queued = false): array {
+        if (!$online) {
+            // R9: the workspace id does not change when a workspace restarts, and a second send makes a duplicate.
+            // When the notice was queued, say so (will_deliver_on_start); otherwise say that the message waits in the inbox.
+            $env = [
+                'status'=>'recipient_offline','delivered'=>false,'recipient_online'=>false,
+                'id'=>$id,'thread_id'=>$threadId,
+            ];
+            if ($queued) {
+                $env['will_deliver_on_start'] = true;
+                $env['message'] = 'Saved. That workspace is not running. The message is delivered when it starts. Do not send it again.';
+            } else {
+                $env['message'] = 'Saved in the inbox of that workspace. The workspace is not running, and no notice could be queued. The message waits in the inbox until the workspace reads it. Do not send it again.';
+            }
+            return $env;
+        }
         $env = ['status'=>'ok','delivered'=>$delivered,'recipient_online'=>true,'id'=>$id,'thread_id'=>$threadId];
         // delivered=false alone could not be told apart from a drop, so a caller either
         // resent forever or wrongly concluded the peer never got it. Say so explicitly.

@@ -914,6 +914,19 @@ class TmuxService {
     }
 
     /**
+     * AGENT_SPAWN_WORKSPACE.md R9: queue the Relay notice for a SAVED workspace that is not running. The message
+     * itself is already in the durable inbox. The notice is typed when the workspace is running and its pane is
+     * ready: the supervisor drain (drainAllPendingRelay) and the next delivery attempt both flush this queue, and
+     * the queue of a stopped workspace is left alone until it starts. No tray pill is published, because the pill
+     * lists only running workspaces. Returns true when the queue file exists afterwards.
+     */
+    public static function queueNoticeForStoppedWorkspace(string $agentId, string $sessionId, string $sender, string $senderName = ''): bool {
+        if ($agentId === '' || !preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sessionId) || !preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sender)) return false;
+        self::enqueuePendingRelay($agentId, $sessionId, $sender, $senderName, 'recipient-not-running', false);
+        return is_file(self::pendingFile($agentId, $sessionId));
+    }
+
+    /**
      * Display label for one sender: "<friendly-workspace-name> (<session-id>)",
      * or just the id when no name is known. The name lets the operator tell which
      * workspace sent the message without decoding a bare session id. It is
@@ -2840,7 +2853,7 @@ class TmuxService {
      * cadence. Both are best-effort: a missed publish/wake still converges on
      * the tray's own reconcile poll and the supervisor's own tick.
      */
-    private static function enqueuePendingRelay(string $agentId, string $sessionId, string $sender, string $senderName, string $reason): void {
+    private static function enqueuePendingRelay(string $agentId, string $sessionId, string $sender, string $senderName, string $reason, bool $announce = true): void {
         if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sender)) return;
         $file = self::pendingFile($agentId, $sessionId);
         @mkdir(dirname($file), 0770, true);
@@ -2855,7 +2868,7 @@ class TmuxService {
         \AICliAgents\Services\AtomicWriteService::writeJson($file, $cur);
 
         try {
-            if (file_exists('/var/run/nginx.socket') && class_exists('\AICliAgents\Services\EventBus')) {
+            if ($announce && file_exists('/var/run/nginx.socket') && class_exists('\AICliAgents\Services\EventBus')) {
                 $senders = self::normalizeSenders($cur['senders']);
                 \AICliAgents\Services\EventBus::publish('activity', [], self::relayWaitingEntry($agentId, $sessionId, $senders));
             }

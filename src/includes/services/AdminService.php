@@ -180,7 +180,7 @@ class AdminService {
                     // VOICE_MAIL.md R14 / AGENT_VOICE.md R14: '' = not set.
                     'spokenName' => (string)($w['spoken_name'] ?? ''),
                     'voiceId'    => VoiceService::workspaceVoiceFor($w),
-                ] + self::announcedFields($w);
+                ] + self::spawnFields($w) + self::announcedFields($w);
             }
             // Single-wrapper rule (see class doc): return the list directly.
             // AdminMcpTools::call() supplies the one and only 'workspaces' key.
@@ -227,7 +227,7 @@ class AdminService {
 
             $args = '';
             if ($path !== '' && $agentId !== '') {
-                try { $args = ArgsService::getEffectiveArgs($path, $agentId); }
+                try { $args = ArgsService::getEffectiveArgs($path, $agentId, $id); }
                 catch (\Throwable $e) { /* args are best-effort; a workspace with no saved args file is normal, not a failure */ }
             }
 
@@ -265,10 +265,29 @@ class AdminService {
                 // VOICE_MAIL.md R14 / AGENT_VOICE.md R14: '' = not set.
                 'spokenName'  => (string)($record['spoken_name'] ?? ''),
                 'voiceId'     => VoiceService::workspaceVoiceFor($record),
-            ] + self::announcedFields($record);
+            ] + self::spawnFields($record) + self::announcedFields($record);
         } catch (\Throwable $e) {
             return self::failure('getWorkspace', $e);
         }
+    }
+
+    /**
+     * AGENT_SPAWN_WORKSPACE.md section 6: who made a workspace and, for a helper, its parent, task, state and
+     * report. `createdBy` is a workspace id, or `human` when a person made the workspace. A workspace made
+     * before the field existed shows ''.
+     *
+     * @param array<string,mixed> $record
+     * @return array<string,mixed>
+     */
+    private static function spawnFields(array $record): array
+    {
+        $out = [
+            'createdBy' => (string)($record['createdBy'] ?? ''),
+            'createdAt' => $record['createdAt'] ?? null,
+        ];
+        $view = SpawnService::view($record);
+        if ($view !== null) $out['spawn'] = $view;
+        return $out;
     }
 
     /**
@@ -637,6 +656,13 @@ class AdminService {
             // ---- voice mail (VOICE_MAIL.md R8) ----
             'voicemail_max_per_workspace' => ['group' => 'voice', 'description' => 'How many voice mail messages to keep for each workspace, 1 to 500. When a workspace has more, the oldest heard messages go first.'],
             'voicemail_max_age_days'      => ['group' => 'voice', 'description' => 'How many days to keep a voice mail message, 1 to 90. Older messages are removed whether they were heard or not.'],
+
+            // ---- helper workspaces (AGENT_SPAWN_WORKSPACE.md) — a person changes these on Settings; an agent cannot raise its own limits ----
+            'spawn_enabled'          => ['group' => 'spawn', 'description' => 'Let agents start helper workspaces: 1 turns on aicli_spawn_workspace, aicli_start_workspace, aicli_stop_workspace and aicli_finish_task. 0 is off (default). Changes only on the Settings page, General, Advanced — an agent cannot change it.'],
+            'spawn_max_children'     => ['group' => 'spawn', 'description' => 'The most helper workspaces that run for one parent workspace at the same time, 1 to 10 (default 3). Changes only on the Settings page.'],
+            'spawn_max_total'        => ['group' => 'spawn', 'description' => 'The most helper workspaces that run on this server at the same time, 1 to 20 (default 6). Changes only on the Settings page.'],
+            'spawn_max_per_agent'    => ['group' => 'spawn', 'description' => 'The most helper workspaces of one agent kind that run at the same time, 1 to 10 (default 2). Changes only on the Settings page.'],
+            'spawn_allow_unattended' => ['group' => 'spawn', 'description' => 'Let helpers run without asking: 1 lets a spawn use the unattended flags of the agent (for example the Codex sandbox bypass), and only in a worktree that the spawn tool made. 0 is off (default). Changes only on the Settings page.'],
 
             // ---- notebook (ARTEFACTS.md) — a person changes these on Settings, Notebook; an agent cannot ----
             'notebook_enabled'            => ['group' => 'notebook', 'description' => 'The Notebook drawer and the artefact tools. 1 is on (default), 0 is off. Changes only on the Settings page, Notebook — an agent cannot change it.'],
@@ -1394,7 +1420,13 @@ class AdminService {
                 return ['error' => 'Rejected characters: ' . implode(', ', $errors)];
             }
 
-            $ok = ArgsService::saveWorkspaceArgs($path, $agentId, $args);
+            // AGENT_SPAWN_WORKSPACE.md R5: a helper workspace keeps its flags in a file named by its id, and that
+            // file wins over the folder file. Save the new flags there, or the change would have no effect.
+            if (ArgsService::hasIdArgs($id)) {
+                $ok = ArgsService::saveIdArgs($id, $args);
+            } else {
+                $ok = ArgsService::saveWorkspaceArgs($path, $agentId, $args);
+            }
             if (!$ok) return ['error' => 'Write failed.'];
             // Args are not secrets — the value is safe to carry in the ledger.
             self::emitEvent('agent.args', ['workspaceId' => $id, 'agentId' => $agentId], "Arguments changed for workspace '$id'", ['args' => $args]);
@@ -2007,11 +2039,16 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function sendInput(string $workspaceId, string $text, bool $enter = true, bool $force = false): array {
+    public static function sendInput(string $workspaceId, string $text, bool $enter = true, bool $force = false, bool $answerPrompt = false): array {
         try {
             $session = self::findSession($workspaceId);
             if ($session === null) {
                 return ['error' => "No workspace with id '$workspaceId' was found."];
+            }
+            // AGENT_SPAWN_WORKSPACE.md R13: a parent answers a permission prompt of a helper that it started. That path
+            // has its own rules (allow-once answers only, the pane must show a question now, a deny list for the prompt).
+            if ($answerPrompt) {
+                return SpawnService::answerChildPrompt($workspaceId, $text);
             }
             $name = (string)($session['name'] ?? $workspaceId);
             $agentId = (string)($session['agentId'] ?? '');
@@ -2038,6 +2075,9 @@ class AdminService {
             if (!self::sendInputGateOpen($workspaceId)) {
                 return ['error' => "Typed into workspace '$name' too recently — wait a few seconds and try again."];
             }
+            // AGENT_SPAWN_WORKSPACE.md R22: text that the parent of a helper types into it starts with a fixed tag that
+            // the plugin writes, so the helper knows the words come from its parent and the terminal shows who typed them.
+            $text = SpawnService::tagForTarget($session, $text);
 
             $gate = $force
                 ? TmuxService::paneIsAddressable($agentId, $workspaceId)
@@ -2095,6 +2135,66 @@ class AdminService {
             }
         }
         return function_exists('mb_substr') ? mb_substr($safe, 0, self::SEND_INPUT_EXCERPT_CHARS) : substr($safe, 0, self::SEND_INPUT_EXCERPT_CHARS);
+    }
+
+    /**
+     * AGENT_SPAWN_WORKSPACE.md R1 (Tier 2). Start a helper workspace in one call: make it, set its flags,
+     * deliver its task and start it. All rules live in SpawnService::spawn(); this method keeps the
+     * AdminService convention (the payload, or an 'error' key) for AdminMcpTools::call().
+     *
+     * @param array<string,mixed> $p agentId, name, path or worktree, model, effort, task, taskTitle, unattended, autoClose, box
+     * @return array<string,mixed>
+     */
+    public static function spawnWorkspace(array $p): array {
+        try {
+            return SpawnService::spawn($p);
+        } catch (\Throwable $e) {
+            return self::failure('spawnWorkspace', $e);
+        }
+    }
+
+    /**
+     * AGENT_SPAWN_WORKSPACE.md R2 (Tier 2). Start a closed workspace that the caller created. A person may start
+     * any workspace. The rules are in SpawnService::startWorkspace().
+     *
+     * @return array<string,mixed>
+     */
+    public static function startWorkspace(string $id): array {
+        try {
+            return SpawnService::startWorkspace($id);
+        } catch (\Throwable $e) {
+            return self::failure('startWorkspace', $e);
+        }
+    }
+
+    /**
+     * AGENT_SPAWN_WORKSPACE.md R2, R14, R17 (Tier 2). Close a workspace that the caller created. A helper with
+     * autoClose is closed for good, with no approval step: only its creator or a person gets here. Any other
+     * workspace is stopped and kept. The rules are in SpawnService::stopWorkspace().
+     *
+     * @return array<string,mixed>
+     */
+    public static function stopWorkspace(string $id): array {
+        try {
+            return SpawnService::stopWorkspace($id);
+        } catch (\Throwable $e) {
+            return self::failure('stopWorkspace', $e);
+        }
+    }
+
+    /**
+     * AGENT_SPAWN_WORKSPACE.md R8 (Tier 2). A helper reports that its task is over. It writes RESULT.json, sets the
+     * state, records the event and sends the parent a Relay message; it closes nothing. The rules are in
+     * SpawnService::finishTask().
+     *
+     * @return array<string,mixed>
+     */
+    public static function finishTask(string $status, string $summary): array {
+        try {
+            return SpawnService::finishTask($status, $summary);
+        } catch (\Throwable $e) {
+            return self::failure('finishTask', $e);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2260,6 +2360,8 @@ class AdminService {
                 ConfigService::clearWorkspaceDeleting($id);   // the record stays, so the workspace may start again
                 return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace removal.'];
             }
+            // AGENT_SPAWN_WORKSPACE.md R5: the flags file of a helper workspace goes with its record.
+            ArgsService::deleteIdArgs($id);
 
             // This delete path goes through ConfigService::saveWorkspaces() directly,
             // not the save_workspaces AJAX action — UtilityHandler::saveWorkspaces()'s

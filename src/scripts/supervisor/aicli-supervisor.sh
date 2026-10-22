@@ -4371,6 +4371,24 @@ _scheduled_continue_tick() {
     ) || true
 }
 
+# AGENT_SPAWN_WORKSPACE.md R14: close each helper workspace that reported its task, once its pane is idle.
+# Same 30 s cadence and lock-drop + timeout wrapper as _scheduled_continue_tick.
+_SPAWN_SWEEP_LAST=0
+_spawn_sweep_tick() {
+    [ "$(command -v php)" ] || return 0
+    local now; now=$(date +%s)
+    [ $(( now - _SPAWN_SWEEP_LAST )) -ge 30 ] || return 0
+    _SPAWN_SWEEP_LAST="$now"
+    local sweeper="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/spawn-sweep.php"
+    [ -f "$sweeper" ] || return 0
+    (
+        if [ -n "${SUP_LOCK_FD:-}" ]; then
+            exec {SUP_LOCK_FD}>&-
+        fi
+        timeout 60 php -d display_errors=0 "$sweeper" >/dev/null 2>&1
+    ) || true
+}
+
 # SCHEDULED_CONTINUE.md / Forgejo #288: inspect every running terminal for a
 # verified provider quota message, not only the browser's selected workspace.
 # The PHP service has its own last-poll guard as well, so a duplicate wake or a
@@ -4700,6 +4718,7 @@ _work_tick() {
     _activity_sweep_tick
     _scheduled_continue_tick
     _quota_detect_tick
+    _spawn_sweep_tick
 
     # Step 1d2: #392 — keep the system log on flash (acts every 300 s).
     declare -f _syslog_keep_tick >/dev/null 2>&1 && { _syslog_keep_tick || true; }
