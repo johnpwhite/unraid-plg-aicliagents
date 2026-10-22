@@ -487,6 +487,328 @@ class BootArchiveService
         return $res;
     }
 
+    // ---- restore (R8, #755) ------------------------------------------------------------------------
+
+    /** The name of a manifest file: MANIFEST-<kind>-<user>-<HHMMSS>.json */
+    public const MANIFEST_RE = '/^MANIFEST-(quarantine|opencode_orphans|codex_sessions)-([A-Za-z0-9_][A-Za-z0-9._-]{0,127})-(\d{6})\.json$/D';
+    /** The plan shows at most this many files in the dialog. The counts cover all files. */
+    public const PLAN_ROWS = 300;
+    /** What a person may choose for a file that is different in the home. */
+    public const POLICIES = ['skip', 'replace'];
+
+    /** @return array{kind:string,user:string,time:string}|null */
+    public static function parseManifestName(string $name): ?array
+    {
+        if (preg_match(self::MANIFEST_RE, $name, $m) !== 1) return null;
+        return ['kind' => $m[1], 'user' => $m[2], 'time' => $m[3]];
+    }
+
+    /**
+     * The manifests of the archives in a checked folder (checkTarget() gave $realFolder). It reads the
+     * two fixed levels <archive folder>/<host>/<date>/ with one glob. It opens no manifest and walks no tree.
+     * @return array<int,array<string,mixed>> newest first
+     */
+    public static function listManifests(string $realFolder, int $limit = 200): array
+    {
+        $out = [];
+        $root = rtrim($realFolder, '/') . '/' . self::ARCHIVE_FOLDER;
+        if (!is_dir($root) || is_link($root)) return $out;
+        foreach (glob($root . '/*/*/MANIFEST-*.json', GLOB_NOSORT) ?: [] as $p) {
+            if (is_link($p) || !is_file($p)) continue;
+            $parsed = self::parseManifestName(basename($p));
+            $dir = dirname($p);
+            if ($parsed === null || preg_match('/^\d{4}-\d{2}-\d{2}$/D', basename($dir)) !== 1) continue;
+            $out[] = ['path' => $p, 'name' => basename($p), 'host' => basename(dirname($dir)), 'date' => basename($dir),
+                      'kind' => $parsed['kind'], 'user' => $parsed['user'], 'time' => $parsed['time'],
+                      'size' => (int)@filesize($p), 'mtime' => (int)@filemtime($p)];
+        }
+        usort($out, static function ($a, $b) { return ($b['mtime'] <=> $a['mtime']) ?: strcmp($b['path'], $a['path']); });
+        return array_slice($out, 0, max(1, $limit));
+    }
+
+    /**
+     * Check the path of a manifest that a person picked. The path must have the shape
+     * <folder>/aicliagents-archive/<host>/<date>/MANIFEST-<kind>-<user>-<time>.json, the folder must pass
+     * checkTarget(), and no part of the path may be a link. Seams: mounted.
+     * @return array{error:?string,path:string,dir:string,kind:string,user:string}
+     */
+    public static function checkManifest(string $path, array $seams = []): array
+    {
+        $bad = static function (string $m): array { return ['error' => $m, 'path' => '', 'dir' => '', 'kind' => '', 'user' => '']; };
+        if (preg_match('#^(/.+)/' . preg_quote(self::ARCHIVE_FOLDER, '#') . '/([A-Za-z0-9._-]+)/(\d{4}-\d{2}-\d{2})/(MANIFEST-[^/]+\.json)$#D', $path, $m) !== 1) {
+            return $bad('This is not the manifest of an archive.');
+        }
+        $parsed = self::parseManifestName($m[4]);
+        if ($parsed === null) return $bad('This is not the manifest of an archive.');
+        $chk = self::checkTarget($m[1], $seams);
+        if ($chk['error'] !== null) return $bad((string)$chk['error']);
+        $canon = $chk['folder'] . '/' . self::ARCHIVE_FOLDER . '/' . $m[2] . '/' . $m[3] . '/' . $m[4];
+        if (is_link($canon) || !is_file($canon)) return $bad('The manifest file was not found.');
+        if (realpath($canon) !== $canon) return $bad('The archive path leads out of the folder.');
+        return ['error' => null, 'path' => $canon, 'dir' => dirname($canon), 'kind' => $parsed['kind'], 'user' => $parsed['user']];
+    }
+
+    /**
+     * Read a manifest. The kind and the user in the file must match the name of the file.
+     * @return array{error:?string,kind:string,user:string,files:array<int,array{file:string,size:int,sha256:string,mtime:int}>}
+     */
+    public static function loadManifest(string $path): array
+    {
+        $out = ['error' => null, 'kind' => '', 'user' => '', 'files' => []];
+        $parsed = self::parseManifestName(basename($path));
+        $raw = @file_get_contents($path);
+        $doc = is_string($raw) ? json_decode($raw, true) : null;
+        if ($parsed === null || !is_array($doc) || ($doc['plugin'] ?? '') !== 'unraid-aicliagents'
+            || ($doc['kind'] ?? '') !== $parsed['kind'] || ($doc['user'] ?? '') !== $parsed['user'] || !is_array($doc['files'] ?? null)) {
+            $out['error'] = 'The manifest cannot be read or does not match its name.';
+            return $out;
+        }
+        $out['kind'] = $parsed['kind']; $out['user'] = $parsed['user'];
+        $seen = [];
+        foreach ($doc['files'] as $e) {
+            if (!is_array($e) || !is_string($e['file'] ?? null) || !is_string($e['sha256'] ?? null)
+                || preg_match('/^[0-9a-f]{64}$/D', $e['sha256']) !== 1 || !is_int($e['size'] ?? null) || $e['size'] < 0) continue;
+            if (isset($seen[$e['file']])) continue;   // one row for each file
+            $seen[$e['file']] = true;
+            $out['files'][] = ['file' => $e['file'], 'size' => $e['size'], 'sha256' => $e['sha256'], 'mtime' => (int)($e['mtime'] ?? 0)];
+        }
+        return $out;
+    }
+
+    /** Why a home-relative path of a manifest is refused, or null. The path must lie inside the folder of its kind. */
+    public static function restorePathReason(string $kind, string $rel): ?string
+    {
+        if ($rel === '' || $rel[0] === '/' || strpos($rel, "\0") !== false) return 'The path is not safe.';
+        foreach (explode('/', $rel) as $seg) {
+            if ($seg === '' || $seg === '.' || $seg === '..') return 'The path is not safe.';
+        }
+        $root = self::describe($kind)['root'] . '/';
+        if (strncmp($rel, $root, strlen($root)) !== 0) return 'The path lies outside the folder this archive came from.';
+        if ($kind === self::KIND_OPENCODE && preg_match('#^\.local/share/aicli-opencode/ws-[0-9a-f]{16}/#', $rel) !== 1) {
+            return 'The path lies outside the folder this archive came from.';
+        }
+        return null;
+    }
+
+    /** True when $target (a path that may not exist yet) lies inside $realHome, and no link leads out. */
+    private static function insideHome(string $target, string $realHome): bool
+    {
+        $d = dirname($target);
+        while ($d !== '' && $d !== '/' && !file_exists($d) && !is_link($d)) $d = dirname($d);
+        $r = @realpath($d);
+        return $r !== false && ($r === $realHome || strpos($r . '/', $realHome . '/') === 0);
+    }
+
+    /**
+     * Compare an archive with the home, and change nothing. Each file of the manifest gets a state:
+     *   new        not in the home; a restore copies it;
+     *   same       in the home with the same content; a restore does nothing;
+     *   different  in the home with other content; a restore copies it only when the person chose "replace";
+     *   refused    the path is not safe, lies outside the folder of its kind, or a link or folder is in the way;
+     *   damaged    the archive copy is missing, or its size or SHA-256 differs from the manifest.
+     * The archive copy is read and hashed here, so the plan is slow on a big archive: it runs in the
+     * background job, never in a web request.
+     *
+     * @return array<string,mixed> status, kind, user, counts, bytes_new, bytes_different, rows (at most PLAN_ROWS), total
+     */
+    public static function restorePlan(string $homeDir, string $manifestPath, array $seams = []): array
+    {
+        $res = ['status' => 'error', 'message' => '', 'kind' => '', 'user' => '', 'counts' => ['new' => 0, 'same' => 0, 'different' => 0, 'refused' => 0, 'damaged' => 0],
+                'bytes_new' => 0, 'bytes_different' => 0, 'rows' => [], 'total' => 0, 'manifest' => ''];
+        $chk = self::checkManifest($manifestPath, $seams);
+        if ($chk['error'] !== null) { $res['message'] = (string)$chk['error']; return $res; }
+        $m = self::loadManifest($chk['path']);
+        if ($m['error'] !== null) { $res['message'] = (string)$m['error']; return $res; }
+        $home = rtrim($homeDir, '/');
+        $realHome = realpath($home);
+        if ($realHome === false || is_link($home) || !is_dir($home)) { $res['message'] = 'The home of this archive was not found.'; return $res; }
+        $res['kind'] = $m['kind']; $res['user'] = $m['user']; $res['manifest'] = $chk['path'];
+        $archRoot = $chk['dir'] . '/' . $m['user'] . '/' . $m['kind'];
+        $rows = [];
+        foreach ($m['files'] as $e) {
+            $rel = $e['file'];
+            $row = ['file' => $rel, 'size' => $e['size'], 'state' => '', 'reason' => '', 'archived_mtime' => $e['mtime'], 'home_mtime' => 0, 'home_newer' => false];
+            $target = $home . '/' . $rel;
+            $src = $archRoot . '/' . $rel;
+            $why = self::restorePathReason($m['kind'], $rel);
+            if ($why === null && (!self::insideHome($target, $realHome) || is_link($target))) $why = 'A link leads out of the home or is in the way.';
+            if ($why === null && file_exists($target) && !is_file($target)) $why = 'A folder is at this place.';
+            if ($why !== null) {
+                $row['state'] = 'refused'; $row['reason'] = $why;
+            } elseif (is_link($src) || !is_file($src)) {
+                $row['state'] = 'damaged'; $row['reason'] = 'The archive copy is missing.';
+            } elseif ((int)@filesize($src) !== $e['size'] || @hash_file('sha256', $src) !== $e['sha256']) {
+                $row['state'] = 'damaged'; $row['reason'] = 'The archive copy does not match the manifest.';
+            } elseif (!file_exists($target)) {
+                $row['state'] = 'new';
+                $res['bytes_new'] += $e['size'];
+            } else {
+                $row['home_mtime'] = (int)@filemtime($target);
+                if ((int)@filesize($target) === $e['size'] && @hash_file('sha256', $target) === $e['sha256']) {
+                    $row['state'] = 'same';
+                } else {
+                    $row['state'] = 'different';
+                    $row['home_newer'] = $row['home_mtime'] > $e['mtime'];
+                    $res['bytes_different'] += $e['size'];
+                }
+            }
+            $res['counts'][$row['state']]++;
+            $rows[] = $row;
+        }
+        $res['total'] = count($rows);
+        // The dialog lists the files that need a look first: different, then refused and damaged, then new, then same.
+        $rank = ['different' => 0, 'refused' => 1, 'damaged' => 1, 'new' => 2, 'same' => 3];
+        usort($rows, static function ($a, $b) use ($rank) { return ($rank[$a['state']] <=> $rank[$b['state']]) ?: strcmp($a['file'], $b['file']); });
+        $res['rows'] = array_slice($rows, 0, self::PLAN_ROWS);
+        $res['status'] = 'ok';
+        return $res;
+    }
+
+    /**
+     * Put the files of an archive back into the home. Run only after the person saw restorePlan() and
+     * chose a policy for the files that are different: 'skip' keeps the file in the home (the default),
+     * 'replace' copies the archived file over it. The plan is made again here, so a file that changed
+     * since the dialog is judged by its state now. A new file never overwrites anything. A different
+     * file is replaced only on 'replace', and never while a process holds it open.
+     * Each file is copied to a temporary name, checked (size and SHA-256 from the manifest), and then
+     * renamed into place. The archive is never changed.
+     *
+     * $seams: copy (fn(src,dst):bool), free (fn(dir):int), open (fn(home):string[]), progress (fn(array)), mounted.
+     * @return array<string,mixed>
+     */
+    public static function restore(string $homeDir, string $manifestPath, string $policy, array $seams = []): array
+    {
+        $res = ['status' => 'error', 'message' => '', 'kind' => '', 'user' => '', 'done' => 0, 'files' => 0, 'bytes' => 0,
+                'replaced' => 0, 'unchanged' => 0, 'kept' => 0, 'skipped' => []];
+        if (!in_array($policy, self::POLICIES, true)) { $res['message'] = 'The choice for different files must be skip or replace.'; return $res; }
+        $chk = self::checkManifest($manifestPath, $seams);
+        if ($chk['error'] !== null) { $res['message'] = (string)$chk['error']; return $res; }
+        $m = self::loadManifest($chk['path']);
+        if ($m['error'] !== null) { $res['message'] = (string)$m['error']; return $res; }
+        $home = rtrim($homeDir, '/');
+        if (realpath($home) === false || is_link($home) || !is_dir($home)) { $res['message'] = 'The home of this archive was not found.'; return $res; }
+        $res['kind'] = $m['kind']; $res['user'] = $m['user'];
+        $archRoot = $chk['dir'] . '/' . $m['user'] . '/' . $m['kind'];
+
+        // Judge every file now, with the same rules as the plan. The state is the state at this moment,
+        // not the state the dialog showed.
+        $need = 0;
+        $copy = [];
+        foreach ($m['files'] as $e) {
+            $st = self::stateNow($home, $archRoot, $m['kind'], $e);
+            if ($st['state'] === 'same') { $res['unchanged']++; continue; }
+            if ($st['state'] === 'new' || ($st['state'] === 'different' && $policy === 'replace')) {
+                $copy[] = $e; $need += $e['size'];
+                continue;
+            }
+            if ($st['state'] === 'different') { $res['kept']++; continue; }
+            $res['skipped'][] = ['id' => $e['file'], 'reason' => $st['reason']];
+        }
+        if (!$copy) {
+            $res['status'] = 'ok';
+            $res['message'] = 'Nothing to restore. ' . self::restoreSummary($res);
+            return $res;
+        }
+        $free = isset($seams['free']) ? (int)($seams['free'])($home) : (int)@disk_free_space($home);
+        if ($free < $need + self::ROOM_MARGIN) {
+            $res['message'] = 'The boot disk has too little room. The restore needs ' . BootSpaceService::human($need + self::ROOM_MARGIN) . ' free.';
+            return $res;
+        }
+        $open = null;
+        $copier = $seams['copy'] ?? [HistoryMoveService::class, 'copyFile'];
+        $owner = @stat($home);
+        $count = count($copy); $i = 0;
+        foreach ($copy as $e) {
+            $i++;
+            if (isset($seams['progress'])) ($seams['progress'])(['done' => $i - 1, 'total' => $count, 'id' => $e['file']]);
+            $target = $home . '/' . $e['file'];
+            $src = $archRoot . '/' . $e['file'];
+            // A cheap check right before the copy: a file that was new must still be absent, and a file
+            // that was different must still be there.
+            $isDiff = file_exists($target);
+            if ($isDiff && $policy !== 'replace') {
+                $res['skipped'][] = ['id' => $e['file'], 'reason' => 'A file appeared at this place.'];
+                continue;
+            }
+            if ($isDiff) {
+                if ($open === null) {
+                    $open = [];
+                    $paths = isset($seams['open']) ? (array)($seams['open'])($home) : HistoryStoreService::procOpenFiles($home);
+                    foreach ($paths as $p) $open[(string)$p] = true;
+                }
+                if (isset($open[$target])) { $res['skipped'][] = ['id' => $e['file'], 'reason' => 'A process uses the file in the home.']; continue; }
+            }
+            $dir = dirname($target);
+            if (!is_dir($dir)) {
+                self::mkdirOwned($dir, $home, $owner);
+                if (!is_dir($dir)) { $res['skipped'][] = ['id' => $e['file'], 'reason' => 'The folder could not be made.']; continue; }
+            }
+            $part = $target . '.aicli-restore.part';
+            @unlink($part);
+            $ok = $copier($src, $part);
+            if (!$ok || !is_file($part) || (int)@filesize($part) !== $e['size'] || @hash_file('sha256', $part) !== $e['sha256']) {
+                @unlink($part);
+                $res['skipped'][] = ['id' => $e['file'], 'reason' => 'The copy did not match the manifest, so nothing changed.'];
+                continue;
+            }
+            $sst = @stat($src);
+            if ($sst !== false) @chmod($part, (int)$sst['mode'] & 07777);
+            if ($e['mtime'] > 0) @touch($part, $e['mtime']);
+            if ($owner !== false) { @chown($part, (int)$owner['uid']); @chgrp($part, (int)$owner['gid']); }
+            if (!$isDiff && file_exists($target)) { @unlink($part); $res['skipped'][] = ['id' => $e['file'], 'reason' => 'A file appeared at this place.']; continue; }
+            if (!@rename($part, $target)) { @unlink($part); $res['skipped'][] = ['id' => $e['file'], 'reason' => 'The copy could not be finished.']; continue; }
+            $res['done']++; $res['files']++; $res['bytes'] += $e['size'];
+            if ($isDiff) $res['replaced']++;
+        }
+        if (isset($seams['progress'])) ($seams['progress'])(['done' => $count, 'total' => $count, 'id' => '']);
+        $res['status'] = 'ok';
+        $res['message'] = 'Restored ' . $res['done'] . ' file(s) (' . BootSpaceService::human($res['bytes']) . '). ' . self::restoreSummary($res);
+        return $res;
+    }
+
+    private static function restoreSummary(array $res): string
+    {
+        $bits = [];
+        if ($res['replaced'] > 0) $bits[] = $res['replaced'] . ' replaced';
+        if ($res['unchanged'] > 0) $bits[] = $res['unchanged'] . ' already the same';
+        if ($res['kept'] > 0) $bits[] = $res['kept'] . ' different file(s) kept in the home';
+        if ($res['skipped']) $bits[] = count($res['skipped']) . ' stayed';
+        return $bits ? ucfirst(implode(', ', $bits)) . '.' : '';
+    }
+
+    /**
+     * The state of one manifest entry now (the same rules as restorePlan, for one file).
+     * @param array{file:string,size:int,sha256:string,mtime:int} $e
+     * @return array{state:string,reason:string}
+     */
+    private static function stateNow(string $home, string $archRoot, string $kind, array $e): array
+    {
+        $realHome = realpath($home);
+        $target = $home . '/' . $e['file'];
+        $src = $archRoot . '/' . $e['file'];
+        $why = self::restorePathReason($kind, $e['file']);
+        if ($why === null && ($realHome === false || !self::insideHome($target, $realHome) || is_link($target))) $why = 'A link leads out of the home or is in the way.';
+        if ($why === null && file_exists($target) && !is_file($target)) $why = 'A folder is at this place.';
+        if ($why !== null) return ['state' => 'refused', 'reason' => $why];
+        if (is_link($src) || !is_file($src)) return ['state' => 'damaged', 'reason' => 'The archive copy is missing.'];
+        if ((int)@filesize($src) !== $e['size'] || @hash_file('sha256', $src) !== $e['sha256']) return ['state' => 'damaged', 'reason' => 'The archive copy does not match the manifest.'];
+        if (!file_exists($target)) return ['state' => 'new', 'reason' => ''];
+        if ((int)@filesize($target) === $e['size'] && @hash_file('sha256', $target) === $e['sha256']) return ['state' => 'same', 'reason' => ''];
+        return ['state' => 'different', 'reason' => 'A different file is in the home.'];
+    }
+
+    /** Make a folder (and its parents) inside the home, owned like the home. */
+    private static function mkdirOwned(string $dir, string $home, $owner): void
+    {
+        $todo = [];
+        $d = $dir;
+        while (strlen($d) > strlen($home) && !is_dir($d)) { $todo[] = $d; $d = dirname($d); }
+        foreach (array_reverse($todo) as $t) {
+            if (!@mkdir($t, 0755) && !is_dir($t)) return;
+            if ($owner !== false) { @chown($t, (int)$owner['uid']); @chgrp($t, (int)$owner['gid']); }
+        }
+    }
+
     /**
      * Last checks on an item before it is copied or removed. Returns a reason, or null when it may go.
      * With $recheckOpen the open files are read again (the item must not be in use right before it goes).

@@ -37,6 +37,20 @@ class BootSpaceService
     public const LOCK_TTL = 900;
     /** The longest one du call may run (seconds). */
     private const DU_TIMEOUT = 120;
+    /**
+     * Boot disk use levels, in percent (docs/specs/BOOT_DISK_SPACE.md R8, #755). The supervisor
+     * script scripts/supervisor/pool-space.sh has the same numbers as its defaults
+     * (AICLI_POOL_EARLY_PCT, AICLI_POOL_WARN_PCT, AICLI_POOL_CLEAR_PCT); a test pins that they match.
+     *  - from EARLY_PCT: the card shows a warning and the Activity tray gets one entry (no push notice);
+     *  - from WARN_PCT: the person also gets ONE push notice in 6 hours;
+     *  - below CLEAR_PCT: the tray entry ends.
+     */
+    public const EARLY_PCT = 80;
+    public const WARN_PCT = 85;
+    public const CRITICAL_PCT = 95;
+    public const CLEAR_PCT = 77;
+    /** A superseded layer image must be older than this many seconds, so a bake that just ended is not touched. */
+    public const SUPERSEDED_MIN_AGE = 3600;
     /** Same patterns as _smoke_is_test_id in tests/smoke/_common.sh. */
     public const TEST_ID_PATTERNS = ['smktest_*', 'smoketest_*', 'smokeuser*', 'smoke*', 'it[0-9]*', 'soak*', 'realuser*[0-9]*'];
 
@@ -157,6 +171,47 @@ class BootSpaceService
         return '';
     }
 
+    /**
+     * The use level of the boot disk: ok | early | warn | critical. $pct is the used percent
+     * (rounded to a whole number, as the supervisor script does).
+     */
+    public static function diskLevel(float $pct): string
+    {
+        $p = (int)round($pct);
+        if ($p >= self::CRITICAL_PCT) return 'critical';
+        if ($p >= self::WARN_PCT) return 'warn';
+        if ($p >= self::EARLY_PCT) return 'early';
+        return 'ok';
+    }
+
+    /**
+     * What a check does for the level change from $prevLevel (the state the check kept, or '' when it
+     * kept none) to the used percent $pct. This is the rule that pool-space.sh follows, as a pure
+     * function so a test can pin it:
+     *   tray:   'open' | 'refresh' | 'close' | ''  (the Activity tray entry)
+     *   notify: true when a push notice goes out now. It goes out only from WARN_PCT, and only when
+     *           the last notice is older than 6 hours ($sinceNotice seconds, null = never).
+     * A person never gets a notice at EARLY_PCT, so one rise from 80 to 86 gives ONE notice, not two.
+     * Between CLEAR_PCT and EARLY_PCT nothing changes (hysteresis).
+     * @return array{level:string,tray:string,notify:bool}
+     */
+    public static function crossing(string $prevLevel, float $pct, ?int $sinceNotice = null): array
+    {
+        $level = self::diskLevel($pct);
+        $p = (int)round($pct);
+        $active = in_array($prevLevel, ['early', 'warn', 'critical'], true);
+        if ($level === 'ok') {
+            if ($active && $p < self::CLEAR_PCT) return ['level' => 'ok', 'tray' => 'close', 'notify' => false];
+            // The hysteresis band: keep the state of the entry.
+            return ['level' => $active ? $prevLevel : 'ok', 'tray' => '', 'notify' => false];
+        }
+        // The tray text changes when the band changes: early, or warn and critical together.
+        $band = static function (string $l): string { return $l === 'early' ? 'early' : 'warn'; };
+        $tray = $active ? ($band($level) === $band($prevLevel) ? '' : 'refresh') : 'open';
+        $notify = $level !== 'early' && ($sinceNotice === null || $sinceNotice >= 21600);
+        return ['level' => $level, 'tray' => $tray, 'notify' => $notify];
+    }
+
     /** Size, use, free space, mount and file system of the disk that holds $path. */
     public static function diskInfo(string $path): array
     {
@@ -233,7 +288,7 @@ class BootSpaceService
      * The "Left over" items: [{key,label,bytes,path}]. Most paths are inside $persist.
      * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>, unfinished:<type>_<id>, backendarchive:<name>.
      */
-    public static function leftOverItems(string $persist, array $homes, callable $du, ?string $retiredList = null): array
+    public static function leftOverItems(string $persist, array $homes, callable $du, ?string $retiredList = null, array $ctx = []): array
     {
         $items = [];
         $protectedRetirePaths = self::openConversionRetirePaths($persist);
@@ -297,6 +352,132 @@ class BootSpaceService
             // A name that fits a test pattern but is a real home (listed in 'plain') is never offered.
             if (!self::isTestId($id) || in_array($id, $homes['plain'], true)) continue;
             $items[] = ['key' => 'testhome:' . $id, 'label' => 'Test home ' . $id, 'bytes' => $du($d), 'path' => $d];
+        }
+        // R8 (#755): layer images that a newer merged layer replaced. Only when the caller gives the manifest.
+        if (isset($ctx['manifest_entities']) && is_array($ctx['manifest_entities'])) {
+            foreach (self::supersededLayers($ctx['layer_dirs'] ?? [$persist], $ctx['manifest_entities'], $du, $ctx) as $it) {
+                $items[] = $it;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * The context for the superseded-layer rule, from the seams of a measure or a removal.
+     * Seams: manifest_entities (array, or null to skip the rule), used_files (set path => true), in_use
+     * (callable path => bool), now. A run with a `du` or `persist` seam (a test) skips the rule unless it passes
+     * manifest_entities, so a test never reads the live layer manifest.
+     * @return array<string,mixed>
+     */
+    public static function layerContext(array $seams, string $persist, string $homePersist): array
+    {
+        $ent = array_key_exists('manifest_entities', $seams)
+            ? $seams['manifest_entities']
+            : ((isset($seams['du']) || isset($seams['persist'])) ? null : self::manifestEntities());
+        $ctx = ['layer_dirs' => array_values(array_unique([$persist, $homePersist ?: $persist]))];
+        if (is_array($ent)) $ctx['manifest_entities'] = $ent;
+        foreach (['used_files', 'in_use', 'now'] as $k) if (isset($seams[$k])) $ctx[$k] = $seams[$k];
+        return $ctx;
+    }
+
+    /** @return array<string,mixed> */
+    private static function manifestEntities(): array
+    {
+        try {
+            require_once __DIR__ . '/LayerManifestService.php';
+            return LayerManifestService::getAllEntities();
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * The layer image files that a loop device reads now (a live mount uses them). A set path => true.
+     * @return array<string,true>
+     */
+    public static function loopBackingFiles(): array
+    {
+        $set = [];
+        foreach (glob('/sys/block/loop*/loop/backing_file', GLOB_NOSORT) ?: [] as $f) {
+            $p = trim((string)@file_get_contents($f));
+            $p = (string)preg_replace('/ \(deleted\)$/', '', $p);
+            if ($p === '') continue;
+            $set[$p] = true;
+            $r = @realpath($p);
+            if ($r !== false) $set[$r] = true;
+        }
+        return $set;
+    }
+
+    /**
+     * Superseded layer images (docs/specs/BOOT_DISK_SPACE.md R8, #755): a layer file of an entity that
+     * the layer manifest does NOT list, while the manifest lists a merged ("consolidated") layer of
+     * that entity that is newer than the file. The merged layer holds the data of the older file, so
+     * the file is dead weight. A consolidate deletes such files itself; one stays when the delete was
+     * cut short (then the file is "untracked" and nothing reads it).
+     *
+     * A file never counts when: the manifest has no merged layer for the entity, or the file is not
+     * older than the newest merged layer (it may be a newer bake that the manifest does not list yet);
+     * a loop device or a mount uses it; the entity has an open intent file (a consolidate or
+     * conversion is running); the file is younger than SUPERSEDED_MIN_AGE; or it is a link.
+     * A parked `.pending-delete.*` file is not counted: the supervisor sweep finishes it.
+     *
+     * One item for each entity: key `superseded:<type>_<id>`, with `files` (full paths).
+     *
+     * @param string[] $dirs folders that hold layer files
+     * @param array<string,mixed> $entities the entities of the layer manifest
+     * @return array<int,array<string,mixed>>
+     */
+    public static function supersededLayers(array $dirs, array $entities, callable $du, array $ctx = []): array
+    {
+        require_once __DIR__ . '/LayerManifestService.php';
+        $now = (int)($ctx['now'] ?? time());
+        $used = $ctx['used_files'] ?? null;
+        if (!is_array($used)) $used = self::loopBackingFiles();
+        $inUse = $ctx['in_use'] ?? [self::class, 'pathInUse'];
+        $groups = [];
+        foreach (array_unique(array_filter(array_map('strval', $dirs))) as $dir) {
+            $dir = rtrim($dir, '/');
+            if ($dir === '' || !is_dir($dir)) continue;
+            foreach (@scandir($dir) ?: [] as $name) {
+                $parsed = LayerManifestService::parseLayerName((string)$name);
+                if ($parsed === null) continue;
+                $ent = $entities[$parsed['type'] . '/' . $parsed['id']] ?? null;
+                $listed = is_array($ent) && is_array($ent['expected_layers'] ?? null) ? $ent['expected_layers'] : [];
+                if (!$listed) continue;
+                $names = []; $newestBase = '';
+                foreach ($listed as $l) {
+                    $fn = basename((string)($l['filename'] ?? ''));
+                    if ($fn === '') continue;
+                    $names[$fn] = true;
+                    if (LayerManifestService::classifyLayerKind($fn) === 'consolidated') {
+                        $k = LayerManifestService::layerSortKey($fn);
+                        if ($k > $newestBase) $newestBase = $k;
+                    }
+                }
+                if (isset($names[$name]) || $newestBase === '') continue;
+                if (LayerManifestService::layerSortKey((string)$name) >= $newestBase) continue;
+                $abs = $dir . '/' . $name;
+                if (is_link($abs) || !is_file($abs)) continue;
+                if (is_file($dir . '/.aicli-intent-' . $parsed['type'] . '-' . $parsed['id'] . '.json')) continue;
+                $st = @stat($abs);
+                if ($st === false || $now - (int)$st['mtime'] < self::SUPERSEDED_MIN_AGE) continue;
+                $real = @realpath($abs) ?: $abs;
+                if (isset($used[$abs]) || isset($used[$real])) continue;
+                if (($inUse)($abs)) continue;
+                $groups[$parsed['type'] . '_' . $parsed['id']][] = $abs;
+            }
+        }
+        $items = [];
+        foreach ($groups as $id => $files) {
+            sort($files);
+            $bytes = 0;
+            foreach ($files as $f) $bytes += (int)$du($f);
+            $key = 'superseded:' . $id;
+            if (preg_match('/^superseded:[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) continue;
+            $items[] = ['key' => $key,
+                'label' => 'Old layer images that a newer merged layer replaced (' . $id . ', ' . count($files) . ' file' . (count($files) === 1 ? '' : 's') . ')',
+                'bytes' => $bytes, 'path' => dirname($files[0]) . '/' . $id . '_*.sqsh', 'files' => $files];
         }
         return $items;
     }
@@ -503,7 +684,10 @@ class BootSpaceService
         if ($configUser === '') $configUser = 'root';
 
         $disk = $seams['disk'] ?? self::diskInfo($persist);
-        $homes = self::discoverHomes($homePersist, $configUser, self::protectedHomeIds($configUser, $seams));
+        if (is_array($disk) && (int)($disk['size'] ?? 0) > 0) {
+            $disk['level'] = self::diskLevel(100 * (int)($disk['used'] ?? 0) / (int)$disk['size']);
+        }
+        $homes =self::discoverHomes($homePersist, $configUser, self::protectedHomeIds($configUser, $seams));
         $parts = [];
         $insideTotal = 0;   // bytes of the parts that lie inside the plugin folder
         $history = [];      // user => agentId => figures (the Move old sessions dialog)
@@ -617,7 +801,8 @@ class BootSpaceService
 
         // ---- left over ----
         if ($complete && !self::outOfTime()) {
-            $items = self::leftOverItems($persist, $homes, $du, $seams['retired_list'] ?? null);
+            $items = self::leftOverItems($persist, $homes, $du, $seams['retired_list'] ?? null,
+                self::layerContext($seams, $persist, $homePersist));
             $lo = 0; foreach ($items as $it) $lo += $it['bytes'];
             if (self::isInside($persist, $pluginDir)) $insideTotal += $lo;
             $parts[] = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
@@ -625,6 +810,7 @@ class BootSpaceService
                     $out = ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']];
                     if (isset($it['locked'])) $out['locked'] = (bool)$it['locked'];
                     if (isset($it['age_seconds'])) $out['age_seconds'] = (int)$it['age_seconds'];
+                    if (isset($it['files'])) $out['files'] = count($it['files']);
                     return $out;
                 }, $items),
                 'action' => array_filter($items, static fn(array $it): bool => empty($it['locked'])) !== []
@@ -920,7 +1106,7 @@ class BootSpaceService
      */
     public static function removeLeftover(string $key, array $seams = []): array
     {
-        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished|backendarchive):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
+        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished|backendarchive|superseded):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
             return ['status' => 'error', 'message' => 'This item is not valid.'];
         }
         $data = $seams['data'] ?? self::read();
@@ -954,7 +1140,11 @@ class BootSpaceService
 
         // Re-check right before removal: find the item again with the live rules.
         $homes = self::discoverHomes($persist, $configUser, self::protectedHomeIds($configUser, $seams));
-        $live = self::leftOverItems($persist, $homes, static function () { return 0; }, $seams['retired_list'] ?? null);   // no du: the callable returns 0
+        $homePersist = rtrim((string)($seams['home_persist'] ?? (isset($seams['persist'])
+            ? $persist
+            : StoragePathResolver::homePersistPathFromConfig(ConfigService::getConfig()))), '/');
+        $live = self::leftOverItems($persist, $homes, static function () { return 0; }, $seams['retired_list'] ?? null,
+            self::layerContext($seams, $persist, $homePersist));   // no du: the callable returns 0
         $item = null;
         foreach ($live as $it) { if ($it['key'] === $key) { $item = $it; break; } }
         if ($item === null) {
@@ -1004,6 +1194,30 @@ class BootSpaceService
             }
             self::logRemoved($key, $freed);
             return ['status' => 'ok', 'freed_bytes' => $freed];
+        }
+
+        if ($type === 'superseded') {
+            // R8 (#755): each file is checked again. The live list above already dropped a file that a
+            // loop or a mount uses, a file with an open intent and a file that is no longer superseded.
+            $used = $seams['used_files'] ?? self::loopBackingFiles();
+            $removed = 0; $kept = 0;
+            foreach ((array)($item['files'] ?? []) as $f) {
+                $f = (string)$f;
+                $dir = dirname($f);
+                $inside = false;
+                foreach (array_unique([$persist, $homePersist ?: $persist]) as $root) {
+                    if ($root !== '' && $dir === $root) $inside = true;
+                }
+                $real = @realpath($f) ?: $f;
+                if (!$inside || is_link($f) || !is_file($f) || isset($used[$f]) || isset($used[$real]) || $inUse($f)) { $kept++; continue; }
+                if (@unlink($f)) $removed++; else $kept++;
+            }
+            if ($removed === 0) {
+                return ['status' => 'error', 'message' => 'No layer image was removed. A mount may use them.'];
+            }
+            self::logRemoved($key, $listedBytes);
+            return ['status' => 'ok', 'freed_bytes' => $listedBytes,
+                'message' => $kept > 0 ? $kept . ' file(s) stayed because a mount or a process uses them.' : ''];
         }
 
         $path = $item['path'];

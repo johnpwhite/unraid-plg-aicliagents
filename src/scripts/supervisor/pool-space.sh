@@ -6,16 +6,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'r
 #
 # Sourced by aicli-supervisor.sh. The supervisor calls _pool_space_tick on
 # every tick. The function acts only every 300 seconds:
-#   - At or above AICLI_POOL_WARN_PCT (default 85): it sends ONE warning per
-#     6 hours that names the free space and the biggest users, and it keeps
-#     one Activity tray entry (pool_space_<mount>, status waiting).
-#   - Below AICLI_POOL_CLEAR_PCT (default 80): it finishes the tray entry.
-#   - Between the two limits: it changes nothing (hysteresis).
+#   - At or above AICLI_POOL_EARLY_PCT (default 80) and below the warn limit: it
+#     keeps one Activity tray entry (pool_space_<mount>, status waiting) and the
+#     card shows a warning. It sends NO push notice (#755).
+#   - At or above AICLI_POOL_WARN_PCT (default 85): the same tray entry, and ONE
+#     push notice per 6 hours that names the free space and the biggest users.
+#     A rise from 80 to 86 gives one notice, not two.
+#   - Below AICLI_POOL_CLEAR_PCT (default 77): it finishes the tray entry.
+#   - Between the clear limit and the early limit: it changes nothing (hysteresis).
+# The numbers match BootSpaceService::EARLY_PCT, WARN_PCT and CLEAR_PCT; a PHP test pins that.
 # Every step is best effort. The function always returns 0.
 #
 # Test overrides (environment): AICLI_POOL_PERSIST_PATH, AICLI_POOL_STATE_DIR,
 # AICLI_POOL_NOW (epoch seconds), AICLI_POOL_DF_CMD (replaces df),
-# AICLI_POOL_WARN_PCT, AICLI_POOL_CLEAR_PCT, AICLI_POOL_INTERVAL, AICLI_BOOT_SPACE_FILE.
+# AICLI_POOL_EARLY_PCT, AICLI_POOL_WARN_PCT, AICLI_POOL_CLEAR_PCT, AICLI_POOL_INTERVAL, AICLI_BOOT_SPACE_FILE.
 
 _POOL_SPACE_LAST=0   # epoch of the last check in this process
 
@@ -150,12 +154,15 @@ _pool_space_tick() {
     fi
     local state="${AICLI_POOL_STATE_DIR:-${MOUNT_ROOT}}"
     local interval="${AICLI_POOL_INTERVAL:-300}"
-    local warn="${AICLI_POOL_WARN_PCT:-85}" clear="${AICLI_POOL_CLEAR_PCT:-80}"
-    local now line size used avail mount pct free_mb safe op marker last_pct users msg label d advice
+    local early="${AICLI_POOL_EARLY_PCT:-80}" warn="${AICLI_POOL_WARN_PCT:-85}" clear="${AICLI_POOL_CLEAR_PCT:-77}"
+    local now line size used avail mount pct free_mb safe op marker last_pct users msg label d advice band_now band_was
     now="${AICLI_POOL_NOW:-$(date +%s)}"
     case "$interval" in ''|*[!0-9]*) interval=300 ;; esac
+    case "$early" in ''|*[!0-9]*) early=80 ;; esac
     case "$warn" in ''|*[!0-9]*) warn=85 ;; esac
-    case "$clear" in ''|*[!0-9]*) clear=80 ;; esac
+    case "$clear" in ''|*[!0-9]*) clear=77 ;; esac
+    # The warn limit is never below the early limit.
+    [ "$warn" -ge "$early" ] || warn="$early"
     [ $(( now - _POOL_SPACE_LAST )) -ge "$interval" ] || return 0
     _POOL_SPACE_LAST="$now"
 
@@ -179,25 +186,28 @@ _pool_space_tick() {
     op="pool_space_${safe}"
     marker="$state/.${op}.tray"
 
-    if [ "$pct" -ge "$warn" ]; then
+    if [ "$pct" -ge "$early" ]; then
         _pool_space_scan "$persist"
         users="$_POOL_USERS"
         advice="$(_pool_space_advice "$_POOL_TOP")"
         msg="The boot disk is ${pct}% full and only ${free_mb} MB is free."
         [ -z "$users" ] || msg+=" The biggest users are: ${users}."
         msg+=" ${advice}"
-        # One warning per 6 hours. Our own stamp makes this testable; the
-        # supervisor rate key is a second guard.
-        d="$state/.${op}.notified"
-        last_pct=0; [ -f "$d" ] && read -r last_pct < "$d" 2>/dev/null
-        case "$last_pct" in ''|*[!0-9]*) last_pct=0 ;; esac
-        if [ $(( now - last_pct )) -ge 21600 ]; then
-            echo "$now" > "$d" 2>/dev/null || true
-            if declare -f _supervisor_notify >/dev/null 2>&1; then
-                _supervisor_notify "warning" "AICliAgents: the boot disk is ${pct}% full" "$msg" "$op" 21600 "/AICliAgentsManager#boot-space" || true
+        # Push notice: only from the warn limit, once per 6 hours. Our own stamp makes this
+        # testable; the supervisor rate key is a second guard. The early band gives no notice,
+        # so a rise through both limits is announced once.
+        if [ "$pct" -ge "$warn" ]; then
+            d="$state/.${op}.notified"
+            last_pct=0; [ -f "$d" ] && read -r last_pct < "$d" 2>/dev/null
+            case "$last_pct" in ''|*[!0-9]*) last_pct=0 ;; esac
+            if [ $(( now - last_pct )) -ge 21600 ]; then
+                echo "$now" > "$d" 2>/dev/null || true
+                if declare -f _supervisor_notify >/dev/null 2>&1; then
+                    _supervisor_notify "warning" "AICliAgents: the boot disk is ${pct}% full" "$msg" "$op" 21600 "/AICliAgentsManager#boot-space" || true
+                fi
             fi
         fi
-        # Tray entry: made once, text refreshed when the percent moves 2+ points.
+        # Tray entry: made once, text refreshed when the percent moves 2+ points or the band changes.
         label="The boot disk is ${pct}% full (${free_mb} MB free)."
         [ -z "$users" ] || label+=" Biggest users: ${users}."
         label+=" ${advice}"
@@ -208,7 +218,10 @@ _pool_space_tick() {
                 _pool_space_php open "$op" "$label" || true ;;
             *)
                 d=$(( pct - last_pct )); [ "$d" -ge 0 ] || d=$(( -d ))
-                if [ "$d" -ge 2 ]; then
+                # A band change (early to warn or back) refreshes the text even for one point.
+                band_now=0; [ "$pct" -lt "$warn" ] || band_now=1
+                band_was=0; [ "$last_pct" -lt "$warn" ] || band_was=1
+                if [ "$d" -ge 2 ] || [ "$band_now" != "$band_was" ]; then
                     echo "$pct" > "$marker" 2>/dev/null || true
                     _pool_space_php refresh "$op" "$label" || true
                 fi ;;

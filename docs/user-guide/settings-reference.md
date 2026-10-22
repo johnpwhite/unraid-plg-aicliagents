@@ -348,6 +348,13 @@ The card **Boot disk space** (see [Home and agent storage](storage.md), "Boot di
 
 Both buttons leave an item alone when a program has one of its files open. They are grey during a storage migration.
 
+| Control | What it does | At once | Agent |
+| :-- | :-- | :-- | :-- |
+| **Restore from an archive…** (bottom of the card) | Opens a dialog in three steps: pick the pool and the folder, pick an archive, then read a check that says how many files are new, the same or different. A different file is kept unless you choose **Replace them with the archived files**. Nothing is copied before you press **Restore**. | Dialog steps. The check and the restore run as background jobs. | None |
+| **Keep the files in the home** / **Replace them with the archived files** | Your choice for files that are in the home with other content. The default is to keep them. | Sent with **Restore**. | None |
+
+The card also warns early about a full boot disk. At 80 % it shows a warning in the card header and under the disk bar, and the Activity tray gets one notice. At 85 % the plugin also sends one Unraid notification in 6 hours. These limits are fixed. They have no setting.
+
 ### Actions on a home card
 
 | Control | What it does | At once |
@@ -517,6 +524,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The **Boot disk space** card has **Restore from an archive…** and an early warning at 80 %. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #755.
 - **2026-10-23** — The card name in the Config Hub table is **History**. The two pointers to the **Home Storage** tab say **Storage**. The Health dot has an (i) button for the checks that are not fine (see [Health, Activity and troubleshooting](health-and-troubleshooting.md)). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-23** — An agent can start a helper workspace with one tool call. Three new settings in **General**, part **Advanced**: **Let agents start helper workspaces**, **Helpers allowed at once** and **Let helpers run without asking**. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-22** — Agent Store, Config Hub and Agent Relay use the same card header as the Configuration tab. The agent chips are called **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The button is called **Check for updates**. The text box of **Global Instructions** opens with **Edit**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.

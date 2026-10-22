@@ -7,4 +7,5 @@ order. A fragment registers its dialog with
 
 Action ids: `tidy_up`, `remove_old_versions`, `clear_caches`, `move_sessions`,
 `bring_back_sessions`, `convert_agents`, `remove_leftover`, `clean_agent_tmp`,
-`archive_boot_data`, `remove_boot_data`.
+`archive_boot_data`, `remove_boot_data`, `restore_boot_data` (the button in the card footer,
+not a line; it gets `{homes: [...]}`).

@@ -36,23 +36,36 @@ class BootArchiveJobService
         return 'boot_archive_' . preg_replace('/[^A-Za-z0-9_]/', '_', $jobId);
     }
 
+    /** The modes of a job. restore_plan only compares (no tray entry); restore copies (R8, #755). */
+    public const MODES = ['archive', 'remove', 'restore_plan', 'restore'];
+
     /** Plain tray title: "Archive quarantine of home root". */
     public static function title(string $mode, string $kind, string $user): string
     {
         $d = BootArchiveService::describe($kind);
-        return ($mode === 'archive' ? 'Archive ' : 'Remove ') . $d['label'] . ' of home ' . $user;
+        $verb = ['archive' => 'Archive ', 'remove' => 'Remove ', 'restore' => 'Restore ', 'restore_plan' => 'Check the archive of '][$mode] ?? 'Remove ';
+        return $verb . $d['label'] . ' of home ' . $user;
     }
 
     /**
      * Queue a job. Returns [jobId|null, error|null]. $seams (tests): spawn (fn(array $argv): int),
      * no_track (bool), job_id.
-     * @param array{kind:string,user:string,mode:string,folder?:string} $opts
+     * @param array{kind:string,user:string,mode:string,folder?:string,manifest?:string,policy?:string} $opts
      * @return array{0:?string,1:?string}
      */
     public static function start(array $opts, array $seams = []): array
     {
         $kind = (string)($opts['kind'] ?? ''); $user = (string)($opts['user'] ?? ''); $mode = (string)($opts['mode'] ?? '');
-        if (!BootArchiveService::isKind($kind) || !BootArchiveService::isUser($user) || !in_array($mode, ['archive', 'remove'], true)) {
+        if (!BootArchiveService::isKind($kind) || !BootArchiveService::isUser($user) || !in_array($mode, self::MODES, true)) {
+            return [null, 'The request is not valid.'];
+        }
+        $isRestore = in_array($mode, ['restore', 'restore_plan'], true);
+        $manifest = $isRestore ? (string)($opts['manifest'] ?? '') : '';
+        $policy = $mode === 'restore' ? (string)($opts['policy'] ?? 'skip') : '';
+        if ($isRestore && ($manifest === '' || $manifest[0] !== '/' || strpos($manifest, "\0") !== false)) {
+            return [null, 'The request is not valid.'];
+        }
+        if ($mode === 'restore' && !in_array($policy, BootArchiveService::POLICIES, true)) {
             return [null, 'The request is not valid.'];
         }
         if (self::running($kind, $user)) {
@@ -60,10 +73,11 @@ class BootArchiveJobService
         }
         $jobId = (string)($seams['job_id'] ?? ('bootarchive-' . $mode . '-' . $kind . '-' . date('His') . '-' . bin2hex(random_bytes(3))));
         $folder = $mode === 'archive' ? (string)($opts['folder'] ?? '') : '';
-        if (!self::writeJson(self::path($jobId, 'opts.json'), ['kind' => $kind, 'user' => $user, 'mode' => $mode, 'folder' => $folder, 'queued_at' => time()])) {
+        if (!self::writeJson(self::path($jobId, 'opts.json'), ['kind' => $kind, 'user' => $user, 'mode' => $mode, 'folder' => $folder,
+                'manifest' => $manifest, 'policy' => $policy, 'queued_at' => time()])) {
             return [null, 'The job could not be queued.'];
         }
-        if (empty($seams['no_track'])) {
+        if (empty($seams['no_track']) && $mode !== 'restore_plan') {
             ActivityService::register(self::trayId($jobId), 'storage', self::title($mode, $kind, $user), [
                 'step' => 'Queued', 'progress' => 5, 'meta' => ['jobId' => $jobId, 'cancel' => 'none'],
             ]);
@@ -93,6 +107,22 @@ class BootArchiveJobService
         return false;
     }
 
+    /**
+     * True when a plan job for this manifest ended well in the last 6 hours. A restore starts only
+     * after that: the person has seen what it would change (R8, #755).
+     */
+    public static function planned(string $manifest): bool
+    {
+        foreach (glob(self::stateDir() . '/bootarchive-*.opts.json') ?: [] as $f) {
+            $o = self::readJson($f);
+            if (($o['mode'] ?? '') !== 'restore_plan' || ($o['manifest'] ?? '') !== $manifest) continue;
+            if (time() - (int)($o['queued_at'] ?? 0) > 21600) continue;
+            $r = self::readJson(self::path(basename($f, '.opts.json'), 'result.json'));
+            if (($r['status'] ?? '') === 'ok') return true;
+        }
+        return false;
+    }
+
     /** @return array<string,mixed> */
     public static function readResult(string $jobId): array
     {
@@ -107,8 +137,9 @@ class BootArchiveJobService
     {
         $o = self::readJson(self::path($jobId, 'opts.json'));
         $kind = (string)($o['kind'] ?? ''); $user = (string)($o['user'] ?? ''); $mode = (string)($o['mode'] ?? '');
-        $tray = empty($seams['no_track']) ? self::trayId($jobId) : '';
-        if (!BootArchiveService::isKind($kind) || !BootArchiveService::isUser($user) || !in_array($mode, ['archive', 'remove'], true)) {
+        // A plan only compares files: it has no tray entry. A restore has one.
+        $tray = (empty($seams['no_track']) && $mode !== 'restore_plan') ? self::trayId($jobId) : '';
+        if (!BootArchiveService::isKind($kind) || !BootArchiveService::isUser($user) || !in_array($mode, self::MODES, true)) {
             self::writeJson(self::path($jobId, 'result.json'), ['status' => 'error', 'message' => 'The job has no valid options.']);
             if ($tray !== '') ActivityService::fail($tray, 'The job has no valid options.');
             return 1;
@@ -122,11 +153,18 @@ class BootArchiveJobService
                 if ($tray === '') return;
                 $total = max(1, (int)($p['total'] ?? 1));
                 $pct = 10 + (int)round(85 * ((int)($p['done'] ?? 0) / $total));
-                ActivityService::update($tray, ['step' => ($mode === 'archive' ? 'Archiving' : 'Removing') . ' ' . min($total, (int)($p['done'] ?? 0) + 1) . ' of ' . $total, 'progress' => min(95, $pct)]);
+                $verb = ['archive' => 'Archiving', 'remove' => 'Removing', 'restore' => 'Restoring'][$mode] ?? 'Working on';
+                ActivityService::update($tray, ['step' => $verb . ' ' . min($total, (int)($p['done'] ?? 0) + 1) . ' of ' . $total, 'progress' => min(95, $pct)]);
             };
-            $res = isset($seams['process'])
-                ? ($seams['process'])($home, $user, $kind, $mode, (string)($o['folder'] ?? ''), $inner)
-                : BootArchiveService::process($home, $user, $kind, $mode, (string)($o['folder'] ?? ''), $inner);
+            if ($mode === 'restore_plan') {
+                $res = BootArchiveService::restorePlan($home, (string)($o['manifest'] ?? ''), $inner);
+            } elseif ($mode === 'restore') {
+                $res = BootArchiveService::restore($home, (string)($o['manifest'] ?? ''), (string)($o['policy'] ?? 'skip'), $inner);
+            } else {
+                $res = isset($seams['process'])
+                    ? ($seams['process'])($home, $user, $kind, $mode, (string)($o['folder'] ?? ''), $inner)
+                    : BootArchiveService::process($home, $user, $kind, $mode, (string)($o['folder'] ?? ''), $inner);
+            }
         } catch (\Throwable $e) {
             LogService::log('Job ' . $jobId . ' stopped: ' . $e->getMessage(), LogService::LOG_ERROR, 'BootArchiveJob');
             $res = ['status' => 'error', 'message' => 'The job stopped with an error. Details are in the Debug Console.'];

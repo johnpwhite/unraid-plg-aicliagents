@@ -433,7 +433,7 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Merge layers". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
-| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. |
+| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, old layer images that a newer merged layer replaced (one item for each home or agent), and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. |
 | **Plugin files** | The rest of the plugin folder: program files, saved copies of earlier versions, settings and state. | None. |
 
 A home in plain folders has the first three **Home** lines. A home with layers has the line **saved layers**.
@@ -446,6 +446,8 @@ A home in plain folders has the first three **Home** lines. A home with layers h
 The plugin checks each item again just before it removes it. It removes only items that the last measure listed under **Left over**. It keeps an item that a mount or a program uses, and says so. It also keeps old layers that an open conversion needs to finish or roll back.
 
 An **Unfinished conversion copy** is a partial copy left by a failed storage migration when the plugin could not remove it. The plugin checks its marker and path again before it removes the copy.
+
+An item **Old layer images that a newer merged layer replaced** is a layer file of a home or an agent that the layer list no longer names, because a merge replaced it. Nothing reads such a file. The plugin lists a file only when all of these are true: the layer list names a merged layer that is newer than the file; no mount and no program uses the file; no merge or conversion of that home or agent is running; and the file is more than one hour old. A newer layer that the layer list does not name yet is never listed, because a save may be on its way. **Remove** deletes only the listed files of that item.
 
 ### Archive or remove old data of a home
 
@@ -470,9 +472,21 @@ In both cases the plugin leaves an item alone when a program has one of its file
 
 An agent can ask for the same actions with the tools `aicli_archive_boot_data` and `aicli_remove_boot_data`. They only propose: nothing moves until you approve the item in the Activity tray. `aicli_get_boot_space` lists the lines.
 
+### Restore from an archive
+
+Press **Restore from an archive…** at the bottom of the card to put archived files back into a home. The plugin never overwrites a file in the home unless you choose so.
+
+1. Press **Restore from an archive…**. Expect: a dialog with a pool and a folder. The pool and folder of your last move are filled in.
+2. Pick the pool and the folder that you used when you archived. Press **Find archives**. Expect: a list of archives, newest first, each with its date, the server name, the kind of data and the home.
+3. Pick one archive. Press **Check this archive**. Expect: after a short wait, a list that says how many files are **new** (not in the home, will be copied), **the same** (already in the home with the same content, nothing to do) and **different** (in the home with other content). The list shows which file in the home is newer. A file that cannot be restored is named with the reason.
+4. If some files are different, choose what happens to them. **Keep the files in the home** is the default. **Replace them with the archived files** copies the archived file over the file in the home.
+5. Press **Restore**. Expect: a message "Restore started". The Activity tray shows the progress and the result. Nothing is copied before this step.
+
+The check only reads. The restore copies each file, checks the copy with its SHA-256 value from the manifest, and then puts it in place. The archive stays as it is. The plugin does not replace a file that a program has open. It refuses a file whose path lies outside the home or outside the folder the file came from, and a file whose archived copy is missing or damaged. The buttons are grey during a storage migration.
+
 ### The warning when the boot disk is nearly full
 
-When the boot disk is 85% full, the plugin sends an Unraid notification and shows a notice in the Activity tray. The text names the biggest users, and the advice fits the biggest part:
+When the boot disk is 80% full, the card **Boot disk space** shows a warning in its header and under the bar, and the Activity tray gets one notice. This early warning sends no Unraid notification. At 85% the plugin also sends an Unraid notification, once in 6 hours, so one rise from 80% to 86% gives you one notification. The warning ends when the disk falls below 77%. The text names the biggest users, and the advice fits the biggest part:
 
 - Layers are the biggest: "Close all and tidy up merges the layers and frees space."
 - A home in plain folders is the biggest: "Conversation history and caches use most of it. Move old sessions or clear caches."
@@ -669,6 +683,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The card **Boot disk space** has **Restore from an archive…**, an early warning at 80% (the Unraid notification stays at 85%), and lists old layer images that a newer merged layer replaced under **Left over**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #755.
 - **2026-10-23** — The Health dot has an (i) button that shows the checks that are not fine. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration fields in this guide use the new labels: **Where homes are stored** and **Where agents are stored** (they were **Home Storage** and **Agent Storage**), next to the settings **Home storage** and **Agent storage**. A home in plain folders no longer shows the body line "Saved straight to disk…"; its status line says it. Issue #750.
 - **2026-10-22** — The tab **Home Storage** is now called **Storage**. Every home is a card with the same header as the cards of the Configuration tab: it opens and closes, shows a one-line status ("Plain folders on the boot disk · no saves needed" or "12 layers · 240 MB unsaved"), has an **(i)**, and can move. The icons of a home became the buttons **Save now**, **Merge layers**, **Repair** and **Delete home…**. The backup row reads "Backup: …" with the button **Backup…**, and the note at the foot of the page is its **(i)**. **Boot disk space** and **System memory** are cards too. The buttons of **Boot disk space** are 44 px high on a phone, and the notes of its lines sit behind an **(i)**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 6), issue #750.

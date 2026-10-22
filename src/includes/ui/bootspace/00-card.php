@@ -51,11 +51,36 @@
         return p(d.getHours()) + ':' + p(d.getMinutes());
     }
 
+    // Pure: the use level of the disk: ok | early | warn | critical. The server gives it
+    // (BootSpaceService::diskLevel, #755). An old measurement file has none, so the card works it out
+    // with the same limits (80, 85 and 95 percent).
+    function levelOf(disk, pct) {
+        if (disk && /^(ok|early|warn|critical)$/.test(disk.level || '')) return disk.level;
+        return pct >= 95 ? 'critical' : (pct >= 85 ? 'warn' : (pct >= 80 ? 'early' : 'ok'));
+    }
+    function diskPct(disk) {
+        if (!disk || !disk.size) return 0;
+        return Math.max(0, Math.min(100, Math.round((disk.used / disk.size) * 100)));
+    }
+
+    // Pure: the sentence under the disk bar when the disk is filling up. '' at the level ok.
+    function levelText(level, pct) {
+        if (level === 'early') return 'The boot disk is ' + pct + '% full. Free some space soon. The lines below show what uses it.';
+        if (level === 'warn') return 'The boot disk is ' + pct + '% full. Free space now. The lines below show what uses it.';
+        if (level === 'critical') return 'The boot disk is almost full (' + pct + '%). Agents may fail to save. Free space now.';
+        return '';
+    }
+
     // Pure: the HTML of the disk bar.
     function diskHtml(disk) {
         if (!disk || !disk.size) return '<div data-testid="boot-space-disk" style="font-size:11px; opacity:0.6;">The disk size is not known yet.</div>';
-        var pct = Math.max(0, Math.min(100, Math.round((disk.used / disk.size) * 100)));
-        var color = pct >= 95 ? '#e53935' : (pct >= 85 ? '#ff8c00' : '#4caf50');
+        var pct = diskPct(disk);
+        var level = levelOf(disk, pct);
+        var color = { critical: '#e53935', warn: '#ff8c00', early: '#e6a23c', ok: '#4caf50' }[level];
+        var warnText = levelText(level, pct);
+        var warnHtml = warnText
+            ? '<div data-testid="boot-space-level" data-level="' + level + '" role="status" style="margin-top:8px; font-size:12px; color:' + color + ';"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> ' + esc(warnText) + '</div>'
+            : '';
         var where = [disk.mount, disk.fstype].filter(Boolean).join(', ');
         return '<div data-testid="boot-space-disk" style="padding:10px; background:rgba(255,255,255,0.02); border-radius:4px; margin-bottom:12px;">' +
             '<div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px; font-size:11px; margin-bottom:4px; opacity:0.85;">' +
@@ -63,7 +88,7 @@
                 '<span><b>' + human(disk.used) + '</b> used of ' + human(disk.size) + ' &middot; <b>' + human(disk.free) + '</b> free</span>' +
             '</div>' +
             '<div class="stat-bar-wrap"><div class="stat-bar-fill" style="width:' + pct + '%; background:' + color + ';"></div>' +
-            '<div class="stat-bar-text">' + pct + '%</div></div></div>';
+            '<div class="stat-bar-text">' + pct + '%</div></div>' + warnHtml + '</div>';
     }
 
     // Pure: the button of one action. A disabled action keeps its reason in the tooltip.
@@ -156,7 +181,10 @@
                 rows +
                 '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11px; opacity:0.85;">' +
                     '<span>' + stamp + '</span>' +
+                    '<span>' +
+                    '<button type="button" id="aicli-bs-restore" class="aicli-btn-slim" data-testid="boot-space-restore" title="Put files of an archive back into a home. Nothing is overwritten without your choice."' + (migrationBusy ? ' disabled aria-disabled="true"' : '') + '>Restore from an archive&hellip;</button> ' +
                     '<button type="button" id="aicli-bs-measure" class="aicli-btn-slim" data-testid="boot-space-measure-now"' + ((measuring || migrationBusy) ? ' disabled title="Wait for the storage migration to finish."' : '') + '>Measure now</button>' +
+                    '</span>' +
                 '</div>';
     }
 
@@ -172,7 +200,12 @@
         var el = document.getElementById('aicli-boot-space-card');
         if (window.aicliCards) {
             window.aicliCards.setStatus('boot-space', statusText(data));
-            window.aicliCards.setWarning('boot-space', !!(data && data.agent_tmp && data.agent_tmp.warn), 'Warning');
+            var dsk = data && data.disk;
+            var lvl = dsk && dsk.size ? levelOf(dsk, diskPct(dsk)) : 'ok';
+            var tmpWarn = !!(data && data.agent_tmp && data.agent_tmp.warn);
+            // The card header warns at 80 percent (early) and above, and for the RAM warning (#755).
+            window.aicliCards.setWarning('boot-space', tmpWarn || lvl !== 'ok',
+                lvl !== 'ok' ? 'Disk ' + diskPct(dsk) + '% full' : 'Warning');
         }
         if (!el) return;
         var html = cardHtml(data);
@@ -304,6 +337,18 @@
         reg.refresh();
     });
 
+    // "Restore from an archive…" (R8, #755): the dialog is the action of fragment 80-restore-boot-data.php.
+    $(document).on('click', '#aicli-bs-restore', function () {
+        if (this.getAttribute('aria-disabled') === 'true') return;
+        var fn = reg.actions['restore_boot_data'];
+        var homes = [];
+        ((state.data && state.data.parts) || []).forEach(function (p) {
+            if (p.group === 'home' && p.user && homes.indexOf(p.user) === -1) homes.push(p.user);
+        });
+        if (typeof fn === 'function') fn({ homes: homes });
+        else if (typeof window.swal === 'function') swal('Not available', 'This action is not available on this page.', 'info');
+    });
+
     $(document).on('click', '#aicli-boot-space-card [data-recovery]', function () {
         if (typeof window.aicliRecoverBackendMigration === 'function') {
             window.aicliRecoverBackendMigration(this.getAttribute('data-recovery'));
@@ -345,6 +390,8 @@
     reg.statusText = statusText;
     reg.human = human;
     reg.load = load;
+    reg.diskHtml = diskHtml;
+    reg.levelOf = levelOf;
 
     $(function () {
         $(document).on('click', '.aicli-tab-btn', function () { setTimeout(maybeLoad, 60); });
