@@ -1172,8 +1172,15 @@ class UtilityHandler {
         // sanitizeFilename ran at lines 328-329. Destination can't escape the
         // allowlisted base.
         $dest = rtrim($targetPath, '/') . '/' . $filename;
-        // nosemgrep: php.lang.security.tainted-url-to-connection.tainted-url-to-connection
-        if (@file_put_contents($dest, $data)) {
+        // #648: same link rule as saveFile(). A link at the file name must not carry the
+        // write outside the allowed folders. The write is temp file + rename.
+        if (is_link($dest)) {
+            $real = ValidationService::validatePath($dest);
+            if ($real === false || strpos($real, '/boot/') === 0) {
+                return ['status' => 'error', 'message' => 'The file name is a link that points outside the allowed folders.'];
+            }
+        }
+        if (\AICliAgents\Services\AtomicWriteService::write($dest, $data)) {
             return ['status' => 'ok', 'filename' => $filename];
         }
         return ['status' => 'error', 'message' => 'Failed to save image'];
