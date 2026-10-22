@@ -115,6 +115,33 @@ home_persist_path() {
     _rp_normalize "$p"
 }
 
+# ---- Array stop guard (issue #10) -------------------------------------------
+# The shell twin of StorageMountService::isArrayStopping(). event/stopping
+# writes the flag before it closes anything; event/disks_mounted removes it.
+# var.ini covers a stop the hook has not seen yet. AICLI_ARRAY_STOPPING_FLAG
+# and AICLI_VAR_INI are test seams.
+
+# aicli_array_stopping: true while the array is stopping (event/stopping until
+# event/stopping_array, which runs once every disk and pool is unmounted).
+aicli_array_stopping() {
+    [ -f "${AICLI_ARRAY_STOPPING_FLAG:-$MOUNT_ROOT/.array_stopping}" ] && return 0
+    grep -q '^fsState="Stopping"' "${AICLI_VAR_INI:-/var/local/emhttp/var.ini}" 2>/dev/null
+}
+
+# aicli_blocked_by_array_stop <path>: true when <path> is on the array or a
+# pool and the array is stopping, so nothing may mount from it or start a
+# process that holds it. Storage on flash or RAM is never blocked.
+aicli_blocked_by_array_stop() {
+    local p="${1:-}" cls
+    [ -n "$p" ] || return 1
+    aicli_array_stopping || return 1
+    cls="$(bash "$(dirname "${BASH_SOURCE[0]}")/classify-path.sh" "$p" 2>/dev/null)"
+    case "$cls" in
+        array|pool:*) return 0 ;;
+    esac
+    return 1
+}
+
 manifest_path() {
     # #1254: AICLI_MANIFEST_PATH redirects the manifest off USB flash for the L3.5
     # suite (test-only hook; unset in production -> the flash path).

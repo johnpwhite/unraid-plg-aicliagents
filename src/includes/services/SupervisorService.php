@@ -61,6 +61,18 @@ class SupervisorService {
     }
 
     /**
+     * Issue #10: true while the array is stopping and plugin storage is on the
+     * array or a pool. event/stopping stops the supervisor; every page load and
+     * AJAX request reaches start() through ensureHealthy(), and a supervisor
+     * started then bakes, remounts and auto-launches from the pool while
+     * emhttpd unmounts it. aicli-supervisor.sh _do_start refuses the same case.
+     */
+    private static function blockedByArrayStop(): bool {
+        require_once __DIR__ . '/StorageMountService.php';
+        return StorageMountService::storageBlockedByArrayStop();
+    }
+
+    /**
      * Spawn the supervisor daemon in the background, fully detached through
      * the shared spawn helper (#337): a new session (setsid is required when
      * the parent has a controlling TTY, e.g. an SSH session during plugin
@@ -74,6 +86,10 @@ class SupervisorService {
         }
 
         if (self::startSuppressed()) {
+            return false;
+        }
+
+        if (self::blockedByArrayStop()) {
             return false;
         }
 

@@ -434,6 +434,17 @@ do_mount() {
     # so the reason read by PHP is THIS mount's truth, never a prior op's. op_bake /
     # op_consolidate already clear on entry; this is the missing op_mount half.
     rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+    # Issue #10: never mount from the array or a pool while it is stopping. This
+    # sits before _passthrough_guard because a passthrough entity is bind-mounted
+    # there and never reaches op_mount, which has the same check for layered ones.
+    if declare -f aicli_blocked_by_array_stop >/dev/null 2>&1 \
+       && aicli_blocked_by_array_stop "$PERSIST"; then
+        write_defer_reason "$TYPE" "$ID" "array_stopping"
+        lifecycle_log "info" "storagectl" "mount_deferred_array_stopping" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST\"}" 2>/dev/null || true
+        emit_json 2 "deferred" "array_stopping" "[]"
+        exit 2
+    fi
     _passthrough_guard mount   # Step 6: plain-dir bind + exit if effective backend is passthrough
     # Bake-lock probe (symmetric with the supervisor's _op_mount, aicli-supervisor.sh):
     # if a bake/consolidate holds this entity's per-entity lock, DEFER this

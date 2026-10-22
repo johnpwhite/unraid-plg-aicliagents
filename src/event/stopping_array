@@ -228,5 +228,13 @@ else
     nchan_notify
 fi
 
+# Issue #10: the stop flag guards the window in which the pool is still mounted
+# and emhttpd is unmounting it. emhttpd fires stopping_array only after every
+# disk and pool unmounted (and removed its mount point), so that window is over:
+# a mount from the pool now fails on its own. Keeping the flag while the array
+# stays stopped would block emergency sessions, a plugin update (its supervisor
+# readiness gate) and repair for no gain. event/disks_mounted removes it too.
+rm -f /tmp/unraid-aicliagents/.array_stopping 2>/dev/null || true
+
 lifecycle_log "info" "event_stopping_array" "array_stop_complete" "{\"storage_class\":\"$STORAGE_CLASS\"}" 2>/dev/null || true
 log "Array stop handler complete."

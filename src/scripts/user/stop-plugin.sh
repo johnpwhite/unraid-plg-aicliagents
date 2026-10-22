@@ -284,6 +284,14 @@ if [ -d "$AGENT_BASE" ]; then
     for mnt in "$AGENT_BASE"/*; do
         [ -d "$mnt" ] && _stop_umount "$mnt"
     done
+    # Issue #10: generations are mounted under $AGENT_BASE/.versions/<agent>/,
+    # which the glob above skips, so it only reached the generation behind each
+    # agent's symlink. A superseded generation kept for a running session stayed
+    # mounted, its lower stayed busy in 8c, and its layer file held the pool.
+    # Unmount every mount left below $AGENT_BASE, deepest first.
+    while read -r mnt; do
+        _stop_umount "$mnt"
+    done < <(awk -v base="$AGENT_BASE/" 'index($2, base) == 1 {print $2}' /proc/mounts | sort -r)
 fi
 
 # 8c. Unmount individual SquashFS loop mounts (these hold /mnt/user open when home is on array)

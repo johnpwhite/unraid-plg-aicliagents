@@ -4909,6 +4909,19 @@ _do_start() {
         return 0
     fi
 
+    # Issue #10: event/stopping stops the supervisor before the array goes
+    # down. A page load or AJAX request (ensureHealthy) used to start a new one
+    # seconds later, which baked, remounted the home and auto-launched
+    # workspaces from the pool while emhttpd was unmounting it. Storage on
+    # flash keeps its supervisor through an array stop.
+    if declare -f aicli_blocked_by_array_stop >/dev/null 2>&1 \
+       && { aicli_blocked_by_array_stop "$(agent_persist_path)" \
+            || aicli_blocked_by_array_stop "$(home_persist_path root)"; }; then
+        log_info "Supervisor start refused: the array is stopping and plugin storage is on it"
+        lifecycle_log "info" "supervisor" "supervisor_start_refused_array_stopping" "{}" 2>/dev/null || true
+        return 0
+    fi
+
     mkdir -p "$STATUS_DIR" 2>/dev/null || true
     mkdir -p "$SUPERVISOR_DIR" 2>/dev/null || true
     mkdir -p "$HALTS_DIR" 2>/dev/null || true

@@ -410,6 +410,20 @@ if { [ "$TYPE" = "home" ] || [ "$TYPE" = "agent" ]; } && [ "${AICLI_CONVERT_SELF
     fi
 fi
 
+# Issue #10: never mount from the array or a pool while it is stopping. Every
+# mount converges here: storagectl mount, the post-bake and post-consolidate
+# refresh, and the agent and home mounts behind a workspace start. A mount at
+# this point holds the pool, so emhttpd's umount fails with "target is busy".
+# The defer (exit 2) is the same one the post-bake and post-consolidate refresh
+# already handle: the layer is committed, the upper is kept, reclaim waits.
+# The shutdown bake in event/stopping never mounts, so it is not affected.
+if declare -f aicli_blocked_by_array_stop >/dev/null 2>&1 \
+   && aicli_blocked_by_array_stop "$PERSIST_PATH"; then
+    error "The array is stopping and $PERSIST_PATH is on it: mount deferred."
+    _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_array_stopping" "array_stopping" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\"}"
+fi
+
 # S-02 (#1352): late-mount defer. A persist path under /mnt/ whose backing mount
 # is ABSENT (findmnt resolves the path to the rootfs "/" — the dir exists but the
 # pool / Unassigned Device behind it is not mounted yet; UD mounts can land up to

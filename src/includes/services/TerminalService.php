@@ -204,6 +204,18 @@ class TerminalService {
             return ['ok' => false, 'reason' => 'array_stopping'];
         }
 
+        // Issue #10: a workspace on flash or RAM passes the check above, but the
+        // start below still mounts the agent and the home from their persist
+        // paths. While the array stops, those mounts hold the pool.
+        if (StorageMountService::storageBlockedByArrayStop()) {
+            LogService::log(
+                "Session $id deferred: the array is stopping and plugin storage is on it",
+                LogService::LOG_WARN,
+                "TerminalService"
+            );
+            return ['ok' => false, 'reason' => 'array_stopping'];
+        }
+
         // 2. Setup environment
         $config = ConfigService::getConfig();
         $registry = AgentRegistry::getRegistry();

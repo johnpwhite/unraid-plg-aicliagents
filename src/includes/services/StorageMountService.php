@@ -174,6 +174,35 @@ class StorageMountService {
         return self::isArrayStopping($varIni, $flag);
     }
 
+    /**
+     * Issue #10: is the array stopping while the plugin's own storage (agent
+     * images or homes) is on the array or a pool? A workspace folder on flash
+     * or RAM passes startBlockedByArrayStop(), but starting it still mounts the
+     * agent and the home from their persist paths, which holds the pool.
+     * $varIni and $flag are test seams.
+     */
+    public static function storageBlockedByArrayStop(?string $varIni = null, ?string $flag = null): bool {
+        if (!self::isArrayStopping($varIni, $flag)) return false;
+        require_once __DIR__ . '/StoragePathResolver.php';
+        return self::isArrayDependent(StoragePathResolver::agentPersistPath())
+            || self::isArrayDependent(StoragePathResolver::homePersistPath('root'));
+    }
+
+    /**
+     * Issue #10: is $path on the array or a pool while the array is not started?
+     * Its storage is then missing by design, and event/stopping records that once
+     * as the degraded state array_stopped_storage_on_array. The polled mount paths
+     * use this to skip a warning that would otherwise reach syslog on every request.
+     * $varIni and $class are test seams.
+     */
+    public static function storageDownWithArray(string $path, ?string $varIni = null, ?string $class = null): bool {
+        if ($path === '') return false;
+        $ini = $varIni ?? (string)@file_get_contents('/var/local/emhttp/var.ini');
+        if (!preg_match('/^fsState="([^"]*)"/m', $ini, $m) || $m[1] === 'Started') return false;
+        $class = $class ?? self::classifyPath($path);
+        return $class === 'array' || strpos($class, 'pool:') === 0;
+    }
+
     /** Forgejo #558: the message the start request returns while the array stops. */
     const ARRAY_STOPPING_MESSAGE = 'The array is stopping. This workspace starts again after the array is started.';
 
@@ -383,6 +412,9 @@ class StorageMountService {
     public static function ensureAgentMounted($agentId, int &$exit = 0) {
         $exit = 1;
         if (self::isMigrationInProgress()) return false;
+        // Issue #10: storagectl refuses this mount anyway; return before spawning
+        // it, so a polling page does not retry and log every refusal to flash.
+        if (self::storageBlockedByArrayStop()) return false;
 
         $mnt = AgentRegistry::agentPath($agentId);
 
@@ -439,7 +471,9 @@ class StorageMountService {
         $persistPath = StoragePathResolver::agentPersistPath();
 
         if (!self::isPathAvailable($persistPath)) {
-            LogService::log("Agent mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            if (!self::storageDownWithArray($persistPath)) {
+                LogService::log("Agent mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            }
             return false;
         }
 
@@ -606,6 +640,9 @@ class StorageMountService {
     private static function ensureHomeMountedTraced($user, int &$exit, string &$path) {
         $exit = 1;
         if (self::isMigrationInProgress()) return false;
+        // Issue #10: storagectl refuses this mount anyway; return before spawning
+        // it, so a polling page does not retry and log every refusal to flash.
+        if (self::storageBlockedByArrayStop()) return false;
 
         $workDir = UtilityService::getWorkDir($user);
         $mnt = "$workDir/home";
@@ -673,7 +710,9 @@ class StorageMountService {
         $persistPath = StoragePathResolver::homePersistPath($user);
 
         if (!self::isPathAvailable($persistPath)) {
-            LogService::log("Home mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            if (!self::storageDownWithArray($persistPath)) {
+                LogService::log("Home mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            }
             if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
             return false;
         }
