@@ -11,7 +11,7 @@
  *   - With a fine pointer (a mouse), hover opens the panel after 300 ms and
  *     leaving closes it, unless a click pinned it.
  *   - Escape closes the panel and returns focus to the (i).
- *   - A press outside closes a pinned panel.
+ *   - A click or tap outside closes a pinned panel (on click, never on pointerdown: see onOutside).
  *   - One panel is open per card at a time (the card is the nearest .aicli-card).
  *   - The panel is found by the aria-controls id of the button. A missing panel
  *     leaves the button inert, and nothing throws.
@@ -141,7 +141,9 @@
         if (refocus) refocus.focus();
     }
 
-    // A press outside the (i) and its panel closes the pinned panels.
+    // A click outside the (i) and its panel closes the pinned panels. This waits for the click and not
+    // for the pointerdown: the close can move the page up. A move between the press and the release
+    // sends the tap of a touch device to another element, and the (i) under the finger never opens.
     function onOutside(e) {
         var openBtns = document.querySelectorAll('[data-aicli-help][aria-expanded="true"]');
         for (var i = 0; i < openBtns.length; i++) {
@@ -157,7 +159,7 @@
         if (document.__aicliHelpDoc) return;
         document.__aicliHelpDoc = true;
         document.addEventListener('keydown', onEscape);
-        document.addEventListener('pointerdown', onOutside);
+        document.addEventListener('click', onOutside);
     }
 
     function attach(root) {
