@@ -299,6 +299,7 @@ Each workspace runs in a tmux session (the session manager that keeps a terminal
 | **Could not reload**, **Could not restart** or **Could not continue** | The agent is busy, an upgrade runs, or no saved conversation exists. | Read the message, wait until the agent is idle, and try again. |
 | **Could not start this workspace** or **Could not close this workspace** | The server refused the request or did not answer. A failed close keeps the workspace row. | Read the message. Check the **Debug Console** for the reason, then try again when the agent is ready. |
 | **Storage Unavailable** after a reboot | The folder of the workspace is not mounted yet. | Wait. The page tries again every 10 seconds. |
+| **Workspace Folder Missing** | The storage is mounted, but the folder of the workspace was deleted or moved. The card shows the folder path. | Waiting does not help. Close the workspace, or choose another folder for it. Open another workspace in the drawer: the card goes away. |
 | "Viewport too narrow to pin the drawer" | The page is less than 700 pixels wide. | Make the window wider, or use the drawer without the pin. |
 | The terminal looks small on your desktop | A phone or a tablet is attached to the same workspace. | Close it on the other device, or set **Size when shared** to `largest`. |
 | **Could not create folder** | The server refused to create the folder. | Read the message in the dialog. Choose another name or folder. |
@@ -321,6 +322,8 @@ For other problems, see [Health, Activity and troubleshooting](health-and-troubl
 
 <details>
 <summary>Change history</summary>
+
+- **2026-10-22** — A workspace whose folder was deleted shows **Workspace Folder Missing**, not "Storage Unavailable". The card offers no RAM install and goes away when you open another workspace. Spec `docs/specs/WORKSPACE_PATH_WAIT_RETRY.md`, issue #757.
 
 - **2026-10-18** — A failed start shows the server reason, and a failed close keeps the workspace row and shows an error. Spec `docs/specs/WORKSPACE_SERVER_AUTHORITY.md`, issue #671.
 - **2026-10-18** — The picker says why a folder could not be read, **Close** on an untracked row keeps the row and says why when the stop fails, and **Manage Session** shows a red message and turns saving off when it cannot read the settings. Issue #670.
