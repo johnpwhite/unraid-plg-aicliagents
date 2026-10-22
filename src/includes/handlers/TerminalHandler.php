@@ -542,6 +542,18 @@ class TerminalHandler {
                 'message' => 'Storage is being migrated. Workspaces open again when it finishes.',
             ];
         }
+        // #687: never start a session for a workspace that is being deleted or was
+        // deleted. An open browser tab re-sends `start` when the delete closes its
+        // session; without this the session came back as an untracked one. The page
+        // drops the tab on this reason.
+        if (\AICliAgents\Services\ConfigService::isWorkspaceRemoved((string)$id)) {
+            return [
+                'status' => 'error',
+                'reason' => 'workspace_removed',
+                'message' => 'This workspace was deleted. It cannot start again.',
+                'id' => (string)$id,
+            ];
+        }
         $config = getAICliConfig();
         $persistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
         // Never default the agent: starting the WRONG agent in a user's

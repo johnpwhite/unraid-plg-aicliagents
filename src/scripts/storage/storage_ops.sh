@@ -957,6 +957,25 @@ fi
 # Claude Code and other package managers finalize directory caches with rename(2).
 # A directory originating in a SquashFS lower otherwise returns EXDEV; redirect_dir
 # copies up its metadata and preserves the atomic rename contract.
+# #692: the mount point was made long before this line (layer discovery and the
+# loop mounts run in between). Another process can remove an empty folder in that
+# time, and the kernel then fails with "mount point does not exist". Make the
+# folder again right before the mount, and fail with a clear reason if that is
+# not possible. Keep the owner that the earlier chown block set.
+if [ ! -d "$MNT_POINT" ]; then
+    lifecycle_log "warn" "mount_stack" "mount_point_recreated" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$MNT_POINT\"}" 2>/dev/null || true
+    if ! mkdir -p "$MNT_POINT"; then
+        error "Mount point $MNT_POINT is gone and cannot be created again"
+        for _lm in "${_NEW_LOOP_MOUNTS[@]}"; do
+            umount_or_keep "$_lm" "new layer mount" 2 || true
+        done
+        exit 1
+    fi
+    if [ -n "$OWNER" ] && [ "$OWNER" != "root" ] && id "$OWNER" >/dev/null 2>&1; then
+        chown "$OWNER" "$MNT_POINT" 2>/dev/null || true
+    fi
+fi
 if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir="$WORK_DIR",redirect_dir=on "$MNT_POINT"; then
     log "Stack mounted at $MNT_POINT (Layers: $LAYER_COUNT)"
     # GH #9 self-diagnosis: did the kernel warn for THIS bind? If so, record

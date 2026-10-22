@@ -2225,6 +2225,11 @@ class AdminService {
                 return ['error' => "Workspace '$id' no longer exists; nothing to delete."];
             }
 
+            // #687: mark the delete BEFORE the close. The close takes seconds. A browser
+            // tab that still shows the workspace sends `start` in that time, and the
+            // session would come back as an untracked one. `start` refuses a marked id.
+            ConfigService::markWorkspaceDeleting($id);
+
             try {
                 $actor = AgentRelayService::actorStatus($id);
                 if (!empty($actor['is_actor']) && empty($actor['paused'])) {
@@ -2248,6 +2253,7 @@ class AdminService {
             ));
             $ok = ConfigService::saveWorkspaces(['sessions' => $remaining, 'activeId' => $workspaces['activeId'] ?? null], [$id]);
             if (!$ok) {
+                ConfigService::clearWorkspaceDeleting($id);   // the record stays, so the workspace may start again
                 return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace removal.'];
             }
 

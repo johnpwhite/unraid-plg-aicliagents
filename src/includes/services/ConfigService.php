@@ -1058,6 +1058,48 @@ class ConfigService {
         return $rec;
     }
 
+    /** Seconds that a "being deleted" mark stays valid. A delete that died half way cannot block a workspace longer than this. */
+    public const WORKSPACE_DELETING_TTL = 600;
+
+    private static function workspaceDeletingPath(string $id): string {
+        $safe = preg_replace('/[^A-Za-z0-9_-]/', '', $id);
+        return rtrim(SecretPaths::stateRoot(), '/') . '/deleting-ws-' . ($safe !== '' ? $safe : 'invalid');
+    }
+
+    /**
+     * #687: mark a workspace as being deleted. The delete closes the session first and
+     * removes the record last. In that gap an open browser tab sends `start` again and
+     * would start the session as an untracked one. Call this BEFORE the close. Best effort.
+     */
+    public static function markWorkspaceDeleting(string $id): void {
+        if ($id === '') return;
+        @file_put_contents(self::workspaceDeletingPath($id), (string)time());
+    }
+
+    /** #687: remove the "being deleted" mark (the delete failed, or the record is gone for good). */
+    public static function clearWorkspaceDeleting(string $id): void {
+        if ($id === '') return;
+        @unlink(self::workspaceDeletingPath($id));
+    }
+
+    /**
+     * #687: true when `start` must refuse this workspace id: a delete of it is under way, or
+     * the registry holds a removal tombstone for it. A Relay actor is never refused here: its
+     * definition stays server-side. An id that was never saved is NOT refused (a new workspace
+     * can start before its first save lands).
+     */
+    public static function isWorkspaceRemoved(string $id): bool {
+        if ($id === '') return false;
+        $mark = self::workspaceDeletingPath($id);
+        $at = is_file($mark) ? (int)@filemtime($mark) : 0;
+        if ($at > 0 && (time() - $at) < self::WORKSPACE_DELETING_TTL) return true;
+        if ($at > 0) @unlink($mark);   // stale: the delete died half way
+        if (isset(self::relayActorIds()[$id])) return false;
+        $deleted = self::getWorkspaces()['deletedIds'] ?? [];
+        $when = is_array($deleted) ? ($deleted[$id] ?? null) : null;
+        return is_int($when) && $when > (time() - 86400);
+    }
+
     /**
      * Saves the list of workspaces (sessions).
      *
