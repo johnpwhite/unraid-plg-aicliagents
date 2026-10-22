@@ -2191,10 +2191,14 @@
         appearance: none; -webkit-appearance: none;
         display: inline-flex; align-items: center; justify-content: center;
         box-sizing: border-box; vertical-align: middle;
-        width: 20px; height: 20px; min-width: 20px; min-height: 20px;
-        margin: 0 0 0 4px !important; padding: 0 !important;
+        /* The hit area is 44 x 44 px on every device (WCAG 2.5.5). The padding and
+           background-clip draw only a 20 px circle. The negative margin keeps the
+           footprint of a 20 px button with a 4 px gap, so the label line does not grow.
+           Unraid gives each button a min-width, so the size needs !important. */
+        width: 44px !important; height: 44px !important; min-width: 44px !important; min-height: 44px !important;
+        margin: -12px -12px -12px -8px !important; padding: 12px !important;
         border: 0 !important; border-radius: 50% !important;
-        background: transparent !important; box-shadow: none !important;
+        background: transparent !important; background-clip: content-box !important; box-shadow: none !important;
         color: var(--aicli-text, var(--text-color, #1c1b1b)) !important;
         font-size: 16px !important; font-weight: normal !important; line-height: 1 !important;
         letter-spacing: 0 !important; text-transform: none !important;
@@ -2202,6 +2206,7 @@
     }
     .aicli-help-btn:hover, .aicli-help-btn[aria-expanded="true"] {
         background: var(--mild-background-color, rgba(128,128,128,0.18)) !important;
+        background-clip: content-box !important;
     }
     .aicli-help-btn:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
     .aicli-help-panel[hidden] { display: none !important; }
@@ -2224,13 +2229,5 @@
     @keyframes aicli-help-in { from { opacity: 0; } to { opacity: 1; } }
     @media (prefers-reduced-motion: reduce) {
         .aicli-help-panel { animation: none; }
-    }
-    /* A touch screen, also a tablet wider than a phone: the hit area is 44 x 44 px.
-       The negative margin keeps the height and the width of the label line. */
-    @media (pointer: coarse) {
-        .aicli-help-btn {
-            width: 44px; height: 44px; min-width: 44px; min-height: 44px;
-            margin: -14px -12px -14px -8px !important;
-        }
     }
 </style>
