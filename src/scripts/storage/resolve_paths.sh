@@ -40,8 +40,14 @@
 
 # ---- Constants ---------------------------------------------------------------
 
-PLUGIN_BASE="/boot/config/plugins/unraid-aicliagents"
-MOUNT_ROOT="/tmp/unraid-aicliagents"
+AICLI_FLASH_ROOT="${AICLI_FLASH_ROOT:-/boot/config/plugins/unraid-aicliagents}"
+AICLI_STATE_ROOT="${AICLI_STATE_ROOT:-/tmp/unraid-aicliagents}"
+while [[ "$AICLI_FLASH_ROOT" == */ ]]; do AICLI_FLASH_ROOT="${AICLI_FLASH_ROOT%/}"; done
+while [[ "$AICLI_STATE_ROOT" == */ ]]; do AICLI_STATE_ROOT="${AICLI_STATE_ROOT%/}"; done
+export AICLI_FLASH_ROOT AICLI_STATE_ROOT
+
+PLUGIN_BASE="$AICLI_FLASH_ROOT"
+MOUNT_ROOT="$AICLI_STATE_ROOT"
 ZRAM_BASE="$MOUNT_ROOT/zram_upper"
 CONFIG_FILE="$PLUGIN_BASE/unraid-aicliagents.cfg"
 # AICLI_EMHTTP_AGENTS is a TEST-ONLY override (mirrors the AICLI_MANIFEST_PATH /

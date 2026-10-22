@@ -1,4 +1,7 @@
 #!/bin/bash
+_INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
+[ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/storage/resolve_paths.sh"
+source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents Installer: Permissions, Shell Integration & Finalization
 
 # --- Permissions ---
@@ -105,7 +108,7 @@ CRON_FILE="/etc/cron.d/unraid-aicliagents.agent-check"
 AGENT_CHECK_SCRIPT="$EMHTTP_DEST/src/scripts/agentcheck"
 chmod 755 "$AGENT_CHECK_SCRIPT" 2>/dev/null
 # Read schedule from config, default to daily at 6am
-SCHEDULE=$(grep -oP 'version_check_schedule="\K[^"]+' /boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg 2>/dev/null || echo "0 6 * * *")
+SCHEDULE=$(grep -oP 'version_check_schedule="\K[^"]+' "${PLUGIN_BASE}/unraid-aicliagents.cfg" 2>/dev/null || echo "0 6 * * *")
 [ -z "$SCHEDULE" ] && SCHEDULE="0 6 * * *"
 cat > "$CRON_FILE" <<CRON
 # AICliAgents: Agent version check schedule
@@ -120,8 +123,8 @@ HEALTH_CRON_FILE="/etc/cron.d/unraid-aicliagents.health-check"
 HEALTH_SCRIPT="$EMHTTP_DEST/src/scripts/healthcheck.php"
 # Key absent -> default every 30 min; key present but EMPTY -> user disabled it
 # (mirrors ConfigService::updateHealthCheckCron semantics).
-if grep -q '^health_check_schedule=' /boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg 2>/dev/null; then
-    HEALTH_SCHEDULE=$(grep -oP 'health_check_schedule="\K[^"]*' /boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg 2>/dev/null | head -n1)
+if grep -q '^health_check_schedule=' "${PLUGIN_BASE}/unraid-aicliagents.cfg" 2>/dev/null; then
+    HEALTH_SCHEDULE=$(grep -oP 'health_check_schedule="\K[^"]*' "${PLUGIN_BASE}/unraid-aicliagents.cfg" 2>/dev/null | head -n1)
 else
     HEALTH_SCHEDULE="*/30 * * * *"
 fi

@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # Immutable plugin-generation helpers.
 #
 # The installer extracts and validates a complete payload before this file is
@@ -73,7 +74,7 @@ aicli_has_live_sessions() {
     done
     # A tmux pane can outlive its browser-side ttyd listener. Its generated
     # command path is still positive evidence that an agent wrapper is active.
-    local work_root="${AICLI_WORK_ROOT:-/tmp/unraid-aicliagents/work}"
+    local work_root="${AICLI_WORK_ROOT:-${MOUNT_ROOT}/work}"
     if command -v pgrep >/dev/null 2>&1; then
         pgrep -f "$work_root/.*/aicli-run-[^/]*\\.sh" >/dev/null 2>&1 && return 0
     fi
@@ -1116,7 +1117,7 @@ aicli_agent_generation_top() {
 }
 
 # _aicli_layer_mnt_base — where op_mount loop-mounts each layer.
-_aicli_layer_mnt_base() { printf '%s\n' "${AICLI_LAYER_MNT_BASE:-/tmp/unraid-aicliagents/mnt}"; }
+_aicli_layer_mnt_base() { printf '%s\n' "${AICLI_LAYER_MNT_BASE:-${MOUNT_ROOT}/mnt}"; }
 
 # aicli_agent_layers_in_overlays <agent_id> — every layer of this agent that a
 # mounted overlay lists in its lowerdir (the kernel's own "in use" answer), one
@@ -1164,7 +1165,7 @@ _aicli_manifest_agent_layers() {
     if declare -f manifest_path >/dev/null 2>&1; then
         mpath="$(manifest_path 2>/dev/null)"
     else
-        mpath="${AICLI_MANIFEST_PATH:-/boot/config/plugins/unraid-aicliagents/layer_manifest.json}"
+        mpath="${AICLI_MANIFEST_PATH:-${PLUGIN_BASE}/layer_manifest.json}"
     fi
     [ -f "$mpath" ] || return 1
     if declare -f manifest_read_locked >/dev/null 2>&1; then
@@ -1408,7 +1409,7 @@ aicli_agent_rebase_wanted() {
     if [ -d "$upper" ] && [ -n "$(find "$upper" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         echo "writable_layer_not_empty"; return 1
     fi
-    marker="${AICLI_REBASE_MARKER_DIR:-/tmp/unraid-aicliagents}/.agent_rebase_failed_${id}"
+    marker="${AICLI_REBASE_MARKER_DIR:-${MOUNT_ROOT}}/.agent_rebase_failed_${id}"
     if [ -f "$marker" ] && [ -n "$(find "$marker" -mmin -360 2>/dev/null)" ]; then
         echo "failed_recently"; return 1
     fi

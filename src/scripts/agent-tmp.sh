@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # agent-tmp.sh — "Agent temporary folder" at agent launch (docs/specs/AGENT_TEMP_FOLDER.md R3).
 #
 # Usage: agent-tmp.sh resolve <user>
@@ -19,10 +20,10 @@
 
 set -u
 
-CFG="${AICLI_AGENT_TMP_CFG:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+CFG="${AICLI_AGENT_TMP_CFG:-${PLUGIN_BASE}/unraid-aicliagents.cfg}"
 MNT="${AICLI_AGENT_TMP_MNT:-/mnt}"
-PLUGIN_DIR="${AICLI_AGENT_TMP_PLUGIN_DIR:-/boot/config/plugins/unraid-aicliagents}"
-LOG="${AICLI_AGENT_TMP_LOG:-/tmp/unraid-aicliagents/debug.log}"
+PLUGIN_DIR="${AICLI_AGENT_TMP_PLUGIN_DIR:-${PLUGIN_BASE}}"
+LOG="${AICLI_AGENT_TMP_LOG:-${MOUNT_ROOT}/debug.log}"
 
 _warn() {
     mkdir -p "$(dirname "$LOG")" 2>/dev/null || true

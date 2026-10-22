@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents Graceful Stop Utility
 # Called by event/stopping when the array stops or server shuts down.
 #
@@ -7,11 +8,11 @@
 # The event/stopping handler checks this before calling us.
 
 EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
-LOG_FILE="/tmp/unraid-aicliagents/debug.log"
-ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
+LOG_FILE="${MOUNT_ROOT}/debug.log"
+ZRAM_UPPER="${MOUNT_ROOT}/zram_upper"
 
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+export TMUX_TMPDIR="${MOUNT_ROOT}/tmux"
 
 # Ensure plugin binaries (mksquashfs, node, etc.) are in PATH
 export PATH="$EMHTTP_DEST/bin:$EMHTTP_DEST/src/scripts/storage:$PATH"
@@ -31,7 +32,7 @@ CAPTURE_BUDGET=8
 source "$EMHTTP_DEST/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
 
 PERSIST_PATH=$(agent_persist_path 2>/dev/null)
-[ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
+[ -z "$PERSIST_PATH" ] && PERSIST_PATH="${PLUGIN_BASE}"
 
 status() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] [Stop] $1" >> "$LOG_FILE"
@@ -76,9 +77,9 @@ fi
 # the budget, so chat continuity survives the shutdown. The kill sweep below is
 # UNCHANGED (the hard guarantee). If event/stopping already captured (guard
 # marker present), skip — don't stack budgets serially in the same shutdown.
-if [ -f /tmp/unraid-aicliagents/.resume_captured ]; then
+if [ -f "${MOUNT_ROOT}/.resume_captured" ]; then
     status "Resume ids already captured by event/stopping — skipping (guard marker)."
-    rm -f /tmp/unraid-aicliagents/.resume_captured 2>/dev/null || true
+    rm -f "${MOUNT_ROOT}/.resume_captured" 2>/dev/null || true
 elif declare -f _capture_resume_before_stop >/dev/null 2>&1; then
     status "Capturing resume ids before kill sweep (budget ${CAPTURE_BUDGET}s)..."
     _capture_resume_before_stop "$CAPTURE_BUDGET"
@@ -146,8 +147,8 @@ if command -v tmux >/dev/null 2>&1; then
     # get killed too.
     # Bug #141: per-session servers (s-<sid>/tmux-<uid>) plus any pre-#141
     # session still live on the legacy shared socket.
-    for _sock in /tmp/unraid-aicliagents/tmux/s-*/tmux-*/default \
-                 /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+    for _sock in "${MOUNT_ROOT}"/tmux/s-*/tmux-*/default \
+                 "${MOUNT_ROOT}"/tmux/tmux-*/default; do
         [ -S "$_sock" ] || continue
         tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r sess; do
             tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
@@ -223,10 +224,10 @@ else
 fi
 
 # ── Step 7: Clean up emergency mode if active ──
-if [ -f /tmp/unraid-aicliagents/.emergency_mode ]; then
+if [ -f "${MOUNT_ROOT}/.emergency_mode" ]; then
     status "Cleaning up emergency mode state..."
-    rm -rf /tmp/unraid-aicliagents/emergency_home
-    rm -f /tmp/unraid-aicliagents/.emergency_mode
+    rm -rf "${MOUNT_ROOT}/emergency_home"
+    rm -f "${MOUNT_ROOT}/.emergency_mode"
 fi
 
 # ── Step 8: Unmount all storage (top-down: overlays first, then loop mounts) ──
@@ -254,7 +255,7 @@ _stop_umount() {
 }
 
 # 8a. Unmount home overlays
-WORK_BASE="/tmp/unraid-aicliagents/work"
+WORK_BASE="${MOUNT_ROOT}/work"
 if [ -d "$WORK_BASE" ]; then
     # BOOT_DISK_SPACE.md R5: the cache binds of a plain home sit inside the home
     # mount and may live on a pool. Remove them first (lazily when busy: this
@@ -287,8 +288,8 @@ if [ -d "$AGENT_BASE" ]; then
 fi
 
 # 8c. Unmount individual SquashFS loop mounts (these hold /mnt/user open when home is on array)
-if [ -d "/tmp/unraid-aicliagents/mnt" ]; then
-    for mnt in /tmp/unraid-aicliagents/mnt/*; do
+if [ -d "${MOUNT_ROOT}/mnt" ]; then
+    for mnt in "${MOUNT_ROOT}"/mnt/*; do
         _stop_umount "$mnt"
     done
 fi
@@ -302,7 +303,7 @@ done
 _stop_umount "$ZRAM_UPPER"
 
 # Clean runtime files
-rm -f /tmp/unraid-aicliagents/.init_done
+rm -f "${MOUNT_ROOT}/.init_done"
 rm -f /var/run/aicliterm-*.sock
 rm -f /var/run/unraid-aicliagents-*.pid
 

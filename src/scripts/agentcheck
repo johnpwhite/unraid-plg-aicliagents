@@ -4,10 +4,11 @@
 # and posts Unraid notifications for any found.
 
 PLUGIN_DIR="/usr/local/emhttp/plugins/unraid-aicliagents"
-LOG="/tmp/unraid-aicliagents/debug.log"
 
 # Ensure plugin is installed
 [ -f "$PLUGIN_DIR/src/includes/AICliAgentsManager.php" ] || exit 0
+source "$PLUGIN_DIR/src/scripts/storage/resolve_paths.sh" 2>/dev/null || exit 0
+LOG="${MOUNT_ROOT}/debug.log"
 
 # Run the check + notify via dedicated PHP script
 /usr/bin/php "$PLUGIN_DIR/src/scripts/agentcheck.php" >> "$LOG" 2>&1

@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # storage_ops.sh -- Phase 5: the storage OPERATIONS library.
 #
 # Home/agent storage op bodies, extracted from the former standalone trio
@@ -297,14 +298,14 @@ _bake_source_for() {
 # show it (UpperPlacementService reads it). A new call clears the old marker.
 _converge_reason_file() {
     local sid="${1//[^a-zA-Z0-9_-]/_}"
-    printf '%s/.upper_converge_reason_home_%s' "${AICLI_CONVERGE_REASON_DIR:-/tmp/unraid-aicliagents}" "$sid"
+    printf '%s/.upper_converge_reason_home_%s' "${AICLI_CONVERGE_REASON_DIR:-${MOUNT_ROOT}}" "$sid"
 }
 _home_upper_converge() {
     local id="${1:-}" persist="${2:-}" live="${3:-}" mnt pol rc rf
     [ -n "$id" ] && [ -n "$persist" ] && [ -n "$live" ] || return 0
     rf="$(_converge_reason_file "$id")"
     rm -f "$rf" 2>/dev/null || true
-    mnt="/tmp/unraid-aicliagents/work/$id/home"
+    mnt="${MOUNT_ROOT}/work/$id/home"
     pol="$( _entity_paths home "$id" "$persist"; printf '%s' "$UPPER_DIR" )"
     [ -n "$pol" ] && [ "$pol" != "$live" ] || return 0
     if _upper_holds_data "$live"; then
@@ -448,7 +449,7 @@ if [ "$TYPE" = "home" ]; then
     _HOME_OTHER_UPPER="$(_entity_upper_for_mode home "$ID" "$PERSIST_PATH" "$_HOME_OTHER_MODE" upper)"
     _HOME_OTHER_WORK="$(_entity_upper_for_mode home "$ID" "$PERSIST_PATH" "$_HOME_OTHER_MODE" work)"
     _HOME_MOUNTED=0
-    if _entity_live_upper "/tmp/unraid-aicliagents/work/$ID/home"; then
+    if _entity_live_upper "${MOUNT_ROOT}/work/$ID/home"; then
         _HOME_MOUNTED=1; _HOME_LIVE_UPPER="$LIVE_UPPER_DIR"; _HOME_LIVE_WORK="$LIVE_WORK_DIR"
     fi
     _HOME_UPPER_CHOICE="$(_home_upper_decide "$_HOME_MOUNTED" "$_HOME_LIVE_UPPER" "$_HOME_POLICY_UPPER" "$_HOME_OTHER_UPPER")"
@@ -500,7 +501,7 @@ if declare -f agent_mount >/dev/null 2>&1; then
 else
     MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 fi
-[ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
+[ "$TYPE" == "home" ] && MNT_POINT="${MOUNT_ROOT}/work/$ID/home"
 
 # Remove a stray/emergency symlink at the mount point (emergency mode can leave
 # one there). SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 2 (2026-09-09): a symlink
@@ -529,7 +530,7 @@ mkdir -p "$UPPER_DIR" "$WORK_DIR" "$MNT_POINT"
 if [ -n "$OWNER" ] && [ "$OWNER" != "root" ] && id "$OWNER" >/dev/null 2>&1; then
     chown -R "$OWNER" "$UPPER_DIR" "$WORK_DIR" 2>/dev/null || true
     chown "$OWNER" "$MNT_POINT" 2>/dev/null || true
-    # Parent of MNT_POINT (e.g. /tmp/unraid-aicliagents/work/<user>/) holds
+    # Parent of MNT_POINT (e.g. ${MOUNT_ROOT}/work/<user>/) holds
     # per-session run scripts written by aicli-shell.sh — chown so the agent
     # can mkdir/write alongside its home mount.
     PARENT_DIR="$(dirname "$MNT_POINT")"
@@ -562,7 +563,7 @@ _LAYER_IDX=0
 for sqsh in "${FILES[@]}"; do
     # Mount each squashfs to a temporary loop mount if not already done
     SQSH_NAME=$(basename "$sqsh" .sqsh)
-    SQSH_MNT="/tmp/unraid-aicliagents/mnt/$SQSH_NAME"
+    SQSH_MNT="${MOUNT_ROOT}/mnt/$SQSH_NAME"
     _LAYER_IDX=$((_LAYER_IDX + 1))
     mkdir -p "$SQSH_MNT"
     if ! mountpoint -q "$SQSH_MNT"; then
@@ -634,7 +635,7 @@ if [ -z "$LOWERS" ]; then
     # so this exits op_mount with the halt code. ONE place for the halt mechanics.
     _mount_integrity_halt() {
         local _state="$1"
-        local _halt_parent="/tmp/unraid-aicliagents/supervisor/halts/${TYPE}"
+        local _halt_parent="${MOUNT_ROOT}/supervisor/halts/${TYPE}"
         mkdir -p "$_halt_parent" 2>/dev/null
         printf '%s' "$_state" > "${_halt_parent}/${ID}.tmp.$$" && mv "${_halt_parent}/${ID}.tmp.$$" "${_halt_parent}/${ID}"
         lifecycle_log "critical" "mount_stack" "mount_stack_halted" \
@@ -679,7 +680,7 @@ if [ -z "$LOWERS" ]; then
     lifecycle_log "warn" "mount_stack" "mount_stack_fresh_install" \
         "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"persist_path\":\"$PERSIST_PATH\",\"integrity_state\":\"$_INTEGRITY_STATE\"}" \
         2>/dev/null || true
-    EMPTY_LOWER="/tmp/unraid-aicliagents/mnt/empty"
+    EMPTY_LOWER="${MOUNT_ROOT}/mnt/empty"
     mkdir -p "$EMPTY_LOWER"
     LOWERS="$EMPTY_LOWER"
 fi
@@ -998,7 +999,7 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
     # and must never be considered replaceable by a later live-session bake.
     if [ "$TYPE" = "home" ]; then
         _MOUNT_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
-        rm -f "/tmp/unraid-aicliagents/.bake_busy_snapshot_${TYPE}_${_MOUNT_LOCK_ID}" 2>/dev/null || true
+        rm -f "${MOUNT_ROOT}/.bake_busy_snapshot_${TYPE}_${_MOUNT_LOCK_ID}" 2>/dev/null || true
     fi
     lifecycle_log "info" "mount_stack" "mount_stack_assembled" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"layer_count\":$LAYER_COUNT,\"mount_point\":\"$MNT_POINT\"}" 2>/dev/null || true
     if [ "$_AGENT_VERSIONED" = "1" ]; then
@@ -1242,7 +1243,7 @@ mapfile -t FILES < <(_layer_stack_sorted "$PERSIST_PATH" "agent" "$ID")
 LOWERS=""
 for sqsh in "${FILES[@]}"; do
     SQSH_NAME="$(basename "$sqsh" .sqsh)"
-    SQSH_MNT="/tmp/unraid-aicliagents/mnt/$SQSH_NAME"
+    SQSH_MNT="${MOUNT_ROOT}/mnt/$SQSH_NAME"
     mkdir -p "$SQSH_MNT"
     if ! mountpoint -q "$SQSH_MNT"; then
         mount -o loop,ro "$sqsh" "$SQSH_MNT" || { error "Failed to mount lower layer $sqsh"; exit 1; }
@@ -1254,7 +1255,7 @@ if [ -z "$LOWERS" ]; then
     # A first-ever install has nothing to stack on. An empty lower is correct
     # here and needs none of op_mount's boot-integrity classification: this
     # overlay is not, and never becomes, the agent's data.
-    LOWERS="/tmp/unraid-aicliagents/mnt/empty"
+    LOWERS="${MOUNT_ROOT}/mnt/empty"
     mkdir -p "$LOWERS"
 fi
 
@@ -1392,7 +1393,7 @@ guard_path "$PERSIST_PATH" "PERSIST_PATH" || exit 1
 _assert_persist_durable "$PERSIST_PATH" || exit 1
 
 _BM_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
-backend_migration_clear_reasons "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-/tmp/unraid-aicliagents}"
+backend_migration_clear_reasons "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-${MOUNT_ROOT}}"
 _BM_MNT=""
 if [ "$TYPE" = "home" ]; then
     _BM_MNT="$(home_mount "$ID")"
@@ -1652,7 +1653,7 @@ fi
 # Sanitise $ID to keep the lock filename shell-safe (alphanumeric + hyphen).
 _LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
 _BAKE_LOCK="/var/run/aicli-bake-${TYPE}-${_LOCK_ID}.lock"
-_BUSY_SNAPSHOT_MARKER="/tmp/unraid-aicliagents/.bake_busy_snapshot_${TYPE}_${_LOCK_ID}"
+_BUSY_SNAPSHOT_MARKER="${MOUNT_ROOT}/.bake_busy_snapshot_${TYPE}_${_LOCK_ID}"
 _HOME_BUSY_AT_BAKE_START=0
 exec 9>"$_BAKE_LOCK"
 # 2026-09-24 (SIDE_BY_SIDE_AGENT_INSTALLS.md "the version that runs is the
@@ -1812,14 +1813,14 @@ if declare -f aicli_on_exit >/dev/null 2>&1; then aicli_on_exit _bake_owner_rele
 # reason read by TaskService.php / StorageMountService.php is THIS bake's
 # truth, never a prior cycle's. Cheap rm at start; each exit-2 path writes
 # the current cause via write_defer_reason; exit-0 leaves no marker.
-rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+rm -f "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
 
 # WP #1277 (bake-confirmed reclaim): the layer writer records the files it
 # actually captured into this manifest; we map them onto UPPER_DIR below and
 # pass them to selective_upper_cleanup so the post-bake reclaim only wipes
 # proven-baked files. Stable per-entity path (overwritten each bake); cleared
 # now so a prior run's list can never be mistaken for this bake's truth.
-_BAKE_MANIFEST="/tmp/unraid-aicliagents/.bake_manifest_${TYPE}_${_LOCK_ID}"
+_BAKE_MANIFEST="${MOUNT_ROOT}/.bake_manifest_${TYPE}_${_LOCK_ID}"
 rm -f "$_BAKE_MANIFEST" "${_BAKE_MANIFEST}.abs" 2>/dev/null || true
 
 log() {
@@ -1873,7 +1874,7 @@ if [ "$TYPE" = "home" ] && home_mount_in_use "$MNT_POINT"; then
         log "Could not prepare rolling busy snapshot marker; this bake will retain every layer for safety"
     fi
     _BUSY_COOLDOWN_SEC="${AICLI_BUSY_BAKE_COOLDOWN_SEC:-1800}"
-    _COOLDOWN_MARKER="/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}"
+    _COOLDOWN_MARKER="${MOUNT_ROOT}/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}"
     _last_busy_bake=0
     [ -f "$_COOLDOWN_MARKER" ] && _last_busy_bake=$(cat "$_COOLDOWN_MARKER" 2>/dev/null || echo 0)
     case "$_last_busy_bake" in ''|*[!0-9]*) _last_busy_bake=0 ;; esac
@@ -1912,7 +1913,7 @@ fi
 # The upper copy is removed only after a successful bake, and only while the
 # mount is idle (_bake_prune_upper, after the reclaim below).
 log "Pruning caches before bake (excluded from the layer; live files kept)..."
-_BAKE_EXCLUDE_FILE="/tmp/unraid-aicliagents/.bake_excludes_${TYPE}_${_LOCK_ID}"
+_BAKE_EXCLUDE_FILE="${MOUNT_ROOT}/.bake_excludes_${TYPE}_${_LOCK_ID}"
 if _bake_prune_patterns "$TYPE" > "$_BAKE_EXCLUDE_FILE" 2>/dev/null; then
     MKSQUASHFS_ARGS="$(_bake_args_with_excludes "${MKSQUASHFS_ARGS:-${_AWL_DEFAULT_ARGS:--comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend}}" "$_BAKE_EXCLUDE_FILE")"
     export MKSQUASHFS_ARGS
@@ -1932,7 +1933,7 @@ if [ ! -d "$UPPER_DIR" ] || ! _bake_upper_has_content "$TYPE" "$UPPER_DIR"; then
     # #567: tell the Activity tray that this save found nothing to write. The
     # tray reads and removes this marker when the job ends (SupervisorService
     # ::bakeNoopStep) and says "Nothing to save" instead of a bare "Done".
-    printf '%s\n' "$(date +%s)" > "/tmp/unraid-aicliagents/.bake_noop_${TYPE}_${ID//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
+    printf '%s\n' "$(date +%s)" > "${MOUNT_ROOT}/.bake_noop_${TYPE}_${ID//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
     # #372: a home still on the upper of the old mode moves to the policy
     # upper once that upper is empty and nothing uses the home.
     if [ "$TYPE" = "home" ] && [ -z "$_UPPER_OVERRIDE" ] \
@@ -1963,7 +1964,7 @@ fi
 
 # Record a marker timestamp BEFORE baking. Any writes to the upper dir after this
 # point will not be in the delta and must NOT be flushed.
-MARKER="/tmp/unraid-aicliagents/.commit_marker_${TYPE}_${ID}"
+MARKER="${MOUNT_ROOT}/.commit_marker_${TYPE}_${ID}"
 touch "$MARKER"
 # M2 fix (v2026.05.18.08): 50ms gap separates the marker mtime from any
 # write that could land at exactly the same tmpfs nanosecond timestamp.
@@ -2025,7 +2026,7 @@ if [ "$SQLITE_DB_COUNT" -gt 0 ]; then
         error "Not enough room to stage $SQLITE_DB_COUNT SQLite backup(s) in $_SQLITE_STAGE_ROOT: need about ${STAGE_NEED_MB} MB (${STAGE_DB_MB} MB of databases plus margin), ${STAGE_FREE_MB} MB free. Nothing was saved; the changes stay in the writable layer."
         # #388: the figures for the supervisor's notification ("need free").
         printf '%s %s\n' "${STAGE_NEED_MB:-0}" "${STAGE_FREE_MB:-unknown}" \
-            > "/tmp/unraid-aicliagents/.bake_no_space_${TYPE}_${ID//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
+            > "${MOUNT_ROOT}/.bake_no_space_${TYPE}_${ID//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
         _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_deferred" "no_space" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"sqlite_stage_no_space\",\"db_count\":$SQLITE_DB_COUNT,\"need_mb\":$STAGE_NEED_MB,\"free_mb\":\"$STAGE_FREE_MB\",\"stage_root\":\"$_SQLITE_STAGE_ROOT\",\"on_ram\":$STAGE_ON_RAM}" "warn"
     fi
@@ -2221,7 +2222,7 @@ if declare -f agent_mount >/dev/null 2>&1; then
 else
     MNT_POINT="/usr/local/emhttp/plugins/unraid-aicliagents/agents/$ID"
 fi
-[ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
+[ "$TYPE" == "home" ] && MNT_POINT="${MOUNT_ROOT}/work/$ID/home"
 
 log "Checking for active sessions on $MNT_POINT..."
 
@@ -2293,7 +2294,7 @@ if home_mount_in_use "$MNT_POINT"; then
     # upper is never trimmed (reclaim deferred), so without this every bake
     # trigger would re-bake the whole untrimmed upper. The pre-bake gate near
     # the top skips redundant bakes until this cooldown elapses. (home only.)
-    [ "$TYPE" = "home" ] && date +%s > "/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+    [ "$TYPE" = "home" ] && date +%s > "${MOUNT_ROOT}/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
     _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_busy" "mount_busy" \
         "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$(basename "$NEW_SQSH")\",\"bytes\":$SQSH_BYTES}"
 fi
@@ -2319,7 +2320,7 @@ if [ "$_REFRESH_RC" -ne 0 ]; then
         log "Mount refresh deferred (busy) — data persisted to Flash; ZRAM reclaim deferred to idle."
         # Stamp the busy-bake cooldown (home only) so the pre-bake gate skips
         # redundant re-bakes of the still-untrimmed upper until idle.
-        [ "$TYPE" = "home" ] && date +%s > "/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+        [ "$TYPE" = "home" ] && date +%s > "${MOUNT_ROOT}/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
         _op_defer "$TYPE" "$ID" "commit_stack" "bash_bake_refresh_deferred" "mount_busy" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$(basename "$NEW_SQSH")\"}"
     fi
@@ -2412,7 +2413,7 @@ fi
 
 # Idle reclaim succeeded — the upper is trimmed, so clear any busy-bake cooldown
 # left over from a prior in-session bake. The next session starts fresh.
-[ "$TYPE" = "home" ] && rm -f "/tmp/unraid-aicliagents/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+[ "$TYPE" = "home" ] && rm -f "${MOUNT_ROOT}/.bake_busy_cooldown_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
 
 # WP #1081: WORK_DIR wipe REMOVED. Previously this swept overlayfs whiteout/work
 # files after cleanup. But under the refresh-then-cleanup order, the overlay is
@@ -2610,7 +2611,7 @@ if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
 fi
 
 # The same cache excludes as every bake.
-_EXCL="/tmp/unraid-aicliagents/.rebase_excludes_${_LOCK_ID}"
+_EXCL="${MOUNT_ROOT}/.rebase_excludes_${_LOCK_ID}"
 _bake_prune_patterns "$TYPE" > "$_EXCL" 2>/dev/null || { error "Could not write the exclude list $_EXCL"; exit 1; }
 MKSQUASHFS_ARGS="$(_bake_args_with_excludes "${MKSQUASHFS_ARGS:-${_AWL_DEFAULT_ARGS:--comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappend}}" "$_EXCL")"
 export MKSQUASHFS_ARGS
@@ -2731,8 +2732,8 @@ source "$_SO_DIR/atomic_write_layer.sh" 2>/dev/null || {
     exit 1
 }
 
-[ "$TYPE" == "home" ] && MNT_POINT="/tmp/unraid-aicliagents/work/$ID/home"
-TASK_STATUS_FILE="/tmp/unraid-aicliagents/task-status-$ID"
+[ "$TYPE" == "home" ] && MNT_POINT="${MOUNT_ROOT}/work/$ID/home"
+TASK_STATUS_FILE="${MOUNT_ROOT}/task-status-$ID"
 
 # #342: derive UPPER_DIR from persistence fstype — must match mount_stack.sh.
 _entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"   # sets UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE  # Phase 3: the LIVE generation's layer, not the id-keyed one
@@ -2831,7 +2832,7 @@ _consol_recheck_binding() {
 # so PHP reads THIS run's reason on any exit-2 path. Sanitise the ID the same
 # way write_defer_reason does so the rm matches the eventual write.
 _DEFER_REASON_ID="${ID//[^a-zA-Z0-9_-]/_}"
-rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_DEFER_REASON_ID}" 2>/dev/null || true
+rm -f "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_DEFER_REASON_ID}" 2>/dev/null || true
 
 # Validate paths before any mount or destructive operations
 guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed validation: $PERSIST_PATH"; update_task_status "Failed" 0 "Invalid path"; exit 1; }
@@ -3052,7 +3053,7 @@ if [ "$TYPE" = "home" ]; then
 fi
 
 # Check disk space in /tmp for the scratch verify mount used by atomic_write_layer (minimal — just a mountpoint)
-check_disk_space "/tmp/unraid-aicliagents/" 10 || { error "Insufficient disk space in /tmp for verification scratch mount"; update_task_status "Failed" 0 "Low disk space"; exit 1; }
+check_disk_space "${MOUNT_ROOT}/" 10 || { error "Insufficient disk space in /tmp for verification scratch mount"; update_task_status "Failed" 0 "Low disk space"; exit 1; }
 
 # WP #271 guard: detect legacy nested 'home/' directory inside the home mount.
 # Some early plugin versions packaged user-home contents at sqsh-root/home/...
@@ -3093,7 +3094,7 @@ mapfile -t OLD_LAYERS < <(layer_files_of "$PERSIST_PATH" "$TYPE" "$ID")   # R-00
 # those writes are lost. Same protection pattern as commit_stack.sh.
 # This was the cause of a silent resume-file loss when gracefulClose ran
 # concurrently with auto-consolidation.
-CONSOLIDATE_MARKER="/tmp/unraid-aicliagents/.consolidate_marker_${TYPE}_${ID}"
+CONSOLIDATE_MARKER="${MOUNT_ROOT}/.consolidate_marker_${TYPE}_${ID}"
 touch "$CONSOLIDATE_MARKER"
 # M2 fix (v2026.05.18.08): 50ms gap separates marker mtime from any concurrent
 # write hitting the same tmpfs nanosecond — the post-bake UPPER_CHANGED check
@@ -3481,7 +3482,7 @@ for old_layer in "${OLD_LAYERS[@]}"; do
     # reads it. The old `umount || umount -l` then `rm -f` hid a held loop:
     # the deleted layer kept its space on the flash until a reboot. A held
     # layer is parked as .pending-delete.<name> for the idle sweep.
-    _old_layer_mnt="/tmp/unraid-aicliagents/mnt/$(basename "$old_layer" .sqsh)"
+    _old_layer_mnt="${MOUNT_ROOT}/mnt/$(basename "$old_layer" .sqsh)"
     if layer_retire_file "$old_layer" "$_old_layer_mnt"; then
         lifecycle_log "info" "consolidate_layers" "old_layer_removed" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"file\":\"$(basename "$old_layer")\"}" 2>/dev/null || true
     else
@@ -3752,8 +3753,8 @@ _assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non
 
 _GR_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
 # Clear any stale defer-reason marker so the reason PHP reads is THIS run's truth.
-rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" \
-      "/tmp/unraid-aicliagents/.graduate_refusal_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+rm -f "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" \
+      "${MOUNT_ROOT}/.graduate_refusal_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
 
 _entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"   # UPPER_DIR/WORK_DIR/MNT_POINT/ENTITY_UPPER_MODE  # Phase 3: the LIVE generation's layer, not the id-keyed one
 
@@ -3838,7 +3839,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     }
     _gr_bytes() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
     # The plain reason the tray shows when the job fails (SupervisorService reads it).
-    _GR_REASON_FILE="/tmp/unraid-aicliagents/.convert_reason_${TYPE}_${_GR_LOCK_ID}"
+    _GR_REASON_FILE="${MOUNT_ROOT}/.convert_reason_${TYPE}_${_GR_LOCK_ID}"
     rm -f "$_GR_REASON_FILE" 2>/dev/null || true
     _gr_reason() { printf '%s\n' "$1" > "$_GR_REASON_FILE" 2>/dev/null || true; }
     _gr_phase "checking"
@@ -3944,7 +3945,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     fi
 
     _GR_SQLITE_DBS="$(detect_sqlite_dbs "$_GR_VIEW" 2>/dev/null)"
-    _GR_META="/tmp/unraid-aicliagents/.convert_${TYPE}_${_GR_LOCK_ID}_$$"
+    _GR_META="${MOUNT_ROOT}/.convert_${TYPE}_${_GR_LOCK_ID}_$$"
     mkdir -p "$_GR_META"
     _GR_EXCLUDES="$_GR_META/excludes"
     # An agent tree holds no cache folders to drop: copy every file.
@@ -3998,11 +3999,11 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
     fi
 
     # R14: the tray reads the copy progress and the measured total from these.
-    _GR_PROG="/tmp/unraid-aicliagents/.convert_progress_${TYPE}_${_GR_LOCK_ID}.log"
-    printf '%s\n' "$_GR_SRC_BYTES" > "/tmp/unraid-aicliagents/.convert_total_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+    _GR_PROG="${MOUNT_ROOT}/.convert_progress_${TYPE}_${_GR_LOCK_ID}.log"
+    printf '%s\n' "$_GR_SRC_BYTES" > "${MOUNT_ROOT}/.convert_total_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
     : > "$_GR_PROG" 2>/dev/null || true
     _gr_cleanup_meta() {
-        rm -rf "$_GR_META" "$_GR_PROG" "/tmp/unraid-aicliagents/.convert_total_${TYPE}_${_GR_LOCK_ID}" "$_GR_CONVERT_LOCK" 2>/dev/null || true
+        rm -rf "$_GR_META" "$_GR_PROG" "${MOUNT_ROOT}/.convert_total_${TYPE}_${_GR_LOCK_ID}" "$_GR_CONVERT_LOCK" 2>/dev/null || true
     }
 
     # ---- copy + verify (nothing destructive yet) ----
@@ -4113,7 +4114,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         _op_defer "$TYPE" "$ID" "graduate" "graduate_deferred" "mount_busy" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\"}"
     fi
-    for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
+    for _gr_lm in "${MOUNT_ROOT}"/mnt/${TYPE}_${ID}_*; do
         [ -d "$_gr_lm" ] || continue
         layer_name_is_of "$TYPE" "$ID" "${_gr_lm##*/}" || continue   # R-002 (#580): not another entity's mount
         # #504: a real unmount only. A lazy one hides the mount but keeps the
@@ -4251,7 +4252,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         rm -rf "$_GR_COPY" 2>/dev/null
         # R4: the supervisor reaps this retire folder after the retention window.
         touch "$_GR_RETIRE" 2>/dev/null || true
-        printf '%s\n' "$_GR_RETIRE" >> "${AICLI_RETIRED_LIST:-/boot/config/plugins/unraid-aicliagents/retired_dirs.list}" 2>/dev/null || true
+        printf '%s\n' "$_GR_RETIRE" >> "${AICLI_RETIRED_LIST:-${PLUGIN_BASE}/retired_dirs.list}" 2>/dev/null || true
     fi
     _gr_cleanup_meta
 
@@ -4365,7 +4366,7 @@ fi
 
 # ---- 5. Copy the consolidated content into the passthrough plain dir ---------
 # Layout MUST match storagectl _pt_dir: $PERSIST/passthrough/<type>s/<id>
-_GR_SCRATCH="/tmp/unraid-aicliagents/.graduate_src_${TYPE}_${_GR_LOCK_ID}_$$"
+_GR_SCRATCH="${MOUNT_ROOT}/.graduate_src_${TYPE}_${_GR_LOCK_ID}_$$"
 mkdir -p "$_GR_SCRATCH" 2>/dev/null
 _gr_cleanup_scratch() {
     umount_or_keep "$_GR_SCRATCH" "conversion scratch" 3 || return 0   # #512: never lazy; a kept mount keeps its dir
@@ -4485,7 +4486,7 @@ fi
 if _mount_teardown_arbiter "$_GR_TEARDOWN_TARGET"; then _GR_TD=0; else _GR_TD=$?; fi
 if [ "$_GR_TD" -eq 0 ]; then
     # Lift this entity's now-orphaned layer loop mounts.
-    for _gr_lm in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
+    for _gr_lm in "${MOUNT_ROOT}"/mnt/${TYPE}_${ID}_*; do
         [ -d "$_gr_lm" ] || continue
         layer_name_is_of "$TYPE" "$ID" "${_gr_lm##*/}" || continue   # R-002 (#580): not another entity's mount
         umount_or_keep "$_gr_lm" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir

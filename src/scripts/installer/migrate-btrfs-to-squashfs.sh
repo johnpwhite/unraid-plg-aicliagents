@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 set -euo pipefail
 # AICliAgents: Deterministic Background Migration Engine
 # Migrates legacy User Homes and Agent Binaries to SquashFS stacks.
@@ -7,10 +8,10 @@ set -euo pipefail
 # 3. Agents are converted but originals are deleted to save space.
 # 4. Homes are converted and originals are moved to migrated_legacy_data/.
 
-LOCK_FILE="/tmp/unraid-aicliagents/migration.lock"
-LOG_FILE="/tmp/unraid-aicliagents/migration.log"
-DEBUG_LOG="/tmp/unraid-aicliagents/debug.log"
-CONFIG_FILE="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+LOCK_FILE="${MOUNT_ROOT}/migration.lock"
+LOG_FILE="${MOUNT_ROOT}/migration.log"
+DEBUG_LOG="${MOUNT_ROOT}/debug.log"
+CONFIG_FILE="${PLUGIN_BASE}/unraid-aicliagents.cfg"
 
 # Source shared storage functions (guard_path, check_disk_space, get_ts, etc.)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -89,7 +90,6 @@ if ! command -v mksquashfs >/dev/null 2>&1; then
 fi
 
 # 1. Determine Persistence Paths via canonical resolver (Phase 5 — no inline cfg greps)
-PLUGIN_BASE="/boot/config/plugins/unraid-aicliagents"
 AGENT_PERSIST_PATH=$(agent_persist_path 2>/dev/null || echo "$PLUGIN_BASE")
 HOME_PERSIST_PATH=$(home_persist_path root 2>/dev/null || echo "$PLUGIN_BASE/persistence")
 # Legacy compat: PERSIST_PATH used for agent operations and monolithic image search
@@ -168,8 +168,8 @@ publish_progress "Starting migration..." 5
 # Only run if the user does NOT already have SquashFS volumes (state is already inside)
 localize_state() {
     local target_dir="$1"
-    local legacy_ws="/boot/config/plugins/unraid-aicliagents/workspaces.json"
-    local legacy_envs="/boot/config/plugins/unraid-aicliagents/envs"
+    local legacy_ws="${PLUGIN_BASE}/workspaces.json"
+    local legacy_envs="${PLUGIN_BASE}/envs"
 
     if [ -f "$legacy_ws" ] || [ -d "$legacy_envs" ]; then
         log "Localizing legacy state (workspaces/envs) to $target_dir/.aicli ..."
@@ -190,7 +190,7 @@ if ! _mig_has_layers "$HOME_PERSIST_PATH" home "$CFG_USER"; then
     if [ -d "$TARGET_HOME_RAW" ]; then
         localize_state "$TARGET_HOME_RAW"
     else
-        TARGET_HOME_MNT="/tmp/unraid-aicliagents/work/$CFG_USER/home"
+        TARGET_HOME_MNT="${MOUNT_ROOT}/work/$CFG_USER/home"
         if ! mountpoint -q "$TARGET_HOME_MNT"; then
             log "Target home ($CFG_USER) not mounted. Attempting temporary mount for localization..."
             bash "$SCRIPT_DIR/../storage/mount_stack.sh" home "$CFG_USER" "$PERSIST_PATH" >/dev/null 2>&1 || true
@@ -219,7 +219,7 @@ done
 if [ -n "$MONO_IMG" ]; then
     log "Found monolithic agent image: $MONO_IMG"
     publish_progress "Extracting monolithic agent image..." 20
-    MONO_MNT="/tmp/unraid-aicliagents/mnt/legacy_agents_mono"
+    MONO_MNT="${MOUNT_ROOT}/mnt/legacy_agents_mono"
     mkdir -p "$MONO_MNT"
     if mount -o loop,ro "$MONO_IMG" "$MONO_MNT" 2>/dev/null; then
         mkdir -p "$RAW_AGENTS"
@@ -316,7 +316,7 @@ for home_img in "$PERSIST_PATH/persistence/home_"*.img "$PERSIST_PATH/home_"*.im
 
     log "  > Migrating home image: $USER_NAME"
     publish_progress "Migrating home: $USER_NAME" 60
-    MNT="/tmp/unraid-aicliagents/mnt/legacy_home_$USER_NAME"
+    MNT="${MOUNT_ROOT}/mnt/legacy_home_$USER_NAME"
     mkdir -p "$MNT"
     if mount -o loop,ro "$home_img" "$MNT"; then
         mksquashfs "$MNT" "$HOME_PERSIST_PATH/home_${USER_NAME}_v1_vol1.sqsh" \

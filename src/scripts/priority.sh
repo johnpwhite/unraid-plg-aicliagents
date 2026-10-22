@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # priority.sh — "Keep the terminal responsive" (docs/specs/RESPONSIVE_PRIORITY.md).
 #
 # Usage:
@@ -24,8 +25,8 @@
 set -u
 
 PROC="${AICLI_PRIORITY_PROC:-/proc}"
-CFG="${AICLI_PRIORITY_CFG:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
-LOG="${AICLI_PRIORITY_LOG:-/tmp/unraid-aicliagents/debug.log}"
+CFG="${AICLI_PRIORITY_CFG:-${PLUGIN_BASE}/unraid-aicliagents.cfg}"
+LOG="${AICLI_PRIORITY_LOG:-${MOUNT_ROOT}/debug.log}"
 
 UP_NICE=-5
 UP_IONICE=0

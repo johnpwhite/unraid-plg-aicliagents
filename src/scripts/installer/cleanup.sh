@@ -1,11 +1,11 @@
 #!/bin/bash
+_INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
+[ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/storage/resolve_paths.sh"
+source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents Installer: Pre-Upgrade Process Eviction & Session Backup (v41)
 
-# Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
-source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
-
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+export TMUX_TMPDIR="${MOUNT_ROOT}/tmux"
 
 # Graceful process termination: SIGTERM first, wait, then SIGKILL if needed.
 # Hard guard against ever touching VM / hypervisor / init processes even if a
@@ -60,7 +60,7 @@ _sanitize_layout_ver() {
     printf '%s' "$v"
 }
 _layout_flash_file() {
-    printf '%s/.layout-version' "${AICLI_LAYOUT_MARKER_DIR:-${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}}"
+    printf '%s/.layout-version' "${AICLI_LAYOUT_MARKER_DIR:-${CONFIG_DIR:-${PLUGIN_BASE}}}"
 }
 # Sets OLD_LAYOUT_VERSION (sanitised). Falls back to the flash copy when the
 # RAM snapshot is missing or "0".
@@ -102,7 +102,7 @@ _write_layout_flash_marker() {
 # Bake and consolidate use one lock file per entity: /var/run/aicli-bake-<type>-<id>.lock
 # (fd 9 in bake, fd 8 in consolidate). We try each one without blocking.
 _sqlite_checkpoint_section() {
-    local root="${1:-/tmp/unraid-aicliagents/work}"
+    local root="${1:-${MOUNT_ROOT}/work}"
     local lockdir="${AICLI_BAKE_LOCK_DIR:-/var/run}"
     command -v sqlite3 >/dev/null 2>&1 || return 0
 
@@ -312,7 +312,7 @@ MIGRATION_NEEDED=0
 NEW_LAYOUT_VERSION_RAW=$(cat "${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/.layout-version" 2>/dev/null || true)
 NEW_LAYOUT_VERSION=$(_sanitize_layout_ver "$NEW_LAYOUT_VERSION_RAW")
 _resolve_old_layout_version
-MIGRATION_SENTINEL="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/.migration_required"
+MIGRATION_SENTINEL="${CONFIG_DIR:-${PLUGIN_BASE}}/.migration_required"
 if [ -f "$MIGRATION_SENTINEL" ]; then
     MIGRATION_NEEDED=1
     log_status "    > .migration_required sentinel present — running full teardown."
@@ -334,7 +334,7 @@ fi
 # the hot-swap / full-teardown split so it covers both paths. `env -u
 # TMUX_TMPDIR` targets the old default socket location. The sentinel is written
 # unconditionally so this never runs again.
-TMUX_MIGRATED="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}/.tmux-socket-migrated"
+TMUX_MIGRATED="${CONFIG_DIR:-${PLUGIN_BASE}}/.tmux-socket-migrated"
 if [ "$MIGRATION_NEEDED" = "1" ] && [ ! -f "$TMUX_MIGRATED" ] && command -v tmux >/dev/null 2>&1; then
     _OLD_SESS=$(env -u TMUX_TMPDIR tmux ls -F '#S' 2>/dev/null | grep '^aicli-agent-' || true)
     if [ -n "$_OLD_SESS" ]; then
@@ -392,7 +392,7 @@ fi
 if [ "$UPGRADE_MODE" = "1" ]; then
     log_status "    > Persisting active user states before eviction..."
 
-    ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
+    ZRAM_UPPER="${MOUNT_ROOT}/zram_upper"
 
     # Strategy A: Atomic SquashFS bake from ZRAM upper (Phase 5: via atomic_write_layer).
     # Only bake dirs with real files (skip overlayfs whiteout-only dirs).
@@ -463,7 +463,7 @@ if [ "$UPGRADE_MODE" = "1" ]; then
                 continue
             fi
             PERSIST_DIR=$(home_persist_path "$user" 2>/dev/null || echo "")
-            [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-/boot/config/plugins/unraid-aicliagents}"
+            [ -z "$PERSIST_DIR" ] && PERSIST_DIR="${CONFIG_DIR:-${PLUGIN_BASE}}"
             log_status "      [ZRAM] Baking home delta for $user..."
             DELTA_NAME=$(atomic_write_layer "home" "$user" "$PERSIST_DIR" "$upper_dir" "delta" 2>/dev/null)
             if [ -n "$DELTA_NAME" ]; then
@@ -487,7 +487,7 @@ fi
 
 # --- 1. SQLite WAL Checkpoint (safe: lock-aware, quick_check first, timeouts) ---
 # Merge WAL journals into main .db files before killing agent processes.
-_sqlite_checkpoint_section /tmp/unraid-aicliagents/work || true
+_sqlite_checkpoint_section "${MOUNT_ROOT}/work" || true
 
 log_step "Evicting legacy processes for a clean upgrade..."
 
@@ -500,8 +500,8 @@ if command -v tmux > /dev/null 2>&1; then
     # get killed too.
     # Bug #141: sessions now each own a private server under s-<sid>/tmux-<uid>;
     # pre-#141 sessions may still be live on the legacy shared socket. Cover both.
-    for _sock in /tmp/unraid-aicliagents/tmux/s-*/tmux-*/default \
-                 /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+    for _sock in "${MOUNT_ROOT}"/tmux/s-*/tmux-*/default \
+                 "${MOUNT_ROOT}"/tmux/tmux-*/default; do
         [ -S "$_sock" ] || continue
         tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
     done
@@ -552,7 +552,7 @@ fi
 [ "$UMNT_KEPT" -gt 0 ] && log_status "    > Kept $UMNT_KEPT busy mount(s) (#512)."
 
 # --- 5. Clear Runtime Locks & Temporary Scripts ---
-rm -f /tmp/unraid-aicliagents/.init_done
+rm -f "${MOUNT_ROOT}/.init_done"
 rm -rf /var/run/aicli-sessions
 rm -f /var/run/aicliterm-*.sock
 

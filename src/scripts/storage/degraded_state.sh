@@ -1,12 +1,13 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # degraded_state.sh — S-05 (#1352): durable degraded flag.
 #
 # The emergency/degraded flag used to live ONLY at the tmpfs path
-# /tmp/unraid-aicliagents/.emergency_mode — gone at reboot, so the boot-time
+# ${MOUNT_ROOT}/.emergency_mode — gone at reboot, so the boot-time
 # integrity sweep could not know the previous session ended degraded (audit
 # finding O / S-05). This helper DUAL-WRITES:
 #
-#   tmpfs   /tmp/unraid-aicliagents/.emergency_mode          (existing consumers
+#   tmpfs   ${MOUNT_ROOT}/.emergency_mode          (existing consumers
 #           — StorageMountService::isEmergencyMode, event handlers — unchanged)
 #   durable <boot-config>/state/degraded.json                (survives reboot)
 #
@@ -26,8 +27,8 @@
 #
 # Sourceable standalone: lifecycle_log is optional (guarded), no other deps.
 
-_DS_EMERGENCY_FLAG="${AICLI_EMERGENCY_FLAG:-/tmp/unraid-aicliagents/.emergency_mode}"
-_DS_STATE_DIR="${AICLI_DEGRADED_STATE_DIR:-/boot/config/plugins/unraid-aicliagents/state}"
+_DS_EMERGENCY_FLAG="${AICLI_EMERGENCY_FLAG:-${MOUNT_ROOT}/.emergency_mode}"
+_DS_STATE_DIR="${AICLI_DEGRADED_STATE_DIR:-${PLUGIN_BASE}/state}"
 _DS_DEGRADED_JSON="$_DS_STATE_DIR/degraded.json"
 
 # _ds_lifecycle <level> <event> <payload> — best-effort lifecycle log (the writer

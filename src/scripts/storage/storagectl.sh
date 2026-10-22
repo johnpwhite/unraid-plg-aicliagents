@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # storagectl.sh — Single entry point ("seam") for all home/agent storage operations.
 #
 # Usage:
@@ -42,7 +43,7 @@
 # ITEST SAFETY:
 #   When AICLI_ITEST_GUARD=1 (set by the integration harness, NEVER in production)
 #   every verb refuses unless the entity id matches ^it[0-9] AND the persist path
-#   resolves under /tmp/unraid-aicliagents/itest/. This makes destructive verbs
+#   resolves under ${MOUNT_ROOT}/itest/. This makes destructive verbs
 #   impossible to aim at real data during a test run. Unset in production → no
 #   restriction, so the seam works for real ids/paths.
 
@@ -75,11 +76,11 @@ source "$_SC_DIR/detect_backend.sh" 2>/dev/null || true
 # shellcheck source=/dev/null
 source "$_SC_DIR/manifest_write.sh" 2>/dev/null || true
 
-ZRAM_BASE="/tmp/unraid-aicliagents/zram_upper"
-ITEST_ROOT="/tmp/unraid-aicliagents/itest"
+ZRAM_BASE="${MOUNT_ROOT}/zram_upper"
+ITEST_ROOT="${MOUNT_ROOT}/itest"
 # #1254: honour the test-only AICLI_LIFECYCLE_LOG redirect so the lifecycle-event
 # READER (here) stays aligned with the WRITER (resolve_paths.sh lifecycle_log_path).
-LIFECYCLE_LOG="${AICLI_LIFECYCLE_LOG:-/boot/config/plugins/unraid-aicliagents/lifecycle.log}"
+LIFECYCLE_LOG="${AICLI_LIFECYCLE_LOG:-${PLUGIN_BASE}/lifecycle.log}"
 
 _sc_err() { printf '[storagectl] %s\n' "$*" >&2; }
 
@@ -166,7 +167,7 @@ _itest_guard() {
 # is STALE — silently ignored, exactly as if absent. _defer_marker_fresh is in
 # common.sh; if common.sh wasn't sourced (degraded), fall back to a plain read.
 _read_defer_reason() {
-    local m="/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_LOCK_ID}"
+    local m="${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_LOCK_ID}"
     if declare -f _defer_marker_fresh >/dev/null 2>&1; then
         _defer_marker_fresh "$m" || return 0
     elif [ ! -f "$m" ]; then
@@ -433,7 +434,7 @@ do_mount() {
     # S-03 (#1352): clear any stale defer-reason from a prior bake/consolidate cycle
     # so the reason read by PHP is THIS mount's truth, never a prior op's. op_bake /
     # op_consolidate already clear on entry; this is the missing op_mount half.
-    rm -f "/tmp/unraid-aicliagents/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
+    rm -f "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_LOCK_ID}" 2>/dev/null || true
     _passthrough_guard mount   # Step 6: plain-dir bind + exit if effective backend is passthrough
     # Bake-lock probe (symmetric with the supervisor's _op_mount, aicli-supervisor.sh):
     # if a bake/consolidate holds this entity's per-entity lock, DEFER this
@@ -673,14 +674,14 @@ do_wipe() {
     umount_or_keep "$mnt" "entity mount" 3 || { emit_json 2 "deferred" "mount_busy"; exit 2; }   # #512: never lazy; never wipe under a live mount
     # Feature #1382 / Bug #1379+#1381: BEFORE removing the .sqsh files, tear down
     # this entity's per-layer squashfs LOOP mounts. Each layer is loop-mounted at
-    # /tmp/unraid-aicliagents/mnt/<type>_<id>_<layer> as the overlay's lowerdir;
+    # ${MOUNT_ROOT}/mnt/<type>_<id>_<layer> as the overlay's lowerdir;
     # if we rm the .sqsh while that mount is still up, the loop device is left
     # bound to a (deleted) backing file forever — the orphan-loop residue the
     # state-invariant harness flags (I5). Unmount each (releasing the loop) so a
     # wipe never leaks an orphan loop. The merge mount above already dropped the
     # only reference to these lowers.
     local _wl
-    for _wl in /tmp/unraid-aicliagents/mnt/${TYPE}_${ID}_*; do
+    for _wl in "${MOUNT_ROOT}"/mnt/${TYPE}_${ID}_*; do
         [ -d "$_wl" ] || continue
         layer_name_is_of "$TYPE" "$ID" "${_wl##*/}" || continue   # R-002 (#580): not another entity's mount
         umount_or_keep "$_wl" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir
@@ -688,7 +689,7 @@ do_wipe() {
     done
     if [ "$WANT_UPPER" -eq 1 ]; then
         local up; up="$(_upper_dir)"
-        case "$up" in /tmp/unraid-aicliagents/*|"$PERSIST"/_upper/*) rm -rf "$up" 2>/dev/null ;; esac
+        case "$up" in "${MOUNT_ROOT}/"*|"$PERSIST"/_upper/*) rm -rf "$up" 2>/dev/null ;; esac
     fi
     if [ "$WANT_LAYERS" -eq 1 ]; then
         shopt -s nullglob
@@ -732,7 +733,7 @@ do_graduate() {
 # backend-migrate — one entity's part of the global storage-engine migration.
 do_backend_migrate() {
     require_entity_args
-    backend_migration_clear_reasons "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-/tmp/unraid-aicliagents}"
+    backend_migration_clear_reasons "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-${MOUNT_ROOT}}"
     _itest_guard || { emit_json 3 "failed" "guard_reject"; exit 3; }
     case "$TARGET" in
         layering|passthrough) ;;
@@ -749,7 +750,7 @@ do_backend_migrate() {
     local changed=0
     [ "$(cat "$result_file" 2>/dev/null)" = "1" ] && changed=1
     rm -f "$result_file"
-    local reason; reason="$(backend_migration_failure_reason "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-/tmp/unraid-aicliagents}" "$ex")"
+    local reason; reason="$(backend_migration_failure_reason "$TYPE" "$ID" "${AICLI_BACKEND_MIGRATION_MARKER_DIR:-${MOUNT_ROOT}}" "$ex")"
     emit_json "$ex" "$(_outcome_for "$ex")" "$reason" "$(_lifecycle_events_json "$start")" "" "$changed"
     exit "$ex"
 }
@@ -870,7 +871,7 @@ _pt_sweep_generations() {
 # (a real umount decides). agents/<id> is then free to become the symlink.
 # The version the old-layout sessions run is written to a marker in RAM, so
 # the drawer can offer them the switch to the installed version.
-_pt_legacy_marker() { printf '%s/passthrough-legacy-%s' "${AICLI_PT_LEGACY_MARKER_DIR:-/tmp/unraid-aicliagents}" "$ID"; }
+_pt_legacy_marker() { printf '%s/passthrough-legacy-%s' "${AICLI_PT_LEGACY_MARKER_DIR:-${MOUNT_ROOT}}" "$ID"; }
 
 # _pt_move_busy_old_layout <stable> — 0 when the busy bind was moved to its
 # version path; 1 (nothing changed) when the bind shows no known version, the

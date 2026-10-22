@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents: cache folders of a plain-folder home (BOOT_DISK_SPACE.md R5, #537, #533).
 #
 # A plain home is one bind mount of a folder on the boot disk. Without this file
@@ -11,17 +12,17 @@
 # lifecycle_log (resolve_paths.sh, optional).
 #
 # Test seams (environment):
-#   AICLI_HOME_CACHE_BASE   RAM base folder   (default /tmp/unraid-aicliagents/cache)
+#   AICLI_HOME_CACHE_BASE   RAM base folder   (default ${MOUNT_ROOT}/cache)
 #   AICLI_HC_LOCATION / AICLI_HC_PATH / AICLI_HC_RAM_MB   replace the settings
 #   AICLI_PROC_SCAN_DIR     replaces /proc in the "is the home in use" scan
 
 # ---- settings ----------------------------------------------------------------
 
-home_cache_ram_base() { printf '%s\n' "${AICLI_HOME_CACHE_BASE:-/tmp/unraid-aicliagents/cache}"; }
+home_cache_ram_base() { printf '%s\n' "${AICLI_HOME_CACHE_BASE:-${MOUNT_ROOT}/cache}"; }
 
 # _hc_cfg <key> — the raw value of a plugin setting ("" when absent).
 _hc_cfg() {
-    local cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+    local cfg="${CONFIG_FILE:-${PLUGIN_BASE}/unraid-aicliagents.cfg}"
     [ -f "$cfg" ] || return 0
     grep -oP "^$1=\"?\K[^\"]*(?=\"?\$)" "$cfg" 2>/dev/null | head -1
 }
@@ -397,11 +398,11 @@ home_cache_release_ram() {
     return 0
 }
 
-# home_cache_id_of_mount <mnt> — the home id of /tmp/unraid-aicliagents/work/<id>/home.
+# home_cache_id_of_mount <mnt> — the home id of ${MOUNT_ROOT}/work/<id>/home.
 home_cache_id_of_mount() {
     local m="${1%/}" id
-    case "$m" in /tmp/unraid-aicliagents/work/*/home) : ;; *) return 1 ;; esac
-    id="${m#/tmp/unraid-aicliagents/work/}"; id="${id%/home}"
+    case "$m" in "${MOUNT_ROOT}/work/"*/home) : ;; *) return 1 ;; esac
+    id="${m#"${MOUNT_ROOT}/work/"}"; id="${id%/home}"
     case "$id" in ''|*/*|*[!A-Za-z0-9._-]*) return 1 ;; esac
     printf '%s\n' "$id"
 }
@@ -489,7 +490,7 @@ home_cache_status_json() {
 home_cache_clear() {
     local id="$1" persist="$2" home root mnt freed=0 b rel loc
     home="$persist/passthrough/homes/$id"
-    mnt="$(_hc_state_get "$id" mnt)"; [ -n "$mnt" ] || mnt="/tmp/unraid-aicliagents/work/$id/home"
+    mnt="$(_hc_state_get "$id" mnt)"; [ -n "$mnt" ] || mnt="${MOUNT_ROOT}/work/$id/home"
     home_cache_home_busy "$mnt" && return 3
     root="$(_hc_state_get "$id" root)"; loc="$(_hc_state_get "$id" location)"
     if [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ]; then

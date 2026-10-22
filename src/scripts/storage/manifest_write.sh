@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # manifest_write.sh — Epic #1310 #1320 / WP#1331 (F6): the SINGLE manifest writer.
 #
 # The spec mandated one bash-side manifest writer because bash can't call PHP at
@@ -38,7 +39,7 @@ _MW_MANIFEST_LOCK="/var/run/aicli-supervisor.manifest.lock"
 #   Default path honours AICLI_MANIFEST_PATH (the #1254 test redirect).
 #   Returns 1 if the manifest is absent.
 manifest_read_locked() {
-    local mpath="${1:-${AICLI_MANIFEST_PATH:-/boot/config/plugins/unraid-aicliagents/layer_manifest.json}}"
+    local mpath="${1:-${AICLI_MANIFEST_PATH:-${PLUGIN_BASE}/layer_manifest.json}}"
     [ -f "$mpath" ] || return 1
     if command -v flock >/dev/null 2>&1 \
         && { [ -e "$_MW_MANIFEST_LOCK" ] || touch "$_MW_MANIFEST_LOCK" 2>/dev/null; }; then

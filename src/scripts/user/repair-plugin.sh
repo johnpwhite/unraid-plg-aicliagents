@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents current-architecture repair utility (#96).
 #
 # This command is deliberately fail-closed. It never formats, deletes, migrates,
@@ -9,7 +10,7 @@ set -u
 
 PLUGIN_DIR="${AICLI_REPAIR_PLUGIN_DIR:-/usr/local/emhttp/plugins/unraid-aicliagents}"
 PHP_BIN="${AICLI_REPAIR_PHP:-php}"
-STATUS_FILE="${AICLI_REPAIR_STATUS_FILE:-/tmp/unraid-aicliagents/repair-status}"
+STATUS_FILE="${AICLI_REPAIR_STATUS_FILE:-${MOUNT_ROOT}/repair-status}"
 MODE="apply"
 [ "${1:-}" = "--check" ] && MODE="check"
 mkdir -p "$(dirname "$STATUS_FILE")"

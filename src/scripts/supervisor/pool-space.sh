@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # pool-space.sh — warn early when the file system that holds the persistence
 # folder (the boot disk) fills up (Forgejo #393,
 # docs/specs/HARD_STOP_RESILIENCE.md R9).
@@ -60,7 +61,7 @@ _pool_space_dir_mb() {
 # fresh (under one hour old). Empty when the file is missing, old or damaged. The
 # check reads the file with grep and sed, so it needs no jq and no php.
 _pool_space_cached_old_mb() {
-    local f="${AICLI_BOOT_SPACE_FILE:-/tmp/unraid-aicliagents/.boot_space.json}" now at b
+    local f="${AICLI_BOOT_SPACE_FILE:-${MOUNT_ROOT}/.boot_space.json}" now at b
     [ -f "$f" ] || return 0
     now="${AICLI_POOL_NOW:-$(date +%s)}"
     at="$(grep -o '"measured_at":[0-9]*' "$f" 2>/dev/null | head -n 1 | sed 's/[^0-9]//g')"
@@ -145,9 +146,9 @@ _pool_space_tick() {
         if declare -f home_persist_path >/dev/null 2>&1; then
             persist="$(home_persist_path 2>/dev/null)"
         fi
-        [ -n "$persist" ] || persist="/boot/config/plugins/unraid-aicliagents/persistence"
+        [ -n "$persist" ] || persist="${PLUGIN_BASE}/persistence"
     fi
-    local state="${AICLI_POOL_STATE_DIR:-/tmp/unraid-aicliagents}"
+    local state="${AICLI_POOL_STATE_DIR:-${MOUNT_ROOT}}"
     local interval="${AICLI_POOL_INTERVAL:-300}"
     local warn="${AICLI_POOL_WARN_PCT:-85}" clear="${AICLI_POOL_CLEAR_PCT:-80}"
     local now line size used avail mount pct free_mb safe op marker last_pct users msg label d advice

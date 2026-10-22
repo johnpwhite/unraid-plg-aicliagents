@@ -12,12 +12,15 @@ error_reporting(E_ALL);
 ini_set('display_errors', '0');
 set_time_limit(30);
 
+// Load the path resolver before the shutdown handler can need its log path.
+require_once __DIR__ . '/includes/services/SecretPaths.php';
+
 // Fatal Error Handler
 register_shutdown_function(function() {
     $error = error_get_last();
     if ($error !== NULL && ($error['type'] === E_ERROR || $error['type'] === E_PARSE || $error['type'] === E_CORE_ERROR || $error['type'] === E_COMPILE_ERROR)) {
         $msg = "FATAL PHP ERROR: {$error['message']} in {$error['file']} on line {$error['line']}";
-        $logFile = "/tmp/unraid-aicliagents/debug.log";
+        $logFile = \AICliAgents\Services\SecretPaths::stateRoot() . '/debug.log';
         @file_put_contents($logFile, "[" . date("Y-m-d H:i:s") . "] $msg\n", FILE_APPEND);
         if (!headers_sent()) {
             header('Content-Type: application/json');
@@ -272,7 +275,7 @@ if (isset($_GET['action'])) {
                 header('Content-Type: application/json');
                 echo json_encode(['progress' => 0, 'step' => 'invalid user']);
             } else {
-                $file = "/tmp/unraid-aicliagents/task-status-$user";
+                $file = \AICliAgents\Services\SecretPaths::stateRoot() . "/task-status-$user";
                 header('Content-Type: application/json');
                 // nosemgrep: php.lang.security.injection.echoed-request.echoed-request
                 if (file_exists($file)) echo file_get_contents($file);

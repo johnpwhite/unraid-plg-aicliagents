@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents uninstaller residual process/runtime sweep.
 #
 # The primary uninstaller calls stop-plugin.sh first so live home data is baked
@@ -7,7 +8,7 @@
 # process before the deployed PHP/source tree can be removed.
 
 EMHTTP_DEST="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}"
-RUNTIME_DIR="${AICLI_RUNTIME_DIR:-/tmp/unraid-aicliagents}"
+RUNTIME_DIR="${AICLI_RUNTIME_DIR:-${MOUNT_ROOT}}"
 RUN_DIR="${AICLI_RUN_DIR:-/var/run}"
 TMP_DIR="${AICLI_TMP_DIR:-/tmp}"
 SUPERVISOR_SH="${AICLI_SUPERVISOR_SH:-$EMHTTP_DEST/src/scripts/supervisor/aicli-supervisor.sh}"

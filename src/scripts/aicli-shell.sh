@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents CLI Restricted Shell Wrapper
 # v2026.03.17.13 - Pure Terminal Wrapper (No Heartbeats)
 #
@@ -21,14 +22,14 @@ esac
 ID="${AICLI_SESSION_ID:-default}"
 AGENT_ID="${AGENT_ID:-gemini-cli}"
 SESSION="aicli-agent-$AGENT_ID-$ID"
-TMP_DIR="/tmp/unraid-aicliagents"
+TMP_DIR="${MOUNT_ROOT}"
 
 # Performance tracing — lightweight timestamp log for optimizing cold-start latency.
-# Each perf_log call writes: epoch_ms stage agent session_id → /tmp/unraid-aicliagents/perf.log
+# Each perf_log call writes: epoch_ms stage agent session_id → ${MOUNT_ROOT}/perf.log
 # Read the last launch's breakdown:
-#   ssh root@<host> "awk -v s=\$(awk '/shell.start/{last=NR} END{print last}' /tmp/unraid-aicliagents/perf.log) \
-#     'NR>=s {if(prev) printf \"%-30s +%5d ms\\n\", \$2, \$1-prev; prev=\$1}' /tmp/unraid-aicliagents/perf.log"
-PERF_LOG="/tmp/unraid-aicliagents/perf.log"
+#   ssh root@<host> "awk -v s=\$(awk '/shell.start/{last=NR} END{print last}' ${MOUNT_ROOT}/perf.log) \
+#     'NR>=s {if(prev) printf \"%-30s +%5d ms\\n\", \$2, \$1-prev; prev=\$1}' ${MOUNT_ROOT}/perf.log"
+PERF_LOG="${MOUNT_ROOT}/perf.log"
 perf_log() {
     printf '%s %s %s %s\n' "$(date +%s%N | cut -c1-13)" "$1" "$AGENT_ID" "$ID" >> "$PERF_LOG" 2>/dev/null
 }
@@ -44,7 +45,7 @@ perf_log shell.start
 
 USER_NAME=$(whoami)
 USER_WORK_DIR="$TMP_DIR/work/$USER_NAME"
-DEBUG_LOG="/tmp/unraid-aicliagents/debug.log"
+DEBUG_LOG="${MOUNT_ROOT}/debug.log"
 EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 # Capture the immutable generation containing this launcher. TerminalService
 # resolves the active src symlink before starting ttyd, so this path remains
@@ -98,7 +99,7 @@ fi
 # backed and consolidates to Flash). Losing the cache on reboot is fine — same
 # cost as today's cold start. Matches the existing npm_cache pruning policy in
 # consolidate_layers.sh: caches never reach Flash.
-export NODE_COMPILE_CACHE="/tmp/unraid-aicliagents/cache/node-compile"
+export NODE_COMPILE_CACHE="${MOUNT_ROOT}/cache/node-compile"
 mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null
 # Hash identifies per-workspace+agent config files (envs, tmux settings). Used by both the
 # new-session init block and the launch-time tmux apply step below.
@@ -218,10 +219,10 @@ _load_args_with_warn() {
         if (\$d === null && trim(\$raw) !== '') { fwrite(STDERR, 'parse_error: ' . json_last_error_msg()); exit; }
         if (!is_array(\$d)) { fwrite(STDERR, 'not_array'); exit; }
         echo \$d['args'] ?? '';
-    " 2>/tmp/unraid-aicliagents/.args-load-err.$$
+    " 2>${MOUNT_ROOT}/.args-load-err.$$
     local _err
-    _err="$(cat "/tmp/unraid-aicliagents/.args-load-err.$$" 2>/dev/null)"
-    rm -f "/tmp/unraid-aicliagents/.args-load-err.$$"
+    _err="$(cat "${MOUNT_ROOT}/.args-load-err.$$" 2>/dev/null)"
+    rm -f "${MOUNT_ROOT}/.args-load-err.$$"
     [ -n "$_err" ] && log_aicli "WARN" 1 "Failed to load args from $_path: $_err — proceeding with empty args"
 }
 if [ -f "$_ARGS_WS_FILE" ]; then
@@ -296,7 +297,7 @@ export LC_ALL=en_US.UTF-8
 # "missing or unsuitable terminal". Compile our bundled source once into a tmpfs
 # dir and expose it via TERMINFO_DIRS (trailing ':' keeps the system db, where
 # xterm-256color lives). Guarded: only if tic exists and it isn't already built.
-_AICLI_TI_DIR="/tmp/unraid-aicliagents/terminfo"
+_AICLI_TI_DIR="${MOUNT_ROOT}/terminfo"
 _AICLI_TI_SRC="$PLUGIN_SRC/terminfo/tmux.terminfo"
 if [ ! -e "$_AICLI_TI_DIR/t/tmux-256color" ] && command -v tic >/dev/null 2>&1 && [ -f "$_AICLI_TI_SRC" ]; then
     mkdir -p "$_AICLI_TI_DIR" 2>/dev/null
@@ -343,7 +344,7 @@ fi
 # shared /tmp/tmux-<uid>. Other processes on the box (a user's own SSH tmux, a
 # container bind-mounting /tmp, another plugin) can leave /tmp/tmux-<uid> with
 # permissions tmux rejects ("unsafe permissions"), and the terminal then fails
-# with "Terminal session not found". /tmp/unraid-aicliagents/tmux is the
+# with "Terminal session not found". ${MOUNT_ROOT}/tmux is the
 # plugin's alone, so tmux's tmux-<uid> dir inside it cannot be corrupted from
 # outside. Exported so the tmux server and every child inherit the same socket
 # location; every other plugin script that calls tmux sets it identically.
@@ -359,7 +360,7 @@ fi
 #
 # AICLI_TMUX_ROOT stays shared: PHP writes per-agent quirk files there, and
 # socket discovery (ProcessManager::tmuxSocketPaths) scans it for both layouts.
-export AICLI_TMUX_ROOT="/tmp/unraid-aicliagents/tmux"
+export AICLI_TMUX_ROOT="${MOUNT_ROOT}/tmux"
 mkdir -p "$AICLI_TMUX_ROOT" 2>/dev/null
 # Sticky world-writable (like /tmp) so multiple agent uids can each create their
 # own subtree but cannot delete or replace another uid's.
@@ -465,7 +466,7 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     # Forgejo #433 (docs/specs/WORKSPACE_SESSION_END_TRACE.md): the session is gone. If the tmux server that held it
     # is gone too, with no "session closed" line in the debug log, it was killed from outside (a signal, the
     # out-of-memory killer) or the box restarted. Say so, so a vanished session can be explained.
-    _OLD_SRV_PID_FILE="${TMUX_TMPDIR:-/tmp/unraid-aicliagents/tmux/s-$ID}/server.pid"
+    _OLD_SRV_PID_FILE="${TMUX_TMPDIR:-${MOUNT_ROOT}/tmux/s-$ID}/server.pid"
     if [ -r "$_OLD_SRV_PID_FILE" ]; then
         _OLD_SRV_PID="$(cat "$_OLD_SRV_PID_FILE" 2>/dev/null)"
         if [ -n "$_OLD_SRV_PID" ] && ! kill -0 "$_OLD_SRV_PID" 2>/dev/null; then
@@ -491,7 +492,7 @@ log_aicli() {
     local level_val="$2"
     local msg="$3"
     local bridge="$PLUGIN_SRC/scripts/log-bridge.php"
-    local debug_log="/tmp/unraid-aicliagents/debug.log"
+    local debug_log="${MOUNT_ROOT}/debug.log"
 
     if [ ! -f "$bridge" ]; then
         echo "[$(date "+%Y-%m-%d %H:%M:%S")] [SHELL-CHILD] $msg" >> "$debug_log" 2>/dev/null
@@ -503,7 +504,7 @@ perf_log() {
     # Optional $2 is appended as a free-form extra field (issue #71 uses it for
     # `run.exit ... rc=<code>`). AICLI_PERF_LOG override exists for unit tests
     # only — production always writes the shared perf.log.
-    printf '%s %s %s %s%s\n' "$(date +%s%N | cut -c1-13)" "$1" "$AGENT_ID" "$AICLI_SESSION_ID" "${2:+ $2}" >> "${AICLI_PERF_LOG:-/tmp/unraid-aicliagents/perf.log}" 2>/dev/null
+    printf '%s %s %s %s%s\n' "$(date +%s%N | cut -c1-13)" "$1" "$AGENT_ID" "$AICLI_SESSION_ID" "${2:+ $2}" >> "${AICLI_PERF_LOG:-${MOUNT_ROOT}/perf.log}" 2>/dev/null
 }
 FUNCOEF
 
@@ -701,7 +702,7 @@ PRIOEOF
 # perf_log/log_aicli call, so the FIRST line of the heredoc body is now
 # a direct debug.log write -- bypasses log_aicli (which calls php) so it
 # works even if php is broken in this context.
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> /tmp/unraid-aicliagents/debug.log
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> "${MOUNT_ROOT}/debug.log"
 export TERM=xterm-256color
 export LC_ALL=en_US.UTF-8
 # Ensure the agent (and every child) runs in the WORKSPACE, not the tmux server's
@@ -734,11 +735,11 @@ export VISUAL="${VISUAL:-true}"
 export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-B] before stty sane" >> /tmp/unraid-aicliagents/debug.log
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-B] before stty sane" >> "${MOUNT_ROOT}/debug.log"
 stty sane 2>/dev/null
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-C] after stty sane (rc=$?)" >> /tmp/unraid-aicliagents/debug.log
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-C] after stty sane (rc=$?)" >> "${MOUNT_ROOT}/debug.log"
 perf_log run.start
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-D] after perf_log run.start" >> /tmp/unraid-aicliagents/debug.log
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-D] after perf_log run.start" >> "${MOUNT_ROOT}/debug.log"
 
 # WP #1253: keep opost+onlcr asserted on this pane for the life of the session.
 # A TUI agent (e.g. agy) cfmakeraw's the pane (turning opost OFF) for its own UI.
@@ -958,12 +959,12 @@ _aicli_record_agent_exit() {
 # TTY (see safe_exec / D-400 — redirecting stderr to a file breaks TUI isatty
 # probes and is NOT an option), so on an unexplained exit the pane scrollback
 # IS the stderr record. Snapshot the last ~80 pane lines plus launch context
-# into /tmp/unraid-aicliagents/crash-<agent>-<session>-<timestamp>.log before
+# into ${MOUNT_ROOT}/crash-<agent>-<session>-<timestamp>.log before
 # the relaunch loop repaints the screen. Bounded: only the 10 newest crash
 # files per agent are kept. AICLI_CRASH_DIR override exists for unit tests.
 _aicli_capture_crash() {
     local _attempt="$1" _rc="$2"
-    local _dir="${AICLI_CRASH_DIR:-/tmp/unraid-aicliagents}"
+    local _dir="${AICLI_CRASH_DIR:-${MOUNT_ROOT}}"
     local _crash_file="$_dir/crash-${AGENT_ID}-${AICLI_SESSION_ID}-$(date +%Y%m%d-%H%M%S).log"
     {
         printf 'agent=%s session=%s attempt=%s rc=%s captured_at=%s\n' \
@@ -1083,8 +1084,8 @@ while true; do
     # re-exec the agent — relaunching a workspace the user just closed and forcing
     # gracefulClose into its 3s hard-stop fallback. Checking the flag before the
     # (re)launch breaks cleanly while still preserving the scrape window.
-    if [ -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" ]; then
-        rm -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" 2>/dev/null
+    if [ -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" ]; then
+        rm -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" 2>/dev/null
         log_aicli "INFO" 2 "Graceful close sentinel observed at loop top — exiting before relaunch."
         break
     fi
@@ -1669,8 +1670,8 @@ while true; do
     # then touch of close-<id>.flag), the agent has already flushed its state
     # and emitted its resume id. Break out of the relaunch loop so the user
     # isn't greeted by "Press ENTER to reload" on a closed workspace.
-    if [ -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" ]; then
-        rm -f "/tmp/unraid-aicliagents/close-$AICLI_SESSION_ID.flag" 2>/dev/null
+    if [ -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" ]; then
+        rm -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" 2>/dev/null
         log_aicli "INFO" 2 "Graceful close sentinel observed — exiting relaunch loop."
         break
     fi
@@ -1686,8 +1687,8 @@ while true; do
     # in that case — they explicitly asked for an immediate restart. Skip the
     # prompt and relaunch immediately. The args refresh at the top of the next
     # iteration picks up the new value.
-    if [ -f "/tmp/unraid-aicliagents/auto-reload-$AICLI_SESSION_ID.flag" ]; then
-        rm -f "/tmp/unraid-aicliagents/auto-reload-$AICLI_SESSION_ID.flag" 2>/dev/null
+    if [ -f "${MOUNT_ROOT}/auto-reload-$AICLI_SESSION_ID.flag" ]; then
+        rm -f "${MOUNT_ROOT}/auto-reload-$AICLI_SESSION_ID.flag" 2>/dev/null
         log_aicli "INFO" 2 "Auto-reload sentinel observed — skipping reload prompt, relaunching immediately."
         continue
     fi
@@ -1781,7 +1782,7 @@ EOF
     # Forgejo #433: log the end of this session, and remember the server pid so a later start can tell a killed server
     # from an agent that simply exited.
     tmux set-hook -g session-closed "run-shell -b '$PLUGIN_SRC/scripts/tmux-session-closed.sh #{hook_session_name} $DEBUG_LOG'" 2>/dev/null
-    tmux display-message -p '#{pid}' > "${TMUX_TMPDIR:-/tmp/unraid-aicliagents/tmux/s-$ID}/server.pid" 2>/dev/null
+    tmux display-message -p '#{pid}' > "${TMUX_TMPDIR:-${MOUNT_ROOT}/tmux/s-$ID}/server.pid" 2>/dev/null
     # RESPONSIVE_PRIORITY.md R5: a new tmux server starts at nice 0. When the setting is on,
     # raise it now. The script reads the setting itself and does nothing when it is off.
     if [ -f "$PLUGIN_SRC/scripts/priority.sh" ]; then

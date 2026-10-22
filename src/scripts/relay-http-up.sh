@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # relay-http-up.sh — idempotent bring-up of the plugin-owned Relay HTTP listener
 # (Forgejo #113 / docs/specs/RELAY_HTTP_TRANSPORT.md).
 #
@@ -41,7 +42,7 @@ SERVER="$PLUGIN_SRC/scripts/relay-http-server.php"
 
 # Runtime state lives on /tmp, never /mnt/user: a blocking flock over shfs can
 # starve the FUSE worker pool and freeze every share on the host.
-RTDIR="${AICLI_RELAY_HTTP_RUNTIME:-/tmp/unraid-aicliagents/relay-http}"
+RTDIR="${AICLI_RELAY_HTTP_RUNTIME:-${MOUNT_ROOT}/relay-http}"
 PIDFILE="$RTDIR/listener.pid"
 # The wanted state ("on <bind> <port>" or "off"), written by every start and
 # stop. The supervisor audit reads it, so the audit needs no PHP.

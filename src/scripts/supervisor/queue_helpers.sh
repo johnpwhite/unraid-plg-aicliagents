@@ -1,7 +1,8 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # queue_helpers.sh — Flat-file queue protocol for the Storage Durability Supervisor.
 #
-# Queue directory: /tmp/unraid-aicliagents/supervisor/queue/
+# Queue directory: ${MOUNT_ROOT}/supervisor/queue/
 # File naming:    <priority>_<epoch>_<type>_<id>_<op>.req
 #   priority: 2-digit, 00 = highest (install), 05 = user-click, 10 = event,
 #             50 = dirty-pressure, 99 = schedule.
@@ -15,14 +16,14 @@
 #   path=$(queue_pop_next)
 #   depth=$(queue_depth)
 
-QUEUE_DIR="${QUEUE_DIR:-/tmp/unraid-aicliagents/supervisor/queue}"
+QUEUE_DIR="${QUEUE_DIR:-${MOUNT_ROOT}/supervisor/queue}"
 
 # S-08 (#1353): job ledger directory — one <job_id>.json per tracked supervisor
 # job, written atomically at every state transition (queued by queue_enqueue;
 # running/done/failed/deferred by the supervisor). PHP reads it via
 # SupervisorService::getJob/listJobs. Reaped by the supervisor's reconcile pass
 # (done after 1 h, failed/deferred after 24 h).
-JOBS_DIR="${JOBS_DIR:-/tmp/unraid-aicliagents/supervisor/jobs}"
+JOBS_DIR="${JOBS_DIR:-${MOUNT_ROOT}/supervisor/jobs}"
 # Real-time activity-tray push bridge (see _job_activity_push). Overridable so a
 # sandbox/test can point it at a non-existent path to disable the push.
 AICLI_SYNC_ACTIVITY_PHP="${AICLI_SYNC_ACTIVITY_PHP:-/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/supervisor/sync-activity.php}"

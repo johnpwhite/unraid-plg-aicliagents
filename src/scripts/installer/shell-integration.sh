@@ -1,4 +1,7 @@
 #!/bin/bash
+_INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
+[ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/storage/resolve_paths.sh"
+source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; return 1 2>/dev/null || exit 1; }
 # AI CLI Agents: Global Shell Integration (Aliases & Path)
 # This file is automatically sourced by bash/sh for all users.
 
@@ -34,7 +37,7 @@ _aicli_run() {
     local agent_path="$1"
     shift
     # 1. Automatically map to the plugin's persistent RAM home for the current user
-    local user_home="/tmp/unraid-aicliagents/work/$(whoami)/home"
+    local user_home="${MOUNT_ROOT}/work/$(whoami)/home"
     [ ! -d "$user_home" ] && mkdir -p "$user_home" && chmod 0700 "$user_home" >/dev/null 2>&1
     # Pre-create keyring dir so it lands in the first bake cycle (Bug #1042:
     # if the daemon creates it only at D-Bus start it may not exist on flash

@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # backup_home.sh — HOME_BACKUP.md: the step functions behind the supervisor's
 # `backup` op (aicli-supervisor.sh:_op_backup_home). SOURCED by
 # aicli-supervisor.sh, so it shares that process's SUP_LOCK_FD, lifecycle_log,
@@ -19,7 +20,7 @@
 # re-checks only that the target is STILL there (a UD device could vanish
 # between enqueue and the tick actually running).
 
-SUPERVISOR_DIR="${SUPERVISOR_DIR:-/tmp/unraid-aicliagents/supervisor}"
+SUPERVISOR_DIR="${SUPERVISOR_DIR:-${MOUNT_ROOT}/supervisor}"
 STORAGE_DIR="${STORAGE_DIR:-/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage}"
 AICLI_PLUGIN_ENTRY="${AICLI_PLUGIN_ENTRY:-/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/AICliAgentsManager.php}"
 EVENT_APPEND_PHP="${EVENT_APPEND_PHP:-/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/event-append.php}"
@@ -234,7 +235,7 @@ _backup_wait_entity_lock() {
 # _backup_ledger <kind> <user> <summary> [data_json]
 # _backup_write_last_record <user> <kind> <summary> <data_json> — durable per-user
 # record of the last run (finished or failed) at
-# /boot/config/plugins/unraid-aicliagents/backup-last-<user>.json, so the
+# ${PLUGIN_BASE}/backup-last-<user>.json, so the
 # Settings card and Health know the outcome and the target even when the run
 # used a target override or the setting changed afterwards. Atomic (tmp + mv).
 _backup_write_last_record() {
@@ -245,7 +246,7 @@ _backup_write_last_record() {
     [ -n "$data_json" ] || data_json='{}'
     [ -n "$user" ] || return 0
     command -v php >/dev/null 2>&1 || return 0
-    local dir="${AICLI_BACKUP_LAST_DIR:-/boot/config/plugins/unraid-aicliagents}" tmp
+    local dir="${AICLI_BACKUP_LAST_DIR:-${PLUGIN_BASE}}" tmp
     [ -d "$dir" ] || return 0
     tmp="$dir/.backup-last-$user.$$.tmp"
     if AICLI_BK_REC_USER="$user" AICLI_BK_REC_KIND="$kind" AICLI_BK_REC_SUMMARY="$summary" \
@@ -547,7 +548,7 @@ _backup_json_list() {
 # _backup_debug_log <LEVEL> <message> — one line in the plugin's debug log,
 # the file the Debug Console shows (DiagnosticsService::debugLogPath()).
 _backup_debug_log() {
-    local dir="${AICLI_DEBUG_LOG_DIR:-/tmp/unraid-aicliagents}"
+    local dir="${AICLI_DEBUG_LOG_DIR:-${MOUNT_ROOT}}"
     [ -d "$dir" ] || return 0
     printf '[%s] [%s] [HomeBackup] %s%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${1:-INFO}" \
         "${AICLI_TRACE_ID:+[t:$AICLI_TRACE_ID] }" "${2:-}" >> "$dir/debug.log" 2>/dev/null || true
@@ -1154,7 +1155,7 @@ _restore_write_last_record() {
     local user="${1:-}" ok="${2:-0}" snapshot="${3:-}" mode="${4:-}" safety_path="${5:-}" cause="${6:-}" summary="${7:-}"
     [ -n "$user" ] || return 0
     command -v php >/dev/null 2>&1 || return 0
-    local dir="/boot/config/plugins/unraid-aicliagents" tmp
+    local dir="${PLUGIN_BASE}" tmp
     [ -d "$dir" ] || return 0
     tmp="$dir/.restore-last-$user.$$.tmp"
     if AICLI_RS_REC_USER="$user" AICLI_RS_REC_OK="$ok" AICLI_RS_REC_SNAPSHOT="$snapshot" \

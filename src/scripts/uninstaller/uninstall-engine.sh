@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents complete explicit-uninstall engine.
 #
 # This is NOT the upgrade cleanup path. Unraid `plugin update` executes the new
@@ -12,7 +13,7 @@ set -u
 NAME="${NAME:-unraid-aicliagents}"
 CONFIG_DIR="${CONFIG_DIR:-/boot/config/plugins/$NAME}"
 EMHTTP_DEST="${EMHTTP_DEST:-/usr/local/emhttp/plugins/$NAME}"
-RUNTIME_DIR="${AICLI_RUNTIME_DIR:-/tmp/unraid-aicliagents}"
+RUNTIME_DIR="${AICLI_RUNTIME_DIR:-${MOUNT_ROOT}}"
 RUN_DIR="${AICLI_RUN_DIR:-/var/run}"
 TMP_DIR="${AICLI_TMP_DIR:-/tmp}"
 CRON_DIR="${AICLI_CRON_DIR:-/etc/cron.d}"

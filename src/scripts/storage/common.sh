@@ -1,10 +1,11 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents: Shared Storage Functions
 # Sourced by all storage scripts for consistent validation and logging.
 
 PLUGIN_BIN="/usr/local/emhttp/plugins/unraid-aicliagents/bin"
-ZRAM_BASE="/tmp/unraid-aicliagents/zram_upper"
-DEBUG_LOG="${AICLI_DEBUG_LOG:-/tmp/unraid-aicliagents/debug.log}"
+ZRAM_BASE="${MOUNT_ROOT}/zram_upper"
+DEBUG_LOG="${AICLI_DEBUG_LOG:-${MOUNT_ROOT}/debug.log}"
 
 # #1322: detect_backend.sh provides the GENUINE device test (entity_upper_mode /
 # backend_for) that _entity_paths uses for the zram-vs-disk upper-mode. It is a
@@ -76,10 +77,10 @@ guard_path() {
     # relocate them.
     local allowed=0
     case "$path" in
-        /tmp/unraid-aicliagents/zram_upper|/tmp/unraid-aicliagents/zram_upper/*) allowed=1 ;;
-        /tmp/unraid-aicliagents|/tmp/unraid-aicliagents/*) allowed=1 ;;
+        "${MOUNT_ROOT}/zram_upper"|"${MOUNT_ROOT}/zram_upper/"*) allowed=1 ;;
+        "${MOUNT_ROOT}"|"${MOUNT_ROOT}/"*) allowed=1 ;;
         /usr/local/emhttp/plugins/unraid-aicliagents|/usr/local/emhttp/plugins/unraid-aicliagents/*) allowed=1 ;;
-        /boot/config/plugins/unraid-aicliagents|/boot/config/plugins/unraid-aicliagents/*) allowed=1 ;;
+        "${PLUGIN_BASE}"|"${PLUGIN_BASE}/"*) allowed=1 ;;
     esac
 
     # User-configurable persistence paths under /mnt/. Allow any pool except the
@@ -501,7 +502,7 @@ _layer_fits_space() {
 # effort: a failed write only loses the figures.
 write_no_space_note() {
     local type="${1:-}" id="${2:-}" need="${3:-0}" free="${4:-unknown}" dir
-    dir="${AICLI_NO_SPACE_NOTE_DIR:-/tmp/unraid-aicliagents}"
+    dir="${AICLI_NO_SPACE_NOTE_DIR:-${MOUNT_ROOT}}"
     printf '%s %s\n' "$need" "$free" \
         > "$dir/.bake_no_space_${type}_${id//[^a-zA-Z0-9_-]/_}" 2>/dev/null || true
 }
@@ -574,7 +575,7 @@ SCRATCH_MARGIN=$((200 * 1024 * 1024))
 # Self-contained cfg read (common.sh may be sourced WITHOUT resolve_paths.sh, so it
 # does not rely on _rp_read_cfg).
 _consolidate_max_layers() {
-    local raw="" cfg="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+    local raw="" cfg="${PLUGIN_BASE}/unraid-aicliagents.cfg"
     if [ -n "${AICLI_CONSOLIDATE_MAX_LAYERS:-}" ]; then
         raw="$AICLI_CONSOLIDATE_MAX_LAYERS"
     elif [ -f "$cfg" ]; then
@@ -632,7 +633,7 @@ _entity_paths() {
     # ENTITY_UPPER_MODE with the mode of the live mount; this one stays.
     ENTITY_POLICY_UPPER_MODE="$_ep_mode"
     if [ "$_ep_type" = "home" ]; then
-        MNT_POINT="/tmp/unraid-aicliagents/work/$_ep_id/home"
+        MNT_POINT="${MOUNT_ROOT}/work/$_ep_id/home"
     elif declare -f agent_mount >/dev/null 2>&1; then
         # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): route through
         # resolve_paths.sh's agent_mount() when it's been sourced — same
@@ -1096,7 +1097,7 @@ _mounted_lower_count() {
 # Flash wear footprint: ~5 KB per failure, capped at 50 files. Trivial.
 # #1254: AICLI_FAILURES_DIR redirects failure snapshots off USB flash for the L3.5
 # suite (test-only; unset in production -> the flash path).
-FAILURE_DIR="${AICLI_FAILURES_DIR:-/boot/config/plugins/unraid-aicliagents/failures}"
+FAILURE_DIR="${AICLI_FAILURES_DIR:-${PLUGIN_BASE}/failures}"
 
 # snapshot_failure <type> <id> <exit_code> <source>
 # Best-effort — never fails, always returns 0.
@@ -1128,7 +1129,7 @@ snapshot_failure() {
 
     # stderr_tail for the supervisor's lifecycle event — per-entity so
     # concurrent failures don't collide.
-    local tail_path="/tmp/unraid-aicliagents/.stderr_tail_${safe_type}_${safe_id}.txt"
+    local tail_path="${MOUNT_ROOT}/.stderr_tail_${safe_type}_${safe_id}.txt"
     [ -f "$DEBUG_LOG" ] && tail -n 10 "$DEBUG_LOG" 2>/dev/null > "$tail_path" 2>/dev/null || true
 
     # Rotate the failures dir — keep the 50 most-recent snapshots; older ones
@@ -1158,7 +1159,7 @@ install_failure_trap() {
 # ---- 2026-09-30 (#374): exit hooks + the SQLite stage folder ----------------
 # docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the SQLite stage folder".
 # On .4 every scheduled bake of the root home copied 29 SQLite databases (up to
-# 2.5 GB) into /tmp/unraid-aicliagents/.sqlite_stage_home_root_<pid>, then
+# 2.5 GB) into ${MOUNT_ROOT}/.sqlite_stage_home_root_<pid>, then
 # stopped with exit 2 and left the copy behind. /tmp is the RAM root file
 # system: it filled to 100 % and every agent on the box failed. Now:
 #   1. the stage folder is on the file system of the writable layer (the
@@ -1189,7 +1190,7 @@ aicli_run_exit_hooks() {
 
 # The folder of the stage folders that old versions made (the RAM root file
 # system). A bake still sweeps it, so an upgrade removes their leftovers.
-AICLI_SQLITE_STAGE_LEGACY_ROOT="/tmp/unraid-aicliagents"
+AICLI_SQLITE_STAGE_LEGACY_ROOT="${MOUNT_ROOT}"
 
 # sqlite_stage_root <upper_dir> — the folder that holds the SQLite stage folder
 # of a bake of <upper_dir>: the parent folder of the writable layer, so the
@@ -1318,7 +1319,7 @@ sqlite_stage_fits() {
 # Prints nothing when unset. Self-contained cfg read (common.sh may be sourced
 # without resolve_paths.sh).
 consolidate_stage_fallback_root() {
-    local raw="" cfg="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+    local raw="" cfg="${PLUGIN_BASE}/unraid-aicliagents.cfg"
     # The env override is a test seam. SET but EMPTY means "no fallback at all",
     # so a test on a box whose cfg names a folder can still prove the no-fallback
     # path; UNSET means read the cfg (production).
@@ -1707,7 +1708,7 @@ release_layer_loops() {
 }
 
 # convert_lock_path <type> <id> — the file a running conversion holds (its pid).
-convert_lock_path() { printf '%s/.converting_%s_%s' "${AICLI_CONVERT_LOCK_DIR:-/tmp/unraid-aicliagents}" "$1" "$2"; }
+convert_lock_path() { printf '%s/.converting_%s_%s' "${AICLI_CONVERT_LOCK_DIR:-${MOUNT_ROOT}}" "$1" "$2"; }
 
 # convert_lock_begin <path> — write this process id and remove it on every exit.
 convert_lock_begin() {
@@ -1942,12 +1943,12 @@ write_graduate_refusal() {
     [ -n "$type" ] && [ -n "$id" ] || return 0
     local safe="${id//[^a-zA-Z0-9_-]/_}"
     printf '%s\n%s\n%s\n' "$why" "$path" "$first" \
-        > "/tmp/unraid-aicliagents/.graduate_refusal_${type}_${safe}" 2>/dev/null || true
+        > "${MOUNT_ROOT}/.graduate_refusal_${type}_${safe}" 2>/dev/null || true
 }
 
 # Clear and read only the reason markers written by one backend-migration call.
 backend_migration_clear_reasons() {
-    local type="${1:-}" id="${2:-}" root="${3:-/tmp/unraid-aicliagents}"
+    local type="${1:-}" id="${2:-}" root="${3:-${MOUNT_ROOT}}"
     local safe="${id//[^a-zA-Z0-9_-]/_}"
     [ -n "$type" ] && [ -n "$id" ] || return 0
     rm -f "$root/.convert_reason_${type}_${safe}" \
@@ -1957,7 +1958,7 @@ backend_migration_clear_reasons() {
 
 # Return the plain reason from the latest backend migration, for any exit code.
 backend_migration_failure_reason() {
-    local type="${1:-}" id="${2:-}" root="${3:-/tmp/unraid-aicliagents}" exit="${4:-0}"
+    local type="${1:-}" id="${2:-}" root="${3:-${MOUNT_ROOT}}" exit="${4:-0}"
     local safe convert refusal defer
     safe="${id//[^a-zA-Z0-9_-]/_}"
     convert="$root/.convert_reason_${type}_${safe}"
@@ -2459,7 +2460,7 @@ bake_via_pseudofile_merge() {
     # them on every exit path. The pseudo-file parser accepts quoted names, so
     # paths containing spaces remain lossless; exclude-file entries are one
     # complete path per line and likewise preserve spaces.
-    local merge_root="/tmp/unraid-aicliagents/.bake_pseudofile_${type}_${id}_$$"
+    local merge_root="${MOUNT_ROOT}/.bake_pseudofile_${type}_${id}_$$"
     local exclude_file="$merge_root/excludes"
     local pseudo_file="$merge_root/pseudo"
     rm -rf "$merge_root" 2>/dev/null
@@ -2572,7 +2573,7 @@ _umount_real_or_detach_logged() {
 # pending_release_list — the RAM list of mounts and files the sweep finishes.
 # One line per item: "<mount or ->\t<file or ->". AICLI_PENDING_RELEASE_LIST
 # overrides the path in tests.
-pending_release_list() { printf '%s' "${AICLI_PENDING_RELEASE_LIST:-/tmp/unraid-aicliagents/.pending_release}"; }
+pending_release_list() { printf '%s' "${AICLI_PENDING_RELEASE_LIST:-${MOUNT_ROOT}/.pending_release}"; }
 
 # _pending_release_add <mnt|-> <file|-> — queue one item, once.
 _pending_release_add() {
@@ -2590,9 +2591,9 @@ _pending_release_add() {
 # a layer loop mount, a verify scratch or a conversion scratch. Never an overlay.
 _pending_release_sweepable() {
     case "${1:-}" in
-        "${AICLI_LAYER_MNT_BASE:-/tmp/unraid-aicliagents/mnt}"/*) return 0 ;;
-        "${AICLI_AWL_SCRATCH_BASE:-/tmp/unraid-aicliagents/scratch}"/*) return 0 ;;
-        /tmp/unraid-aicliagents/.graduate_src_*) return 0 ;;
+        "${AICLI_LAYER_MNT_BASE:-${MOUNT_ROOT}/mnt}"/*) return 0 ;;
+        "${AICLI_AWL_SCRATCH_BASE:-${MOUNT_ROOT}/scratch}"/*) return 0 ;;
+        "${MOUNT_ROOT}/.graduate_src_"*) return 0 ;;
     esac
     return 1
 }
@@ -2687,7 +2688,7 @@ pending_release_sweep() {
                     printf '%s\t%s\n' "$mnt" "$f" >> "$keep"; left=$((left + 1)); continue
                 fi
             fi
-            [ "$mnt" != "-" ] && case "$mnt" in /tmp/unraid-aicliagents/*) rmdir "$mnt" 2>/dev/null ;; esac
+            [ "$mnt" != "-" ] && case "$mnt" in "${MOUNT_ROOT}/"*) rmdir "$mnt" 2>/dev/null ;; esac
             if [ "$f" != "-" ] && [ -e "$f" ]; then
                 release_layer_loops "$f" >/dev/null 2>&1 || true
                 if [ -n "$(layer_loops_of "$f")" ]; then
@@ -2856,7 +2857,7 @@ bake_result_saved() {
 # the supervisor's reconcile tick. Precedence mirrors _consolidate_max_layers:
 # AICLI_DEFER_MARKER_TTL_H env (test hook) > cfg key defer_marker_ttl_h > 24.
 _defer_marker_ttl_h() {
-    local raw="" cfg="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+    local raw="" cfg="${PLUGIN_BASE}/unraid-aicliagents.cfg"
     if [ -n "${AICLI_DEFER_MARKER_TTL_H:-}" ]; then
         raw="$AICLI_DEFER_MARKER_TTL_H"
     elif [ -f "$cfg" ]; then
@@ -3153,7 +3154,7 @@ _itest_sigkill_window() {
 # write_defer_reason <type> <id> <reason>
 # Writes a single-line reason marker for callers (StorageMountService / TaskService)
 # to disambiguate the legitimate exit-2 paths. Best-effort — failure to write does
-# not abort the bake. Path: /tmp/unraid-aicliagents/.bake_defer_reason_${type}_${id}
+# not abort the bake. Path: ${MOUNT_ROOT}/.bake_defer_reason_${type}_${id}
 # PHP side is responsible for unlink-after-read so stale reasons don't bleed across runs.
 # Validates <reason> against AICLI_DEFER_REASONS — an unlisted reason still writes
 # (non-breaking) but emits a stderr warning so a new caller can't silently invent a
@@ -3168,7 +3169,7 @@ write_defer_reason() {
         *) echo "[write_defer_reason] WARN: unlisted defer reason '$reason' (not in AICLI_DEFER_REASONS — add it + a TaskService.php message)" >&2 ;;
     esac
     local sanitised_id="${id//[^a-zA-Z0-9_-]/_}"
-    local marker="/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${sanitised_id}"
+    local marker="${MOUNT_ROOT}/.bake_defer_reason_${type}_${sanitised_id}"
     # Truncate to a single short line; reason should be a stable identifier.
     printf '%s\n' "$reason" > "$marker" 2>/dev/null || true
 }
@@ -3214,7 +3215,7 @@ _op_defer() {
 #   AICLI_BATCH_DISABLE=1   emit nothing / inject nothing (byte-for-byte legacy)
 # ===========================================================================
 
-_BATCH_CACHE_DIR="/tmp/unraid-aicliagents/cache"
+_BATCH_CACHE_DIR="${MOUNT_ROOT}/cache"
 _BATCH_CACHE_FILE="${_BATCH_CACHE_DIR}/batch_cpus.cache"
 
 # _batch_online_cpus <sysfs_root> — print online cpu ids (one per line).

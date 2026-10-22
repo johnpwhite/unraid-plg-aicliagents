@@ -1,4 +1,7 @@
 #!/bin/bash
+_INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
+[ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/storage/resolve_paths.sh"
+source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents Installer: Runtime Dependencies (Node, tmux, fd, rg)
 
 # Forgejo #292 (2026-09-23): any human-readable line this script prints must go
@@ -412,7 +415,7 @@ create_docker_proxy() {
     local cmd=$1 image=$2 docker_cmd=$3 description=$4
     local wrapper="$BIN_DEST/$cmd"
     local wrapper_tmp="$wrapper.tmp.$$"
-    local log_file="/tmp/unraid-aicliagents/debug.log"
+    local log_file="${MOUNT_ROOT}/debug.log"
 
     cat > "$wrapper_tmp" <<'DOCKEREOF'
 #!/bin/bash
@@ -421,7 +424,8 @@ CMD="__CMD__"
 IMAGE="__IMAGE__"
 DOCKER_CMD="__DOCKER_CMD__"
 DESCRIPTION="__DESCRIPTION__"
-LOG="/tmp/unraid-aicliagents/debug.log"
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" || exit 1
+LOG="${MOUNT_ROOT}/debug.log"
 
 log_proxy() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [DockerProxy] $1" >> "$LOG" 2>/dev/null

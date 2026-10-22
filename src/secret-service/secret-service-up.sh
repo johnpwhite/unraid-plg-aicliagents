@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../scripts/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # secret-service-up.sh — idempotent per-user bring-up of the AICliAgents Secret
 # Service (Bug #1042 / docs/specs/SECRET_SERVICE.md).
 #
@@ -18,7 +19,7 @@ HOME_DIR="${2:-$HOME}"
 
 PLUGIN="/usr/local/emhttp/plugins/unraid-aicliagents"
 DAEMON="$PLUGIN/src/secret-service/secret-service-daemon"
-SS_BASE="/tmp/unraid-aicliagents/secret-service"
+SS_BASE="${MOUNT_ROOT}/secret-service"
 RTDIR="$SS_BASE/$USER_NAME"
 SOCK="$RTDIR/bus"
 ADDR="unix:path=$SOCK"

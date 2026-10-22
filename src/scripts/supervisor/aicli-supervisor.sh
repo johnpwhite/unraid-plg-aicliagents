@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # aicli-supervisor.sh — Storage Durability Supervisor daemon
 #
 # Phase 3.2: reconcile + drain + bake triggers wired.
@@ -38,7 +39,7 @@ LOCKFILE="/var/run/aicli-supervisor.lock"
 SUP_LOCK_FD=""
 
 # Status file lives in tmpfs — read by React UI.
-STATUS_DIR="/tmp/unraid-aicliagents"
+STATUS_DIR="${MOUNT_ROOT}"
 STATUSFILE="${STATUS_DIR}/supervisor.status.json"
 
 # Supervisor-specific directories under tmpfs
@@ -133,14 +134,14 @@ if [ -f "$RESOLVE_SH" ]; then
     [ -f "$GENERATION_SH" ] && source "$GENERATION_SH" 2>/dev/null || true
 else
     lifecycle_log() { true; }
-    agent_persist_path() { echo "/boot/config/plugins/unraid-aicliagents"; }
-    home_persist_path() { echo "/boot/config/plugins/unraid-aicliagents/persistence"; }
-    manifest_path() { echo "/boot/config/plugins/unraid-aicliagents/layer_manifest.json"; }
-    zram_upper() { echo "/tmp/unraid-aicliagents/zram_upper/${1}s/${2}/upper"; }
+    agent_persist_path() { echo "${PLUGIN_BASE}"; }
+    home_persist_path() { echo "${PLUGIN_BASE}/persistence"; }
+    manifest_path() { echo "${PLUGIN_BASE}/layer_manifest.json"; }
+    zram_upper() { echo "${MOUNT_ROOT}/zram_upper/${1}s/${2}/upper"; }
     home_live_upper() { zram_upper home "${1:-root}"; }
     home_uppers_live() {
         local d u
-        for d in /tmp/unraid-aicliagents/zram_upper/homes/*/upper; do
+        for d in "${MOUNT_ROOT}"/zram_upper/homes/*/upper; do
             [ -d "$d" ] || continue
             u="${d%/upper}"; printf '%s\t%s\n' "${u##*/}" "$d"
         done
@@ -352,7 +353,7 @@ _halt_exists() {
 # ---------------------------------------------------------------------------
 # Notification helper
 # Rate-limit: one notification per (entity, event) per boot.
-# The rate-limit file is /tmp/unraid-aicliagents/supervisor/.notified/<key>
+# The rate-limit file is ${MOUNT_ROOT}/supervisor/.notified/<key>
 # ---------------------------------------------------------------------------
 _NOTIFIED_DIR="${SUPERVISOR_DIR}/.notified"
 
@@ -472,7 +473,7 @@ _manifest_has_entity() {
 # Echoes a newline-separated list of entity keys from the manifest.
 _manifest_get_entities() {
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     [ -f "$mpath" ] || return 0
     # Extract entity keys from JSON: "home/root": { ... }
     _manifest_read "$mpath" | grep -oP '(?<="entities"\s{0,4}:\s{0,4}\{)[^}]*' 2>/dev/null | \
@@ -487,7 +488,7 @@ _manifest_get_entities() {
 _manifest_entity_layers() {
     local entity="${1:-}"
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     [ -f "$mpath" ] || return 0
     # Extract filenames from expected_layers for this entity
     # Look for the entity block and extract filenames
@@ -507,7 +508,7 @@ _manifest_entity_persist_path() {
     local manifest_json="${2:-}"
     if [ -z "$manifest_json" ]; then
         local mpath
-        mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+        mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
         [ -f "$mpath" ] || return 0
         manifest_json="$(_manifest_read "$mpath")"
     fi
@@ -655,7 +656,7 @@ _verify_layer_cached() {
 _manifest_last_known_good() {
     local entity="${1:-}"
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     [ -f "$mpath" ] || return 0
     _manifest_read "$mpath" | grep -A10 "\"${entity}\"" 2>/dev/null | \
         grep -oP '"last_known_good_at":\s*"\K[^"]*' | head -1 || true
@@ -763,7 +764,7 @@ _reconcile_finish_intent() {
         [ "$listed" -eq 0 ] || continue
         log_info "Reconcile: leftover old layer $bn of an interrupted $entity merge — finishing the delete (write-ahead intent)"
         ( source "${AICLI_STORAGE_COMMON_SH:-${STORAGE_DIR}/common.sh}" >/dev/null 2>&1 \
-            && layer_retire_file "$f" "/tmp/unraid-aicliagents/mnt/${bn%.sqsh}" ) || true
+            && layer_retire_file "$f" "${MOUNT_ROOT}/mnt/${bn%.sqsh}" ) || true
         lifecycle_log "info" "supervisor" "reconcile_intent_delete_finished" \
             "{\"entity\":\"$entity\",\"filename\":\"$bn\"}" 2>/dev/null || true
         changed=0
@@ -1047,8 +1048,8 @@ _reconcile_log_dedup() {
 # RAM list has items, or every AICLI_PENDING_SWEEP_EVERY_S (300) seconds over the
 # persistence folders, where a parked .pending-delete.* layer survives a reboot.
 _pending_release_tick() {
-    local list="${AICLI_PENDING_RELEASE_LIST:-/tmp/unraid-aicliagents/.pending_release}"
-    local stamp="${AICLI_PENDING_SWEEP_STAMP:-/tmp/unraid-aicliagents/.pending_release_swept}"
+    local list="${AICLI_PENDING_RELEASE_LIST:-${MOUNT_ROOT}/.pending_release}"
+    local stamp="${AICLI_PENDING_SWEEP_STAMP:-${MOUNT_ROOT}/.pending_release_swept}"
     local every="${AICLI_PENDING_SWEEP_EVERY_S:-300}" now last=0 id
     local dirs=()
     now="$(date +%s)"
@@ -1166,7 +1167,7 @@ _reconcile_recover_untracked_layer() {
 
 _op_reconcile() {
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     _manifest_heal_missing_homes
     [ -f "$mpath" ] || return 0
 
@@ -1272,7 +1273,7 @@ _op_reconcile() {
         # F4 (WP#1327): the marker is mtime-BOUNDED — a leaked marker (kill-mid-
         # migration; not a `finally`) must NOT disable path_drift protection for the
         # rest of the uptime. A marker older than the window is treated as stale/gone.
-        local _mig_marker="/tmp/unraid-aicliagents/.migration_inprogress.json"
+        local _mig_marker="${MOUNT_ROOT}/.migration_inprogress.json"
         local _mig_fresh=0
         if [ -f "$_mig_marker" ] && [ -n "$(find "$_mig_marker" -mmin -30 2>/dev/null)" ]; then
             _mig_fresh=1
@@ -1496,7 +1497,7 @@ _op_reconcile() {
                 log_info "Reconcile: untracked layer $act_file for $entity — attempting recovery"
                 # F27: give a transient loop-mount failure one retry before quarantine.
                 _reconcile_recover_untracked_layer "$type" "$id" "$persist_path" "$act_file" \
-                    "/tmp/unraid-aicliagents/.reconcile_verify_$$"
+                    "${MOUNT_ROOT}/.reconcile_verify_$$"
             fi
         done
 
@@ -1600,7 +1601,7 @@ _op_reconcile() {
     # another disk, which the loop above never sees. op_graduate records each
     # such folder in RETIRED_LIST; reap it after the same window. A folder whose
     # disk is not mounted (array stopped) keeps its line for a later tick.
-    local _rl="${AICLI_RETIRED_LIST:-/boot/config/plugins/unraid-aicliagents/retired_dirs.list}" _rl_keep _rl_d
+    local _rl="${AICLI_RETIRED_LIST:-${PLUGIN_BASE}/retired_dirs.list}" _rl_keep _rl_d
     if [ -s "$_rl" ]; then
         _rl_keep=""
         while IFS= read -r _rl_d; do
@@ -1632,7 +1633,7 @@ _op_reconcile() {
     fi
     [ -n "${AICLI_DEFER_MARKER_TTL_H:-}" ] && ttl_h="$AICLI_DEFER_MARKER_TTL_H"
     case "$ttl_h" in ''|*[!0-9]*) ttl_h=24 ;; esac
-    find /tmp/unraid-aicliagents -maxdepth 1 -name '.bake_defer_reason_*' \
+    find "$MOUNT_ROOT" -maxdepth 1 -name '.bake_defer_reason_*' \
         -mmin "+$(( ttl_h * 60 ))" -delete 2>/dev/null || true
 
     # Feature #1382 (finding 4): reap GENUINELY-abandoned loop devices — a loop
@@ -1778,7 +1779,7 @@ _op_bake() {
     local _bk_reason=""
     if [ "$exit_code" -eq 2 ]; then
         local _bk_safe_id="${id//[^a-zA-Z0-9_-]/_}"
-        _bk_reason="$(head -1 "/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${_bk_safe_id}" 2>/dev/null | tr -d '\n')"
+        _bk_reason="$(head -1 "${MOUNT_ROOT}/.bake_defer_reason_${type}_${_bk_safe_id}" 2>/dev/null | tr -d '\n')"
     fi
     # #374: record the result for the automatic-bake backoff (every caller;
     # a saved result clears it).
@@ -1802,7 +1803,7 @@ _op_bake() {
         local safe_type safe_id stderr_tail tail_path
         safe_type=$(printf '%s' "$type" | tr -c 'A-Za-z0-9_.-' '_')
         safe_id=$(printf '%s' "$id"     | tr -c 'A-Za-z0-9_.-' '_')
-        tail_path="/tmp/unraid-aicliagents/.stderr_tail_${safe_type}_${safe_id}.txt"
+        tail_path="${MOUNT_ROOT}/.stderr_tail_${safe_type}_${safe_id}.txt"
         stderr_tail=""
         if [ -f "$tail_path" ]; then
             stderr_tail=$(head -c 2000 "$tail_path" 2>/dev/null \
@@ -1859,7 +1860,7 @@ _bake_no_space_alert() {
     local type="${1:-}" id="${2:-}" safe_id need="0" free="unknown" f
     [ -n "$id" ] || return 0
     safe_id="${id//[^a-zA-Z0-9_-]/_}"
-    f="/tmp/unraid-aicliagents/.bake_no_space_${type}_${safe_id}"
+    f="${MOUNT_ROOT}/.bake_no_space_${type}_${safe_id}"
     [ -f "$f" ] && read -r need free < "$f" 2>/dev/null
     _supervisor_notify "warning" "AICliAgents: not enough boot disk space to save the home" \
         "Saving '$id' needs about ${need} MB of free space on the boot disk and only ${free} MB is free. Nothing was saved; your changes stay in RAM and are lost if the server restarts. Free some space (Home Storage, Boot disk space, shows what uses it), then save again." \
@@ -1877,7 +1878,7 @@ _bake_no_space_alert() {
 _bake_no_space_clear() {
     local type="${1:-}" id="${2:-}" safe_id
     safe_id="${id//[^a-zA-Z0-9_-]/_}"
-    rm -f "/tmp/unraid-aicliagents/.bake_no_space_${type}_${safe_id}" 2>/dev/null || true
+    rm -f "${MOUNT_ROOT}/.bake_no_space_${type}_${safe_id}" 2>/dev/null || true
     [ -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" ] || return 0
     rm -f "${_NOTIFIED_DIR}/tray_bake_no_space_${safe_id}" 2>/dev/null || true
     _bake_no_space_tray close "$id"
@@ -2012,7 +2013,7 @@ _op_consolidate() {
         local safe_type safe_id stderr_tail tail_path
         safe_type=$(printf '%s' "$type" | tr -c 'A-Za-z0-9_.-' '_')
         safe_id=$(printf '%s' "$id"     | tr -c 'A-Za-z0-9_.-' '_')
-        tail_path="/tmp/unraid-aicliagents/.stderr_tail_${safe_type}_${safe_id}.txt"
+        tail_path="${MOUNT_ROOT}/.stderr_tail_${safe_type}_${safe_id}.txt"
         stderr_tail=""
         if [ -f "$tail_path" ]; then
             stderr_tail=$(head -c 2000 "$tail_path" 2>/dev/null \
@@ -2335,7 +2336,7 @@ _op_mount() {
         # id sanitised exactly like commit_stack's _LOCK_ID).
         local safe_id marker
         safe_id="${id//[^a-zA-Z0-9_-]/_}"
-        marker="/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${safe_id}"
+        marker="${MOUNT_ROOT}/.bake_defer_reason_${type}_${safe_id}"
         [ -f "$marker" ] && _OP_DEFER_REASON="$(head -1 "$marker" 2>/dev/null | tr -d '\n')"
     fi
 
@@ -2485,7 +2486,7 @@ _op_graduate() {
     if [ "$exit_code" -eq 2 ] || [ "$exit_code" -eq 4 ]; then
         local safe_id marker
         safe_id="${id//[^a-zA-Z0-9_-]/_}"
-        marker="/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${safe_id}"
+        marker="${MOUNT_ROOT}/.bake_defer_reason_${type}_${safe_id}"
         [ -f "$marker" ] && _OP_DEFER_REASON="$(head -1 "$marker" 2>/dev/null | tr -d '\n')"
     fi
 
@@ -2878,7 +2879,7 @@ _job_finalize() {
     # bake/consolidate defers also leave a reason marker — record it.
     if [ -z "$defer" ] && { [ "$exit_code" -eq 2 ] || [ "$exit_code" -eq 4 ]; }; then
         local safe_id="${id//[^a-zA-Z0-9_-]/_}"
-        local marker="/tmp/unraid-aicliagents/.bake_defer_reason_${type}_${safe_id}"
+        local marker="${MOUNT_ROOT}/.bake_defer_reason_${type}_${safe_id}"
         [ -f "$marker" ] && defer="$(head -1 "$marker" 2>/dev/null | tr -d '\n')"
     fi
 
@@ -3395,7 +3396,7 @@ _reap_orphan_queued_jobs() {
 # unlinking an EXPIRED one can never change a bake decision. A live one is kept.
 # $1 (test seam) overrides the directory. Called from _op_reconcile.
 _bake_cooldown_marker_sweep() {
-    local dir="${1:-/tmp/unraid-aicliagents}"
+    local dir="${1:-${MOUNT_ROOT}}"
     [ -d "$dir" ] || return 0
     local cooldown="${AICLI_BUSY_BAKE_COOLDOWN_SEC:-1800}"
     case "$cooldown" in ''|*[!0-9]*) cooldown=1800 ;; esac
@@ -3421,7 +3422,7 @@ _bake_cooldown_marker_sweep() {
 # sorted glob and a count, no PHP child. Called from _op_reconcile.
 # $1 (test seam) overrides the ledger directory; default is the real one.
 _events_ledger_sweep() {
-    local dir="${1:-/tmp/unraid-aicliagents/events}"
+    local dir="${1:-${MOUNT_ROOT}/events}"
     [ -d "$dir" ] || return 0
 
     local max_events="${EVENT_LEDGER_MAX_EVENTS:-20000}"
@@ -3460,7 +3461,7 @@ _events_ledger_sweep() {
 # ---------------------------------------------------------------------------
 _check_dirty_pressure() {
     local zram_base
-    zram_base="${ZRAM_BASE:-/tmp/unraid-aicliagents/zram_upper}"
+    zram_base="${ZRAM_BASE:-${MOUNT_ROOT}/zram_upper}"
     [ -d "$zram_base" ] || return 0
 
     local total_bytes=0
@@ -3721,7 +3722,7 @@ _auto_bake_enqueue() {
 # ---------------------------------------------------------------------------
 _check_schedule_trigger() {
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     [ -f "$mpath" ] || return 0
 
     local now
@@ -3805,7 +3806,7 @@ _policy_consolidate_home_is_idle() {
 
 _check_consolidate_policy() {
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     [ -f "$mpath" ] || return 0
     [ "$(command -v php)" ] || return 0
 
@@ -3883,7 +3884,7 @@ _now_epoch() { date +%s; }
 # Echo newline-separated home ids from the manifest (homes only).
 _manifest_home_ids() {
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
     [ -f "$mpath" ] || return 0
     [ "$(command -v php)" ] || return 0
     AICLI_MANIFEST_FILE="$mpath" php -d display_errors=0 -r '
@@ -4481,7 +4482,7 @@ _agent_generation_sweep_run() {
     timeout 1800 bash "${STORAGE_DIR}/storagectl.sh" rebase --type agent --id "$agent_id" --persist "$persist" >/dev/null 2>&1
     rc=$?
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
-        touch "/tmp/unraid-aicliagents/.agent_rebase_failed_${agent_id}" 2>/dev/null || true
+        touch "${MOUNT_ROOT}/.agent_rebase_failed_${agent_id}" 2>/dev/null || true
     fi
     return 0
 }
@@ -4514,7 +4515,7 @@ _relay_pending_exists() {
         done
         return 1
     fi
-    for f in /tmp/unraid-aicliagents/work/*/home/relay/pending/*.json; do
+    for f in "${MOUNT_ROOT}"/work/*/home/relay/pending/*.json; do
         [ -f "$f" ] && return 0
     done
     return 1
@@ -4543,7 +4544,7 @@ _RELAY_PEER_LAST=0
 _RELAY_PEER_PID=""
 _relay_peer_tick() {
     [ "$(command -v php)" ] || return 0
-    local peers="${AICLI_RELAY_PEERS_FILE:-/boot/config/plugins/unraid-aicliagents/relay-peers.json}"
+    local peers="${AICLI_RELAY_PEERS_FILE:-${PLUGIN_BASE}/relay-peers.json}"
     [ -s "$peers" ] || return 0
     grep -q '"peer_' "$peers" 2>/dev/null || return 0
     local now; now=$(date +%s)
@@ -5029,7 +5030,7 @@ _do_start() {
     fi
 
     # Load config overrides if available
-    local cfg_file="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+    local cfg_file="${PLUGIN_BASE}/unraid-aicliagents.cfg"
     if [ -f "$cfg_file" ]; then
         # Read specific keys safely
         local _v
@@ -5225,7 +5226,7 @@ _do_flush() {
     lifecycle_log "info" "supervisor" "flush_start" "{\"timeout_s\":$timeout_sec}" 2>/dev/null || true
 
     # Enumerate dirty entities and enqueue priority-0 bakes
-    local zram_base="${ZRAM_BASE:-/tmp/unraid-aicliagents/zram_upper}"
+    local zram_base="${ZRAM_BASE:-${MOUNT_ROOT}/zram_upper}"
     local flushed_count=0
 
     # #372: a home is flushed from the upper its mount REALLY uses (zram or
@@ -5312,7 +5313,7 @@ _do_flush() {
 # ---------------------------------------------------------------------------
 _do_cleanup_phantoms() {
     local mpath
-    mpath="$(manifest_path 2>/dev/null || echo '/boot/config/plugins/unraid-aicliagents/layer_manifest.json')"
+    mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
 
     if [ ! -f "$mpath" ]; then
         log_info "cleanup-phantoms: manifest not found at $mpath — nothing to do"
@@ -5355,9 +5356,9 @@ _do_cleanup_phantoms() {
     # for OFFLINE-card rendering, so leftover smoke fixtures appear as ghost
     # users in the Storage tab UI. Match smoke[a-z]*[0-9]+ ONLY — never touch
     # anything that could be a real user.
-    local work_base="/tmp/unraid-aicliagents/work"
-    local zram_homes="/tmp/unraid-aicliagents/zram_upper/homes"
-    local zram_agents="/tmp/unraid-aicliagents/zram_upper/agents"
+    local work_base="${MOUNT_ROOT}/work"
+    local zram_homes="${MOUNT_ROOT}/zram_upper/homes"
+    local zram_agents="${MOUNT_ROOT}/zram_upper/agents"
     local fs_pruned=0
     for base in "$work_base" "$zram_homes" "$zram_agents"; do
         [ -d "$base" ] || continue

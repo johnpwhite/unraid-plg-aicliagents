@@ -8,17 +8,26 @@
 # complete stop + flush sequence.
 
 EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+if ! source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null; then
+    AICLI_FLASH_ROOT="${AICLI_FLASH_ROOT:-/boot/config/plugins/unraid-aicliagents}"
+    AICLI_STATE_ROOT="${AICLI_STATE_ROOT:-/tmp/unraid-aicliagents}"
+    while [[ "$AICLI_FLASH_ROOT" == */ ]]; do AICLI_FLASH_ROOT="${AICLI_FLASH_ROOT%/}"; done
+    while [[ "$AICLI_STATE_ROOT" == */ ]]; do AICLI_STATE_ROOT="${AICLI_STATE_ROOT%/}"; done
+    export AICLI_FLASH_ROOT AICLI_STATE_ROOT
+    PLUGIN_BASE="$AICLI_FLASH_ROOT"
+    MOUNT_ROOT="$AICLI_STATE_ROOT"
+    CONFIG_FILE="$PLUGIN_BASE/unraid-aicliagents.cfg"
+fi
 CLASSIFY="$EMHTTP_DEST/src/scripts/storage/classify-path.sh"
 SUPERVISOR_SCRIPT="$EMHTTP_DEST/src/scripts/supervisor/aicli-supervisor.sh"
-LOG="/tmp/unraid-aicliagents/debug.log"
+LOG="${MOUNT_ROOT}/debug.log"
 
-mkdir -p /tmp/unraid-aicliagents
+mkdir -p "$MOUNT_ROOT"
 
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+export TMUX_TMPDIR="${MOUNT_ROOT}/tmux"
 
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
-source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 # S-05 (#1352): durable degraded flag (dual-write tmpfs + boot config).
 source "$EMHTTP_DEST/src/scripts/storage/degraded_state.sh" 2>/dev/null || true
 # R2 (CAPTURE_RESUME_ALL_CLOSE_PATHS): the shutdown-capture bridge.
@@ -78,7 +87,7 @@ needs_array() {
 
 # Determine where storage lives
 PERSIST_PATH=$(agent_persist_path 2>/dev/null)
-[ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
+[ -z "$PERSIST_PATH" ] && PERSIST_PATH="$PLUGIN_BASE"
 STORAGE_CLASS=$(classify "$PERSIST_PATH")
 log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
 
@@ -90,7 +99,7 @@ log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
 log "Capturing resume ids before eviction sweep (budget ${CAPTURE_BUDGET}s)..."
 if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
     _capture_resume_before_stop "$CAPTURE_BUDGET"
-    : > /tmp/unraid-aicliagents/.resume_captured 2>/dev/null || true
+    : > "${MOUNT_ROOT}/.resume_captured" 2>/dev/null || true
 fi
 
 if needs_array "$STORAGE_CLASS"; then
@@ -129,7 +138,7 @@ if needs_array "$STORAGE_CLASS"; then
     if declare -f degraded_set >/dev/null 2>&1; then
         degraded_set "array_stopped_storage_on_array"
     else
-        touch /tmp/unraid-aicliagents/.emergency_mode
+        touch "${MOUNT_ROOT}/.emergency_mode"
     fi
     log "Emergency mode flag set (array stopped, plugin storage was on array)."
 
@@ -158,7 +167,7 @@ else
         # Non-root audit: iterate every per-uid tmux socket. PHP/root tmux
         # sees only its own server; non-root agents (e.g. aicliagent) live
         # under tmux-<other-uid>/default and were previously invisible.
-        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        for _sock in "${MOUNT_ROOT}"/tmux/tmux-*/default; do
             [ -S "$_sock" ] || continue
             while IFS= read -r sess; do
                 [ -z "$sess" ] && continue

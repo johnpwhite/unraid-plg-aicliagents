@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # shutdown_unmount.sh — the squashfs loop-mount teardown that frees /mnt/cache
 # at shutdown, factored out so the shutdown handler can GUARANTEE it runs within
 # a reserved slice of the budget (GH #10 / Forgejo #228).
@@ -18,7 +19,7 @@
 # .sqsh files. $1 (optional) overrides the mount base — for tests only; production
 # always uses the real path.
 _reserve_unmount_squashfs_loops() {
-    local base="${1:-/tmp/unraid-aicliagents/mnt}"
+    local base="${1:-${MOUNT_ROOT}/mnt}"
     if [ -d "$base" ]; then
         local mnt
         for mnt in "$base"/*; do

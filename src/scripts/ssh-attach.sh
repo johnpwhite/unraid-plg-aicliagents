@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents SSH Forced-Command Attach Script — chmod 0755
 #
 # Installed as the forced-command in authorized_keys for SSH launch links (#747).
@@ -26,7 +27,7 @@ export LANG=en_US.utf8
 export LC_ALL=en_US.utf8
 
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+export TMUX_TMPDIR="${MOUNT_ROOT}/tmux"
 
 SESSION_PATTERN='^aicli-agent-[A-Za-z0-9_.-]+$'
 

@@ -11,17 +11,26 @@
 # All path classification uses classify-path.sh (no PHP dependency during shutdown).
 
 EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
+if ! source "$EMHTTP_DEST/src/scripts/storage/resolve_paths.sh" 2>/dev/null; then
+    AICLI_FLASH_ROOT="${AICLI_FLASH_ROOT:-/boot/config/plugins/unraid-aicliagents}"
+    AICLI_STATE_ROOT="${AICLI_STATE_ROOT:-/tmp/unraid-aicliagents}"
+    while [[ "$AICLI_FLASH_ROOT" == */ ]]; do AICLI_FLASH_ROOT="${AICLI_FLASH_ROOT%/}"; done
+    while [[ "$AICLI_STATE_ROOT" == */ ]]; do AICLI_STATE_ROOT="${AICLI_STATE_ROOT%/}"; done
+    export AICLI_FLASH_ROOT AICLI_STATE_ROOT
+    PLUGIN_BASE="$AICLI_FLASH_ROOT"
+    MOUNT_ROOT="$AICLI_STATE_ROOT"
+    CONFIG_FILE="$PLUGIN_BASE/unraid-aicliagents.cfg"
+fi
 CLASSIFY="$EMHTTP_DEST/src/scripts/storage/classify-path.sh"
-LOG="/tmp/unraid-aicliagents/debug.log"
-CONFIG="/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg"
+LOG="${MOUNT_ROOT}/debug.log"
+CONFIG="$CONFIG_FILE"
 
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
-export TMUX_TMPDIR="/tmp/unraid-aicliagents/tmux"
+export TMUX_TMPDIR="${MOUNT_ROOT}/tmux"
 
-mkdir -p /tmp/unraid-aicliagents
+mkdir -p "$MOUNT_ROOT"
 
 # Source canonical path resolver (Phase 1 — Storage Durability Supervisor)
-source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/resolve_paths.sh" 2>/dev/null || true
 # F6 (WP#1331): the SINGLE manifest writer (shutdown delta bake's manifest record).
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/manifest_write.sh" 2>/dev/null || true
 # S-05 (#1352): durable degraded flag (dual-write tmpfs + boot config).
@@ -110,7 +119,7 @@ log "Shutdown/Array stop detected."
 # soon as the sessions below close; the plugin refuses a start on the array or
 # a pool while this flag exists (StorageMountService::isArrayStopping).
 # event/disks_mounted removes it; /tmp does not survive a reboot.
-touch "${AICLI_STATE_ROOT:-/tmp/unraid-aicliagents}/.array_stopping" 2>/dev/null || true
+touch "${MOUNT_ROOT}/.array_stopping" 2>/dev/null || true
 
 # docs/specs/VOICE_MAIL.md: voice mail lives on tmpfs between heartbeats, so flush
 # it to Flash before anything else in shutdown runs — this is the moment a reboot
@@ -150,7 +159,7 @@ fi
 # Determine storage classification
 # Fix C: use agent_persist_path() from canonical resolver (not a bare grep on agent_storage_path).
 PERSIST_PATH=$(agent_persist_path 2>/dev/null)
-[ -z "$PERSIST_PATH" ] && PERSIST_PATH="/boot/config/plugins/unraid-aicliagents"
+[ -z "$PERSIST_PATH" ] && PERSIST_PATH="$PLUGIN_BASE"
 STORAGE_CLASS=$(classify "$PERSIST_PATH")
 log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
 lifecycle_log "info" "event_stopping" "shutdown_event_received" "{\"storage_class\":\"$STORAGE_CLASS\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
@@ -223,7 +232,7 @@ run_full_stop() {
 log "Capturing resume ids before kill sweep (budget ${CAPTURE_BUDGET}s)..."
 if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
     _capture_resume_before_stop "$CAPTURE_BUDGET"
-    : > /tmp/unraid-aicliagents/.resume_captured 2>/dev/null || true
+    : > "${MOUNT_ROOT}/.resume_captured" 2>/dev/null || true
 fi
 
 if needs_array "$STORAGE_CLASS"; then
@@ -239,7 +248,7 @@ if needs_array "$STORAGE_CLASS"; then
         if declare -f degraded_set >/dev/null 2>&1; then
             degraded_set "array_stopped_storage_on_array"
         else
-            touch /tmp/unraid-aicliagents/.emergency_mode
+            touch "${MOUNT_ROOT}/.emergency_mode"
         fi
         log "Emergency mode flag set (array stopped, server still running)."
         # Notify UI: home gone, agents gone (both on array), emergency mode active
@@ -262,7 +271,7 @@ else
     if command -v tmux >/dev/null 2>&1; then
         # Non-root audit: iterate every per-uid tmux socket. PHP/root tmux
         # sees only its own server; non-root agents live under tmux-<uid>/.
-        for _sock in /tmp/unraid-aicliagents/tmux/tmux-*/default; do
+        for _sock in "${MOUNT_ROOT}"/tmux/tmux-*/default; do
             [ -S "$_sock" ] || continue
             while IFS= read -r sess; do
                 [ -z "$sess" ] && continue
@@ -349,7 +358,7 @@ else
                 lifecycle_log "warn" "event_stopping" "awl_source_failed" "{\"path\":\"$AWL_SCRIPT\"}" 2>/dev/null || true
             fi
         fi
-        ZRAM_UPPER="/tmp/unraid-aicliagents/zram_upper"
+        ZRAM_UPPER="${MOUNT_ROOT}/zram_upper"
         # #372 (HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins"):
         # bake the upper each home's mount REALLY uses (zram first, then disk),
         # not only the zram folders. Without resolve_paths.sh: the zram folders.

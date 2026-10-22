@@ -1,13 +1,14 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 set -euo pipefail
 # AICliAgents: ZRAM Initialization Script
 # Goal: Setup a 4GB compressed RAM block device for OverlayFS upperdir.
 
 ZRAM_SIZE="4G"
-ZRAM_MNT="/tmp/unraid-aicliagents/zram_upper"
+ZRAM_MNT="${MOUNT_ROOT}/zram_upper"
 ZRAM_ALGO="zstd"
 ZRAM_LABEL="AICLI_ZRAM"
-DEBUG_LOG="/tmp/unraid-aicliagents/debug.log"
+DEBUG_LOG="${MOUNT_ROOT}/debug.log"
 
 mkdir -p "$(dirname "$DEBUG_LOG")"
 

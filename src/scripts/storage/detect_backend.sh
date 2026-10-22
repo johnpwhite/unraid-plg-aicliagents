@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # detect_backend.sh — Epic #1310 Step 2 / ADR 0001: the GENUINE device test that
 # selects the storage backend. Replaces the fstype proxy (vfat→zram in
 # _entity_paths + its PHP replica in StorageMountService::resolveHomeUpperPath).
@@ -179,7 +180,7 @@ _entity_upper_pref() {
     elif declare -f _rp_read_cfg >/dev/null 2>&1; then
         _v="$(_rp_read_cfg storage_upper_mode 2>/dev/null || true)"
     else
-        local _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+        local _cfg="${CONFIG_FILE:-${PLUGIN_BASE}/unraid-aicliagents.cfg}"
         _v=""
         [ -f "$_cfg" ] && _v="$(grep -oP '^storage_upper_mode="?\K[^"]*(?="?$)' "$_cfg" 2>/dev/null | head -1)"
     fi
@@ -195,7 +196,7 @@ _aicli_cfg_key() {
         _rp_read_cfg "$_k" 2>/dev/null || true
         return 0
     fi
-    _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+    _cfg="${CONFIG_FILE:-${PLUGIN_BASE}/unraid-aicliagents.cfg}"
     [ -f "$_cfg" ] || return 0
     grep -oP "^${_k}=\"?\\K[^\"]*(?=\"?\$)" "$_cfg" 2>/dev/null | head -1
 }
@@ -314,7 +315,7 @@ _entity_manifest_segment_from_raw() {
 # graduate migration. Pure-bash; AICLI_MANIFEST_PATH overrides for unit tests.
 _entity_manifest_backend() {
     local type="$1" id="$2"
-    local mpath="${AICLI_MANIFEST_PATH:-/boot/config/plugins/unraid-aicliagents/layer_manifest.json}"
+    local mpath="${AICLI_MANIFEST_PATH:-${PLUGIN_BASE}/layer_manifest.json}"
     [ -f "$mpath" ] || { printf ''; return 0; }
     local seg
     seg="$(_entity_manifest_segment_from_raw "$(_manifest_raw_locked "$mpath")" "$type" "$id")"
@@ -339,7 +340,7 @@ _entity_manifest_backend() {
 # Entities WITHOUT the field behave exactly as before (recorded ⇒ expects layers).
 _entity_manifest_expects_layers() {
     local type="$1" id="$2"
-    local mpath="${AICLI_MANIFEST_PATH:-/boot/config/plugins/unraid-aicliagents/layer_manifest.json}"
+    local mpath="${AICLI_MANIFEST_PATH:-${PLUGIN_BASE}/layer_manifest.json}"
     [ -f "$mpath" ] || { printf '0'; return 0; }
     # S-04 (#1352): prefer the SHARED-locked read (manifest_read_locked in
     # manifest_write.sh, when the caller sourced it — storagectl does) so the
@@ -427,7 +428,7 @@ _agent_device_class() {
     # agent on each status poll: remember a boot answer in RAM (never with the
     # test hook, which forces the class).
     if [ -z "${AICLI_ITEST_MOUNT_CLASS:-}" ]; then
-        cf="${AICLI_TMP_BASE:-/tmp/unraid-aicliagents}/.agent_device_class_${path//[^a-zA-Z0-9]/_}"
+        cf="${AICLI_TMP_BASE:-${MOUNT_ROOT}}/.agent_device_class_${path//[^a-zA-Z0-9]/_}"
         if [ -r "$cf" ]; then
             read -r cls < "$cf" 2>/dev/null || cls=""
             case "$cls" in usb|internal) printf '%s' "$cls"; return 0 ;; esac

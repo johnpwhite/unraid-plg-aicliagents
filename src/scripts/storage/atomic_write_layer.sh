@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # atomic_write_layer.sh — Atomic SquashFS layer writer for AICliAgents.
 #
 # Usage (source this file, then call the function):
@@ -30,7 +31,7 @@
 #     verified layer (one relative path per line) to this file. WP #1277: lets
 #     op_bake confine the post-bake reclaim to proven-baked files.
 #   AICLI_AWL_SCRATCH_BASE — parent dir of the read-only verify mount point
-#     (default /tmp/unraid-aicliagents/scratch; unit tests use a temp dir).
+#     (default ${MOUNT_ROOT}/scratch; unit tests use a temp dir).
 #
 # Lifecycle log events emitted:
 #   atomic_write_start, atomic_write_verify_failed, atomic_write_ok, atomic_write_failed
@@ -333,7 +334,7 @@ atomic_write_layer() {
 
         # ----- Step 5: Verify readability via RO mount on scratch mountpoint ----
         # AICLI_AWL_SCRATCH_BASE: a unit test puts the verify mount point in its own temp dir.
-        local scratch_mnt="${AICLI_AWL_SCRATCH_BASE:-/tmp/unraid-aicliagents/scratch}/atomic-verify-${pid}-${epoch}"
+        local scratch_mnt="${AICLI_AWL_SCRATCH_BASE:-${MOUNT_ROOT}/scratch}/atomic-verify-${pid}-${epoch}"
         mkdir -p "$scratch_mnt" 2>/dev/null || {
             echo "[atomic_write_layer] ERROR: cannot create scratch mount dir: $scratch_mnt" >&2
             exit 1
