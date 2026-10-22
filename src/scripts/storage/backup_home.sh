@@ -40,6 +40,25 @@ if ! declare -f job_ledger_set_phase >/dev/null 2>&1; then
     [ -f "$_bk_qh" ] && source "$_bk_qh" 2>/dev/null || true
     unset _bk_qh
 fi
+if ! declare -f _backup_target_check >/dev/null 2>&1; then
+    # #749: the network-place checks (mounted, write probe). One file, also used by the PHP pre-flight.
+    _bk_rt="$(dirname "${BASH_SOURCE[0]}")/remote_target.sh"
+    [ -f "$_bk_rt" ] || _bk_rt="$STORAGE_DIR/remote_target.sh"
+    # shellcheck disable=SC1090
+    [ -f "$_bk_rt" ] && source "$_bk_rt" 2>/dev/null || true
+    unset _bk_rt
+fi
+if ! declare -f _backup_target_check >/dev/null 2>&1; then
+    # The checks file is missing: refuse a network place (fail closed), pass a local one.
+    _backup_target_check() {
+        RT_REASON=""
+        case "${1:-}" in
+            /mnt/remotes/*) RT_REASON="The backup place ${1} is on a network share, and the plugin cannot check the share."; return 1 ;;
+        esac
+        return 0
+    }
+    _backup_target_mounted() { case "${1:-}" in /mnt/remotes/*) return 1 ;; esac; return 0; }
+fi
 if ! declare -f lifecycle_log >/dev/null 2>&1; then
     lifecycle_log() { true; }
 fi
@@ -658,6 +677,12 @@ _backup_update_latest() {
 _backup_prune() {
     local base keep="${3:-5}"
     base="$(_backup_base_dir "${1:-}" "${2:-}")"
+    # #749: on a network place that is not mounted, the folder is an empty local
+    # folder. Its list says nothing about the real snapshots. Decide nothing.
+    if ! _backup_target_mounted "${1:-}"; then
+        log_warn "Backup prune skipped: the network place ${1:-} is not mounted"
+        return 0
+    fi
     [ -d "$base" ] || return 0
     case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
     [ "$keep" -ge 1 ] || keep=1
@@ -828,6 +853,17 @@ _backup_home_execute() {
     # in StorageHandler::backupHome() before this job was even enqueued. Only
     # re-verify the target is STILL there (a UD device can vanish between the
     # click and this tick actually running).
+    #
+    # #749 comes first: a network place (for example /mnt/remotes/stor01-Backup-Apps) must
+    # be mounted and must take a small write now. Else the copy would go to an empty
+    # local folder, and the reason would be hidden behind "target unavailable".
+    if ! _backup_target_check "$BK_TARGET" backup; then
+        lifecycle_log "error" "supervisor" "backup_preflight_failed" \
+            "{\"entity\":\"$entity\",\"reason\":\"target_not_ready\"}" 2>/dev/null || true
+        _backup_ledger "storage.backup.failed" "$user" "home backup of $user failed: $RT_REASON" \
+            "$(printf '{"cause":"target_not_ready","reason":%s}' "$(_backup_json_str "$RT_REASON")")"
+        exit 1
+    fi
     if [ ! -d "$BK_TARGET" ] || [ ! -w "$BK_TARGET" ]; then
         lifecycle_log "error" "supervisor" "backup_preflight_failed" \
             "{\"entity\":\"$entity\",\"reason\":\"target_unavailable\"}" 2>/dev/null || true
@@ -1240,6 +1276,23 @@ _restore_home_execute() {
     # in StorageHandler::restoreHome() before this job was even enqueued. Only
     # re-verify the snapshot and the home mount are STILL there (either could
     # vanish between the click and this tick actually running).
+    #
+    # #749 comes first: a snapshot on a network place needs a mounted share that answers. The
+    # safety snapshot is written to the backup place, so that place must take a write too.
+    local rs_reason=""
+    if ! _backup_target_check "$RS_SNAPSHOT" restore; then
+        rs_reason="$RT_REASON"
+    elif [ "$RS_SAFETY" = "1" ] && [ -n "$RS_TARGET" ] && ! _backup_target_check "$RS_TARGET" backup; then
+        rs_reason="$RT_REASON"
+    fi
+    if [ -n "$rs_reason" ]; then
+        lifecycle_log "error" "supervisor" "restore_preflight_failed" \
+            "{\"entity\":\"$entity\",\"cause\":\"target_not_ready\"}" 2>/dev/null || true
+        _restore_ledger "storage.restore.failed" "$user" "home restore of $user failed: $rs_reason" \
+            "$(printf '{"cause":"target_not_ready","reason":%s}' "$(_backup_json_str "$rs_reason")")"
+        _restore_write_last_record "$user" "0" "$RS_SNAPSHOT" "$RS_MODE" "" "target_not_ready" "home restore of $user failed: $rs_reason"
+        exit 1
+    fi
     if [ ! -d "$RS_SNAPSHOT" ] || [ ! -d "$RS_SNAPSHOT/tree" ]; then
         lifecycle_log "error" "supervisor" "restore_preflight_failed" \
             "{\"entity\":\"$entity\",\"cause\":\"snapshot_unavailable\"}" 2>/dev/null || true

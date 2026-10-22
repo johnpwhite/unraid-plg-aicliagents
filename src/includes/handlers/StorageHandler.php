@@ -1346,6 +1346,12 @@ class StorageHandler {
         $config = getAICliConfig();
         $target = self::effectiveBackupTarget($user);
 
+        // #749: a snapshot on a network place needs a mounted share that answers. An empty
+        // or missing folder of a share that is not mounted is not "no snapshots".
+        if ($target !== '' && ($netReason = \AICliAgents\Services\StorageTargetService::networkPlaceReason($target, 'restore')) !== null) {
+            return ['status' => 'error', 'message' => 'Home restore refused: ' . $netReason];
+        }
+
         // S3: resolve 'latest' (or take the given path) and PROVE it is a real,
         // on-disk directory inside this user's own backup root — never a path
         // (or a 'latest' symlink) pointing anywhere else. This is the FIRST

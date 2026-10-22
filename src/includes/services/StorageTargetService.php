@@ -235,6 +235,13 @@ class StorageTargetService {
             }
         }
 
+        // #749: a network place must be mounted and must take a small write. Ask first,
+        // before any other call that touches the folder (a dead share can block it).
+        $networkReason = self::networkPlaceReason($resolved, 'backup');
+        if ($networkReason !== null) {
+            return self::backupTargetResult(false, $resolved, '', 0, $networkReason);
+        }
+
         $fstype = self::findmntFstype($resolved);
         if ($fstype !== '' && (strcasecmp($fstype, 'fuse.shfs') === 0 || stripos($fstype, 'fuse') === 0)) {
             return self::backupTargetResult(false, $resolved, $fstype, 0,
@@ -289,6 +296,53 @@ class StorageTargetService {
         }
 
         return self::backupTargetResult(true, $resolved, $fstype, self::freeBytes($resolved), '');
+    }
+
+    /**
+     * #749: is a backup place on a network share ready? Runs
+     * src/scripts/storage/remote_target.sh (the same checks the backup job runs).
+     * A local place passes. For a network place the share must be mounted and
+     * must answer: 'backup' makes a small write test, 'restore' only reads.
+     * The child has a time limit; a share that does not answer is not ready.
+     * AICLI_PROC_MOUNTS and AICLI_REMOTES_ROOT (test seams) reach the child.
+     *
+     * @return string|null one plain sentence when the place is not ready, else null
+     */
+    public static function networkPlaceReason(string $path, string $mode = 'backup'): ?string {
+        $script = dirname(__DIR__, 2) . '/scripts/storage/remote_target.sh';
+        if (!is_file($script)) {
+            return preg_match('#^/mnt/remotes/#', $path)
+                ? "The backup place $path is on a network share, and the plugin cannot check the share."
+                : null;
+        }
+        $mode = ($mode === 'restore') ? 'restore' : 'backup';
+        $proc = @proc_open( // nosemgrep: php.lang.security.tainted-exec.tainted-exec — array-form proc_open, no shell interpolation
+            ['bash', $script, 'check', $path, $mode],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes
+        );
+        if (!is_resource($proc)) return null;
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        $out = '';
+        $deadline = microtime(true) + 40.0;
+        while (true) {
+            $out .= (string)stream_get_contents($pipes[1]);
+            $st = proc_get_status($proc);
+            if (!$st['running']) { $code = (int)$st['exitcode']; break; }
+            if (microtime(true) > $deadline) {
+                // Do not wait for a blocked child.
+                proc_terminate($proc, 9);
+                fclose($pipes[1]); fclose($pipes[2]);
+                return "The backup place $path is on a network share that does not answer. Check that the share is online, then try again.";
+            }
+            usleep(50000);
+        }
+        $out .= (string)stream_get_contents($pipes[1]);
+        fclose($pipes[1]); fclose($pipes[2]);
+        proc_close($proc);
+        if ($code === 0) return null;
+        $out = trim($out);
+        return $out !== '' ? $out : "The backup place $path is not ready.";
     }
 
     /** @return array{ok:bool, resolved:string, fs:string, free_bytes:int, message:string} */
