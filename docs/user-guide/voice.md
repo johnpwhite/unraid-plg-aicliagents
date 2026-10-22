@@ -271,7 +271,7 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 | The guided setup waits and does not end. | Unraid is still downloading the image, or the **Add Container** page is closed. | Look at the Docker tab. Press **Set up natural voice** again after 20 minutes. |
 | The mic icon shows a crossed-out microphone. | Voice input was refused. The bubble tells you why. | Allow the microphone in the browser's site settings, open a workspace that runs, or set a transcription endpoint. |
 | "Nothing was recognised." | The recording had no speech, or the engine returned an empty text. | Speak closer to the microphone. Press **Test (records 3 s, 8 s live)**. |
-| "The transcription server did not answer." | The endpoint is wrong or the engine is stopped or busy. | Check the **Transcription endpoint URL** and the container. |
+| "The transcription server did not answer." | The endpoint is wrong or the engine is stopped or busy. When this happens on the last part of a recording, after you press stop, the plugin waits about 2 seconds and sends that part once more. The message shows only if the second try fails too. The words of that last part are then lost. | Check the **Transcription endpoint URL** and the container. Say the words again. |
 | "The transcription engine at … returned HTTP 400." The red line stays for 6 seconds, and the recording goes on. | The engine refused the recording. The plugin sends each piece as a WAV recording, which engines read; a browser that cannot convert the sound sends its own format, which some engines refuse. | Press **Test (records 3 s, 8 s live)** in another browser, such as Chrome or Safari. Check that **Model** is a model the engine lists. |
 | "Typed, not sent: the agent is busy". | **Send when I stop talking** is on, but the agent was not at its prompt. | Press Enter when the agent is ready. |
 | Voice mail shows no messages for a workspace. | The workspace was set to **Off** when the agent spoke, or the messages are older than **Days kept**. | Set the mode to **Speak** or **Voice mail**. Raise **Days kept**. |
@@ -290,6 +290,8 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 <summary>Change history</summary>
 
 - **2026-10-22** — When the transcription engine does not answer, dictation carries on with your browser's speech recognition and the bubble says so. The next recording tries the engine again. Spec `docs/specs/VOICE_INPUT.md`, issue #726.
+- **2026-10-22** — If the transcription engine fails on the last part of a recording, the plugin sends that part to the engine once more after about 2 seconds. Before, the words were lost at once. Spec `docs/specs/VOICE_INPUT.md`, issue #754.
+
 - **2026-10-21** — Live dictation keeps typing after the first sentence. The Settings dictation **Test** uses the live endpoint when one is set, so you can see the words appear while you speak. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issues #733 and #731.
 - **2026-10-20** — New setting **Live transcription endpoint**: with a live engine, your words appear while you speak and are corrected. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issue #731.
 - **2026-10-20** — With a transcription engine, a pause with no speech types nothing. Before, some engines typed a label such as "[BLANK_AUDIO]". Spec `docs/specs/VOICE_INPUT.md`, issue #730.

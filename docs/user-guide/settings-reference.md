@@ -8,6 +8,8 @@
 
 The plugin keeps its settings on one page: **AI CLI Agents**, under Unraid's **Settings** menu. The page has six tabs: **Configuration**, **Agent Store**, **Home Storage**, **Config Hub**, **Agent Relay** and **Debug Console**. This page lists every control on those tabs, in the order the page shows them, with the label the page shows. A few switches live in the terminal drawer instead: voice, the microphone and the pin. They are at the end of this page.
 
+On the Configuration tab, the help for each setting is behind an **(i)** button next to its label. Tap or click the button, or press Enter, to read what the setting does. Move the mouse over it to see the help for a moment. Press Escape or tap outside to close it.
+
 Most controls save at once, with no Save button. A few controls ask you to confirm first, because they move data or close workspaces. Each table says what happens at once when a control changes. The last column says whether an agent may change the setting through the Plugin management tools. An agent can only do that when you turn on **Plugin management** on the Configuration tab.
 
 ## How to read the tables
