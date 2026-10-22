@@ -837,7 +837,7 @@ try {
             // BOOT_DISK_SPACE.md R8 (#724). Tier 3: proposes only. `archive-boot-data <kind> <user> --folder=<path>`.
             $abFolder = '';
             foreach (array_slice($argv, 4) as $a) {
-                if (preg_match('/^--folder=(.*)$/', (string)$a, $m)) $abFolder = $m[1];
+                if (preg_match('/^--folder=(.*)$/D', (string)$a, $m)) $abFolder = $m[1];
             }
             $result = AdminMcpTools::call('aicli_archive_boot_data', [
                 'kind' => (string)($argv[2] ?? ''), 'user' => (string)($argv[3] ?? ''), 'folder' => $abFolder]);
