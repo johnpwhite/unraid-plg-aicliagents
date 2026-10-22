@@ -214,6 +214,15 @@
  *                                `user`'s home (default: the configured home
  *                                user) to its storage layers. Closes no
  *                                session. Prints the supervisor job id.
+ *   boot-space                  (BOOT_DISK_SPACE.md R8, #724) Tier 1 read. The card lines
+ *                                that can be archived or removed. Measures nothing.
+ *   archive-boot-data <kind> <user> --folder=<path>
+ *                                PROPOSES moving old data of a home off the boot
+ *                                disk to an existing folder inside a pool.
+ *                                Nothing moves until a human approves.
+ *   remove-boot-data <kind> <user>
+ *                                PROPOSES removing that data for good. Nothing is
+ *                                removed until a human approves.
  *   consolidate-home <user>     (HOME_PERSIST_CONSOLIDATE_TOOLS.md, 2026-09-17)
  *                                PROPOSES merging every saved layer of
  *                                `user`'s home into one — validates and asks
@@ -378,6 +387,9 @@ const ADMIN_AGENT_USAGE = [
     'delete-workspace' => 'delete-workspace <id> -- PROPOSES ONLY; a human must approve in the Manager UI',
     'upgrade-agent' => 'upgrade-agent <agentId> [version] -- PROPOSES ONLY; a human must approve in the Manager UI',
     'consolidate-home' => 'consolidate-home <user> -- PROPOSES ONLY; a human must approve in the Manager UI (closes every session of that user when approved)',
+    'boot-space' => 'boot-space -- the Boot disk space lines that can be archived or removed, from the last measurement (nothing is measured)',
+    'archive-boot-data' => 'archive-boot-data <quarantine|opencode_orphans|codex_sessions> <user> --folder=<existing folder inside a pool> -- PROPOSES ONLY; a human must approve in the Manager UI',
+    'remove-boot-data' => 'remove-boot-data <quarantine|opencode_orphans|codex_sessions> <user> -- PROPOSES ONLY; removes for good once a human approves in the Manager UI',
     'backup-home' => 'backup-home <user> [--quiesce=cold|warm] [--target=<path>] [--scheduled] -- PROPOSES ONLY unless --scheduled (the operator\'s own cron; do not pass it yourself); --scheduled refuses from inside an agent workspace',
     'list-backups' => 'list-backups <user>',
     'restore-home' => 'restore-home <user> --snapshot=<path|latest> [--mode=replace|merge] [--no-safety-snapshot] --yes -- the OPERATOR\'s own command; without --yes prints the plan and exits 2; --yes refuses from inside an agent workspace; an agent must use aicli_restore_home instead',
@@ -816,6 +828,24 @@ try {
         case 'consolidate-home':
             // HOME_PERSIST_CONSOLIDATE_TOOLS.md, 2026-09-17. Tier 3: proposes only.
             $result = AdminMcpTools::call('aicli_consolidate_home', ['user' => (string)($argv[2] ?? '')]);
+            break;
+        case 'boot-space':
+            // BOOT_DISK_SPACE.md R8 (#724). Tier 1: reads the last measurement, measures nothing.
+            $result = AdminMcpTools::call('aicli_get_boot_space', []);
+            break;
+        case 'archive-boot-data':
+            // BOOT_DISK_SPACE.md R8 (#724). Tier 3: proposes only. `archive-boot-data <kind> <user> --folder=<path>`.
+            $abFolder = '';
+            foreach (array_slice($argv, 4) as $a) {
+                if (preg_match('/^--folder=(.*)$/', (string)$a, $m)) $abFolder = $m[1];
+            }
+            $result = AdminMcpTools::call('aicli_archive_boot_data', [
+                'kind' => (string)($argv[2] ?? ''), 'user' => (string)($argv[3] ?? ''), 'folder' => $abFolder]);
+            break;
+        case 'remove-boot-data':
+            // BOOT_DISK_SPACE.md R8 (#724). Tier 3: proposes only. Removes for good once a person approves.
+            $result = AdminMcpTools::call('aicli_remove_boot_data', [
+                'kind' => (string)($argv[2] ?? ''), 'user' => (string)($argv[3] ?? '')]);
             break;
         case 'backup-home':
             // HOME_BACKUP.md, 2026-09-12. `--scheduled` is the ONE exception to

@@ -83,10 +83,13 @@
         if (part.action) acts += buttonHtml(part, part.action, migrationBusy);
         (part.extra_actions || []).forEach(function (a) { acts += ' ' + buttonHtml(part, a, migrationBusy); });
         var note = part.note ? '<div style="font-size:10px; opacity:0.6; margin-top:1px;">' + esc(part.note) + '</div>' : '';
+        // R8 (#724): a short (i) note on the lines that can be archived or removed.
+        var info = part.info
+            ? ' <i class="fa fa-info-circle aicli-bs-info" data-testid="boot-space-info" tabindex="0" role="img" aria-label="' + esc(part.info) + '" title="' + esc(part.info) + '" style="opacity:0.7; cursor:help; font-size:11px;"></i>' : '';
         var link = part.setting_link
             ? ' <a href="#" class="aicli-bs-setting" data-setting="' + esc(part.setting_link) + '" data-testid="boot-space-setting-link" style="font-size:10px;">Cache setting</a>' : '';
         return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:grid; grid-template-columns:minmax(240px,0.7fr) minmax(180px,1.3fr) 70px minmax(120px,max-content); align-items:center; gap:8px 14px; padding:8px 0; border-top:1px solid var(--border-color, #333);">' +
-            '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + link + note + '</div>' +
+            '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + info + link + note + '</div>' +
             '<div style="min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
             '<div data-testid="boot-space-size" style="text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
             '<div style="text-align:right;">' + acts + '</div>' +

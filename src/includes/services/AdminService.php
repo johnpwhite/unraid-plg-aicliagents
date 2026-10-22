@@ -2147,6 +2147,10 @@ class AdminService {
         'aicli_consolidate_home' => 'executeApprovedConsolidateHome',
         // ARTEFACTS.md: a purge removes a notebook file. Only a person's Approve runs it.
         'aicli_purge_artefact'   => 'executeApprovedPurgeArtefact',
+        // BOOT_DISK_SPACE.md R8 (#724): archive or remove old data of a home on the boot disk.
+        // Both run the same detached job; Remove deletes for good, so both need a person's Approve.
+        'aicli_archive_boot_data' => 'executeApprovedBootArchive',
+        'aicli_remove_boot_data'  => 'executeApprovedBootArchive',
     ];
 
     /**
@@ -2594,6 +2598,103 @@ class AdminService {
         }
     }
 
+    // ------------------------------------------------------------------
+    // BOOT DISK SPACE: archive or remove old data (BOOT_DISK_SPACE.md R8, #724)
+    //
+    // aicli_get_boot_space (read), aicli_archive_boot_data and aicli_remove_boot_data
+    // (Tier 3, propose only). The read answers from the last background measurement.
+    // The two proposals write a pending Activity tray item; only a person's Approve
+    // queues the same detached job that the Boot disk space card queues.
+    // ------------------------------------------------------------------
+
+    /**
+     * The archive and remove lines of the Boot disk space card, from the last measurement. Reads
+     * the measurement file only: it measures nothing.
+     * @return array<string,mixed>
+     */
+    public static function bootSpace(): array {
+        $data = BootSpaceService::read();
+        $lines = [];
+        foreach (($data['parts'] ?? []) as $p) {
+            if (strpos((string)($p['key'] ?? ''), 'archive:') !== 0) continue;
+            $lines[] = ['kind' => (string)$p['kind'], 'user' => (string)$p['user'], 'label' => (string)$p['label'],
+                        'bytes' => (int)$p['bytes'], 'units' => (int)($p['units'] ?? 0), 'files' => (int)($p['files'] ?? 0),
+                        'note' => (string)($p['note'] ?? ''), 'info' => (string)($p['info'] ?? '')];
+        }
+        $disk = is_array($data['disk'] ?? null) ? $data['disk'] : null;
+        return ['measured_at' => (int)($data['measured_at'] ?? 0), 'has_data' => $data !== null,
+                'disk' => $disk === null ? null : ['size' => (int)$disk['size'], 'used' => (int)$disk['used'], 'free' => (int)$disk['free']],
+                'archive_folder_rule' => 'Pick a folder that already exists inside a pool (for example /mnt/<pool>/<share>). The plugin makes only "' . BootArchiveService::ARCHIVE_FOLDER . '/<host>/<date>" inside it. It never uses the boot disk, RAM or /mnt/user, and never makes a new top-level folder on a pool.',
+                'lines' => $lines];
+    }
+
+    /**
+     * Validate an archive or remove request WITHOUT writing anything.
+     * @return array{error:string}|array{description:string,params:array<string,mixed>}
+     */
+    public static function validateBootArchive(string $mode, string $kind, string $user, string $folder = ''): array {
+        $kind = trim($kind); $user = trim($user); $folder = trim($folder);
+        if (!BootArchiveService::isKind($kind)) {
+            return ['error' => "'$kind' is not a kind of data. Use one of: " . implode(', ', BootArchiveService::KINDS) . '.'];
+        }
+        if (!BootArchiveService::isUser($user)) return ['error' => 'A valid home name is required in `user`.'];
+        $line = BootArchiveService::lineFor(BootSpaceService::read(), $kind, $user);
+        if ($line === null || (int)$line['bytes'] < 1) {
+            $have = [];
+            foreach (self::bootSpace()['lines'] as $l) $have[] = $l['kind'] . '/' . $l['user'];
+            return ['error' => "The last measurement lists no $kind data for home '$user'. Lines now: " . ($have ? implode(', ', $have) : 'none') . '. Ask a person to press Measure now on the Boot disk space card if the measurement is old.'];
+        }
+        $d = BootArchiveService::describe($kind);
+        $size = BootSpaceService::human((int)$line['bytes']);
+        if ($mode === 'archive') {
+            $chk = BootArchiveService::checkTarget($folder);
+            if ($chk['error'] !== null) return ['error' => (string)$chk['error']];
+            $text = "Archive the " . $d['label'] . " of home $user ($size, " . (int)($line['units'] ?? 0) . " item(s)) to "
+                . BootArchiveService::archiveBase($chk['folder']) . '. Each file is copied and checked with SHA-256, listed in a manifest file, and only then removed from the boot disk. Items that a process uses stay.';
+        } else {
+            $folder = '';
+            $text = "Remove the " . $d['label'] . " of home $user ($size, " . (int)($line['units'] ?? 0) . " item(s)) from the boot disk for good. Nothing is copied first. Items that a process uses stay.";
+        }
+        return ['description' => $text, 'params' => ['mode' => $mode, 'kind' => $kind, 'user' => $user, 'folder' => $folder]];
+    }
+
+    /**
+     * Tier 3. Validate, then propose. Never executes.
+     * @return array<string,mixed>
+     */
+    public static function proposeBootArchive(string $mode, string $kind, string $user, string $folder = ''): array {
+        try {
+            if (!in_array($mode, ['archive', 'remove'], true)) return ['error' => 'The mode must be archive or remove.'];
+            $validated = self::validateBootArchive($mode, $kind, $user, $folder);
+            if (isset($validated['error'])) return $validated;
+            return self::proposePending($mode === 'archive' ? 'aicli_archive_boot_data' : 'aicli_remove_boot_data', $validated['description'], $validated['params']);
+        } catch (\Throwable $e) {
+            return self::failure('proposeBootArchive', $e);
+        }
+    }
+
+    /**
+     * Run ONLY by approvePending(). Checks again, then queues the same detached job as the card.
+     * @param array<string,mixed> $params From the pending item's own 'meta.params'.
+     * @return array<string,mixed>
+     */
+    public static function executeApprovedBootArchive(array $params): array {
+        try {
+            if (!class_exists('\\AICliAgents\\Handlers\\BootArchiveHandler')) { require_once __DIR__ . '/../handlers/BootArchiveHandler.php'; }
+            require_once __DIR__ . '/StorageBackendMigrationService.php';
+            if (StorageBackendMigrationService::isMigrationInProgress()) {
+                return ['error' => 'Wait for the storage migration to finish before starting another storage action.'];
+            }
+            $r = \AICliAgents\Handlers\BootArchiveHandler::queue(
+                (string)($params['kind'] ?? ''), (string)($params['user'] ?? ''),
+                (string)($params['mode'] ?? ''), (string)($params['folder'] ?? ''));
+            if (($r['status'] ?? '') !== 'queued') return ['error' => (string)($r['message'] ?? 'The job could not be queued.')];
+            return $r;
+        } catch (\Throwable $e) {
+            return self::failure('executeApprovedBootArchive', $e);
+        }
+    }
+
     /**
      * HOME_RESTORE.md Tier row. Validate a home-restore request and describe
      * its consequence in plain language, WITHOUT writing anything, closing
@@ -2734,6 +2835,10 @@ class AdminService {
                 return ($user !== '' ? "Restore $user's home" : 'Restore a home') . ($snap !== '' ? " from $snap" : '') . '?';
             case 'aicli_consolidate_home':
                 return $user !== '' ? "Merge the layers of $user's home?" : 'Merge the layers of a home?';
+            case 'aicli_archive_boot_data':
+            case 'aicli_remove_boot_data':
+                $kindWord = BootArchiveService::isKind((string)($params['kind'] ?? '')) ? BootArchiveService::describe((string)$params['kind'])['label'] : 'old data';
+                return ($tool === 'aicli_archive_boot_data' ? 'Archive ' : 'Remove ') . $kindWord . ($user !== '' ? " of home $user" : '') . '?';
             case 'aicli_purge_artefact':
                 $title = trim((string)($params['title'] ?? ''));
                 return $title !== '' ? 'Remove the Notebook file "' . $title . '" for good?' : 'Remove a Notebook file for good?';

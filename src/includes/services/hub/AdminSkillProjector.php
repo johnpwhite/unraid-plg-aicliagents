@@ -170,6 +170,12 @@ Destructive tools (PROPOSE only — read "Destructive tools" below first):
 - `aicli_consolidate_home` — propose merging every saved layer of one user's
   home into one. Closes every session of that user when approved. See "Home
   persist and consolidate" below before your first call.
+- `aicli_archive_boot_data` and `aicli_remove_boot_data` — propose moving old
+  data of a home off the boot disk to a pool folder (archive), or removing it
+  for good (remove). Kinds: `quarantine`, `opencode_orphans`, `codex_sessions`.
+  Read the lines first with `aicli_get_boot_space` (CLI: `boot-space`). The
+  archive folder must already exist inside a pool. Nothing moves until a human
+  approves.
 
 ## Home backup
 
@@ -259,6 +265,7 @@ Destructive actions (PROPOSE only — read "Destructive tools" below first):
 - `upgrade-agent <agentId> [version]`
 - `backup-home <user> [--quiesce=cold|warm] [--target=<path>]`
 - `consolidate-home <user>`
+- `archive-boot-data <kind> <user> --folder=<path>` and `remove-boot-data <kind> <user>` (read first: `boot-space`)
 
 Run `$AICLI_ADMIN_COMMAND help` for the exact shape of every action, including
 which values each optional argument accepts.

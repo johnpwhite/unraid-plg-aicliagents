@@ -1,0 +1,568 @@
+<?php
+/**
+ * <module_context>
+ * Description: Archive or remove three kinds of old data from a plain home on the boot disk
+ *   (docs/specs/BOOT_DISK_SPACE.md R8, issue #724). The kinds:
+ *     quarantine        <home>/.aicli/quarantine/        databases that an agent set aside
+ *     opencode_orphans  <home>/.local/share/aicli-opencode/ws-*   data of OpenCode workspaces that no longer exist
+ *     codex_sessions    <home>/.codex/sessions/          big Codex session logs older than 14 days
+ *   select() finds the items that may go. measureHome() gives the sizes for the Boot disk space
+ *   card. process() archives the items to a folder on a pool (copy, SHA-256 check, manifest, then
+ *   remove from the home) or removes them.
+ * Dependencies: HistoryStoreService (open files, allocated bytes), HistoryMoveService (pool rules,
+ *   copier), MeasureDeadline, ConfigService, FavouritesService.
+ * Constraints: select(), measureHome() and process() walk folders. They run in the background
+ *   measure or in the detached job (scripts/storage/boot-archive.php), NEVER in a web request.
+ *   Never touches a file that a process holds open. Never touches the data of a workspace that is
+ *   in the workspace list or in the favourites. Never removes a file before its copy is checked
+ *   and listed in the manifest. Never makes a new top-level folder on a pool.
+ * </module_context>
+ *
+ * Archive layout:
+ *   <chosen folder>/aicliagents-archive/<host>/<YYYY-MM-DD>/<user>/<kind>/<path relative to the home>
+ *   <chosen folder>/aicliagents-archive/<host>/<YYYY-MM-DD>/MANIFEST-<kind>-<user>-<HHMMSS>.json
+ */
+
+namespace AICliAgents\Services;
+
+require_once __DIR__ . '/HistoryStoreService.php';
+require_once __DIR__ . '/HistoryMoveService.php';
+require_once __DIR__ . '/MeasureDeadline.php';
+
+class BootArchiveService
+{
+    public const KIND_QUARANTINE = 'quarantine';
+    public const KIND_OPENCODE = 'opencode_orphans';
+    public const KIND_CODEX = 'codex_sessions';
+    public const KINDS = [self::KIND_QUARANTINE, self::KIND_OPENCODE, self::KIND_CODEX];
+
+    /** A Codex log is "large" from this size (allocated bytes). */
+    public const CODEX_MIN_BYTES = 1048576;
+    /** A Codex log must be older than this many days. */
+    public const CODEX_DAYS = 14;
+    /** Data of a gone OpenCode workspace that changed inside this window stays (seconds). */
+    public const RECENT_SECONDS = 86400;
+    /** Free space that must remain on the target after an archive. */
+    public const ROOM_MARGIN = 67108864;
+    public const ARCHIVE_FOLDER = 'aicliagents-archive';
+    /** The measurement keeps this many item names for the confirm of Remove. */
+    public const NAMES_SHOWN = 12;
+
+    // ---- the kinds ------------------------------------------------------------------
+
+    /** Plain words for each kind. `info` is the text behind the (i) mark of the card line. */
+    public static function describe(string $kind): array
+    {
+        switch ($kind) {
+            case self::KIND_QUARANTINE:
+                return ['label' => 'quarantine',
+                    'title' => 'Quarantine folder',
+                    'info' => 'Damaged agent databases that the plugin set aside and replaced. Nothing reads them. Keep a copy if you want to look at them later.',
+                    'root' => '.aicli/quarantine'];
+            case self::KIND_OPENCODE:
+                return ['label' => 'data of deleted OpenCode workspaces',
+                    'title' => 'Data of deleted OpenCode workspaces',
+                    'info' => 'OpenCode keeps one database for each workspace. These workspaces are not in your workspace list or your favourites any more. Data of a workspace that exists stays.',
+                    'root' => '.local/share/aicli-opencode'];
+            case self::KIND_CODEX:
+                return ['label' => 'large Codex session logs',
+                    'title' => 'Large Codex session logs',
+                    'info' => 'Codex session logs of ' . (self::CODEX_MIN_BYTES / 1048576) . ' MB or more, not changed for ' . self::CODEX_DAYS . ' days. Codex cannot resume a session that is archived or removed. These sizes are also part of the conversation history above.',
+                    'root' => '.codex/sessions'];
+        }
+        return ['label' => $kind, 'title' => $kind, 'info' => '', 'root' => ''];
+    }
+
+    public static function isKind(string $kind): bool
+    {
+        return in_array($kind, self::KINDS, true);
+    }
+
+    /** A home id as the plugin makes it: no slash, no leading dot. */
+    public static function isUser(string $user): bool
+    {
+        return preg_match('/^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/D', $user) === 1;
+    }
+
+    // ---- places ----------------------------------------------------------------------
+
+    /** The plain home of a user on the boot disk. Seams: home_persist. */
+    public static function homeDir(string $user, array $seams = []): string
+    {
+        $hp = (string)($seams['home_persist'] ?? '');
+        if ($hp === '') {
+            $hp = StoragePathResolver::homePersistPathFromConfig(ConfigService::getConfig());
+        }
+        return rtrim($hp, '/') . '/passthrough/homes/' . $user;
+    }
+
+    /**
+     * The folder names of OpenCode data that belong to a workspace in the list or in the
+     * favourites: "ws-" + the first 16 characters of sha1("<user>:<path>"), the rule in
+     * aicli-shell.sh. The key is made for every home user, so a path that a different user
+     * opened is also safe. Seam: workspace_paths (list of paths).
+     *
+     * Returns null when no workspace path is known at all (an empty list, or a list that cannot be
+     * read). Then the plugin cannot tell which data is in use, so the caller offers nothing.
+     *
+     * @return array<string,true>|null
+     */
+    public static function protectedWorkspaceKeys(array $users, array $seams = []): ?array
+    {
+        if (isset($seams['workspace_paths'])) {
+            $paths = array_map('strval', (array)$seams['workspace_paths']);
+        } else {
+            $paths = [];
+            try {
+                foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $w) {
+                    if (is_array($w) && (string)($w['path'] ?? '') !== '') $paths[] = (string)$w['path'];
+                }
+            } catch (\Throwable $e) { /* no list: the favourites still protect */ }
+            try {
+                require_once __DIR__ . '/FavouritesService.php';
+                foreach (FavouritesService::list() as $f) {
+                    if ((string)($f['path'] ?? '') !== '') $paths[] = (string)$f['path'];
+                }
+            } catch (\Throwable $e) { /* nothing more to protect */ }
+        }
+        if (!array_filter($paths, static fn(string $p): bool => $p !== '')) return null;
+        $variants = [];
+        foreach ($paths as $p) {
+            $variants[$p] = true;
+            $variants[rtrim($p, '/')] = true;
+            $real = @realpath($p);
+            if ($real !== false) $variants[$real] = true;
+        }
+        $keys = [];
+        foreach (array_unique(array_merge($users, ['root'])) as $u) {
+            foreach (array_keys($variants) as $p) {
+                if ($p === '') continue;
+                $keys['ws-' . substr(sha1($u . ':' . $p), 0, 16)] = true;
+            }
+        }
+        return $keys;
+    }
+
+    // ---- finding the items ---------------------------------------------------------------
+
+    /**
+     * Files under $base (a folder inside $home), without links. Stops at $deadline (a Unix time
+     * with fraction).
+     * @return array<int,array{rel:string,abs:string,bytes:int,mtime:int}>
+     */
+    private static function walk(string $home, string $base, float $deadline, bool &$partial): array
+    {
+        $out = [];
+        if (!is_dir($base) || is_link($base)) return $out;
+        $n = 0;
+        try {
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveCallbackFilterIterator(
+                    new \RecursiveDirectoryIterator($base, \FilesystemIterator::SKIP_DOTS),
+                    static function ($cur) { return !$cur->isLink(); }
+                ),
+                \RecursiveIteratorIterator::LEAVES_ONLY,
+                \RecursiveIteratorIterator::CATCH_GET_CHILD
+            );
+            foreach ($it as $f) {
+                if ((++$n & 127) === 0 && microtime(true) > $deadline) { $partial = true; break; }
+                if (!$f->isFile()) continue;
+                $abs = $f->getPathname();
+                $st = @lstat($abs);
+                if ($st === false) continue;
+                $out[] = ['rel' => substr($abs, strlen($home) + 1), 'abs' => $abs,
+                          'bytes' => HistoryStoreService::allocated($abs), 'mtime' => (int)$st['mtime']];
+            }
+        } catch (\Throwable $e) { /* an unreadable folder counts as empty */ }
+        return $out;
+    }
+
+    /**
+     * The items of one kind that may go now.
+     *
+     * $seams: now, open (callable home => list of open paths), budget (seconds), workspace_paths, users.
+     *
+     * @return array{units:array<int,array{id:string,rels:string[],bytes:int,mtime:int}>,skipped:array<int,array{id:string,reason:string}>,partial:bool}
+     */
+    public static function select(string $homeDir, string $user, string $kind, array $seams = []): array
+    {
+        $res = ['units' => [], 'skipped' => [], 'partial' => false];
+        if (!self::isKind($kind)) return $res;
+        $home = rtrim($homeDir, '/');
+        if (!is_dir($home) || is_link($home)) return $res;
+        $now = (int)($seams['now'] ?? time());
+        $deadline = microtime(true) + (float)($seams['budget'] ?? 120);
+        $root = $home . '/' . self::describe($kind)['root'];
+        $partial = false;
+
+        if ($kind === self::KIND_QUARANTINE) {
+            $groups = [];
+            foreach (self::walk($home, $root, $deadline, $partial) as $f) {
+                $seg = explode('/', substr($f['abs'], strlen($root) + 1));
+                // <agent>/<time>/... is one item; a loose file is its own item.
+                $id = count($seg) >= 3 ? $seg[0] . '/' . $seg[1] : implode('/', $seg);
+                $groups[$id][] = $f;
+            }
+            self::collect($res, $groups, $home, $seams, 0, $now);
+        } elseif ($kind === self::KIND_OPENCODE) {
+            $dirs = glob($root . '/ws-*', GLOB_ONLYDIR | GLOB_NOSORT) ?: [];
+            // The list of workspaces is read only when there is OpenCode data to judge.
+            $protected = $dirs ? self::protectedWorkspaceKeys(
+                array_merge((array)($seams['users'] ?? []), [$user]), $seams) : [];
+            if ($protected === null) {
+                // No workspace is known. The plugin cannot tell which data is in use, so it offers none.
+                $res['skipped'][] = ['id' => '(all)', 'reason' => 'The workspace list is empty or unreadable, so the plugin cannot tell which data is in use.'];
+                $dirs = [];
+                $protected = [];
+            }
+            $groups = [];
+            foreach ($dirs as $dir) {
+                $name = basename($dir);
+                if (is_link($dir) || preg_match('/^ws-[0-9a-f]{16}$/D', $name) !== 1) continue;
+                if (isset($protected[$name])) continue;   // a workspace in the list or in the favourites
+                $files = self::walk($home, $dir, $deadline, $partial);
+                if ($files) $groups[$name] = $files;
+            }
+            self::collect($res, $groups, $home, $seams, self::RECENT_SECONDS, $now);
+        } else {
+            $groups = [];
+            $cut = $now - self::CODEX_DAYS * 86400;
+            foreach (self::walk($home, $root, $deadline, $partial) as $f) {
+                if ($f['bytes'] < self::CODEX_MIN_BYTES || $f['mtime'] > $cut) continue;
+                $groups[$f['rel']] = [$f];
+            }
+            self::collect($res, $groups, $home, $seams, 0, $now);
+        }
+        $res['partial'] = $partial;
+        usort($res['units'], static function ($a, $b) { return ($b['bytes'] <=> $a['bytes']) ?: strcmp($a['id'], $b['id']); });
+        return $res;
+    }
+
+    /**
+     * Turn file groups into items. A group with an open file, or with a file changed inside
+     * $recent seconds, is skipped as a whole.
+     * @param array<string,array<int,array{rel:string,abs:string,bytes:int,mtime:int}>> $groups
+     */
+    private static function collect(array &$res, array $groups, string $home, array $seams, int $recent, int $now): void
+    {
+        // The open files are read once, and only when there is an item to judge.
+        $open = [];
+        if ($groups) {
+            $paths = isset($seams['open']) ? (array)($seams['open'])($home) : HistoryStoreService::procOpenFiles($home);
+            foreach ($paths as $p) $open[(string)$p] = true;
+        }
+        foreach ($groups as $id => $files) {
+            $bytes = 0; $newest = 0; $rels = []; $isOpen = false;
+            foreach ($files as $f) {
+                $bytes += $f['bytes'];
+                $newest = max($newest, $f['mtime']);
+                $rels[] = $f['rel'];
+                if (isset($open[$f['abs']])) $isOpen = true;
+            }
+            sort($rels);
+            if ($isOpen) { $res['skipped'][] = ['id' => (string)$id, 'reason' => 'A process uses it.']; continue; }
+            if ($recent > 0 && $now - $newest < $recent) { $res['skipped'][] = ['id' => (string)$id, 'reason' => 'It changed in the last day.']; continue; }
+            $res['units'][] = ['id' => (string)$id, 'rels' => $rels, 'bytes' => $bytes, 'mtime' => $newest];
+        }
+    }
+
+    /**
+     * The sizes for the card: kind => {bytes, units, files, skipped, partial}. Background only.
+     * @return array<string,array{bytes:int,units:int,files:int,skipped:int,partial:bool}>
+     */
+    public static function measureHome(string $homeDir, string $user, array $seams = []): array
+    {
+        $out = [];
+        foreach (self::KINDS as $kind) {
+            $s = self::select($homeDir, $user, $kind, $seams + ['budget' => MeasureDeadline::remaining(120)]);
+            $bytes = 0; $files = 0; $names = [];
+            foreach ($s['units'] as $u) { $bytes += $u['bytes']; $files += count($u['rels']); $names[] = $u['id']; }
+            $out[$kind] = ['bytes' => $bytes, 'units' => count($s['units']), 'files' => $files,
+                           'skipped' => count($s['skipped']), 'partial' => $s['partial'],
+                           'names' => array_slice($names, 0, self::NAMES_SHOWN)];
+        }
+        return $out;
+    }
+
+    /**
+     * The lines of the card for one home from measureHome() figures. A kind with no item has no line.
+     * @param array<string,array<string,mixed>> $figures
+     * @return array<int,array<string,mixed>>
+     */
+    public static function cardParts(string $user, array $figures): array
+    {
+        $parts = [];
+        foreach (self::KINDS as $kind) {
+            $f = $figures[$kind] ?? null;
+            if (!is_array($f) || (int)($f['units'] ?? 0) < 1) continue;
+            $d = self::describe($kind);
+            $note = (int)$f['units'] . ($kind === self::KIND_CODEX ? ' log(s)' : ' item(s)')
+                . ((int)($f['skipped'] ?? 0) > 0 ? ', ' . (int)$f['skipped'] . ' in use or too new, left alone' : '');
+            $parts[] = [
+                'key' => 'archive:' . $kind . ':' . $user, 'group' => 'home', 'user' => $user, 'kind' => $kind,
+                'label' => 'Home ' . $user . ': ' . $d['label'], 'bytes' => (int)$f['bytes'],
+                'note' => $note, 'info' => $d['info'], 'units' => (int)$f['units'], 'files' => (int)$f['files'],
+                'names' => array_values(array_map('strval', (array)($f['names'] ?? []))),
+                'action' => ['id' => 'archive_boot_data', 'label' => 'Archive…', 'enabled' => true, 'reason' => ''],
+                'extra_actions' => [['id' => 'remove_boot_data', 'label' => 'Remove', 'enabled' => true, 'reason' => '']],
+            ];
+        }
+        return $parts;
+    }
+
+    /** The line of the last measurement for a kind and a home, or null. */
+    public static function lineFor(?array $data, string $kind, string $user): ?array
+    {
+        foreach (($data['parts'] ?? []) as $p) {
+            if (($p['key'] ?? '') === 'archive:' . $kind . ':' . $user) return $p;
+        }
+        return null;
+    }
+
+    // ---- the target folder -----------------------------------------------------------------------
+
+    /**
+     * Check the folder that a person picked for an archive. The rules:
+     *  - an absolute folder under /mnt/<pool> (not /mnt/user, not the boot disk, not RAM);
+     *  - the pool is mounted;
+     *  - the folder is at least one level below the pool and EXISTS, so the plugin never makes a
+     *    new top-level folder on a pool (Unraid shows each one as a share);
+     *  - the folder is not a link, and its real path stays inside the same pool.
+     * Seams: mounted (fn(folder):bool).
+     *
+     * @return array{error:?string,folder:string}
+     */
+    public static function checkTarget(string $folder, array $seams = []): array
+    {
+        $f = rtrim(trim($folder), '/');
+        $bad = static function (string $m) use ($f): array { return ['error' => $m, 'folder' => $f]; };
+        if ($f === '' || !HistoryMoveService::destinationShapeOk($f)) return $bad('Pick a folder on a pool.');
+        if (HistoryMoveService::normaliseSetting($f, '') === '') {
+            return $bad('This place is not allowed. Pick a folder on a pool. The boot disk, RAM and /mnt/user are not allowed.');
+        }
+        $mounted = isset($seams['mounted']) ? (bool)($seams['mounted'])($f) : HistoryMoveService::destinationMounted($f);
+        if (!$mounted) return $bad('The pool is not mounted. Start the array, then try again.');
+        $root = getenv('AICLI_MNT_ROOT');
+        $root = ($root !== false && $root !== '') ? rtrim($root, '/') : '/mnt';
+        $parts = explode('/', substr($f, strlen($root) + 1));
+        if (count($parts) < 2) {
+            return $bad('Pick a folder inside the pool, not the pool itself. The plugin does not make a new top-level folder on a pool.');
+        }
+        if (is_link($f) || !is_dir($f)) {
+            return $bad('This folder does not exist. Make the folder first. The plugin makes only the folder ' . self::ARCHIVE_FOLDER . ' inside it.');
+        }
+        $real = realpath($f);
+        $poolReal = realpath($root . '/' . $parts[0]);
+        if ($real === false || $poolReal === false || strpos($real . '/', $poolReal . '/') !== 0) {
+            return $bad('This folder leads out of the pool.');
+        }
+        return ['error' => null, 'folder' => $real];
+    }
+
+    /** <folder>/aicliagents-archive/<host>/<date> */
+    public static function archiveBase(string $realFolder, array $seams = []): string
+    {
+        $host = preg_replace('/[^A-Za-z0-9._-]/', '_', (string)($seams['host'] ?? (gethostname() ?: 'host'))) ?: 'host';
+        $date = (string)($seams['date'] ?? date('Y-m-d', (int)($seams['now'] ?? time())));
+        return rtrim($realFolder, '/') . '/' . self::ARCHIVE_FOLDER . '/' . $host . '/' . $date;
+    }
+
+    // ---- doing it ---------------------------------------------------------------------------------
+
+    /**
+     * Archive or remove the items of one kind. Background job only.
+     *
+     * $mode 'archive' needs $folder (checked by checkTarget()); $mode 'remove' ignores it.
+     * $seams: now, open, copy (fn(src,dst):bool), free (fn(dir):int), mounted, host, date, progress (fn(array)),
+     * workspace_paths, users, home_persist.
+     *
+     * @return array{status:string,message:string,done:int,files:int,bytes:int,skipped:array<int,array{id:string,reason:string}>,manifest:string,dest:string}
+     */
+    public static function process(string $homeDir, string $user, string $kind, string $mode, string $folder = '', array $seams = []): array
+    {
+        $res = ['status' => 'error', 'message' => '', 'done' => 0, 'files' => 0, 'bytes' => 0, 'skipped' => [], 'manifest' => '', 'dest' => ''];
+        if (!self::isKind($kind)) { $res['message'] = 'This kind of data is not known.'; return $res; }
+        if (!self::isUser($user)) { $res['message'] = 'This home name is not valid.'; return $res; }
+        if (!in_array($mode, ['archive', 'remove'], true)) { $res['message'] = 'The mode must be archive or remove.'; return $res; }
+        $home = rtrim($homeDir, '/');
+        $realHome = realpath($home);
+        if ($realHome === false || is_link($home)) { $res['message'] = 'This home was not found.'; return $res; }
+
+        $sel = self::select($home, $user, $kind, $seams);
+        $res['skipped'] = $sel['skipped'];
+        if (!$sel['units']) {
+            $res['status'] = 'ok';
+            $res['message'] = 'Nothing to ' . ($mode === 'archive' ? 'archive' : 'remove') . '.';
+            return $res;
+        }
+
+        $base = '';
+        $manifestPath = '';
+        $entries = [];
+        if ($mode === 'archive') {
+            $chk = self::checkTarget($folder, $seams);
+            if ($chk['error'] !== null) { $res['message'] = (string)$chk['error']; return $res; }
+            $base = self::archiveBase($chk['folder'], $seams);
+            $total = 0;
+            foreach ($sel['units'] as $u) $total += $u['bytes'];
+            // The room is checked on the chosen folder, before the plugin makes any folder in it.
+            $free = isset($seams['free']) ? (int)($seams['free'])($chk['folder']) : (int)@disk_free_space($chk['folder']);
+            if ($free < $total + self::ROOM_MARGIN) {
+                $res['message'] = 'The target has too little room. It needs ' . BootSpaceService::human($total + self::ROOM_MARGIN) . ' free.';
+                return $res;
+            }
+            if (!is_dir($base) && !@mkdir($base, 0755, true) && !is_dir($base)) {
+                $res['message'] = 'The archive folder could not be made.';
+                return $res;
+            }
+            $manifestPath = $base . '/MANIFEST-' . $kind . '-' . $user . '-' . date('His', (int)($seams['now'] ?? time())) . '.json';
+            $res['dest'] = $base;
+        }
+
+        $copier = $seams['copy'] ?? [HistoryMoveService::class, 'copyFile'];
+        $count = count($sel['units']); $i = 0;
+        foreach ($sel['units'] as $u) {
+            $i++;
+            if (isset($seams['progress'])) ($seams['progress'])(['done' => $i - 1, 'total' => $count, 'id' => $u['id']]);
+            $why = self::unitGuard($home, $realHome, $u, $seams, false);
+            if ($why !== null) { $res['skipped'][] = ['id' => $u['id'], 'reason' => $why]; continue; }
+
+            if ($mode === 'archive') {
+                $made = [];
+                $why = null;
+                foreach ($u['rels'] as $rel) {
+                    $why = self::copyChecked($rel, $home . '/' . $rel, $base . '/' . $user . '/' . $kind . '/' . $rel, $copier, $made);
+                    if ($why !== null) break;
+                }
+                if ($why !== null) {
+                    // Nothing leaves the home for this item. Remove the copies that this run made for it.
+                    foreach ($made as $m) { if ($m['fresh']) @unlink($m['dst']); }
+                    $res['skipped'][] = ['id' => $u['id'], 'reason' => $why];
+                    continue;
+                }
+                foreach ($made as $m) {
+                    $entries[] = ['file' => $m['rel'], 'item' => $u['id'], 'size' => $m['size'], 'sha256' => $m['sha'],
+                                  'mtime' => $m['mtime'], 'archived_at' => time()];
+                }
+                // The manifest lists the checked copies BEFORE any original goes.
+                self::writeManifest($manifestPath, $user, $kind, $entries);
+                $res['manifest'] = $manifestPath;
+            }
+
+            // The item must still be idle, and an archived file must not have changed since the copy.
+            // Then the originals go.
+            $why = self::unitGuard($home, $realHome, $u, $seams, true);
+            if ($why === null && $mode === 'archive') {
+                clearstatcache();
+                foreach ($made as $m) {
+                    $now = @stat($home . '/' . $m['rel']);
+                    if ($now === false || (int)$now['size'] !== $m['size'] || (int)$now['mtime'] !== $m['mtime']) {
+                        $why = 'A file changed during the copy.';
+                        break;
+                    }
+                }
+            }
+            if ($why !== null) {
+                $res['skipped'][] = ['id' => $u['id'], 'reason' => $why . ($mode === 'archive' ? ' The copy stays in the archive.' : '')];
+                continue;
+            }
+            $gone = true;
+            foreach ($u['rels'] as $rel) {
+                $abs = $home . '/' . $rel;
+                if (is_file($abs) && !is_link($abs)) @unlink($abs);
+                clearstatcache(true, $abs);
+                if (file_exists($abs) || is_link($abs)) $gone = false;
+            }
+            self::pruneEmptyDirs($home, $kind, $u['rels']);
+            if (!$gone) { $res['skipped'][] = ['id' => $u['id'], 'reason' => 'A file could not be removed.']; continue; }
+            $res['done']++;
+            $res['files'] += count($u['rels']);
+            $res['bytes'] += $u['bytes'];
+        }
+        if (isset($seams['progress'])) ($seams['progress'])(['done' => $count, 'total' => $count, 'id' => '']);
+        $res['status'] = 'ok';
+        $verb = $mode === 'archive' ? 'Archived' : 'Removed';
+        $res['message'] = $verb . ' ' . $res['done'] . ' item(s) (' . BootSpaceService::human($res['bytes']) . ').'
+            . ($res['skipped'] ? ' ' . count($res['skipped']) . ' stayed.' : '');
+        return $res;
+    }
+
+    /**
+     * Last checks on an item before it is copied or removed. Returns a reason, or null when it may go.
+     * With $recheckOpen the open files are read again (the item must not be in use right before it goes).
+     * @param array{id:string,rels:string[],bytes:int,mtime:int} $u
+     */
+    private static function unitGuard(string $home, string $realHome, array $u, array $seams, bool $recheckOpen): ?string
+    {
+        $open = [];
+        if ($recheckOpen) {
+            $paths = isset($seams['open']) ? (array)($seams['open'])($home) : HistoryStoreService::procOpenFiles($home);
+            foreach ($paths as $p) $open[(string)$p] = true;
+        }
+        foreach ($u['rels'] as $rel) {
+            if ($rel === '' || $rel[0] === '/' || strpos($rel, '..') !== false) return 'The path is not safe.';
+            $abs = $home . '/' . $rel;
+            if (is_link($abs) || !is_file($abs)) return 'A file is gone or is a link.';
+            $dirReal = realpath(dirname($abs));
+            if ($dirReal === false || strpos($dirReal . '/', $realHome . '/') !== 0) return 'A file lies outside the home.';
+            if (isset($open[$abs])) return 'A process uses it.';
+        }
+        return null;
+    }
+
+    /**
+     * Copy one file, check size and SHA-256. Returns a reason on failure. A file that is already in
+     * the archive with the same content counts as copied (fresh = false). A different file at the
+     * same place is never overwritten.
+     * @param array<int,array{rel:string,dst:string,size:int,sha:string,mtime:int,fresh:bool}> $made
+     */
+    private static function copyChecked(string $rel, string $src, string $dst, callable $copier, array &$made): ?string
+    {
+        $st = @stat($src);
+        $sha = @hash_file('sha256', $src);
+        if ($st === false || $sha === false) return 'A file cannot be read.';
+        $row = ['rel' => $rel, 'dst' => $dst, 'size' => (int)$st['size'], 'sha' => $sha, 'mtime' => (int)$st['mtime'], 'fresh' => true];
+        if (file_exists($dst)) {
+            if (@hash_file('sha256', $dst) !== $sha) return 'A different file is already in the archive at this place.';
+            $row['fresh'] = false;
+            $made[] = $row;
+            return null;
+        }
+        $dir = dirname($dst);
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return 'The archive folder could not be made.';
+        $part = $dst . '.part';
+        $ok = $copier($src, $part);
+        if (!$ok || !is_file($part) || (int)@filesize($part) !== (int)$st['size'] || @hash_file('sha256', $part) !== $sha) {
+            @unlink($part);
+            return 'The copy did not match the original, so the original stays.';
+        }
+        @chmod($part, (int)$st['mode'] & 07777);
+        @touch($part, (int)$st['mtime']);
+        if (!@rename($part, $dst)) { @unlink($part); return 'The copy could not be finished.'; }
+        $made[] = $row;
+        return null;
+    }
+    /** @param array<int,array<string,mixed>> $entries */
+    private static function writeManifest(string $path, string $user, string $kind, array $entries): void
+    {
+        $doc = ['plugin' => 'unraid-aicliagents', 'kind' => $kind, 'user' => $user,
+                'host' => gethostname() ?: '', 'written_at' => time(), 'files' => $entries];
+        $tmp = $path . '.tmp.' . getmypid();
+        if (@file_put_contents($tmp, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) !== false) @rename($tmp, $path);
+    }
+
+    /** Remove the folders that the removal emptied, up to (not including) the root of the kind. */
+    private static function pruneEmptyDirs(string $home, string $kind, array $rels): void
+    {
+        $root = $home . '/' . self::describe($kind)['root'];
+        $dirs = [];
+        foreach ($rels as $rel) {
+            $d = dirname($home . '/' . $rel);
+            while (strlen($d) > strlen($root) && strpos($d, $root . '/') === 0) { $dirs[$d] = strlen($d); $d = dirname($d); }
+        }
+        arsort($dirs);
+        foreach (array_keys($dirs) as $d) {
+            if (is_dir($d) && !is_link($d)) @rmdir($d);   // rmdir removes an empty folder only
+        }
+    }
+}

@@ -27,6 +27,7 @@ namespace AICliAgents\Services;
 require_once __DIR__ . '/HistoryStoreService.php';
 require_once __DIR__ . '/HistoryMoveService.php';
 require_once __DIR__ . '/MeasureDeadline.php';
+require_once __DIR__ . '/BootArchiveService.php';
 
 class BootSpaceService
 {
@@ -543,7 +544,18 @@ class BootSpaceService
             if (($cache['location'] ?? '') === 'boot') $cacheBoot = max($cacheBoot, (int)($cache['bytes'] ?? 0));
             $histBytes = min($histBytes, $total);
             $cacheBoot = min($cacheBoot, max(0, $total - $histBytes));
-            $other = max(0, $total - $histBytes - $cacheBoot);
+            // R8 (#724): archive lines. The OpenCode and Codex lines lie inside the conversation
+            // history figure, so only the quarantine folder is taken out of "other".
+            $archiveParts = [];
+            try {
+                $fig = isset($seams['archive'])
+                    ? ($seams['archive'])($u)
+                    : BootArchiveService::measureHome($home, $u, ['users' => array_merge($homes['plain'], [$configUser])]);
+                $archiveParts = BootArchiveService::cardParts($u, $fig);
+            } catch (\Throwable $e) { /* no archive lines for this home */ }
+            $quarantineBytes = 0;
+            foreach ($archiveParts as $ap) { if (($ap['kind'] ?? '') === BootArchiveService::KIND_QUARANTINE) $quarantineBytes += (int)$ap['bytes']; }
+            $other = max(0, $total - $histBytes - $cacheBoot - min($quarantineBytes, max(0, $total - $histBytes - $cacheBoot)));
             if (self::isInside($homePersist, $pluginDir)) $insideTotal += $total;
 
             $hist = ['key' => 'home:' . $u . ':history', 'group' => 'home', 'user' => $u,
@@ -570,6 +582,7 @@ class BootSpaceService
             $parts[] = ['key' => 'home:' . $u . ':other', 'group' => 'home', 'user' => $u,
                 'label' => 'Home ' . $u . ': other', 'bytes' => $other,
                 'note' => 'Your own files and agent settings.', 'action' => null];
+            foreach ($archiveParts as $ap) $parts[] = $ap;
         }
 
         // ---- agents ----
