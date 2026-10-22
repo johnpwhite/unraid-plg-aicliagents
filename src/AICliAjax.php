@@ -12,19 +12,39 @@ error_reporting(E_ALL);
 ini_set('display_errors', '0');
 set_time_limit(30);
 
-// Load the path resolver before the shutdown handler can need its log path.
-require_once __DIR__ . '/includes/services/SecretPaths.php';
+// Forgejo #367: pin this request to ONE plugin generation. `src` is a link
+// that an update repoints at any moment. Resolve it once, here, and load every
+// file through the result. Two includes through the link can land in two
+// generations and declare a class twice (a fatal "Cannot redeclare class").
+// clearstatcache drops a stale cached answer for the link (PHP keeps resolved
+// paths for up to 120 s in a php-fpm worker).
+// The pin comes FIRST. No file is loaded before it.
+if (!defined('AICLI_GEN_SRC')) {
+    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
+}
+// The shutdown handler needs this pure decision class. Load it from the pinned
+// generation. The manager below loads the same file by __DIR__, so
+// require_once skips it there.
+require_once AICLI_GEN_SRC . '/includes/services/ValidationService.php';
 
 // Fatal Error Handler
 register_shutdown_function(function() {
-    // A fatal error can stop the page before the includes below load. Load the
-    // pure decision class here so the handler never fails on its own.
+    // A fatal error can stop the page before the manager loads SecretPaths.
+    // The handler loads no file. It uses the state folder from the environment
+    // and falls back to the default folder when the class is not loaded yet.
     if (!class_exists('AICliAgents\\Services\\ValidationService', false)) {
-        @require_once __DIR__ . '/includes/services/ValidationService.php';
+        return;
     }
     $fatal = \AICliAgents\Services\ValidationService::fatalErrorResponse(error_get_last());
     if ($fatal !== null) {
-        $logFile = \AICliAgents\Services\SecretPaths::stateRoot() . '/debug.log';
+        if (class_exists('AICliAgents\\Services\\SecretPaths', false)) {
+            $stateRoot = \AICliAgents\Services\SecretPaths::stateRoot();
+        } else {
+            $envRoot = getenv('AICLI_STATE_ROOT');
+            $stateRoot = ($envRoot !== false && $envRoot !== '') ? rtrim($envRoot, '/') : '/tmp/unraid-aicliagents';
+        }
+        $logFile = $stateRoot . '/debug.log';
         @file_put_contents($logFile, "[" . date("Y-m-d H:i:s") . "] " . $fatal['log'] . "\n", FILE_APPEND);
         if (!headers_sent()) {
             header('Content-Type: application/json');
@@ -33,16 +53,6 @@ register_shutdown_function(function() {
     }
 });
 
-// Forgejo #367: pin this request to ONE plugin generation. `src` is a link
-// that an update repoints at any moment. Resolve it once, here, and load every
-// file through the result. Two includes through the link can land in two
-// generations and declare a class twice (a fatal "Cannot redeclare class").
-// clearstatcache drops a stale cached answer for the link (PHP keeps resolved
-// paths for up to 120 s in a php-fpm worker).
-if (!defined('AICLI_GEN_SRC')) {
-    clearstatcache(true, '/usr/local/emhttp/plugins/unraid-aicliagents/src');
-    define('AICLI_GEN_SRC', realpath('/usr/local/emhttp/plugins/unraid-aicliagents/src') ?: '/usr/local/emhttp/plugins/unraid-aicliagents/src');
-}
 require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
 require_once AICLI_GEN_SRC . '/includes/services/ValidationService.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/TerminalHandler.php';

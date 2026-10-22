@@ -2,7 +2,7 @@ Menu="Tasks"
 Title="Wiki"
 Icon="fa-book"
 Code="f02d"
-Cond="((@include_once '/usr/local/emhttp/plugins/unraid-aicliagents/src/includes/services/SecretPaths.php') !== false && ((@parse_ini_file(\AICliAgents\Services\SecretPaths::flashRoot() . '/unraid-aicliagents.cfg') ?: [])['wiki_page_enabled'] ?? '0') === '1')"
+Cond="(((@parse_ini_file(rtrim((string)(getenv('AICLI_FLASH_ROOT') ?: '/boot/config/plugins/unraid-aicliagents'), '/') . '/unraid-aicliagents.cfg') ?: [])['wiki_page_enabled'] ?? '0') === '1')"
 ---
 <?php
 /**
