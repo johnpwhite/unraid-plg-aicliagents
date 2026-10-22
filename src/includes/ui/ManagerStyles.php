@@ -2225,7 +2225,9 @@
     .aicli-help-panel p:last-child { margin-bottom: 0; }
     .aicli-help-panel code { font-size: 12px; color: inherit; }
     /* The Health chip panel sits under the tab strip, so it needs a gap to the form below it. */
-    #aicli-help-health-chip { margin: -4px 0 12px; }
+    /* An 8 px gap on both sides and width auto keep the box inside the screen on every device
+       (the page content starts at x = -2 px on a phone and a tablet, so a full-width box was cut off). */
+    #aicli-help-health-chip { width: auto; margin: -4px 8px 12px; }
     #aicli-help-health-chip ul { margin: 0 0 6px; padding-left: 18px; }
     /* A short format hint that stays visible next to a control. */
     .aicli-hint { width: 100%; margin-top: 3px; font-size: 12px; color: var(--aicli-text, var(--text-color, #1c1b1b)); }

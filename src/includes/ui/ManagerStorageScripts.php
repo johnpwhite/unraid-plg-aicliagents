@@ -2701,7 +2701,7 @@ function aicliRestoreHome(user, snap) {
         '<div style="text-align:left; font-size:12px; line-height:1.6;">' +
             '<p>Snapshot from ' + escapeHtml(snap.at || 'an unknown time') + (snap.warm ? ' (warm — taken while sessions were running)' : ' (cold)') +
                 (snap.files ? ', ' + escapeHtml(snap.files) : '') + (snap.size ? ', ' + escapeHtml(snap.size) : '') + '.</p>' +
-            (snap.warm ? '<p style="color:#f59e0b;">This snapshot was taken while sessions were running — it may not be perfectly consistent.</p>' : '') +
+            (snap.warm ? '<p style="color:color-mix(in srgb, #f59e0b 40%, var(--text-color, #1c1c1c));">This snapshot was taken while sessions were running — it may not be perfectly consistent.</p>' : '') +
             '<label style="display:block; margin:6px 0 2px; cursor:pointer;"><input type="radio" name="aicli-restore-mode" value="replace" checked> Replace — the home ends up identical to the snapshot; anything else in the home is removed.</label>' +
             '<label style="display:block; margin:2px 0 8px; cursor:pointer;"><input type="radio" name="aicli-restore-mode" value="merge"> Merge — the snapshot\'s files are copied over the home; nothing else is removed.</label>' +
             '<label style="display:block; margin-bottom:8px; cursor:pointer;"><input type="checkbox" id="aicli-restore-safety" checked> Take a safety snapshot of the current home first (labelled "pre-restore")</label>' +
