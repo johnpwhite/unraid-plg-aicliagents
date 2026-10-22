@@ -253,6 +253,8 @@ class StorageMetricsService {
                 // reads THIS field; the tidy-up notice and the banner use the same rule.
                 ['can_convert' => FileStorage::canConvert($homeDev, $homeWear, $_caps['backend'], $_hasLayers, 'home'),
                  'persist_path' => $homePath],
+                // R22: the rollback copy of the old layers, or null. The card reads THIS field.
+                ['graduated' => self::graduatedForHome((string)$_u)],
                 ['last_backup' => $_bk['last_backup'] ?? null,
                  'last_backup_run' => $_bk['last_run'] ?? null,
                  'backup' => $_bkSummary],
@@ -528,6 +530,29 @@ class StorageMetricsService {
     private static function getDirSize($path) {
         $io = shell_exec("du -sm " . escapeshellarg($path) . " 2>/dev/null | cut -f1");
         return (int)trim($io);
+    }
+
+    /**
+     * CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R22: the rollback copy of a converted home, or null.
+     * The home card shows its size and its removal date, and offers "Remove old layers".
+     * @param array{persist?:string,retention_days?:int,du?:callable,locked?:list<string>} $seams tests
+     * @return array{key:string,bytes:int,expires_at:int}|null
+     */
+    public static function graduatedForHome(string $user, array $seams = []): ?array
+    {
+        require_once __DIR__ . '/BootSpaceService.php';
+        $persist = (string)($seams['persist'] ?? BootSpaceService::persistPath());
+        if (isset($seams['retention_days'])) {
+            $days = (int)$seams['retention_days'];
+        } else {
+            $raw = trim((string)(ConfigService::getConfig()['graduated_retention_days'] ?? '14'));
+            $days = preg_match('/^\d+$/', $raw) === 1 ? (int)$raw : 14;   // the supervisor also falls back to 14
+        }
+        try {
+            return BootSpaceService::graduatedCopyForHome($persist, $user, $days, $seams);
+        } catch (\Throwable $e) {
+            return null;   // the card must still render
+        }
     }
 
     /** ZRAM has a real 4 GiB capacity; a disk upper has no honest bar denominator. */

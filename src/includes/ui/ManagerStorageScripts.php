@@ -231,6 +231,65 @@ function homeJobRemaining(job, dirtyMb) {
     return '~' + formatSize(Number(dirtyMb) * 1048576) + ' to ' + action;
 }
 
+// CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R22: after "Convert to plain folders" the old layers wait
+// for a rollback. While they exist, the home card (h.graduated = {key, bytes, expires_at}, from the
+// server) says how big they are and when the plugin removes them, and offers "Remove old layers".
+// Pure: returns the strip HTML, or '' when the home has no such copy.
+function aicliGraduatedDate(epochSeconds) {
+    var d = new Date(Number(epochSeconds) * 1000);
+    if (!isFinite(d.getTime())) return '';
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+function aicliGraduatedStripHtml(user, h, job) {
+    var g = h && h.graduated;
+    if (!g || !g.key) return '';
+    var size = Number(g.bytes) > 0 ? formatSize(Number(g.bytes)) : 'size not known';
+    var when = aicliGraduatedDate(g.expires_at);
+    return '<div data-testid="home-graduated-strip" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:6px 8px; background:rgba(230,138,0,0.08); border:1px solid rgba(230,138,0,0.35); border-radius:4px;">' +
+        '<span data-testid="home-graduated-line" style="font-size:10px; line-height:1.4;"><i class="fa fa-history" style="color:var(--orange, #e68a00); margin-right:5px;"></i>Old layers kept for rollback: ' + escapeHtml(size) + (when ? ', removed automatically on ' + escapeHtml(when) : '') + '</span>' +
+        '<button type="button" class="aicli-btn-slim" data-testid="home-graduated-btn" style="white-space:nowrap;"' + (job ? ' disabled title="' + job.title + '"' : '') + ' onclick="removeOldLayers(' + aicliJsArg(user) + '); return false;">Remove old layers</button>' +
+        '</div>';
+}
+
+// The button posts the same action as the Remove button of the Boot disk space card
+// (remove_leftover) with the key of the folder. The server checks the folder again.
+function removeOldLayers(user) {
+    var hs = (window._aicliHomesLast || {})[user] || {};
+    var g = hs.graduated;
+    if (!g || !g.key) return false;
+    function run() {
+        var token = typeof csrf !== 'undefined' ? csrf : (window.csrf_token || '');
+        $.ajax({
+            url: '/plugins/unraid-aicliagents/AICliAjax.php?action=remove_leftover',
+            method: 'POST', dataType: 'json',
+            data: { csrf_token: token, key: g.key }
+        }).done(function (r) {
+            if (r && r.status === 'ok') {
+                if (typeof window.swal === 'function') swal({ title: 'Removed', text: 'Freed ' + formatSize(Number(g.bytes) || 0) + '.', type: 'success', timer: 2500, showConfirmButton: false });
+            } else if (typeof window.swal === 'function') {
+                swal('Not removed', (r && r.message) || 'The old layers could not be removed.', 'error');
+            }
+            refreshStats();
+        }).fail(function () {
+            if (typeof window.swal === 'function') swal('Not removed', 'Could not reach the server.', 'error');
+        });
+    }
+    if (typeof window.swal !== 'function') { if (window.confirm('Remove the old layers of ' + user + '?')) run(); return false; }
+    swal({
+        title: 'Remove old layers?',
+        text: '<div style="text-align:left; font-size:12px; line-height:1.6;">' +
+            '<div style="margin-bottom:8px;">The old layers of the home of <b>' + escapeHtml(user) + '</b> are removed for good. You can no longer roll the conversion back.</div>' +
+            '<div>This frees <b>' + escapeHtml(formatSize(Number(g.bytes) || 0)) + '</b> on the boot disk.</div></div>',
+        html: true,
+        type: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Remove',
+        cancelButtonText: 'Cancel',
+        confirmButtonColor: '#b35900'
+    }, function (confirmed) { if (confirmed) run(); });
+    return false;
+}
+
 function renderHomeStats(homes) {
     // HOME_BACKUP.md #287: the backup line on each card reads this snapshot.
     if (typeof aicliNoteHomesForBackup === 'function') aicliNoteHomesForBackup(homes);
@@ -294,6 +353,8 @@ function renderHomeStats(homes) {
                             '<span style="font-size:10px; line-height:1.4;"><i class="fa fa-folder-open-o" style="color:#4caf50; margin-right:5px;"></i>This home can change to plain folders. Then it needs no more saves or tidy-ups.</span>' +
                             '<button type="button" class="aicli-btn-slim" data-testid="home-convert-btn" style="white-space:nowrap;"' + (job ? ' disabled title="' + job.title + '"' : '') + ' onclick="convertHomeStorage(' + aicliJsArg(u) + '); return false;">Convert to plain folders</button>' +
                         '</div>' : '') +
+                    // R22: the rollback copy of the old layers, while it exists.
+                    aicliGraduatedStripHtml(u, h, job) +
                     // Bug #1380: non-modal relocation offer — shown ONLY when this
                     // entity's data sits on a GENUINE USB flash drive AND a durable
                     // non-array non-flash target exists to move it to.

@@ -300,6 +300,49 @@ class BootSpaceService
         return $items;
     }
 
+    /**
+     * The rollback copy of a converted home (docs/specs/CONVERT_LAYERED_TO_PLAIN_FOLDERS.md R22).
+     * Convert to plain folders moves the old layers to <persist>/.graduated/home_<user>. The home
+     * card shows them while they exist. Returns null when the home has no such copy, or when an
+     * open conversion still needs it.
+     *
+     * key: the item key of the "Left over" line (graduated:<folder name>), so the card and that
+     * line remove the copy through the same action (remove_leftover).
+     * expires_at: the supervisor removes an entry when `find -mtime +N` matches. That means an age
+     * of N+1 whole days, so the date is the folder's change time plus N+1 days.
+     * The size comes from one bounded `du` (a status request must stay short).
+     *
+     * @param array{du?:callable,locked?:list<string>} $seams tests
+     * @return array{key:string,bytes:int,expires_at:int}|null
+     */
+    public static function graduatedCopyForHome(string $persist, string $user, int $retentionDays, array $seams = []): ?array
+    {
+        $persist = rtrim($persist, '/');
+        $safe = preg_replace('/[^a-zA-Z0-9_-]/', '_', $user) ?? $user;
+        if ($safe === '' || !is_dir($persist . '/.graduated')) return null;
+        // A second conversion inside the window uses "home_<user>.<timestamp>" (storage_ops.sh).
+        $best = null; $bestTime = -1;
+        foreach (array_merge(glob($persist . '/.graduated/home_' . $safe, GLOB_NOSORT) ?: [],
+                             glob($persist . '/.graduated/home_' . $safe . '.*', GLOB_NOSORT) ?: []) as $p) {
+            if (is_link($p) || !is_dir($p)) continue;
+            if (preg_match('/^[A-Za-z0-9._-]{1,128}$/', basename($p)) !== 1) continue;
+            $t = (int)@filemtime($p);
+            if ($t > $bestTime) { $best = $p; $bestTime = $t; }
+        }
+        if ($best === null) return null;
+        $locked = $seams['locked'] ?? self::openConversionRetirePaths($persist);
+        if (in_array(self::normalizePathForMatch($best), $locked, true)) return null;
+        if ($retentionDays < 0) $retentionDays = 14;
+        if (isset($seams['du'])) {
+            $bytes = (int)($seams['du'])($best);
+        } else {
+            $out = (string)@shell_exec('timeout 3 du -x -s -B1 -- ' . escapeshellarg($best) . ' 2>/dev/null');
+            $bytes = preg_match('/^(\d+)\s/', $out, $m) === 1 ? (int)$m[1] : 0;
+        }
+        return ['key' => 'graduated:' . basename($best), 'bytes' => $bytes,
+                'expires_at' => $bestTime + ($retentionDays + 1) * 86400];
+    }
+
     private static function archiveAgeText(int $ageSeconds): string
     {
         if ($ageSeconds < 60) return 'less than a minute old';
@@ -868,7 +911,10 @@ class BootSpaceService
             return ['status' => 'error', 'message' => 'This item is not valid.'];
         }
         $data = $seams['data'] ?? self::read();
-        $listed = false;
+        // The old layers of a converted home are also offered on the home card, which reads
+        // the folder itself and not the last measurement. The measurement may be old or
+        // missing, so this one kind needs no listing. The live check below is the guard.
+        $listed = strpos($key, 'graduated:') === 0;
         foreach (($data['parts'] ?? []) as $p) {
             if (($p['key'] ?? '') !== 'leftover') continue;
             foreach (($p['items'] ?? []) as $it) {
