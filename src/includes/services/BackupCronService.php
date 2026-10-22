@@ -30,6 +30,15 @@ class BackupCronService {
     /** One file, like the health-check and agent-check crons. */
     private const CRON_FILE = '/etc/cron.d/unraid-aicliagents.backup-home';
 
+    /**
+     * The cron file path. AICLI_BACKUP_CRON_FILE is a test-only override, so a test
+     * never writes the system cron folder. Production never sets it.
+     */
+    private static function cronFile(): string {
+        $e = getenv('AICLI_BACKUP_CRON_FILE');
+        return ($e !== false && $e !== '') ? $e : self::CRON_FILE;
+    }
+
     /** The CLI entry point every cron line calls — never a proposal, per HOME_BACKUP.md's Tier row: `--scheduled` is the operator's own schedule, not an agent action. */
     private const ADMIN_AGENT_SCRIPT = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php';
 
@@ -97,13 +106,13 @@ class BackupCronService {
         });
 
         if (empty($lines)) {
-            @unlink(self::CRON_FILE);
+            @unlink(self::cronFile());
             LogService::log('Home backup schedule: no home has a schedule — cron not installed.', LogService::LOG_INFO, 'BackupCronService');
             @exec('/usr/local/sbin/update_cron 2>/dev/null');
             return;
         }
 
-        if (!self::writeCronFile($lines, self::CRON_FILE)) {
+        if (!self::writeCronFile($lines, self::cronFile())) {
             LogService::log('Home backup schedule: the cron file could not be written, so the schedule is NOT active.', LogService::LOG_ERROR, 'BackupCronService');
             return;
         }
