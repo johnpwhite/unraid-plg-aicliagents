@@ -649,6 +649,19 @@ class TerminalHandler {
         // Check 2: Is the workspace path (where the agent will work) available?
         if (!empty($workspacePath) && !\AICliAgents\Services\StorageMountService::isPathAvailable($workspacePath)) {
             $wsClassification = \AICliAgents\Services\StorageMountService::classifyPath($workspacePath);
+            // #757: the storage is mounted but the folder is gone. Waiting does
+            // not help, so say so and do not offer the RAM install.
+            if (\AICliAgents\Services\StorageMountService::isBackingStorageMounted((string)$workspacePath, $wsClassification)) {
+                return [
+                    'status' => 'error',
+                    'reason' => 'workspace_missing',
+                    'message' => "This workspace's folder no longer exists: " . $workspacePath
+                        . '. Close the workspace, or choose another folder for it.',
+                    'path' => $workspacePath,
+                    'classification' => $wsClassification,
+                    'emergency_possible' => false,
+                ];
+            }
             return [
                 'status' => 'error',
                 'reason' => 'workspace_unavailable',

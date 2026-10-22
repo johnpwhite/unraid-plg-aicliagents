@@ -124,6 +124,34 @@ class StorageMountService {
         return is_dir($path) && is_readable($path);
     }
 
+    /**
+     * #757: is the storage that holds this path mounted? Use it after
+     * isPathAvailable() fails, to tell "the array or pool is not mounted"
+     * from "the storage is mounted but the folder is gone".
+     *
+     * An array path (/mnt/user, /mnt/diskN) needs its mount row. A pool path
+     * (classification pool:<name>) needs the row for /mnt/<name>. Every other
+     * class (flash, ram, unassigned, unknown) has no mount we can check, so
+     * the answer is true.
+     *
+     * $mounts is an explicit test seam; production reads /proc/mounts.
+     */
+    public static function isBackingStorageMounted(string $path, string $classification, ?string $mounts = null): bool {
+        $mounts = $mounts ?? (@file_get_contents('/proc/mounts') ?: '');
+        if (!self::isBackingMountAvailable($path, $mounts)) return false;
+        if (strpos($classification, 'pool:') === 0) {
+            $pool = substr($classification, 5);
+            if ($pool === '') return true;
+            return self::mountTableHasTarget($mounts, '/mnt/' . $pool);
+        }
+        // An unassigned disk or a remote share mounts at /mnt/disks/<name> or
+        // /mnt/remotes/<name>. When that share is down, the folder is not "gone".
+        if (preg_match('#^/mnt/(disks|remotes)/([^/]+)#', $path, $m)) {
+            return self::mountTableHasTarget($mounts, '/mnt/' . $m[1] . '/' . $m[2]);
+        }
+        return true;
+    }
+
     /** Forgejo #558: written by event/stopping, removed by event/disks_mounted. */
     private static function arrayStoppingFlagPath(): string {
         return rtrim(SecretPaths::stateRoot(), '/') . '/.array_stopping';
