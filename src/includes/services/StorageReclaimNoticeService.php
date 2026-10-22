@@ -16,7 +16,10 @@
  *     stick (`can_convert`, #496) the button runs convert_storage instead: the home
  *     becomes plain folders and needs no more tidy-ups. A person dismissing the ask ("Later") is
  *     remembered for that episode only (the started_at of the wait), so a new wait asks
- *     again but the same wait never nags.</constraints>
+ *     again. A dismissal also ends after 24 hours (DISMISS_TTL, #746): the file holds the
+ *     episode and the time of the dismissal, and if the wait still goes on the notice comes
+ *     back once a day. The banner on the terminal page has its own Convert button, so the
+ *     page never depends on this notice being visible.</constraints>
  * </module_context>
  */
 
@@ -44,23 +47,40 @@ class StorageReclaimNoticeService
         return rtrim($base, '/') . '/.' . self::opId($user) . '.dismissed';
     }
 
-    /** Remember that a person chose "Later" for the wait that began at $startedAt. */
-    public static function markDismissed(string $opId, int $startedAt): void
+    /** #746: a dismissal lasts this long. Then the notice comes back if the wait goes on. */
+    public const DISMISS_TTL = 86400;
+
+    /**
+     * Remember that a person chose "Later" for the wait that began at $startedAt.
+     * The file holds "<started_at>:<time of the dismissal>". $now is a test seam.
+     */
+    public static function markDismissed(string $opId, int $startedAt, ?int $now = null): void
     {
         try {
             if (strpos($opId, self::OP_PREFIX) !== 0) return;
             $user = substr($opId, strlen(self::OP_PREFIX));
-            @file_put_contents(self::dismissPath($user), (string)$startedAt);
+            @file_put_contents(self::dismissPath($user), $startedAt . ':' . ($now ?? time()));
         } catch (\Throwable $e) {
             // best effort
         }
     }
 
-    /** started_at of the wait episode a person dismissed, or 0. */
-    private static function dismissedEpisode(string $user): int
+    /**
+     * started_at of the wait episode a person dismissed, or 0 when there is none or the
+     * dismissal is older than DISMISS_TTL (#746). An old file without a time (written
+     * before #746) counts from its modification time. $now is a test seam.
+     */
+    public static function dismissedEpisode(string $user, ?int $now = null): int
     {
-        $raw = @file_get_contents(self::dismissPath($user));
-        return $raw === false ? 0 : (int)trim($raw);
+        $path = self::dismissPath($user);
+        $raw = @file_get_contents($path);
+        if ($raw === false) return 0;
+        $parts = explode(':', trim($raw));
+        $episode = (int)$parts[0];
+        $at = isset($parts[1]) ? (int)$parts[1] : (int)@filemtime($path);
+        if ($episode <= 0) return 0;
+        if ((($now ?? time()) - $at) >= self::DISMISS_TTL) return 0;
+        return $episode;
     }
 
     /**

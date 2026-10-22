@@ -146,6 +146,39 @@
         });
     }
 
+    // #746: ONE confirm for "Convert to plain folders". The tray button and the banner on
+    // the terminal page both call it, so the question and the action are the same.
+    function convertHomeConfirm(user, onYes) {
+        var cNote = 'The home stays on the boot disk and needs no more tidy-ups. '
+            + 'Your current storage files are kept as a backup for 14 days, then removed; when the boot disk is short of space, that backup is kept on another disk. '
+            // R14: never look hung. The Storage tab's dialog gives the size estimate.
+            + 'For a large home this can take 30 minutes or more; the workspaces stay closed until it ends, and this tray shows the progress.';
+        trayConfirm({
+            title: 'Convert to plain folders?',
+            html: '<div style="text-align:left;line-height:1.6">'
+                + '<div style="margin-bottom:10px;">Every workspace of home <b>' + esc(user)
+                + '</b> closes and opens again.</div><div>' + cNote + '</div></div>',
+            plain: 'Convert the home of ' + user + ' to plain folders? Every workspace of this home closes and opens again.\n\n' + cNote,
+            confirmText: 'Convert',
+        }, onYes);
+    }
+
+    // #746: the banner on the terminal page calls this. It never reads the tray's entry, so
+    // it works when the person hid that notice. With a tray on the page it uses the tray's
+    // job starter (the progress then shows in the tray). Without one it calls the same
+    // AJAX action itself.
+    window.aicliConvertHome = function (user) {
+        var u = user || 'root';
+        convertHomeConfirm(u, function () {
+            var tray = document.querySelector('aicli-activity-tray');
+            if (tray && typeof tray._startHomeJob === 'function') {
+                tray._startHomeJob('convert_storage', u, 'storage_reclaim_' + u.replace(/[^A-Za-z0-9_-]/g, '_'));
+                return;
+            }
+            fetch(ajaxUrl('convert_storage', { type: 'home', id: u })).catch(function () { /* the banner stays; press the button again */ });
+        });
+    };
+
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -963,18 +996,7 @@
                     // that is not a USB stick is offered the conversion, not a merge.
                     if (act === 'convert_home') {
                         var cUser = el.getAttribute('data-user') || 'root';
-                        var cNote = 'The home stays on the boot disk and needs no more tidy-ups. '
-                            + 'Your current storage files are kept as a backup for 14 days, then removed; when the boot disk is short of space, that backup is kept on another disk. '
-                            // R14: never look hung. The Storage tab's dialog gives the size estimate.
-                            + 'For a large home this can take 30 minutes or more; the workspaces stay closed until it ends, and this tray shows the progress.';
-                        trayConfirm({
-                            title: 'Convert to plain folders?',
-                            html: '<div style="text-align:left;line-height:1.6">'
-                                + '<div style="margin-bottom:10px;">Every workspace of home <b>' + esc(cUser)
-                                + '</b> closes and opens again.</div><div>' + cNote + '</div></div>',
-                            plain: 'Convert the home of ' + cUser + ' to plain folders? Every workspace of this home closes and opens again.\n\n' + cNote,
-                            confirmText: 'Convert',
-                        }, function () {
+                        convertHomeConfirm(cUser, function () {
                             el.disabled = true;
                             el.textContent = 'Starting…';
                             self._startHomeJob('convert_storage', cUser, opId);
