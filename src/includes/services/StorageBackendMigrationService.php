@@ -18,48 +18,57 @@ final class StorageBackendMigrationService
     private const INSTALL_WAIT_TIMEOUT_SECONDS = 1200;
     private const ACTIVITY_ID = 'storage_backend_migration';
 
-    public static function preflight(string $target, ?array $config = null, array $seams = []): array
+    /**
+     * Read-only: what a change of one kind to $target would do, and whether it is allowed.
+     * $kind is "homes", "agents" or "all" (the one-engine call path of older callers).
+     * The check compares with the REAL state of the kind, not only with the saved value:
+     * a kind that is mixed can still be completed.
+     */
+    public static function preflight(string $target, ?array $config = null, array $seams = [], string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
         $config = $config ?? ConfigService::getConfig();
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
         $target = StorageBackendPolicyService::normalizeMode($target);
-        $current = StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering');
-        if ($target === $current) {
+        $current = StorageBackendPolicyService::kindMode($config, $kind);
+        $allEntities = $seams['entities'] ?? self::entities($config, $seams);
+        $entities = self::entitiesForTarget($allEntities, $target, $kind, $current, self::realBackendMap($seams));
+        if ($target === $current && $entities === []) {
             return [
                 'status' => 'error',
-                'message' => self::alreadySetMessage($current),
+                'message' => self::alreadySetMessage($current, $kind),
                 'target' => $target,
                 'current' => $current,
+                'kind' => $kind,
             ];
         }
         $verdicts = $seams['verdicts'] ?? StorageBackendPolicyService::targetVerdicts($config);
         $refused = [];
         $usb = [];
-        foreach ($verdicts as $kind => $verdict) {
-            if (!empty($verdict['refuse'])) $refused[] = $kind;
-            if (!empty($verdict['is_usb_or_removable'])) $usb[] = $kind;
+        foreach ($verdicts as $verdictKind => $verdict) {
+            if ($kind === StorageBackendPolicyService::KIND_HOMES && $verdictKind !== 'home') continue;
+            if ($kind === StorageBackendPolicyService::KIND_AGENTS && $verdictKind !== 'agent') continue;
+            if (!empty($verdict['refuse'])) $refused[] = $verdictKind;
+            if (!empty($verdict['is_usb_or_removable'])) $usb[] = $verdictKind;
         }
         if ($target === StorageBackendPolicyService::PASSTHROUGH && $refused !== []) {
             return [
                 'status' => 'error',
-                'message' => 'Plain-directory mode cannot use the refused storage target for: ' . implode(', ', $refused) . '.',
+                'message' => 'Plain folders cannot use the refused storage target for: ' . implode(', ', $refused) . '.',
                 'target' => $target,
+                'kind' => $kind,
                 'targets' => $verdicts,
             ];
         }
-        $allEntities = $seams['entities'] ?? self::entities($config, $seams);
-        $entities = self::entitiesForTarget($allEntities, $target, $config);
-        $skippedAgents = self::skippedAgentIds($allEntities, $target, $config);
         $capacity = self::capacityPreflight($target, $config, $verdicts, $entities, $seams);
         if (($capacity['status'] ?? '') !== 'ok') {
-            return $capacity + ['target' => $target, 'targets' => $verdicts];
+            return $capacity + ['target' => $target, 'kind' => $kind, 'targets' => $verdicts];
         }
+        $noun = self::kindNoun($kind);
         $message = $target === StorageBackendPolicyService::PASSTHROUGH
-            ? (!empty($config['keep_agents_compressed'])
-                ? 'Homes will be converted to plain directories. Keep agents compressed is on, so agents will stay in SquashFS layers. Existing sessions will be closed safely, old SquashFS data will be retained in the migration archive, and new installs can activate side by side.'
-                : 'All installed agents and homes will be converted to plain directories. Existing sessions will be closed safely, old SquashFS data will be retained in the migration archive, and new installs can activate side by side.')
-            : 'All installed agents and homes will be converted to SquashFS layers with writable zram state. Existing plain directories will be archived only after the layer and manifest are verified.';
+            ? 'All ' . $noun . ' that are not plain folders yet will be converted to plain folders. Existing sessions will be closed safely, old SquashFS data will be retained in the migration archive, and new installs can activate side by side.'
+            : 'All ' . $noun . ' that are not SquashFS layers yet will be converted to SquashFS layers with writable zram state. Existing plain folders will be archived only after the layer and manifest are verified.';
         if ($usb !== []) {
-            $message .= ' The probe identified removable/USB-backed storage (' . implode(', ', $usb) . '); SquashFS + zram is recommended to reduce wear.';
+            $message .= ' The probe identified removable/USB-backed storage (' . implode(', ', $usb) . '); SquashFS layers are recommended to reduce wear.';
         }
         $message .= ' The migration needs about ' . BootSpaceService::human((int)$capacity['capacity']['forward_bytes'])
             . ' for the new storage and ' . BootSpaceService::human((int)$capacity['capacity']['rollback_bytes'])
@@ -67,38 +76,110 @@ final class StorageBackendMigrationService
         return [
             'status' => 'ok',
             'target' => $target,
-            'current' => StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering'),
+            'kind' => $kind,
+            'current' => $current,
             'targets' => $verdicts,
             'requires_acknowledgement' => $usb !== [],
             'message' => $message,
             'capacity' => $capacity['capacity'],
-            'skipped_agents' => $skippedAgents,
+            'item_count' => count($entities),
         ];
     }
 
-    private static function alreadySetMessage(string $mode): string
+    /**
+     * The real state of both kinds for the Configuration tab: `homes` and `agents`, each with
+     * `state` (plain | layers | mixed | none), `label` (for example "Mixed: 1 of 2 homes are
+     * plain folders"), the counts and the saved setting (`saved`). The label comes from the
+     * storage status, not from the saved setting. A caller may pass the status (tests).
+     *
+     * @param array<string,mixed>|null $status storage status, or null to read it
+     * @param list<string>|null $installedAgentIds installed agent ids, or null to read them
+     */
+    public static function kindStates(?array $status = null, ?array $installedAgentIds = null, ?array $config = null): array
     {
-        return $mode === StorageBackendPolicyService::PASSTHROUGH
-            ? 'The storage engine already uses plain folders.'
-            : 'The storage engine already uses SquashFS layers.';
-    }
-
-    /** Keep installed agents layered when the person has enabled this storage setting. */
-    private static function entitiesForTarget(array $entities, string $target, array $config): array
-    {
-        if ($target !== StorageBackendPolicyService::PASSTHROUGH || empty($config['keep_agents_compressed'])) return $entities;
-        return array_values(array_filter($entities, static fn(array $entity): bool => ($entity['type'] ?? '') !== 'agent'));
-    }
-
-    /** @return list<string> agent ids that remain layered during a plain-folder migration */
-    private static function skippedAgentIds(array $entities, string $target, array $config): array
-    {
-        if ($target !== StorageBackendPolicyService::PASSTHROUGH || empty($config['keep_agents_compressed'])) return [];
-        $ids = [];
-        foreach ($entities as $entity) {
-            if (($entity['type'] ?? '') === 'agent') $ids[] = (string)($entity['id'] ?? '');
+        $config = $config ?? ConfigService::getConfig();
+        $status = $status ?? StorageMetricsService::getStatus();
+        if ($installedAgentIds === null) {
+            $installedAgentIds = [];
+            if (class_exists(AgentRegistry::class)) {
+                foreach (AgentRegistry::getRegistry() as $id => $agent) {
+                    if (!empty($agent['is_installed'])) $installedAgentIds[] = (string)$id;
+                }
+            }
         }
-        return array_values(array_unique(array_filter($ids, static fn(string $id): bool => $id !== '')));
+        $real = StorageBackendPolicyService::realStates($status, $installedAgentIds);
+        $out = ['status' => 'ok'];
+        foreach (['homes', 'agents'] as $kind) {
+            unset($real[$kind]['backends']);
+            $out[$kind] = $real[$kind] + ['saved' => StorageBackendPolicyService::kindMode($config, $kind)];
+        }
+        return $out;
+    }
+
+    /** Plain words for the items of one kind. */
+    private static function kindNoun(string $kind): string
+    {
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        return $kind === StorageBackendPolicyService::KIND_HOMES ? 'homes'
+            : ($kind === StorageBackendPolicyService::KIND_AGENTS ? 'agents' : 'agents and homes');
+    }
+
+    private static function alreadySetMessage(string $mode, string $kind = StorageBackendPolicyService::KIND_ALL): string
+    {
+        $noun = ucfirst(self::kindNoun($kind));
+        return $mode === StorageBackendPolicyService::PASSTHROUGH
+            ? $noun . ' already use plain folders.'
+            : $noun . ' already use SquashFS layers.';
+    }
+
+    /**
+     * The backend of each item in the real storage status: "type/id" => "flash" | "passthrough".
+     * "flash" is the layer engine. A caller that supplies its own entity list gets an empty map
+     * unless it supplies `real_backends`: the live status is never read for it.
+     *
+     * @return array<string,string>
+     */
+    private static function realBackendMap(array $seams): array
+    {
+        if (isset($seams['real_backends']) && is_array($seams['real_backends'])) return $seams['real_backends'];
+        if (isset($seams['entities'])) return [];
+        try {
+            $installed = [];
+            if (class_exists(AgentRegistry::class)) {
+                foreach (AgentRegistry::getRegistry() as $id => $agent) {
+                    if (!empty($agent['is_installed'])) $installed[] = (string)$id;
+                }
+            }
+            $real = StorageBackendPolicyService::realStates(StorageMetricsService::getStatus(), $installed);
+        } catch (\Throwable $e) {
+            return [];
+        }
+        $map = [];
+        foreach ($real['homes']['backends'] as $id => $backend) $map['home/' . $id] = $backend;
+        foreach ($real['agents']['backends'] as $id => $backend) $map['agent/' . $id] = $backend;
+        return $map;
+    }
+
+    /**
+     * The items one kind must convert for $target: the items of that kind that are not on
+     * the target yet. An item with no entry in the real map counts as being on the saved
+     * setting ($saved), so it needs conversion only when $target differs from $saved.
+     *
+     * @param array<string,string> $backends "type/id" => "flash" | "passthrough"
+     */
+    private static function entitiesForTarget(array $entities, string $target, string $kind, string $saved, array $backends): array
+    {
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        $out = [];
+        foreach ($entities as $entity) {
+            $type = (string)($entity['type'] ?? '');
+            if ($kind === StorageBackendPolicyService::KIND_HOMES && $type !== 'home') continue;
+            if ($kind === StorageBackendPolicyService::KIND_AGENTS && $type !== 'agent') continue;
+            $key = $type . '/' . (string)($entity['id'] ?? '');
+            $now = isset($backends[$key]) ? StorageBackendPolicyService::engineOfBackend((string)$backends[$key]) : $saved;
+            if ($now !== $target) $out[] = $entity;
+        }
+        return $out;
     }
 
     /**
@@ -300,12 +381,13 @@ final class StorageBackendMigrationService
     }
 
     /** Save a refusal so both status views retain the reason a migration did not start. */
-    private static function recordPreflightFailure(array $check, string $target, array $config, array $entities): array
+    private static function recordPreflightFailure(array $check, string $target, array $config, array $entities, string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
         $now = time();
         $state = [
             'status' => 'error', 'phase' => 'preflight',
-            'from' => StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering'),
+            'kind' => StorageBackendPolicyService::normalizeKind($kind),
+            'from' => StorageBackendPolicyService::kindMode($config, $kind),
             'target' => StorageBackendPolicyService::normalizeMode($target),
             'started_at' => $now, 'updated_at' => $now, 'completed' => 0,
             'total' => count($entities), 'current' => '',
@@ -317,8 +399,9 @@ final class StorageBackendMigrationService
     }
 
     /** Reserve the shared migration right, then start the worker without holding the page open. */
-    public static function startAsync(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
+    public static function startAsync(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = [], string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
         $config = $config ?? ConfigService::getConfig();
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
@@ -329,7 +412,7 @@ final class StorageBackendMigrationService
         try {
             $conflict = self::pathMoveConflictMessage();
             if ($conflict !== null) return ['status' => 'error', 'message' => $conflict];
-            return self::startAsyncWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock);
+            return self::startAsyncWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock, $kind);
         } finally {
             FileStorage::releaseMigrationLock($migrationLock);
         }
@@ -347,12 +430,13 @@ final class StorageBackendMigrationService
         if (($prior['status'] ?? '') !== 'interrupted') {
             return ['status' => 'error', 'message' => 'There is no interrupted engine change to recover.'];
         }
+        $kind = StorageBackendPolicyService::normalizeKind((string)($prior['kind'] ?? ''));
         $from = StorageBackendPolicyService::normalizeMode((string)($prior['from'] ?? 'layering'));
         $target = StorageBackendPolicyService::normalizeMode((string)($prior['target'] ?? 'layering'));
         $migrated = is_array($prior['migrated'] ?? null) ? array_values(array_unique(array_map('strval', $prior['migrated']))) : [];
         if ($from === $target) return ['status' => 'error', 'message' => 'The interrupted engine change has no valid target. Check storage before you continue.'];
         if ($operation === 'continue') {
-            $check = self::preflight($target, $config, $seams);
+            $check = self::preflight($target, $config, $seams, $kind);
             if (($check['status'] ?? '') !== 'ok') return $check;
         }
 
@@ -376,12 +460,12 @@ final class StorageBackendMigrationService
             } while (true);
 
             $now = time();
-            $entities = $operation === 'continue' ? self::entitiesForTarget(self::entities($config, $seams), $target, $config) : array_map(static function (string $key): array {
+            $entities = $operation === 'continue' ? self::entitiesForTarget($seams['entities'] ?? self::entities($config, $seams), $target, $kind, $from, self::realBackendMap($seams)) : array_map(static function (string $key): array {
                 [$type, $id] = explode('/', $key, 2);
                 return ['type' => $type, 'id' => $id];
             }, array_filter($migrated, static fn(string $key): bool => preg_match('#^(agent|home)/[A-Za-z0-9_.-]{1,128}$#D', $key) === 1));
             $state = [
-                'status' => 'queued', 'phase' => 'queued', 'from' => $from, 'target' => $target,
+                'status' => 'queued', 'phase' => 'queued', 'kind' => $kind, 'from' => $from, 'target' => $target,
                 'operation' => $operation, 'started_at' => $now, 'updated_at' => $now,
                 'completed' => 0, 'total' => count($entities), 'current' => '', 'worker_pid' => 0,
                 'migrated' => $migrated, 'entities' => self::entityJournal($entities, $from, $target),
@@ -395,11 +479,11 @@ final class StorageBackendMigrationService
             $migrationLock = null;
             self::releaseLaunchGuard($launchLock);
             $launchLock = false;
-            $spawn = $seams['spawn_recovery'] ?? static function (string $targetMode, string $action): int {
+            $spawn = $seams['spawn_recovery'] ?? static function (string $targetMode, string $action) use ($kind): int {
                 require_once __DIR__ . '/UtilityService.php';
                 $script = dirname(__DIR__, 2) . '/scripts/storage-backend-migrate.php';
                 return UtilityService::spawnDetached(
-                    [PHP_BINARY, $script, $targetMode, '0', $action],
+                    [PHP_BINARY, $script, $targetMode, '0', $action, $kind],
                     self::statusPath() . '.log',
                     true
                 );
@@ -535,26 +619,36 @@ final class StorageBackendMigrationService
     }
 
     /** @param resource|null $migrationLock */
-    private static function startAsyncWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock): array
+    private static function startAsyncWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock, string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
-            $current = StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering');
-            if (StorageBackendPolicyService::normalizeMode($target) === $current) {
-                return ['status' => 'error', 'message' => self::alreadySetMessage($current)];
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        $target = StorageBackendPolicyService::normalizeMode($target);
+        $from = StorageBackendPolicyService::kindMode($config, $kind);
+        // Compare with the REAL state of the kind, not only with the saved value: a kind
+        // that is mixed can still be completed, and only the items off the target convert.
+        $allEntities = $seams['entities'] ?? self::entities($config, $seams);
+        $entities = self::entitiesForTarget($allEntities, $target, $kind, $from, self::realBackendMap($seams));
+        if ($target === $from && $entities === []) {
+            return ['status' => 'error', 'message' => self::alreadySetMessage($from, $kind)];
+        }
+        if ($entities === [] && !isset($seams['preflight'])) {
+            // Every item of this kind is on the target already. Save the setting; nothing converts.
+            $saver = $seams['save_kind'] ?? static fn(string $k, string $mode): bool => (bool)ConfigService::saveConfig(self::settingsToSave($k, $mode), false);
+            if (!$saver($kind, $target)) {
+                return ['status' => 'error', 'message' => 'The setting could not be saved. Try again.'];
             }
-        $check = $seams['preflight'] ?? self::preflight($target, $config, $seams);
+            return ['status' => 'saved', 'kind' => $kind, 'target' => $target,
+                'message' => ucfirst(self::kindNoun($kind)) . ' were already on ' . strtolower(StorageBackendPolicyService::kindLabel($target)) . '. The setting is saved.'];
+        }
+        $check = $seams['preflight'] ?? self::preflight($target, $config, $seams, $kind);
         if (($check['status'] ?? '') !== 'ok') {
-            $entities = self::entitiesForTarget($seams['entities'] ?? self::entities($config, $seams), $target, $config);
-            return self::recordPreflightFailure($check, $target, $config, $entities);
+            return self::recordPreflightFailure($check, $target, $config, $entities, $kind);
         }
         $target = (string)$check['target'];
         if (!empty($check['requires_acknowledgement']) && !$acknowledgeWear) {
-            return ['status' => 'error', 'message' => 'Plain-directory mode on removable/USB storage requires an explicit wear acknowledgement.'];
+            return ['status' => 'error', 'message' => 'Plain folders on removable/USB storage require an explicit wear acknowledgement.'];
         }
 
-        $allEntities = $seams['entities'] ?? self::entities($config, $seams);
-        $entities = self::entitiesForTarget($allEntities, $target, $config);
-        $skippedAgents = self::skippedAgentIds($allEntities, $target, $config);
-        $from = StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering');
         $lock = self::acquireLaunchGuard(true);
         if ($lock === false) {
             return ['status' => 'error', 'message' => 'A storage-engine migration or workspace start is already running. Wait for it to finish, then try again.'];
@@ -571,17 +665,15 @@ final class StorageBackendMigrationService
 
             $waitingForInstalls = $activeInstalls !== [];
             $state = [
-                'status' => 'queued', 'from' => $from, 'target' => $target,
+                'status' => 'queued', 'kind' => $kind, 'from' => $from, 'target' => $target,
                 'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
                 'total' => count($entities), 'current' => $waitingForInstalls ? implode(', ', $activeInstalls) : '',
                 'phase' => $waitingForInstalls ? 'waiting_for_installs' : 'queued',
                 'message' => $waitingForInstalls
                     ? 'The migration is queued and waiting for agent installation to finish: ' . implode(', ', $activeInstalls) . '.'
-                    : 'The migration is queued. Workspaces cannot open until it finishes.'
-                        . ($skippedAgents !== [] ? ' Keep agents compressed is on, so agents stay in SquashFS layers.' : ''),
+                    : 'The migration is queued. Workspaces cannot open until it finishes.',
                 'worker_pid' => 0,
                 'migrated' => [],
-                'skipped_agents' => $skippedAgents,
                 'sessions_to_resume' => [],
                 'entities' => self::entityJournal($entities, $from, $target),
             ];
@@ -605,11 +697,11 @@ final class StorageBackendMigrationService
             // records that it owns the storage policy.
             self::releaseLaunchGuard($lock);
             $lock = false;
-            $spawn = $seams['spawn'] ?? static function (string $mode, bool $ack): int {
+            $spawn = $seams['spawn'] ?? static function (string $mode, bool $ack) use ($kind): int {
                 require_once __DIR__ . '/UtilityService.php';
                 $script = dirname(__DIR__, 2) . '/scripts/storage-backend-migrate.php';
                 return UtilityService::spawnDetached(
-                    [PHP_BINARY, $script, $mode, $ack ? '1' : '0'],
+                    [PHP_BINARY, $script, $mode, $ack ? '1' : '0', 'continue', $kind],
                     self::statusPath() . '.log',
                     true
                 );
@@ -655,7 +747,7 @@ final class StorageBackendMigrationService
     }
 
     /** Run the accepted worker job and record a failure that happened before conversion began. */
-    public static function runQueuedMigration(string $target, bool $acknowledgeWear): array
+    public static function runQueuedMigration(string $target, bool $acknowledgeWear, string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
         $state = self::readStatus();
         if (($state['status'] ?? '') === 'queued') {
@@ -665,7 +757,7 @@ final class StorageBackendMigrationService
             self::writeDurableStatus($state);
         }
         try {
-            $result = self::migrate($target, $acknowledgeWear, ConfigService::getConfig());
+            $result = self::migrate($target, $acknowledgeWear, ConfigService::getConfig(), [], $kind);
         } catch (\Throwable $e) {
             $state = self::readStatus();
             if (($state['status'] ?? '') === 'queued') {
@@ -788,10 +880,18 @@ final class StorageBackendMigrationService
         $migrated = is_array($status['migrated'] ?? null) ? $status['migrated'] : [];
         $total = max(0, (int)($status['total'] ?? 0));
         if ($migrated !== []) {
-            $kind = ($status['target'] ?? '') === StorageBackendPolicyService::PASSTHROUGH ? 'plain folders' : 'SquashFS layers';
-            return 'The engine change did not finish: ' . count($migrated) . ' of ' . $total . ' items are ' . $kind . '. Continue or put them back.';
+            $engine = ($status['target'] ?? '') === StorageBackendPolicyService::PASSTHROUGH ? 'plain folders' : 'SquashFS layers';
+            return 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not finish: ' . count($migrated) . ' of ' . $total . ' items are ' . $engine . '. Continue or put them back.';
         }
-        return 'The engine change did not finish. No items changed. Continue or put them back.';
+        return 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not finish. No items changed. Continue or put them back.';
+    }
+
+    /** Name of the change in a message: "home storage change", "agent storage change" or "storage change". */
+    private static function changeName(string $kind): string
+    {
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        return $kind === StorageBackendPolicyService::KIND_HOMES ? 'home storage change'
+            : ($kind === StorageBackendPolicyService::KIND_AGENTS ? 'agent storage change' : 'storage change');
     }
 
     private static function workerPidIsRunning(array $status): bool
@@ -820,7 +920,7 @@ final class StorageBackendMigrationService
     private static function writeDurableStatus(array $status): bool
     {
         $record = [];
-        foreach (['status', 'phase', 'from', 'target', 'migrated', 'skipped_agents', 'sessions_to_resume', 'total', 'completed', 'current', 'message', 'worker_pid', 'operation', 'started_at', 'updated_at'] as $key) {
+        foreach (['status', 'phase', 'kind', 'from', 'target', 'migrated', 'sessions_to_resume', 'total', 'completed', 'current', 'message', 'worker_pid', 'operation', 'started_at', 'updated_at'] as $key) {
             if (array_key_exists($key, $status)) $record[$key] = $status[$key];
         }
         if (!isset($record['migrated']) || !is_array($record['migrated'])) $record['migrated'] = [];
@@ -856,12 +956,20 @@ final class StorageBackendMigrationService
         $progress = $total > 0 ? min(99, (int)floor(100 * $completed / $total)) : 1;
         ActivityService::update(self::ACTIVITY_ID, [
             'type' => 'migrate',
-            'label' => 'Changing storage engine',
+            'label' => 'Changing ' . self::activityName((string)($state['kind'] ?? '')),
             'status' => 'running',
-            'step' => (string)($state['message'] ?? 'Changing storage engine.'),
+            'step' => (string)($state['message'] ?? 'Changing storage.'),
             'progress' => $progress,
             'meta' => ['kind' => 'job'],
         ]);
+    }
+
+    /** What the Activity tray says is changing: home storage, agent storage or storage. */
+    private static function activityName(string $kind): string
+    {
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        return $kind === StorageBackendPolicyService::KIND_HOMES ? 'home storage'
+            : ($kind === StorageBackendPolicyService::KIND_AGENTS ? 'agent storage' : 'storage');
     }
 
     private static function finishMigrationActivity(string $step = ''): void
@@ -900,9 +1008,10 @@ final class StorageBackendMigrationService
      * convert (callable(type,id,mode,forceDirect): array),
      * wrap (callable(from,to,work): object with ->ok and ->error), save (callable(mode): bool).
      */
-    public static function migrate(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = []): array
+    public static function migrate(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = [], string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
         $config = $config ?? ConfigService::getConfig();
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
         $migrationLock = FileStorage::acquireMigrationLock();
@@ -912,29 +1021,29 @@ final class StorageBackendMigrationService
         try {
             $conflict = self::pathMoveConflictMessage();
             if ($conflict !== null) return ['status' => 'error', 'message' => $conflict, 'migrated' => []];
-            return self::migrateWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock);
+            return self::migrateWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock, $kind);
         } finally {
             FileStorage::releaseMigrationLock($migrationLock);
         }
     }
 
     /** @param resource|null $migrationLock */
-    private static function migrateWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock): array
+    private static function migrateWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock, string $kind = StorageBackendPolicyService::KIND_ALL): array
     {
-        $check = $seams['preflight'] ?? self::preflight($target, $config, $seams);
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        $from = StorageBackendPolicyService::kindMode($config, $kind);
+        $allEntities = $seams['entities'] ?? self::entities($config, $seams);
+        $entities = self::entitiesForTarget($allEntities, StorageBackendPolicyService::normalizeMode($target), $kind, $from, self::realBackendMap($seams));
+        $check = $seams['preflight'] ?? self::preflight($target, $config, $seams, $kind);
         if (($check['status'] ?? '') !== 'ok') {
-            $entities = self::entitiesForTarget($seams['entities'] ?? self::entities($config, $seams), $target, $config);
-            return self::recordPreflightFailure($check, $target, $config, $entities);
+            return self::recordPreflightFailure($check, $target, $config, $entities, $kind);
         }
         $target = (string)$check['target'];
         if (!empty($check['requires_acknowledgement']) && !$acknowledgeWear) {
-            return ['status' => 'error', 'message' => 'Plain-directory mode on removable/USB storage requires an explicit wear acknowledgement.'];
+            return ['status' => 'error', 'message' => 'Plain folders on removable/USB storage require an explicit wear acknowledgement.'];
         }
-        $save = $seams['save'] ?? static fn(string $mode): bool => (bool)ConfigService::saveConfig(['storage_backend_mode' => $mode], false);
-        $from = StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering');
-        $allEntities = $seams['entities'] ?? self::entities($config, $seams);
-        $entities = self::entitiesForTarget($allEntities, $target, $config);
-        $skippedAgents = self::skippedAgentIds($allEntities, $target, $config);
+        // The setting of THIS kind is saved only after every item of the kind has converted.
+        $save = $seams['save'] ?? static fn(string $mode): bool => (bool)ConfigService::saveConfig(self::settingsToSave($kind, $mode), false);
 
         $waitForLaunchGuard = $seams['launch_guard_wait'] ?? static function (int $microseconds): void { usleep($microseconds); };
         $guardWaitStartedAt = microtime(true);
@@ -967,12 +1076,11 @@ final class StorageBackendMigrationService
                 }
             }
             $state = [
-                'status' => 'running', 'from' => $from, 'target' => $target,
+                'status' => 'running', 'kind' => $kind, 'from' => $from, 'target' => $target,
                 'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
                 'total' => count($entities), 'current' => '', 'phase' => 'waiting_for_installs',
                 'message' => 'Checking for agent installations in progress.',
                 'migrated' => $priorMigrated,
-                'skipped_agents' => $skippedAgents,
                 'entities' => $journal,
             ];
             self::writeStatus($state);
@@ -1027,9 +1135,6 @@ final class StorageBackendMigrationService
                     $result = ['status' => 'error', 'message' => $message, 'migrated' => []];
                 } else {
                     $result = self::migrateLocked($from, $target, $entities, $seams, $save, $state);
-                    if (($result['status'] ?? '') === 'ok' && $skippedAgents !== []) {
-                        $result['message'] .= ' Keep agents compressed is on, so agents stayed in SquashFS layers.';
-                    }
                     $state['status'] = $result['status'] === 'ok'
                         ? 'complete'
                         : (!empty($state['migrated']) ? 'interrupted' : 'error');
@@ -1040,7 +1145,7 @@ final class StorageBackendMigrationService
                     self::writeStatus($state);
                     self::writeDurableStatus($state);
                     if (($state['status'] ?? '') === 'complete') {
-                        self::finishMigrationActivity('Storage engine changed.');
+                        self::finishMigrationActivity(ucfirst(self::activityName((string)($state['kind'] ?? ''))) . ' changed.');
                     } else {
                         self::failMigrationActivity($state['message']);
                     }
@@ -1054,6 +1159,17 @@ final class StorageBackendMigrationService
         if (!empty($result['resume_after_migration'])) self::resumeMigrationSessions((array)($state['sessions_to_resume'] ?? []), $seams);
         unset($result['resume_after_migration']);
         return $result;
+    }
+
+    /** The cfg keys a finished conversion saves: the setting of its kind (both for the older one-engine path). */
+    private static function settingsToSave(string $kind, string $mode): array
+    {
+        $mode = StorageBackendPolicyService::normalizeMode($mode);
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        if ($kind === StorageBackendPolicyService::KIND_ALL) {
+            return [StorageBackendPolicyService::KEY_HOMES => $mode, StorageBackendPolicyService::KEY_AGENTS => $mode];
+        }
+        return [StorageBackendPolicyService::keyForKind($kind) => $mode];
     }
 
     /** Resume only sessions that were live before the conversion closed them. */

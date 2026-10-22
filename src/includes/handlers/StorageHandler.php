@@ -99,6 +99,7 @@ class StorageHandler {
             case 'nuclear_rebuild_storage':     $result = self::wipe(); break;
             case 'purge_artifacts':             $result = self::purgeArtifacts(); break;
             case 'preflight_migrate':           return self::preflightMigrate();
+            case 'storage_kind_state':     return \AICliAgents\Services\StorageBackendMigrationService::kindStates();
             case 'storage_backend_migration_status': return \AICliAgents\Services\StorageBackendMigrationService::status();
             case 'storage_backend_migration_recovery': $result = \AICliAgents\Services\StorageBackendMigrationService::recoverInterruptedAsync((string)($_REQUEST['operation'] ?? ''), getAICliConfig()); break;
             case 'execute_migrate':             $result = self::executeMigrateExclusive(); break;
@@ -130,7 +131,7 @@ class StorageHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
-                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode',
+                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'storage_kind_state', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',
@@ -1888,7 +1889,7 @@ class StorageHandler {
         if (empty($estimate['offered'])) {
             $why = [
                 'usb_boot' => 'Agents on a USB boot stick keep compressed layers.',
-                'keep_agents_compressed' => 'Keep agents compressed is on. Turn it off to convert agents.',
+                'keep_agents_compressed' => 'Agent storage is set to SquashFS layers. Set it to Plain folders on the Configuration tab to convert the agents.',
                 'no_layered_agents' => 'No agent uses compressed layers.',
                 'not_boot_disk' => 'The agents are not on the boot disk.',
             ][(string)($estimate['reason'] ?? '')] ?? 'Agents cannot be converted now.';
@@ -2304,7 +2305,9 @@ class StorageHandler {
     private static function preflightStorageBackend(): array {
         require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
         $mode = (string)($_GET['mode'] ?? 'layering');
-        return \AICliAgents\Services\StorageBackendMigrationService::preflight($mode, getAICliConfig());
+        // kind = homes or agents: the two storage settings on the Configuration tab.
+        $kind = (string)($_GET['kind'] ?? '');
+        return \AICliAgents\Services\StorageBackendMigrationService::preflight($mode, getAICliConfig(), [], $kind);
     }
 
     /** #456: read-only — what moving the homes' writable layer to ?mode= would do, and whether it is allowed. */
@@ -2324,7 +2327,8 @@ class StorageHandler {
         require_once __DIR__ . '/../services/StorageBackendMigrationService.php';
         $mode = (string)($_GET['mode'] ?? 'layering');
         $ack = ((string)($_GET['ack_wear'] ?? '0') === '1');
-        return \AICliAgents\Services\StorageBackendMigrationService::startAsync($mode, $ack, getAICliConfig());
+        $kind = (string)($_GET['kind'] ?? '');
+        return \AICliAgents\Services\StorageBackendMigrationService::startAsync($mode, $ack, getAICliConfig(), [], $kind);
     }
 
     /**

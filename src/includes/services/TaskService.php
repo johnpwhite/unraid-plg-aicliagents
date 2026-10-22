@@ -175,7 +175,7 @@ class TaskService {
                 $what  = $first !== '' ? " (first: $first)" : '';
                 return "Refused: $where already has files$what. Move them away, then try again. Nothing was changed.";
             case 'keep_agents_compressed':
-                return 'Refused: the setting Keep agents compressed is on. Turn it off, then try again. Nothing was changed.';
+                return 'Refused: Agent storage is set to SquashFS layers. Set it to Plain folders on the Configuration tab, then try again. Nothing was changed.';
             case 'no_layers_to_convert':
             case 'no_layers':
                 return 'Refused: this home has no saved layers to convert. Nothing was changed.';

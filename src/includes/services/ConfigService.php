@@ -12,6 +12,7 @@ namespace AICliAgents\Services;
 
 require_once __DIR__ . '/HomeCacheService.php';
 require_once __DIR__ . '/AgentTempService.php';
+require_once __DIR__ . '/StorageBackendPolicyService.php';
 
 class ConfigService {
     private static ?string $lastWorkspaceSaveMessage = null;
@@ -43,14 +44,11 @@ class ConfigService {
             'log_level' => '2',
             'home_storage_path' => SecretPaths::flashRoot() . '/persistence',
             'agent_storage_path' => SecretPaths::flashRoot() . '/persistence',
-            // One global storage engine for all agents and homes.  SquashFS +
-            // zram is the safe default on the boot device and removable media;
-            // changing this setting runs an explicit all-entity migration.
-            'storage_backend_mode' => 'layering',
-            // BOOT_DISK_SPACE.md R3: on an internal boot disk a new agent install uses plain
-            // folders. '1' keeps new installs and updates in compressed layers (they use less
-            // space). A USB boot stick always uses layers. Existing agents are not moved.
-            'keep_agents_compressed' => '0',
+            // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two storage settings, one for homes
+            // (storage_backend_homes) and one for agents (storage_backend_agents). Each is
+            // 'layering' (SquashFS layers) or 'passthrough' (plain folders). getConfig() adds
+            // both keys. It reads the old keys storage_backend_mode and keep_agents_compressed
+            // as a fallback for one more release. A change runs a migration for that kind only.
             // #456: where a home's writable layer lives under the layering engine:
             // 'zram' (RAM, lost on a crash until saved) or 'disk' (durable, uses
             // space on the persistence drive). Changing it runs UpperPlacementService.
@@ -245,15 +243,15 @@ class ConfigService {
         ];
 
         if (!file_exists(self::configPath())) {
-            return $defaults;
+            return self::withStorageKinds($defaults, []);
         }
 
         $config = @parse_ini_file(self::configPath());
         if ($config === false) {
-            return $defaults;
+            return self::withStorageKinds($defaults, []);
         }
 
-        $merged = array_merge($defaults, $config);
+        $merged = self::withStorageKinds(array_merge($defaults, $config), $config);
 
         // Migrate the legacy path only when the modern home key is absent. The
         // old cfg entry may still be present on disk after an upgrade, but it is
@@ -263,6 +261,38 @@ class ConfigService {
         }
         unset($merged['persistence_base']);
 
+        return $merged;
+    }
+
+    /**
+     * Add the two storage settings (homes and agents) to a config array. The new keys win.
+     * When one is absent the old keys fill it (StorageBackendPolicyService::resolveKindModes).
+     * The boot disk is probed only when the old rule needs it, and only once per request.
+     *
+     * @param array<string,mixed> $merged config with defaults
+     * @param array<string,mixed> $raw    the keys of the cfg file (no defaults)
+     */
+    private static function withStorageKinds(array $merged, array $raw): array {
+        static $internalBoot = [];
+        $needsBoot = !StorageBackendPolicyService::isMode($raw[StorageBackendPolicyService::KEY_AGENTS] ?? null)
+            && StorageBackendPolicyService::normalizeMode($raw['storage_backend_mode'] ?? 'layering') === StorageBackendPolicyService::LAYERING
+            && (string)($raw['keep_agents_compressed'] ?? '0') !== '1';
+        $internal = false;
+        if ($needsBoot) {
+            $path = (string)($merged['agent_storage_path'] ?? '');
+            if (!array_key_exists($path, $internalBoot)) {
+                try {
+                    require_once __DIR__ . '/FileStorage.php';
+                    $internalBoot[$path] = $path !== '' && (string)(FileStorage::probeTarget($path)['mount_class'] ?? '') === 'boot_internal';
+                } catch (\Throwable $e) {
+                    $internalBoot[$path] = false;
+                }
+            }
+            $internal = $internalBoot[$path];
+        }
+        $kinds = StorageBackendPolicyService::resolveKindModes($raw, $internal);
+        $merged[StorageBackendPolicyService::KEY_HOMES] = $kinds['homes'];
+        $merged[StorageBackendPolicyService::KEY_AGENTS] = $kinds['agents'];
         return $merged;
     }
 
@@ -385,10 +415,26 @@ class ConfigService {
     public static function saveConfig($newConfig, $notify = true) {
         LogService::log("Initiating plugin configuration update...", LogService::LOG_INFO, "ConfigService");
 
+        // The two storage settings (homes and agents). A bad value is replaced, never stored.
+        // An old caller that sends storage_backend_mode sets the homes setting.
         if (isset($newConfig['storage_backend_mode'])) {
-            $newConfig['storage_backend_mode'] = StorageBackendPolicyService::normalizeMode(
-                $newConfig['storage_backend_mode']
-            );
+            if (!isset($newConfig[StorageBackendPolicyService::KEY_HOMES])) {
+                $newConfig[StorageBackendPolicyService::KEY_HOMES] = $newConfig['storage_backend_mode'];
+            }
+            unset($newConfig['storage_backend_mode']);
+        }
+        foreach ([StorageBackendPolicyService::KEY_HOMES, StorageBackendPolicyService::KEY_AGENTS] as $_kindKey) {
+            if (isset($newConfig[$_kindKey])) {
+                $newConfig[$_kindKey] = StorageBackendPolicyService::normalizeMode($newConfig[$_kindKey]);
+            }
+        }
+        // The old keep_agents_compressed flag is gone. An old caller that sends it sets the agents setting.
+        if (isset($newConfig['keep_agents_compressed'])) {
+            if (!isset($newConfig[StorageBackendPolicyService::KEY_AGENTS])) {
+                $newConfig[StorageBackendPolicyService::KEY_AGENTS] = ((string)$newConfig['keep_agents_compressed'] === '1')
+                    ? StorageBackendPolicyService::LAYERING : StorageBackendPolicyService::PASSTHROUGH;
+            }
+            unset($newConfig['keep_agents_compressed']);
         }
 
         // BOOT_DISK_SPACE.md R5: the three cache settings. A bad value is replaced, never stored.
@@ -402,11 +448,6 @@ class ConfigService {
             $newConfig['home_cache_path'] = HomeCacheService::normalisePath(
                 $newConfig['home_cache_path'], (string)(self::getConfig()['home_cache_path'] ?? ''));
         }
-        // BOOT_DISK_SPACE.md R3
-        if (isset($newConfig['keep_agents_compressed'])) {
-            $newConfig['keep_agents_compressed'] = ((string)$newConfig['keep_agents_compressed'] === '1') ? '1' : '0';
-        }
-
         if (isset($newConfig['storage_upper_mode'])) {
             $newConfig['storage_upper_mode'] = ((string)$newConfig['storage_upper_mode'] === 'disk') ? 'disk' : 'zram';
         }

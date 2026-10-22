@@ -1330,12 +1330,14 @@ class AgentRegistry {
         return !$binExists && !$sqshExists && $hasRealVersion && !$hasStoredContent && !$busy;
     }
 
-    /** The RAW storage_backend_mode from the cfg file ('' when absent), as bash `_rp_read_cfg` reads it. */
+    /** The RAW agents policy (storage_backend_agents, else storage_backend_mode) from the cfg file ('' when absent), as bash `_rp_read_cfg` reads it. */
     public static function rawStorageBackendPolicy(): string {
         $path = ConfigService::configPath();
         if (!is_file($path)) return '';
         $cfg = @parse_ini_file($path);
-        return is_array($cfg) ? (string)($cfg['storage_backend_mode'] ?? '') : '';
+        if (!is_array($cfg)) return '';
+        // The agents setting first, then the old one-engine key (one release of fallback).
+        return (string)($cfg['storage_backend_agents'] ?? $cfg['storage_backend_mode'] ?? '');
     }
 
     /**

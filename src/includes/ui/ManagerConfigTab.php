@@ -25,24 +25,26 @@ $autoSave = 'onchange="autoSaveConfig()"';
                             <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">Choose No to hide the AI Cli Agents tab from Unraid's top menu without removing the plugin.</div>
                         </dd>
 
-                        <dt>Persistence engine</dt>
+                        <?php // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two settings, one per kind. Each line below the select shows the REAL state. ?>
+                        <dt>Home storage</dt>
                         <dd>
-                            <select name="storage_backend_mode" aria-label="Persistence engine" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['storage_backend_mode'] ?? 'layering', 'layering', _('SquashFS layers + zram (recommended)'))?>
-                                <?=mk_option($config['storage_backend_mode'] ?? 'layering', 'passthrough', _('Plain directories (advanced)'))?>
+                            <select name="storage_backend_homes" aria-label="Home storage" data-testid="storage-backend-homes" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'layering', _('SquashFS layers'))?>
+                                <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'passthrough', _('Plain folders'))?>
                             </select>
-                            <div id="aicli-backend-migration-status" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
-                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">One setting applies to every installed agent and home. Changing it migrates all existing storage. Plain directories write directly to the selected path; removable/USB targets require an acknowledgement and SquashFS + zram is recommended to reduce wear.</div>
+                            <div id="aicli-kind-state-homes" data-testid="storage-kind-state-homes" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How the homes are kept on the persistence drive. Changing it converts only the homes that are not on the new kind yet. Plain folders write directly to the drive; a removable/USB drive needs your acknowledgement, and SquashFS layers reduce wear. New homes use this setting.</div>
                         </dd>
 
-                        <?php // BOOT_DISK_SPACE.md R3 ?>
-                        <dt>Keep agents compressed</dt>
+                        <dt>Agent storage</dt>
                         <dd>
-                            <select name="keep_agents_compressed" aria-label="Keep agents compressed" data-testid="keep-agents-compressed" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['keep_agents_compressed'] ?? '0', '0', _('No: new agents use plain folders on an internal boot disk'))?>
-                                <?=mk_option($config['keep_agents_compressed'] ?? '0', '1', _('Yes: keep new agents in compressed layers'))?>
+                            <select name="storage_backend_agents" aria-label="Agent storage" data-testid="storage-backend-agents" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'layering', _('SquashFS layers'))?>
+                                <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'passthrough', _('Plain folders'))?>
                             </select>
-                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">On an internal boot disk, new agents use plain folders. Turn this on to keep them in compressed layers, which use less space on a small boot disk.</div>
+                            <div id="aicli-kind-state-agents" data-testid="storage-kind-state-agents" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
+                            <div id="aicli-backend-migration-status" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
+                            <div style="font-size:10px; opacity:0.65; margin-top:3px; width:100%;">How the agents are kept on the persistence drive. Changing it converts only the agents that are not on the new kind yet. SquashFS layers use less space on a small boot disk; plain folders are simpler. New agent installs and updates use this setting.</div>
                         </dd>
 
                         <dt>Writable layer for homes</dt>

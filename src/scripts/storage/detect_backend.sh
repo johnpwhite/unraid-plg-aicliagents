@@ -156,7 +156,7 @@ entity_upper_mode() {
     # way with or without resolve_paths.sh (_entity_upper_policy), so a caller
     # that did not source it (PHP via `--upper-mode`) gets the same answer.
     local _policy
-    _policy="$(_entity_upper_policy)"
+    _policy="$(_entity_upper_policy "${2:-}")"
     if [ "$_policy" = "layering" ]; then
         # docs/specs/HOME_UPPER_PLACEMENT_SETTING.md (#456): for a HOME the person
         # chooses RAM or disk with storage_upper_mode. Disk is refused on removable
@@ -186,21 +186,35 @@ _entity_upper_pref() {
     [ "$_v" = "disk" ] && printf 'disk' || printf 'zram'
 }
 
-# _entity_upper_policy -> the RAW storage_backend_mode ('' when the key is
-# absent). AICLI_STORAGE_BACKEND_POLICY wins (tests). Uses resolve_paths.sh's
-# _rp_read_cfg when it is loaded, else reads the same cfg file directly with
-# the same pattern. PHP AgentRegistry::rawStorageBackendPolicy reads the same key.
+# _cfg_value <key> -> the raw value of one cfg key ('' when absent). Uses
+# resolve_paths.sh's _rp_read_cfg when it is loaded, else reads the same cfg
+# file directly with the same pattern.
+_cfg_value() {
+    local _k="${1:-}" _cfg
+    if declare -f _rp_read_cfg >/dev/null 2>&1; then
+        _rp_read_cfg "$_k" 2>/dev/null || true
+        return 0
+    fi
+    _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
+    [ -f "$_cfg" ] || return 0
+    grep -oP "^${_k}=\"?\\K[^\"]*(?=\"?\$)" "$_cfg" 2>/dev/null | head -1
+}
+
+# _entity_upper_policy [type] -> the RAW storage policy of the kind of <type>
+# ('' when the key is absent): storage_backend_agents for an agent,
+# storage_backend_homes for a home or an unknown type. When the new key is
+# absent the old key storage_backend_mode answers (one release of fallback).
+# AICLI_STORAGE_BACKEND_POLICY wins for both kinds (tests).
+# PHP AgentRegistry::rawStorageBackendPolicy reads the same keys.
 _entity_upper_policy() {
+    local _type="${1:-}" _key="storage_backend_homes" _v
     if [ -n "${AICLI_STORAGE_BACKEND_POLICY:-}" ]; then
         printf '%s' "$AICLI_STORAGE_BACKEND_POLICY"; return 0
     fi
-    if declare -f _rp_read_cfg >/dev/null 2>&1; then
-        _rp_read_cfg storage_backend_mode 2>/dev/null || true
-        return 0
-    fi
-    local _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
-    [ -f "$_cfg" ] || return 0
-    grep -oP '^storage_backend_mode="?\K[^"]*(?="?$)' "$_cfg" 2>/dev/null | head -1
+    [ "$_type" = "agent" ] && _key="storage_backend_agents"
+    _v="$(_cfg_value "$_key")"
+    [ -n "$_v" ] || _v="$(_cfg_value storage_backend_mode)"
+    printf '%s' "$_v"
 }
 
 # ---------------------------------------------------------------------------
@@ -350,13 +364,13 @@ _entity_manifest_expects_layers() {
 # ---------------------------------------------------------------------------
 # BOOT_DISK_SPACE.md R3: agents in plain folders on an internal boot.
 # On an internal boot disk (not a USB stick) a NEW agent install uses plain
-# folders unless the person turned on "Keep agents compressed". A USB boot
+# folders unless Agent storage is set to SquashFS layers (the old flag "Keep agents compressed" before the two storage settings). A USB boot
 # keeps compressed layers. An agent that already has layers stays layered
 # (effective_backend keeps its "layers pin it" rule); only the person converts it.
 
 # agent_storage_choice <engine_policy> <keep_compressed> <device_class> -> layers|plain
-#   engine_policy    layering | passthrough | "" (the storage_backend_mode setting)
-#   keep_compressed  1 = the setting "Keep agents compressed" is on, else 0
+#   engine_policy    layering | passthrough | "" (the agents policy: storage_backend_agents, else storage_backend_mode)
+#   keep_compressed  1 = Agent storage is SquashFS layers (see _keep_agents_compressed), else 0
 #   device_class     usb | internal (where the plugin keeps its agents)
 # Pure (no subprocess). passthrough policy is plain for every device; a USB
 # device or an unknown device class is layers (err toward layers, as the rest of
@@ -382,18 +396,22 @@ agent_convert_fits() {
     if [ "$after" -ge "$reserve" ]; then printf 'ok'; else printf 'no_room:%s' "$(( reserve - after ))"; fi
 }
 
-# _keep_agents_compressed -> 1|0. AICLI_KEEP_AGENTS_COMPRESSED wins (tests); else
-# the keep_agents_compressed setting in the cfg file (default 0).
+# _keep_agents_compressed -> 1|0. 1 means "Agent storage is SquashFS layers".
+# AICLI_KEEP_AGENTS_COMPRESSED wins (tests). Else the Agent storage setting
+# (storage_backend_agents) answers: layering = 1, passthrough = 0. When that key
+# is absent, the old keep_agents_compressed flag in the cfg file answers (one
+# release of fallback; default 0).
 _keep_agents_compressed() {
-    local v
+    local v a
     if [ -n "${AICLI_KEEP_AGENTS_COMPRESSED:-}" ]; then
         v="$AICLI_KEEP_AGENTS_COMPRESSED"
-    elif declare -f _rp_read_cfg >/dev/null 2>&1; then
-        v="$(_rp_read_cfg keep_agents_compressed 2>/dev/null || true)"
     else
-        local _cfg="${CONFIG_FILE:-/boot/config/plugins/unraid-aicliagents/unraid-aicliagents.cfg}"
-        v=""
-        [ -f "$_cfg" ] && v="$(grep -oP '^keep_agents_compressed="?\K[^"]*(?="?$)' "$_cfg" 2>/dev/null | head -1)"
+        a="$(_cfg_value storage_backend_agents)"
+        case "$a" in
+            layering)    v=1 ;;
+            passthrough) v=0 ;;
+            *)           v="$(_cfg_value keep_agents_compressed)" ;;
+        esac
     fi
     [ "$v" = "1" ] && printf '1' || printf '0'
 }
@@ -432,7 +450,7 @@ _agent_device_class() {
 effective_backend() {
     local type="$1" id="$2" persist="$3" dev hl
     local _explicit_policy="${AICLI_STORAGE_BACKEND_POLICY:-}"
-    local _policy="${_explicit_policy:-$(_rp_read_cfg storage_backend_mode 2>/dev/null || true)}"
+    local _policy="${_explicit_policy:-$(_entity_upper_policy "$type")}"
     # Test fixtures must be able to exercise either engine even when the live
     # host has a persisted global policy. An explicit policy supplied by a test
     # still wins, so policy-matrix tests remain independent of the shell runner's
@@ -475,7 +493,7 @@ effective_backend() {
     # the same layers-first invariant as the legacy device path above.
     if [ "$_policy" = "passthrough" ]; then printf 'passthrough'; return 0; fi
 
-    # BOOT_DISK_SPACE.md R3: with no engine policy set, "Keep agents compressed"
+    # BOOT_DISK_SPACE.md R3: with no engine policy set, Agent storage (or the old Keep agents compressed flag)
     # still decides for a new agent on an internal boot disk.
     if [ "$type" = "agent" ] && [ -z "${AICLI_ITEST_BACKEND:-}" ] \
         && [ "$(_agent_device_class "$persist")" = "internal" ] \

@@ -138,9 +138,6 @@ function saveAICliAgentsManager(form, silent = false) {
     var newHomePath = $(form).find('[name="home_storage_path"]').val() || '';
     var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
     var curHomePath = '<?= addslashes($config['home_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
-    var newStorageMode = $(form).find('[name="storage_backend_mode"]').val() || 'layering';
-    var curStorageMode = window._aicliCurrentStorageMode || '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
-    window._aicliCurrentStorageMode = curStorageMode;
     var newUpperMode = $(form).find('[name="storage_upper_mode"]').val() || 'zram';
     var curUpperMode = '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
 
@@ -151,39 +148,19 @@ function saveAICliAgentsManager(form, silent = false) {
         return;
     }
 
-    // The engine is global.  Probe the actual backing devices before accepting
-    // a change, then let the server migrate every entity before saving the mode.
+    // Home storage and Agent storage are two settings. A change of one is a conversion of
+    // that kind only, never a bare save: probe the backing devices, show what will happen,
+    // then let the server convert the items before it saves the setting.
     // A removable/USB result is an explicit warning, not a path-prefix guess.
-    if (newStorageMode !== curStorageMode) {
-        if (window._aicliEngineBusy) return;
-        window._aicliEngineBusy = true;
-        var restoreEngine = function () { window._aicliEngineBusy = false; $(form).find('[name="storage_backend_mode"]').val(window._aicliCurrentStorageMode || curStorageMode); };
-        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend&mode=' + encodeURIComponent(newStorageMode) + '&csrf_token=' + csrf, function(pf) {
-            if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage-engine check failed", "error"); return; }
-            var msg = pf.message || ('This will migrate all agents and homes to ' + newStorageMode + '.');
-            aicliGuardedSwal({ title: "Change persistence engine?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: "Migrate all storage", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
-                sessionStorage.removeItem('aicli_backend_migration_dismissed');
-                renderBackendMigrationStatus({ status: 'queued', target: newStorageMode, message: 'Starting the migration…' });
-                aicliAjax('execute_storage_backend', { mode: newStorageMode, ack_wear: 1 }, function(r) {
-                    if (r.status === 'accepted') {
-                        window._aicliBackendMigrationStartedHere = true;
-                        if (typeof swal.close === 'function') swal.close();
-                        updateBackendMigrationStatus();
-                    } else {
-                        restoreEngine();
-                        renderBackendMigrationStatus({ status: 'error', from: curStorageMode, target: newStorageMode, message: r.message || 'Storage migration failed.' });
-                        swal("Migration Failed", r.message || "Check debug.log", "error");
-                    }
-                }).fail(function() {
-                    // A response can be lost after the detached worker starts.
-                    // Close the prompt and use the saved state as the source of truth.
-                    window._aicliBackendMigrationStartedHere = true;
-                    if (typeof swal.close === 'function') swal.close();
-                    updateBackendMigrationStatus();
-                });
-            });
-        }).fail(function() { restoreEngine(); swal("Error", "Could not check the change. Try again.", "error"); });
-        return;
+    var storageKinds = ['homes', 'agents'];
+    for (var ki = 0; ki < storageKinds.length; ki++) {
+        var kindName = storageKinds[ki];
+        var kindNew = $(form).find('[name="storage_backend_' + kindName + '"]').val() || 'layering';
+        var kindCur = aicliCurrentStorageMode(kindName);
+        if (kindNew !== kindCur) {
+            aicliChangeStorageKind(kindName, kindNew, kindCur, form);
+            return;
+        }
     }
 
     if ((newAgentPath && newAgentPath !== curAgentPath) || (newHomePath && newHomePath !== curHomePath)) {
@@ -362,6 +339,88 @@ function aicliChangeUpperMode(target, previous, form) {
     }).fail(function() { restore(); swal("Error", "Could not check the change. Try again.", "error"); });
 }
 
+// ---- Home storage and Agent storage (GLOBAL_STORAGE_BACKEND_MIGRATION.md) ----
+// The saved value of each kind. The page value is the start; a finished migration moves it.
+window._aicliCurrentStorage = window._aicliCurrentStorage || {
+    homes: '<?= addslashes($config['storage_backend_homes'] ?? 'layering') ?>',
+    agents: '<?= addslashes($config['storage_backend_agents'] ?? 'layering') ?>'
+};
+function aicliCurrentStorageMode(kind) { return window._aicliCurrentStorage[kind] || 'layering'; }
+function aicliStorageSelects() { return $('select[name="storage_backend_homes"], select[name="storage_backend_agents"]'); }
+function aicliKindSelect(kind) { return $('select[name="storage_backend_' + kind + '"]'); }
+function aicliKindWord(kind) { return kind === 'agents' ? 'agent storage' : 'home storage'; }
+function aicliKindModeLabel(mode) { return mode === 'passthrough' ? 'Plain folders' : 'SquashFS layers'; }
+
+// Show the REAL state of each kind under its select. It comes from the storage status, not
+// from the saved value, so a home that was converted by hand shows at once ("Mixed: ...").
+// When the kind is mixed, or the saved value and the real state differ, a button finishes the job.
+function aicliRenderKindState(r) {
+    ['homes', 'agents'].forEach(function (kind) {
+        var box = $('#aicli-kind-state-' + kind);
+        var s = r && r[kind];
+        if (!box.length || !s) return;
+        var saved = s.saved || aicliCurrentStorageMode(kind);
+        box.empty();
+        $('<span>').text('Now: ' + s.label + '.').appendTo(box);
+        var missing = Number(s.total || 0) - Number(saved === 'passthrough' ? s.plain : s.layers);
+        if (s.state !== 'none' && missing > 0) {
+            var left = missing + (kind === 'agents' ? ' agent' : ' home') + (missing === 1 ? '' : 's');
+            $('<button type="button">').attr('data-testid', 'storage-kind-finish-' + kind)
+                .text('Convert the other ' + left + ' to ' + aicliKindModeLabel(saved).toLowerCase())
+                .css({ marginLeft: '8px' })
+                .on('click', function () { aicliChangeStorageKind(kind, saved, saved, document.getElementById('aicli-settings-form')); })
+                .appendTo(box);
+        }
+    });
+}
+function aicliLoadKindState() {
+    if (!$('#aicli-kind-state-homes').length) return;
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=storage_kind_state&csrf_token=' + encodeURIComponent(csrf))
+        .done(aicliRenderKindState);
+}
+
+// Convert one kind (homes or agents) to newMode. newMode may equal the saved value: then the
+// kind is mixed and only the items that are not on newMode yet convert.
+function aicliChangeStorageKind(kind, newMode, curMode, form) {
+    if (window._aicliEngineBusy) return;
+    window._aicliEngineBusy = true;
+    var restoreEngine = function () { window._aicliEngineBusy = false; aicliKindSelect(kind).val(aicliCurrentStorageMode(kind)); };
+    var word = aicliKindWord(kind);
+    var q = '&mode=' + encodeURIComponent(newMode) + '&kind=' + encodeURIComponent(kind);
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend' + q + '&csrf_token=' + csrf, function(pf) {
+        if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage check failed", "error"); return; }
+        var msg = pf.message || ('This will convert ' + word + ' to ' + aicliKindModeLabel(newMode).toLowerCase() + '.');
+        aicliGuardedSwal({ title: "Change " + word + "?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: kind === 'agents' ? "Convert agents" : "Convert homes", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
+            sessionStorage.removeItem('aicli_backend_migration_dismissed');
+            renderBackendMigrationStatus({ status: 'queued', kind: kind, target: newMode, message: 'Starting the migration…' });
+            aicliAjax('execute_storage_backend', { mode: newMode, kind: kind, ack_wear: 1 }, function(r) {
+                if (r.status === 'accepted') {
+                    window._aicliBackendMigrationStartedHere = true;
+                    if (typeof swal.close === 'function') swal.close();
+                    updateBackendMigrationStatus();
+                } else if (r.status === 'saved') {
+                    // Every item was on the new kind already: only the setting changed.
+                    window._aicliCurrentStorage[kind] = newMode;
+                    window._aicliEngineBusy = false;
+                    renderBackendMigrationStatus({ status: 'idle' });
+                    if (typeof swal.close === 'function') swal.close();
+                    aicliLoadKindState();
+                } else {
+                    restoreEngine();
+                    renderBackendMigrationStatus({ status: 'error', kind: kind, from: curMode, target: newMode, message: r.message || 'Storage migration failed.' });
+                    swal("Migration Failed", r.message || "Check debug.log", "error");
+                }
+            }).fail(function() {
+                // A response can be lost after the detached worker starts.
+                // Close the prompt and use the saved state as the source of truth.
+                window._aicliBackendMigrationStartedHere = true;
+                if (typeof swal.close === 'function') swal.close();
+                updateBackendMigrationStatus();
+            });
+        });
+    }).fail(function() { restoreEngine(); swal("Error", "Could not check the change. Try again.", "error"); });
+}
+
 function showMigrateOverlay() {
     $('#aicli-migrate-overlay').remove();
     $('body').append(
@@ -405,47 +464,52 @@ function renderBackendMigrationStatus(s) {
     box.prop('hidden', false).empty();
     var interrupted = s.status === 'interrupted';
     var running = s.status === 'running' || s.status === 'queued' || interrupted;
-    var title = s.status === 'queued' ? 'Storage migration starting'
-        : (s.phase === 'rolling_back' ? 'Restoring storage after a conversion problem'
-        : (interrupted ? 'Storage migration stopped' : (running ? 'Storage migration in progress'
-        : (s.status === 'complete' ? 'Storage migration complete' : 'Storage migration needs attention'))));
-    var target = s.target === 'passthrough' ? 'Plain directories' : (s.target === 'layering' ? 'SquashFS layers + zram' : '');
+    // Say which kind converts: homes, agents, or (an older request) both.
+    var kindWord = s.kind === 'homes' ? 'Home storage' : (s.kind === 'agents' ? 'Agent storage' : 'Storage');
+    var kindNames = s.kind === 'homes' ? ['homes'] : (s.kind === 'agents' ? ['agents'] : ['homes', 'agents']);
+    var title = s.status === 'queued' ? kindWord + ' migration starting'
+        : (s.phase === 'rolling_back' ? 'Restoring ' + kindWord.toLowerCase() + ' after a conversion problem'
+        : (interrupted ? kindWord + ' migration stopped' : (running ? kindWord + ' migration in progress'
+        : (s.status === 'complete' ? kindWord + ' migration complete' : kindWord + ' migration needs attention'))));
+    var target = s.target === 'passthrough' ? 'Plain folders' : (s.target === 'layering' ? 'SquashFS layers' : '');
     $('<strong>').text(title).appendTo(box);
     $('<div>').text((target ? 'Target: ' + target + '. ' : '') + (s.message || '')).appendTo(box);
     if (running && Number(s.total) > 0) {
         var current = s.current ? 'Current item: ' + s.current + '. ' : '';
         $('<div>').text(current + Number(s.completed || 0) + ' of ' + Number(s.total) + ' complete.').appendTo(box);
         $('<progress>').attr({ max: Number(s.total), value: Number(s.completed || 0), 'aria-label': 'Storage migration progress' }).css({ width: '100%', marginTop: '6px' }).appendTo(box);
-        $('select[name="storage_backend_mode"]').prop('disabled', true);
+        aicliStorageSelects().prop('disabled', true);
     } else if (running) {
-        $('select[name="storage_backend_mode"]').prop('disabled', true);
+        aicliStorageSelects().prop('disabled', true);
         $('<div>').text(s.message || 'Workspaces cannot open until the migration finishes.').appendTo(box);
         if (interrupted) {
             $('<button type="button">').text('Continue').css({ marginTop: '6px', marginRight: '6px' }).on('click', function() { aicliRecoverBackendMigration('continue'); }).appendTo(box);
             $('<button type="button">').text('Put back').css({ marginTop: '6px' }).on('click', function() { aicliRecoverBackendMigration('rollback'); }).appendTo(box);
         }
     } else {
-        $('select[name="storage_backend_mode"]').prop('disabled', false);
-        // Set the select from a finished record ONCE per record, not on every poll:
-        // a later poll must not move the select back while the person picks a new
-        // engine and its confirmation is open.
-        // A person who already picked another engine keeps the choice, also before the
+        aicliStorageSelects().prop('disabled', false);
+        // Set the select(s) of the migrated kind from a finished record ONCE per record, not on
+        // every poll: a later poll must not move a select back while the person picks a new
+        // value and its confirmation is open.
+        // A person who already picked another value keeps the choice, also before the
         // first reply arrives (the 400 ms save delay, the check, the open warning): the
         // record then moves only the baseline that Cancel restores (#702).
-        var engineSelect = $('select[name="storage_backend_mode"]');
-        var baseline = window._aicliCurrentStorageMode || '<?= addslashes($config['storage_backend_mode'] ?? 'layering') ?>';
-        var choosing = !!window._aicliEngineBusy || engineSelect.val() !== baseline;
         var recordKey = String(s.started_at || '') + ':' + String(s.status || '');
+        var choosing = !!window._aicliEngineBusy;
+        kindNames.forEach(function (k) {
+            if (aicliKindSelect(k).val() !== aicliCurrentStorageMode(k)) choosing = true;
+        });
         var firstSeen = !choosing && window._aicliBackendStatusApplied !== recordKey;
         if (!choosing) window._aicliBackendStatusApplied = recordKey;
-        if (firstSeen && s.status === 'complete' && target) engineSelect.val(s.target);
-        if (s.status === 'complete' && s.target) window._aicliCurrentStorageMode = s.target;
-        if ((s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliCurrentStorageMode = s.from;
-        if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) {
-            engineSelect.val(s.from);
-            window._aicliEngineBusy = false;
-        }
+        kindNames.forEach(function (k) {
+            if (firstSeen && s.status === 'complete' && target) aicliKindSelect(k).val(s.target);
+            if (s.status === 'complete' && s.target) window._aicliCurrentStorage[k] = s.target;
+            if ((s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliCurrentStorage[k] = s.from;
+            if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) aicliKindSelect(k).val(s.from);
+        });
+        if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliEngineBusy = false;
         if (s.status === 'complete') window._aicliEngineBusy = false;
+        if (firstSeen && s.status !== 'queued') aicliLoadKindState();
         if (s.status === 'complete' && window._aicliBackendMigrationStartedHere) {
             window._aicliBackendMigrationStartedHere = false;
             setTimeout(safeReload, 800);
@@ -719,6 +783,7 @@ $(function() {
     refreshStats();
     resetStatsTimer();
     updateBackendMigrationStatus();
+    aicliLoadKindState();
     setInterval(function() {
         if (document.visibilityState === 'visible') updateBackendMigrationStatus();
     }, 2500);

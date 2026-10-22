@@ -560,7 +560,8 @@ class AdminService {
             // ---- storage paths ----
             'home_storage_path'    => ['group' => 'storage', 'description' => "Where the plugin stores each user's persistent home data."],
             'agent_storage_path'   => ['group' => 'storage', 'description' => "Where the plugin stores each agent's persistent install data."],
-            'keep_agents_compressed' => ['group' => 'storage', 'description' => 'On an internal boot disk new agents use plain folders. 1 keeps new installs and updates in compressed layers, which use less space on a small boot disk. 0 is the default.'],
+            'storage_backend_homes' => ['group' => 'storage', 'description' => 'Home storage: layering keeps homes in SquashFS layers, passthrough keeps them in plain folders. A change from the Configuration tab converts the homes that are not on the new kind. Setting it here changes only the saved value and converts nothing.'],
+            'storage_backend_agents' => ['group' => 'storage', 'description' => 'Agent storage: layering keeps agents in SquashFS layers, passthrough keeps them in plain folders. New installs use this kind. A change from the Configuration tab converts the agents that are not on the new kind. Setting it here changes only the saved value and converts nothing.'],
             'write_protect_agents' => ['group' => 'storage', 'description' => 'Keeps installed agent files read-only between upgrades.'],
             // BOOT_DISK_SPACE.md R4
             'keep_previous_version' => ['group' => 'storage', 'description' => 'Each agent keeps its last version so you can roll back. Turn this off to keep only the version in use and save space on the boot disk.'],

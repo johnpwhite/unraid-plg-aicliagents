@@ -1094,7 +1094,7 @@ if [ "$cur_bytes" -eq 0 ]; then
     need_bytes=$(( _nf_mb * 1048576 ))
 fi
 if ! _layer_fits_space "$persist" "$need_bytes"; then
-    printf '[direct-stage] no space on the boot disk for the new version of %s: about %s MB needed, %s MB free — install not started. Open Home Storage, Boot disk space to see what uses the space; turn on Keep agents compressed (Configuration) to keep agents in compressed layers.\n' \
+    printf '[direct-stage] no space on the boot disk for the new version of %s: about %s MB needed, %s MB free — install not started. Open Home Storage, Boot disk space to see what uses the space; set Agent storage to SquashFS layers (Configuration) to keep agents in compressed layers.\n' \
         "$id" "$_FIT_NEED_MB" "$_FIT_FREE_MB" >&2
     lifecycle_log "error" "stage" "direct_agent_stage_no_space" \
         "{\"id\":\"$id\",\"need_mb\":$_FIT_NEED_MB,\"free_mb\":\"$_FIT_FREE_MB\",\"current_bytes\":$cur_bytes}" 2>/dev/null || true
@@ -3798,7 +3798,12 @@ lifecycle_log "info" "graduate" "graduate_start" \
 _GR_AGENT=0
 if [ "$TYPE" = "agent" ] && { [ "${AICLI_GRADUATE_REASON:-}" = "user_convert" ] || [ "$FORCE_DIRECT" = "1" ]; }; then
     _GR_AGENT=1
-    if [ "$(_keep_agents_compressed)" = "1" ]; then
+    # A single-agent convert (reason user_convert) is refused while Agent storage is
+    # "SquashFS layers". The storage migration of the agents kind (--force-direct) is
+    # the person's change of that very setting: it runs before the new value is saved,
+    # and PHP lists only the agents that must convert, so it is not refused here.
+    # (The reason code keeps its old name; the tray text says "Agent storage".)
+    if [ "$(_keep_agents_compressed)" = "1" ] && [ "$FORCE_DIRECT" != "1" ]; then
         _gr_precondition_refuse "keep_agents_compressed"
     fi
 fi

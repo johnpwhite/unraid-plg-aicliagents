@@ -257,7 +257,7 @@ class AgentStorageService
      * The numbers of the "Convert agents to plain folders" dialog, and whether the
      * dialog is offered at all.
      *
-     * Offered only on an internal boot disk, while "Keep agents compressed" is off,
+     * Offered only on an internal boot disk, while Agent storage is not "SquashFS layers",
      * and when at least one agent is layered. For each layered agent: its size now
      * (its layers on disk), its estimated size as plain folders (the unpacked size
      * divided by the boot file system's compression ratio), the total extra space,
@@ -279,7 +279,7 @@ class AgentStorageService
         $class   = (string)($facts['device_class'] ?? self::deviceClass($persist));
         $keep    = array_key_exists('keep', $facts)
             ? (bool)$facts['keep']
-            : (string)(ConfigService::getConfig()['keep_agents_compressed'] ?? '0') === '1';
+            : StorageBackendPolicyService::kindMode(ConfigService::getConfig(), StorageBackendPolicyService::KIND_AGENTS) === StorageBackendPolicyService::LAYERING;
         $disk  = (int)($facts['disk_bytes'] ?? (int)@disk_total_space($persist));
         $free  = (int)($facts['free_bytes'] ?? (int)@disk_free_space($persist));
         $ratio = (float)($facts['ratio'] ?? self::compressRatio($persist));

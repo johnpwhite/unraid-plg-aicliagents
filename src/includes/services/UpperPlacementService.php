@@ -121,8 +121,8 @@ final class UpperPlacementService
             return ['status' => 'error', 'message' => 'Unknown writable-layer placement.'];
         }
         $current = self::currentMode($config);
-        if (StorageBackendPolicyService::normalizeMode($config['storage_backend_mode'] ?? 'layering') !== StorageBackendPolicyService::LAYERING) {
-            return ['status' => 'error', 'message' => 'The writable layer applies to the "SquashFS layers + zram" engine. Plain directories have none.'];
+        if (StorageBackendPolicyService::kindMode($config, StorageBackendPolicyService::KIND_HOMES) !== StorageBackendPolicyService::LAYERING) {
+            return ['status' => 'error', 'message' => 'The writable layer applies to homes on SquashFS layers. Homes on plain folders have none. Change Home storage first.'];
         }
         $usb = $seams['usb'] ?? (static function () use ($config): bool {
             $v = StorageBackendPolicyService::targetVerdicts($config);

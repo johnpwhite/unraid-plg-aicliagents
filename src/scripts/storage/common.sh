@@ -692,7 +692,7 @@ _entity_paths_live() {
 
 # ---- #372: the live mount wins ---------------------------------------------
 # docs/specs/HOME_STORAGE_LIFECYCLE.md "2026-09-30 — the live mount wins".
-# The policy (storage_backend_mode, then the device test) says where the upper
+# The policy (storage_backend_homes / storage_backend_agents, then the device test) says where the upper
 # of a NEW mount goes. It can change while an entity is mounted (a settings
 # change, the 2026-09-22 policy rule, an upgrade from 2026.09.15.08). Before
 # #372 every bake, the shutdown bake and the supervisor calculated the mode
