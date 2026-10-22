@@ -86,7 +86,7 @@ To change a server, press the pencil icon. To remove one, press the trash icon. 
 
 A remote server (http or sse) often wants a login. The editor has an **Authentication** choice and a list of **Additional headers**. A header is a named line that the agent sends with each request to the server.
 
-1. Store the secret first. In the Agent Store, open the **Envs** panel of any agent, press **Add secret**, and give the secret a name in capital letters, for example `MY_TOKEN` (see [Agent Store](agent-store.md)). The plugin keeps each secret once, by its name.
+1. Store the secret first. In the Agent Store, open the **Variables** panel of any agent, press **Add secret**, and give the secret a name in capital letters, for example `MY_TOKEN` (see [Agent Store](agent-store.md)). The plugin keeps each secret once, by its name.
 2. In the editor, choose **Bearer token** and type the key in braces: `{MY_TOKEN}`. The Config Hub adds `Bearer ` in front for you.
 3. Choose **Custom header** when the server wants another header, for example `X-API-Key`. Type the header name and the value `{MY_KEY}`.
 4. Under **Additional headers**, press **Add header** for a header that is not a login, for example a tenant number. This kind of value can be plain text.
@@ -343,6 +343,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The Agent Store chip **Envs** is called **Variables** here. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The cards have the same header as the other Settings tabs, with a status line and an (i) button. The long card intros are behind the (i). The text box of **Global Instructions** is closed until you press **Edit**. Each agent tile is one large check box. The lists of agents per item are in the table "Which agents receive what" only. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
 
 - **2026-10-22** — The setting names in this guide follow the new labels: **Let agents manage the plugin** and **Voice**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

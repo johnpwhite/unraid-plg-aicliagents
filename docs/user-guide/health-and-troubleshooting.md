@@ -21,8 +21,8 @@ The plugin watches itself and tells you when something needs a look. The **Healt
 ### How to read the dot
 
 1. Look at the right end of the tab bar. The dot has one of three colours. The word beside it reads **Health: ok**, **Health: warn** or **Health: fail**.
-2. Move the pointer over the dot. Expect: a tooltip. It says "All checks OK", or it lists each check that is not fine, with a message. A phone has no hover, so press the dot to open the Debug Console and read the log there.
-3. Press the dot. Expect: the Debug Console opens.
+2. Press the (i) button next to the dot. On a desktop you can also hold the pointer over it. Expect: a panel opens under the tab bar. It says what the colours mean. Below that it says "All checks are OK.", or it lists each check that is not fine, with a message. Press the (i) again, or press Escape, to close the panel. A phone has no hover, so use the (i).
+3. Press **Open the Debug Console** in the panel, or press the dot. Expect: the Debug Console opens.
 
 | Colour | Word | Meaning |
 | :-- | :-- | :-- |
@@ -38,11 +38,11 @@ The overall colour is the worst result of all checks. The page reads the health 
 | Check | What it looks at | Warn when | Fail when | What to do |
 | :-- | :-- | :-- | :-- | :-- |
 | **supervisor** | The background program that saves and merges storage layers (the supervisor). | Never. | It does not run, it has no heartbeat file, or the heartbeat is older than three ticks (15 seconds by default). A supervisor that you turned off by configuration counts as ok. | Open the Debug Console and look for supervisor lines. |
-| **manifest** | The list of saved layers that the plugin keeps. | The list comes from a newer plugin version. | The list cannot be read, or the boot check marks a home or an agent as lost or unmanaged. | Open **Settings, Home Storage**. See [Home and agent storage](storage.md). Restore from a backup when the home is lost. |
-| **mounts** | Homes and agents that are mounted now. | Never. | A mounted home or agent has saved layers that the list does not know. | Open **Settings, Home Storage** to see the state of each home and agent. Send a support bundle if it stays red. |
+| **manifest** | The list of saved layers that the plugin keeps. | The list comes from a newer plugin version. | The list cannot be read, or the boot check marks a home or an agent as lost or unmanaged. | Open **Settings, Storage**. See [Home and agent storage](storage.md). Restore from a backup when the home is lost. |
+| **mounts** | Homes and agents that are mounted now. | Never. | A mounted home or agent has saved layers that the list does not know. | Open **Settings, Storage** to see the state of each home and agent. Send a support bundle if it stays red. |
 | **defer_markers** | Storage jobs that were put off. | A put-off marker is older than 6 hours. | Never. | Look at the Activity tray for a waiting job and its reason. |
 | **disk_space** | Free space on the boot drive (the USB flash drive) and use of `/tmp` (the RAM disk). | The boot drive has less than 10% free, or `/tmp` is more than 80% used. | The boot drive has less than 5% free. | Free space on the boot drive. Move homes and agents to a pool (see [Home and agent storage](storage.md)). |
-| **boot_integrity** | A check of all storage at start-up. | It reports a warning state. | It reports a critical state. | Open **Settings, Home Storage** and read the state of each home and agent. |
+| **boot_integrity** | A check of all storage at start-up. | It reports a warning state. | It reports a critical state. | Open **Settings, Storage** and read the state of each home and agent. |
 | **debug_log** | The size of the plugin log. | The log is more than twice its size limit (5 MB by default). | Never. | Press the eraser icon in the Debug Console to clear the log. |
 | **client_errors** | Errors that the browser pages report. | More than 10 in the last hour. | Never. | Reload the page. If it comes back, send a support bundle. |
 | **storage_jobs** | The list of storage jobs. | A job failed. | Never. | Open the Debug Console and look for the error. See [Home and agent storage](storage.md). |
@@ -207,12 +207,12 @@ The Health check reads cheap information: files, the mount list and free space. 
 
 | Symptom | What it means | What to do |
 | :-- | :-- | :-- |
-| The Health dot is amber or red. | One or more checks are not fine. | Hover over the dot. Find the check in the table above and follow its advice. |
+| The Health dot is amber or red. | One or more checks are not fine. | Press the (i) next to the dot. Find the check in the table above and follow its advice. |
 | An agent upgrade shows **waiting** for hours. | The new version is ready, but a session still runs the old one. | Close that session, or leave it. The upgrade finishes when the last old session ends. |
 | A row says "Gave up after 60 minutes". | A storage job ran past its limit. | Read the step in the row. Try the job again after you free room. |
 | A merge shows **waiting** with a reason such as "no room". | The merge cannot run until there is enough space. | Free space on the target, or move storage. See [Home and agent storage](storage.md). |
 | The boot drive is nearly full. | Old layers, a writable layer on the boot drive, or logs fill it. | Read the **pinned_layers**, **home_upper** and **disk_space** checks. Restart the named workspaces or merge the home. |
-| A workspace does not start and the drawer button reads **Emergency Session**. | Home storage is not available. | Check **Settings, Home Storage** and the drive behind your storage path. An emergency session gives you a temporary home in RAM, and the page shows "Emergency Mode — Temporary home. Work done here is not saved and is lost when storage returns." When storage returns, the session closes and your saved state returns. |
+| A workspace does not start and the drawer button reads **Emergency Session**. | Home storage is not available. | Check **Settings, Storage** and the drive behind your storage path. An emergency session gives you a temporary home in RAM, and the page shows "Emergency Mode — Temporary home. Work done here is not saved and is lost when storage returns." When storage returns, the session closes and your saved state returns. |
 | The Unraid array is stopped. | A workspace whose storage is on flash keeps running. A workspace whose storage is on the array offers Emergency Mode. | Start the array. |
 | A home looks damaged. | The layers are broken or lost. | Restore it from a saved copy. See [Home backup and restore](backup-restore.md). |
 | A terminal looks old after an update, or has an orange dot. | The terminal connection runs old code. | Press **Reconnect now** in the banner, or **Reconnect terminal** in the hover panel. |
@@ -242,6 +242,7 @@ If the problem is not here, build a support bundle and ask on the forum thread f
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The Health dot has an (i) button. Its panel lists the checks that are not fine and has a button to the Debug Console. Two pointers to the **Home Storage** tab now say **Storage**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The setting **Plugin management tools** is now called **Let agents manage the plugin** on the Configuration tab. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 
 </details>

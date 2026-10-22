@@ -26,7 +26,7 @@ Use both. The layers keep your work safe from a power cut. A backup keeps your h
 
 ## Where to find it
 
-Open the **AI CLI Agents** page under Unraid's Settings menu, and open the **Home Storage** tab. Each home has its own card. At the bottom of the card is the backup strip:
+Open the **AI CLI Agents** page under Unraid's Settings menu, and open the **Storage** tab. Each home has its own card. At the bottom of the card is the backup strip:
 
 - A line of status text.
 - A button. It reads **Set up config backup…** when no folder is chosen. Otherwise it reads **Config backup…**. The backup copies the home folder: the settings, sign-ins and history of the agents. It does not copy the server.
@@ -52,7 +52,7 @@ A warm backup can add "· N files changed during the backup". This is not an err
 
 ### Set up a backup
 
-1. Open the **Home Storage** tab.
+1. Open the **Storage** tab.
 2. Press **Set up config backup…** on the card of the home.
 3. Press **Choose folder…** under **Destination folder**. Expect: the plugin's folder browser opens.
 4. Go to the folder that should hold the snapshots. The browser has a **New folder** button. It makes a folder for you. Press **Select**.
@@ -294,6 +294,7 @@ A backup is a job in the same queue as saves and merges. Only one storage job ru
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The tab **Home Storage** is called **Storage** in this guide. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — A backup place on a network share is checked before each backup and each restore: the share must be mounted, and a backup writes a small test file. A share that is not mounted is refused with one sentence, and no snapshot is deleted. Spec `docs/specs/HOME_BACKUP.md`, issue #749.
 
 - **2026-10-18** — A **Replace** restore no longer removes the folders that the backup left out. Spec `docs/specs/HOME_RESTORE.md`, issue #658.

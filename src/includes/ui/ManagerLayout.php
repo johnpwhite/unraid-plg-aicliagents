@@ -7,6 +7,7 @@
  * </module_context>
  */
 ?>
+<?php require_once __DIR__ . '/SettingsCard.php'; // aicli_help_btn(), aicli_help_panel(): the Health chip (i). ?>
 <?php /* Epic #307: body.aicli-mgr scopes the phone-size sweet-alert rules in
    ManagerStyles.php to this page, so Unraid's shared dialog is not restyled
    anywhere else. */ ?>
@@ -49,7 +50,11 @@
         <span id="aicli-health-dot" style="width:10px; height:10px; border-radius:50%; background:#888; display:inline-block;"></span>
         <span id="aicli-health-label" style="color:var(--text-color, inherit);">Health</span>
     </span>
+    <?php /* Phase 8 (finding D2): the shared (i) of the Health chip. Its panel lists the checks that are
+       not OK. It sits under the tab strip, in the page flow. The chip itself still opens the Debug Console. */ ?>
+    <?= aicli_help_btn('health-chip', 'Health') ?>
 </div>
+<?= aicli_help_panel('health-chip') ?>
 
 <form onsubmit="saveAICliAgentsManager(this, true); return false;" id="aicli-settings-form">
     <input type="hidden" name="csrf_token" value="<?=$csrf_token?>">

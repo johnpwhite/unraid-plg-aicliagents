@@ -6,6 +6,7 @@
  *   cache TTL), plus one debounced read when the page's event stream (re)connects,
  *   breaks, or carries a storage change (EVENT_STREAM_MULTIPLEX.md R6), maps overall ok|warn|fail to green/amber/red, tooltip lists non-ok
  *   checks, click opens the Debug Console tab.
+ * Phase 8: the same non-ok lines also fill #aicli-health-detail in the (i) panel (help/health.php).
  * Dependencies: CommonLogging.php (aicliAjax), ManagerLayout.php (#aicli-health-chip),
  *   ManagerScripts.php (switchMainTab).
  * Constraints: Atomic UI fragment (< 80 lines). Read-only — never mutates state.
@@ -34,6 +35,18 @@ function aicliHealthApply(r) {
             var c = r.checks[k] || {};
             if (c.status !== 'ok') lines.push(k + ': ' + (c.status || '?') + (c.message ? ' — ' + c.message : ''));
         });
+    }
+    // The (i) panel of the chip lists the checks that are not OK. textContent only, so a message is never markup.
+    var detail = document.getElementById('aicli-health-detail');
+    if (detail) {
+        detail.textContent = '';
+        if (!lines.length) {
+            detail.textContent = overall === 'unknown' ? 'The health state is not known yet.' : 'All checks are OK.';
+        } else {
+            var ul = document.createElement('ul');
+            lines.forEach(function (t) { var li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+            detail.appendChild(ul);
+        }
     }
     chip.title = 'Plugin health: ' + overall
         + (lines.length ? '\n' + lines.join('\n') : '\nAll checks OK')

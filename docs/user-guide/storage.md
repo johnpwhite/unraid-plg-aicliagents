@@ -604,7 +604,7 @@ The **Storage** tab shows a related banner when the boot check finds something t
 
 ## Health warnings about storage
 
-The Health dot at the top of the Settings page turns amber when a storage check finds a problem. Hover it to read the text. Click it to open the **Debug Console** tab. Two checks cover the layers.
+The Health dot at the top of the Settings page turns amber when a storage check finds a problem. Press the (i) next to it to read the text. Click the dot to open the **Debug Console** tab. Two checks cover the layers.
 
 ### Deleted layers still pin space
 
@@ -669,6 +669,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The Health dot has an (i) button that shows the checks that are not fine. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration fields in this guide use the new labels: **Where homes are stored** and **Where agents are stored** (they were **Home Storage** and **Agent Storage**), next to the settings **Home storage** and **Agent storage**. A home in plain folders no longer shows the body line "Saved straight to disk…"; its status line says it. Issue #750.
 - **2026-10-22** — The tab **Home Storage** is now called **Storage**. Every home is a card with the same header as the cards of the Configuration tab: it opens and closes, shows a one-line status ("Plain folders on the boot disk · no saves needed" or "12 layers · 240 MB unsaved"), has an **(i)**, and can move. The icons of a home became the buttons **Save now**, **Merge layers**, **Repair** and **Delete home…**. The backup row reads "Backup: …" with the button **Backup…**, and the note at the foot of the page is its **(i)**. **Boot disk space** and **System memory** are cards too. The buttons of **Boot disk space** are 44 px high on a phone, and the notes of its lines sit behind an **(i)**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 6), issue #750.
 - **2026-10-22** — The storage choice is now named **Compressed layers** everywhere (it was shown as **SquashFS layers** in some places). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

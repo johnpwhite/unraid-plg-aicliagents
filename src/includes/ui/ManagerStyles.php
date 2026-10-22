@@ -2224,6 +2224,9 @@
     .aicli-help-panel p { margin: 0 0 6px; font-size: inherit; color: inherit; }
     .aicli-help-panel p:last-child { margin-bottom: 0; }
     .aicli-help-panel code { font-size: 12px; color: inherit; }
+    /* The Health chip panel sits under the tab strip, so it needs a gap to the form below it. */
+    #aicli-help-health-chip { margin: -4px 0 12px; }
+    #aicli-help-health-chip ul { margin: 0 0 6px; padding-left: 18px; }
     /* A short format hint that stays visible next to a control. */
     .aicli-hint { width: 100%; margin-top: 3px; font-size: 12px; color: var(--aicli-text, var(--text-color, #1c1b1b)); }
     @keyframes aicli-help-in { from { opacity: 0; } to { opacity: 1; } }
@@ -2250,7 +2253,11 @@
     /* Phase 5: the Advanced part of a card. A native details element; the summary is a 44 px row
        with the label and its (i). A row that the page hides keeps its hidden attribute (the dd rule sets display). */
     [data-aicli-hide-plain-homes][hidden] { display: none !important; }
-    .aicli-adv { margin-top: 10px; border-top: 1px solid var(--border-color, rgba(128,128,128,0.35)); }
+    /* The (i) is a sibling of the details element: a button inside a summary fails axe nested-interactive.
+       It sits on the summary row at the right. Its margins are -12 px, so top and right are 12 px. */
+    .aicli-adv-wrap { position: relative; margin-top: 10px; }
+    .aicli-adv-wrap > .aicli-help-btn { position: absolute; top: 12px; right: 12px; z-index: 1; }
+    .aicli-adv { border-top: 1px solid var(--border-color, rgba(128,128,128,0.35)); }
     .aicli-adv-summary {
         display: flex; align-items: center; gap: 6px; cursor: pointer;
         min-height: 44px; box-sizing: border-box; list-style: none;

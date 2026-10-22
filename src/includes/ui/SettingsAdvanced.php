@@ -21,10 +21,13 @@ if (!function_exists('aicli_adv_open')) {
     {
         $id = aicli_help_id($cardId);
         $helpId = 'adv-' . $id;
+        // The (i) is a sibling of the details element, not a child of the summary. A button inside a
+        // summary fails the axe rule nested-interactive. The wrapper puts the (i) on the summary row.
         return aicli_help_panel($helpId)
+            . '<div class="aicli-adv-wrap">'
+            . aicli_help_btn($helpId, 'Advanced settings of ' . $cardTitle)
             . '<details class="aicli-adv" id="aicli-adv-' . $id . '" data-testid="adv-' . $id . '">'
-            . '<summary class="aicli-adv-summary" data-testid="adv-summary-' . $id . '"><span>Advanced</span>'
-            . aicli_help_btn($helpId, 'Advanced settings of ' . $cardTitle) . '</summary>'
+            . '<summary class="aicli-adv-summary" data-testid="adv-summary-' . $id . '"><span>Advanced</span></summary>'
             . '<div class="aicli-adv-body">';
     }
 }
@@ -33,6 +36,6 @@ if (!function_exists('aicli_adv_close')) {
     /** The end of the Advanced part. */
     function aicli_adv_close(): string
     {
-        return '</div></details>';
+        return '</div></details></div>';
     }
 }

@@ -22,7 +22,7 @@ Words used on this page:
 - **The "..." button on a workspace row** (or a right-click on the row): **Session settings**, **Config / assets**, **Add to favourites**, **Export bundle** and **Continue**. Some items show only for a running workspace.
 - **The Select Workspace dialog** (**New Workspace** in the drawer): the **Favourites** section, the **Secrets** button in the path bar, and **Import bundle…** in the footer.
 - **The key icon**: in the icon row of a pinned drawer, or on the tab of an unpinned drawer.
-- **Settings, Agent Store tab**: the chips **Envs**, **Terminal** and **Args** on each agent card.
+- **Settings, Agent Store tab**: the chips **Variables**, **Terminal** and **Start options** on each agent card.
 - **Settings, Configuration tab**: the cards **SSH keys**, **Automatic continue**, **Terminal** and **General** (its part **Advanced**).
 - **The Activity tray**: it records each scheduled and automatic continue. See [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
@@ -36,7 +36,7 @@ Session settings hold four things: launch arguments, environment variables, secr
 
 | Setting | Layers, from lowest to highest |
 | :-- | :-- |
-| Launch arguments | 1. The agent-wide arguments (Agent Store, **Args** chip). 2. The arguments of the workspace. They replace the agent arguments. The plugin does not join the two. |
+| Launch arguments | 1. The agent-wide arguments (Agent Store, **Start options** chip). 2. The arguments of the workspace. They replace the agent arguments. The plugin does not join the two. |
 | Environment | 1. The built-in values for some agents. 2. The agent secrets. 3. The workspace secrets. 4. The agent variables. 5. The workspace variables. For the same name, the higher number wins. A variable therefore wins over a secret with the same name. |
 | tmux profile | 1. The built-in values. 2. The agent defaults (**Terminal** chip). 3. The workspace overrides. 4. The tmux config file in the workspace folder. The file wins. |
 
@@ -50,7 +50,7 @@ The footer has **Cancel** and **Apply Now**. The mark "● unsaved" shows when y
 
 #### Set a variable for one workspace
 
-1. Open the **ENV** tab. Expect: the rows show the variables of the agent. They come from the **Envs** chip in the Agent Store.
+1. Open the **ENV** tab. Expect: the rows show the variables of the agent. They come from the **Variables** chip in the Agent Store.
 2. Change the value of a row, or press **Add Variable** and type a name and a value.
 3. Expect: each row that differs from the agent shows the badge **● ws** (workspace override).
 4. Press **Apply Now**. Expect: the plugin restarts the session of the workspace. The agent resumes its conversation and starts with the new environment.
@@ -104,11 +104,11 @@ You set the agent defaults on the **Terminal** chip of the agent card. The chip 
 Use the Agent Store when many workspaces share a value.
 
 1. Open Settings, then the **Agent Store** tab.
-2. On the agent card, press the chip **Envs** or **Args**.
-3. **Envs**: the fields that the agent declares are at the top, for example an API key. Below them are **Variables** and **Secrets**. Use **Add variable** or **Add secret**, then **Save**.
-4. **Args**: type the flags and press **Save**.
-5. Expect after **Save** in **Envs**: "Saved. N running sessions use the old values until they restart." and the button **Restart them now**. The button opens "Restart sessions?" with each session marked busy or idle. **Restart idle sessions** restarts only the idle ones. A busy session is never restarted from here.
-6. Expect after **Save** in **Args**: "CLI args updated". No session restarts. A running agent uses the arguments when it starts again.
+2. On the agent card, press the chip **Variables** or **Start options**.
+3. **Variables**: the fields that the agent declares are at the top, for example an API key. Below them are **Variables** and **Secrets**. Use **Add variable** or **Add secret**, then **Save**.
+4. **Start options**: type the flags and press **Save**.
+5. Expect after **Save** in **Variables**: "Saved. N running sessions use the old values until they restart." and the button **Restart them now**. The button opens "Restart sessions?" with each session marked busy or idle. **Restart idle sessions** restarts only the idle ones. A busy session is never restarted from here.
+6. Expect after **Save** in **Start options**: "CLI args updated". No session restarts. A running agent uses the arguments when it starts again.
 
 See [Agent Store](agent-store.md) for the rest of the card.
 
@@ -370,7 +370,7 @@ The plugin drops an expression that does not compile, and the built-in rule stay
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
 | **ENV**, **Args**, **tmux** tabs (Manage Session) | Values for one workspace. They win over the agent. | Empty. The workspace uses the agent values. | One workspace needs another model, endpoint, key or terminal behaviour. |
-| **Envs**, **Args**, **Terminal** chips (Agent Store) | Values for every workspace of the agent. | Empty, or the built-in values. | Many workspaces share a value. |
+| **Variables**, **Start options**, **Terminal** chips (Agent Store) | Values for every workspace of the agent. | Empty, or the built-in values. | Many workspaces share a value. |
 | **Restart all saved workspaces** | Starts the saved workspaces of the agent after a restart. | On. | You want to start them by hand. |
 | **Start fresh if no resume** | Starts a fresh session when no conversation is saved. | On. | You never want a blank session to start by itself. |
 | **Continue after a restart** | Types a continue message after a restart, upgrade or reload. | On. | You want to read the screen first. |
@@ -416,7 +416,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 - [User guide](README.md): the index of all guides.
 - [Workspaces](workspaces.md): the drawer, the workspace menu and the Select Workspace dialog.
 - [The terminal](terminal.md): copy, paste, uploads and links in the terminal.
-- [Agent Store](agent-store.md): the agent card with the chips **Envs**, **Terminal** and **Args**.
+- [Agent Store](agent-store.md): the agent card with the chips **Variables**, **Terminal** and **Start options**.
 - [Config Hub](config-hub.md): the shared definitions behind the **managed** files.
 - [Agent Relay](relay.md): the notices that the safety rules protect.
 - [Plugin management tools for agents](agent-tools.md): the tools that an agent uses, including send input.
@@ -427,6 +427,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The Agent Store chips are called **Variables** and **Start options** in this guide (they were **Envs** and **Args**). The tabs of the dialog **Manage Session** keep the names **ENV**, **tmux** and **Args**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration tab has new cards. The continue settings, your patterns and the Terminal input safety rules are in the card **Automatic continue** (the last two in its part **Advanced**). The switch **Let agents manage the plugin** is in **General**, part **Advanced**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The settings have new labels: **Wait before each continue, and how many** and **Let agents manage the plugin**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-18** — A refused save in Manage Session shows the server reason and keeps the dialog open for a retry. Spec `docs/specs/ENV_AND_SECRETS_TIERS.md`, issue #670.

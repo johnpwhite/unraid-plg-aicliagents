@@ -130,9 +130,9 @@ Both options are kept in this browser, per device. The **i** icon of the bubble 
 
 | Mode | How it works | When to use it |
 | :-- | :-- | :-- |
-| **Browser recognition** (**Transcription endpoint URL** is empty) | Your browser turns the speech into text. It works in Chrome and Safari, also on an iPhone. | The quick start. No install. |
-| **Transcription engine** (**Transcription endpoint URL** is set) | The page records your speech and sends it to a server on your network. The server returns the text. The plugin cuts the recording at a pause of about 0.7 seconds, or every 8 seconds, so you see the words come in piece by piece. A pause with no speech types nothing. The words do not appear while you speak and are not corrected afterwards; only browser recognition does that. If the engine does not answer, the rest of the recording uses browser recognition, and the bubble says: "The transcription engine did not answer; using your browser's speech recognition." The next recording tries the engine again. | Firefox, Chrome on iPhone, and any browser without built-in recognition. Also when you want the audio to stay on your own server. |
-| **Live engine** (**Live transcription endpoint** is set) | The page streams your speech to a live engine on your network. Your words appear while you speak, and the last word changes as the engine hears more. When you pause, the sentence is final. If the live engine cannot be reached, dictation uses the transcription engine, or the browser, and the bubble says so. | You want to see the words as you speak, and the audio must stay on your own network. On the remote-access page, use a **wss://** address. |
+| **Browser recognition** (**Transcription server address** is empty) | Your browser turns the speech into text. It works in Chrome and Safari, also on an iPhone. | The quick start. No install. |
+| **Transcription engine** (**Transcription server address** is set) | The page records your speech and sends it to a server on your network. The server returns the text. The plugin cuts the recording at a pause of about 0.7 seconds, or every 8 seconds, so you see the words come in piece by piece. A pause with no speech types nothing. The words do not appear while you speak and are not corrected afterwards; only browser recognition does that. If the engine does not answer, the rest of the recording uses browser recognition, and the bubble says: "The transcription engine did not answer; using your browser's speech recognition." The next recording tries the engine again. | Firefox, Chrome on iPhone, and any browser without built-in recognition. Also when you want the audio to stay on your own server. |
+| **Live engine** (**Live transcription server (optional)** is set) | The page streams your speech to a live engine on your network. Your words appear while you speak, and the last word changes as the engine hears more. When you pause, the sentence is final. If the live engine cannot be reached, dictation uses the transcription engine, or the browser, and the bubble says so. | You want to see the words as you speak, and the audio must stay on your own network. On the remote-access page, use a **wss://** address. |
 
 A browser without recognition gets the message "This browser has no speech recognition. Use Safari or Chrome, or set a transcription endpoint in Settings, Dictation." If the microphone is blocked, the message is "The browser refused microphone access; allow it in the site settings and try again."
 
@@ -141,8 +141,8 @@ To set up a transcription engine with a guide:
 1. In **Settings, Configuration, Dictation**, find the row **Local dictation**.
 2. Press **Set up local dictation**. This installs the free Speaches server (Whisper) as a Docker container. Unraid's **Add Container** page opens in a new tab. Press **Apply** there.
 3. Go back to the card. Expect: the steps **Container running**, **Server answers**, **Whisper model downloaded**, **Settings saved** show the progress. The model download is about 500 MB and can take several minutes. You may leave the page and press **Connect local dictation** later.
-4. Expect: the card says it connected to Speaches with a model name. The plugin has saved **Transcription endpoint URL** and **Model**.
-5. Press **Test** and say a sentence. Expect: the result line shows "Listening… 3 s left", then "Transcribing…", then the text that it heard. If nothing was heard, it says "Nothing was recognised." With a **Live transcription endpoint**, the line shows "Listening (live)… 8 s left" and the words appear and change while you speak.
+4. Expect: the card says it connected to Speaches with a model name. The plugin has saved **Transcription server address** and **Model**.
+5. Press **Test** and say a sentence. Expect: the result line shows "Listening… 3 s left", then "Transcribing…", then the text that it heard. If nothing was heard, it says "Nothing was recognised." With a **Live transcription server (optional)**, the line shows "Listening (live)… 8 s left" and the words appear and change while you speak.
 
 To set it up by hand, install **Speaches** from Community Applications (the CPU build), then fill in the fields yourself. Speaches has no model installed at first. Open its web page once and install a model, for example `Systran/faster-whisper-small`. Type that exact name in **Model**. If you give a name that the engine does not know, **Test** shows "The engine does not know the model", with the name. The Speaches appdata folder must belong to user ID 1000, or the model download fails with a permission error. Some other Community Applications engines speak the same interface (SenseVoice-API, Fun-ASR-Nano-API, Qwen3-ASR-API). The linuxserver **faster-whisper** template does not work, because it uses a different protocol.
 
@@ -232,11 +232,11 @@ All in **Settings, Configuration**, in the cards **Agent voice** and **Dictation
 | **Test** | Speaks a fixed sentence by the way that you set. | — | After a change. |
 | **Messages kept per workspace** | The most voice mail messages a workspace keeps, 1 to 500. When there are more, the oldest messages that you have heard go first. | 50 | To keep more or fewer. |
 | **Days kept** | The age at which voice mail is removed, heard or not, 1 to 90. | 7 | To keep voice mail longer. |
-| **Transcription endpoint URL** | Address of a transcription engine. Empty means the browser's recognition. | Empty | After you set up local dictation, or for Firefox and iPhone Chrome. |
+| **Transcription server address** | Address of a transcription engine. Empty means the browser's recognition. | Empty | After you set up local dictation, or for Firefox and iPhone Chrome. |
 | **Model** | The model name that the transcription engine uses. | whisper-1 | Set it to a model that your engine has (the guide does it). |
 | **Language** | The language that you speak, for example "en". Empty lets the browser or the engine detect it. | Empty | When detection picks the wrong language. |
 | **API key** (voice input) | A key for a transcription engine that needs one. | None | Only when your engine needs a key. |
-| **Test** | Records three seconds and shows the text that it heard. With a live endpoint, it streams for eight seconds and shows the words while you speak. It types nothing. | — | After a change. |
+| **Test** | Records three seconds and shows the text that it heard. With a live transcription server, it streams for eight seconds and shows the words while you speak. It types nothing. | — | After a change. |
 
 Choices that live outside this card:
 
@@ -271,7 +271,7 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 | The guided setup waits and does not end. | Unraid is still downloading the image, or the **Add Container** page is closed. | Look at the Docker tab. Press **Set up natural voice** again after 20 minutes. |
 | The mic icon shows a crossed-out microphone. | Voice input was refused. The bubble tells you why. | Allow the microphone in the browser's site settings, open a workspace that runs, or set a transcription endpoint. |
 | "Nothing was recognised." | The recording had no speech, or the engine returned an empty text. | Speak closer to the microphone. Press **Test**. |
-| "The transcription server did not answer." | The endpoint is wrong or the engine is stopped or busy. When this happens on the last part of a recording, after you press stop, the plugin waits about 2 seconds and sends that part once more. The message shows only if the second try fails too. The words of that last part are then lost. | Check the **Transcription endpoint URL** and the container. Say the words again. |
+| "The transcription server did not answer." | The endpoint is wrong or the engine is stopped or busy. When this happens on the last part of a recording, after you press stop, the plugin waits about 2 seconds and sends that part once more. The message shows only if the second try fails too. The words of that last part are then lost. | Check the **Transcription server address** and the container. Say the words again. |
 | "The transcription engine at … returned HTTP 400." The red line stays for 6 seconds, and the recording goes on. | The engine refused the recording. The plugin sends each piece as a WAV recording, which engines read; a browser that cannot convert the sound sends its own format, which some engines refuse. | Press **Test** in another browser, such as Chrome or Safari. Check that **Model** is a model the engine lists. |
 | "Typed, not sent: the agent is busy". | **Send when I stop talking** is on, but the agent was not at its prompt. | Press Enter when the agent is ready. |
 | Voice mail shows no messages for a workspace. | The workspace was set to **Off** when the agent spoke, or the messages are older than **Days kept**. | Set the mode to **Speak** or **Voice mail**. Raise **Days kept**. |
@@ -289,13 +289,14 @@ When an agent speaks, the plugin sends the text to your engine and keeps the sou
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The guide uses the labels of the page: **Transcription server address** and **Live transcription server (optional)** (they were called the endpoint). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The voice input settings (**Voice input**) now have their own card, **Dictation**, on the Configuration tab. The **Voice mail** limits are in the part **Advanced** of the card **Agent voice**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The voice settings have new labels: **Voice**, **Voice server address**, **Transcription server address**, **Live transcription server (optional)** and **Test**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — When the transcription engine does not answer, dictation carries on with your browser's speech recognition and the bubble says so. The next recording tries the engine again. Spec `docs/specs/VOICE_INPUT.md`, issue #726.
 - **2026-10-22** — If the transcription engine fails on the last part of a recording, the plugin sends that part to the engine once more after about 2 seconds. Before, the words were lost at once. Spec `docs/specs/VOICE_INPUT.md`, issue #754.
 
 - **2026-10-21** — Live dictation keeps typing after the first sentence. The Settings dictation **Test** uses the live endpoint when one is set, so you can see the words appear while you speak. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issues #733 and #731.
-- **2026-10-20** — New setting **Live transcription endpoint**: with a live engine, your words appear while you speak and are corrected. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issue #731.
+- **2026-10-20** — New setting **Live transcription server (optional)**: with a live engine, your words appear while you speak and are corrected. Spec `docs/specs/VOICE_LIVE_ENGINE.md`, issue #731.
 - **2026-10-20** — With a transcription engine, a pause with no speech types nothing. Before, some engines typed a label such as "[BLANK_AUDIO]". Spec `docs/specs/VOICE_INPUT.md`, issue #730.
 - **2026-10-18** — When an agent speaks for a different workspace, the voice mail message shows "(said by ...)" with the name of the workspace that really spoke. Spec `docs/specs/AGENT_VOICE.md`, issue #664.
 

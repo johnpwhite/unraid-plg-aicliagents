@@ -19,12 +19,12 @@ The plugin has two places in the Unraid web interface.
 | :-- | :-- |
 | **Configuration** | Choose the Unraid user, the storage places, the terminal look and the behaviour of the plugin. |
 | **Agent Store** | Install, upgrade and set up each agent. |
-| **Home Storage** | Look after your home (the folder that holds the agent settings, memory and sign-ins) and its backups. |
+| **Storage** | Look after your home (the folder that holds the agent settings, memory and sign-ins) and its backups. |
 | **Config Hub** | Keep tools, instructions and skills in step across your agents. |
 | **Agent Relay** | Let the workspaces on your server send messages to each other. |
 | **Debug Console** | Read the log and collect information for a bug report. |
 
-A small coloured dot with the word **Health** sits at the right end of the tab row. Green means all is well. Amber is a warning. Red needs your attention. Select it to open the Debug Console.
+A small coloured dot with the word **Health** sits at the right end of the tab row. Green means all is well. Amber is a warning. Red needs your attention. Select the dot to open the Debug Console. Select the (i) next to it to see which checks are not fine.
 
 If you cannot find the AI CLI Agents tab, open **Settings, AI CLI Agents, Configuration**. Check that **Show the AI CLI Agents tab** is **Yes**. The choice **No** hides the tab from the top menu. It does not remove the plugin.
 
@@ -52,7 +52,7 @@ You need at least one installed agent before you can start a workspace. If no ag
 3. Press the install button on the card. It reads **Install** followed by the version number.
 4. Expect: a progress bar shows on the card. The card shows the installed version when the install ends.
 
-Each card has chips: **Channel**, **Envs**, **Resources**, **Terminal** and **Args**. The chips stay grey until the agent is installed. The **Envs** chip holds the environment variables and the secrets that the plugin gives to the agent at launch. The guide [Agent Store](agent-store.md) explains every chip.
+Each card has chips: **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The chips stay grey until the agent is installed. The **Variables** chip holds the environment variables and the secrets that the plugin gives to the agent at launch. The guide [Agent Store](agent-store.md) explains every chip.
 
 ### The first-run wizard
 
@@ -99,9 +99,9 @@ Each agent needs a sign-in the first time you use it. You do it inside the termi
 | :-- | :-- |
 | Claude Code | Type `/login` in the terminal on the first launch. |
 | Gemini CLI | Run `gemini auth login`. It signs in with your Google account. |
-| Codex CLI | Run `codex login` (a browser sign-in). Or add your `OPENAI_API_KEY` in the **Envs** chip of the Agent Store card. The key needs no interactive sign-in. On Unraid, Codex runs without an operating-system sandbox, and an approval step gates its commands. |
+| Codex CLI | Run `codex login` (a browser sign-in). Or add your `OPENAI_API_KEY` in the **Variables** chip of the Agent Store card. The key needs no interactive sign-in. On Unraid, Codex runs without an operating-system sandbox, and an approval step gates its commands. |
 | Antigravity CLI | On the first launch the agent prints a Google authorisation link. Open it in a browser, approve the access and paste the code into the terminal. |
-| Grok Build | Follow the account-linking steps that the agent shows on the first launch. As an option, add `XAI_API_KEY` in the **Envs** chip. |
+| Grok Build | Follow the account-linking steps that the agent shows on the first launch. As an option, add `XAI_API_KEY` in the **Variables** chip. |
 | Kimi Code | The agent may already know your account. If it asks you to sign in, use the login choice inside the agent. |
 
 The other agents show no hint in the wizard. These are OpenCode, Kilo Code, Pi Coder, GitHub Copilot, Factory CLI, NanoCoder, Goose and Qwen Code. Read the documentation of each agent for its sign-in. Most of them read an API key from an environment variable. Add such a key in the **Envs** chip of the agent card. The Secrets section of that chip hides the value and does not show it again after you save it.
@@ -115,26 +115,26 @@ These settings matter most on the first day. The full list is in [Settings refer
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
 | **Show the AI CLI Agents tab** (Configuration) | Shows or hides the AI CLI Agents tab in the top menu. | Yes | Choose No only if you want to use the plugin through the Settings page. |
-| **Home Storage** (Configuration, **Change…**) | The place where your home is saved. | The flash drive | Move it to a cache pool for speed and less flash wear. |
-| **Agent Storage** (Configuration, **Change…**) | The place where the installed agents are saved. | The flash drive | Move it to a cache pool when you install many agents. |
+| **Where homes are stored** (Configuration, Storage card, **Change…**) | The place where your home is saved. | The flash drive | Move it to a cache pool for speed and less flash wear. |
+| **Where agents are stored** (Configuration, Storage card, **Change…**) | The place where the installed agents are saved. | The flash drive | Move it to a cache pool when you install many agents. |
 | **Starting folder** (Configuration) | The folder where the folder picker starts when no other folder applies. | `/mnt/user` | Set it to the folder that holds your projects. |
 | **Terminal user** (Configuration) | The Unraid user that runs the terminals. It decides whose home you see. | `root` | Change it only if you want the agents to run as another user. |
 | **Colour scheme** and **Text size** (Configuration) | The colours and the text size of the terminal. | Dark, 14 px | Change them for your eyes or your screen. |
 
-A change on the Configuration tab saves at once. Moving **Home Storage** or **Agent Storage** shows a warning first and then moves the data. See [Home and agent storage](storage.md).
+A change on the Configuration tab saves at once. Moving **Where homes are stored** or **Where agents are stored** shows a warning first and then moves the data. See [Home and agent storage](storage.md).
 
 ## Where the plugin keeps your data
 
 | What | Where | Kept after a reboot? |
 | :-- | :-- | :-- |
 | The plugin settings | On the flash drive, in the folder `/boot/config/plugins/unraid-aicliagents/`. | Yes |
-| Your home: agent settings, memory, sign-ins, the list of workspaces, the saved conversation of each workspace and the settings of each workspace | In the place you chose as **Home Storage**. | Yes |
-| The installed agents | In the place you chose as **Agent Storage**. | Yes |
-| The working copy of your home while you work | In RAM, in the folder `/tmp/unraid-aicliagents/`. | No. The plugin saves it to Home Storage first. |
+| Your home: agent settings, memory, sign-ins, the list of workspaces, the saved conversation of each workspace and the settings of each workspace | In the place you chose as **Where homes are stored**. | Yes |
+| The installed agents | In the place you chose as **Where agents are stored**. | Yes |
+| The working copy of your home while you work | In RAM, in the folder `/tmp/unraid-aicliagents/`. | No. The plugin saves it to the place of your homes first. |
 | The log | In RAM, in the same folder. The **Debug Console** tab shows it. | No |
-| Choices that belong to one browser: the pinned drawer, the place of the drawer tab, the folder picker choices (hidden folders, sort order, open Favourites), the device label | In that browser. | Until you clear the data of the browser. |
+| Choices that belong to one browser: the pinned drawer, the place of the drawer tab, the folder picker choices (hidden folders, sort order, open Favourites), the device name | In that browser. | Until you clear the data of the browser. |
 
-The plugin saves your home to Home Storage in the background. **Save unsaved home changes every** on the Configuration tab sets how often (every 2 hours by default). The **Save now** button next to it saves at once. A save is not the same as a backup. For a second copy, see [Home backup and restore](backup-restore.md).
+The plugin saves your home to the place of your homes in the background. **Save unsaved home changes every** on the Configuration tab sets how often (every 2 hours by default). The **Save now** button next to it saves at once. A save is not the same as a backup. For a second copy, see [Home backup and restore](backup-restore.md).
 
 ## What happens behind the scenes
 
@@ -170,6 +170,7 @@ Each workspace runs a tmux session on the server. The browser terminal attaches 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-23** — The guide uses the labels that the page shows now: the tab **Storage**, the chips **Version**, **Variables**, **Storage**, **Terminal** and **Start options**, the settings **Where homes are stored** and **Where agents are stored**, and the (i) of the Health dot. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The settings in this guide follow the new labels on the Configuration tab: **Show the AI CLI Agents tab**, **Starting folder**, **Terminal user**, **Colour scheme**, **Text size** and **Save unsaved home changes every** (with a **Save now** button). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 
 </details>
