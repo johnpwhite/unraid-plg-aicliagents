@@ -449,10 +449,26 @@ class UtilityHandler {
         if ($path === false || !is_dir($path) || !is_readable($path)) {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];
         }
+        // #762 (GitHub #31, PR #32 by Joly0): a folder that is not allowed but sits above an
+        // allowed base (for example "/") shows only the children that lead to a base. The
+        // folder itself is never read. Each entry has "selectable"; false means "open only".
+        $sortMode = $_GET['sort'] ?? '';
+        $filterText = $_GET['filter'] ?? '';
+        $waypoints = self::allowedChildren($path);
+        if ($waypoints !== null) {
+            $waypoints = self::arrangeWaypoints($waypoints, is_string($sortMode) ? $sortMode : '', is_string($filterText) ? $filterText : '');
+            $items = [];
+            if ($path !== '/') $items[] = ['name' => '..', 'path' => dirname($path)];
+            return [
+                'status' => 'ok', 'path' => $path, 'items' => array_merge($items, $waypoints),
+                'page' => 1, 'limit' => $limit, 'has_more' => false,
+                'next_page' => null, 'truncated' => false, 'selectable' => false,
+            ];
+        }
         if (ValidationService::validatePath($rawPath) === false) {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];
         }
-        $scanPath = \AICliAgents\Services\PoolPathService::resolvePoolPath($path) ?? $path;
+        $scanPath =\AICliAgents\Services\PoolPathService::resolvePoolPath($path) ?? $path;
         // #474: with a sort, the server filters and sorts the whole folder (up to the
         // scan limit) and then cuts the page. Without a sort, the old paging holds.
         $sort = $_GET['sort'] ?? '';
@@ -487,6 +503,64 @@ class UtilityHandler {
             $response['normalised'] = \AICliAgents\Services\SecretPaths::normaliseModes($path);
         }
         return $response;
+    }
+
+    /**
+     * #762: for a folder that is NOT inside the allow-list but lies above an allowed
+     * base, the existing child folders that lead to a base. Returns null when $path is
+     * allowed itself (list it normally) or leads to no base, so the caller refuses it
+     * as before (/usr, /etc, /var).
+     *
+     * Names come only from the allow-list. The folder is never scanned, so nothing
+     * outside the allow-list is disclosed and a huge folder is never read.
+     *
+     * @return array<int,array{name:string,path:string,mtime:int,selectable:bool}>|null
+     */
+    private static function allowedChildren(string $path): ?array {
+        if (ValidationService::validatePath($path) !== false) return null;
+        $prefix = rtrim($path, '/') . '/';
+        $children = [];
+        foreach (ValidationService::allowedPathBases() as $base) {
+            if (strpos($base, $prefix) !== 0) continue;
+            $name = explode('/', substr($base, strlen($prefix)))[0];
+            if ($name === '' || isset($children[$name])) continue;
+            $full = $prefix . $name;
+            if (!is_dir($full) || !is_readable($full)) continue;
+            $mtime = @filemtime($full);
+            $children[$name] = [
+                'name' => $name,
+                'path' => $full,
+                'mtime' => $mtime === false ? 0 : $mtime,
+                'selectable' => ValidationService::validatePath($full) !== false,
+            ];
+        }
+        if (!$children) return null;
+        return array_values($children);
+    }
+
+    /**
+     * #762 with #474: apply the sort and the name filter of the picker to the few
+     * waypoint entries. Same rules as readDirectorySorted: natural order without case,
+     * the filter starts at DIRECTORY_FILTER_MIN_CHARS characters, and no sort means name
+     * ascending.
+     *
+     * @param array<int,array{name:string,path:string,mtime:int,selectable:bool}> $entries
+     * @return array<int,array{name:string,path:string,mtime:int,selectable:bool}>
+     */
+    private static function arrangeWaypoints(array $entries, string $sort, string $filter): array {
+        $needle = trim($filter);
+        if ((function_exists('mb_strlen') ? mb_strlen($needle) : strlen($needle)) >= self::DIRECTORY_FILTER_MIN_CHARS) {
+            $entries = array_values(array_filter($entries, static function (array $e) use ($needle): bool {
+                $hit = function_exists('mb_stripos') ? mb_stripos($e['name'], $needle) : stripos($e['name'], $needle);
+                return $hit !== false;
+            }));
+        }
+        $byName = static fn(array $a, array $b): int => strnatcasecmp($a['name'], $b['name']);
+        if ($sort === 'name-desc') usort($entries, static fn(array $a, array $b): int => $byName($b, $a));
+        elseif ($sort === 'newest') usort($entries, static fn(array $a, array $b): int => ($b['mtime'] <=> $a['mtime']) ?: $byName($a, $b));
+        elseif ($sort === 'oldest') usort($entries, static fn(array $a, array $b): int => ($a['mtime'] <=> $b['mtime']) ?: $byName($a, $b));
+        else usort($entries, $byName);
+        return $entries;
     }
 
     /**

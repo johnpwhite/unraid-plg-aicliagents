@@ -44,6 +44,7 @@ The **Folder** section is one panel. It holds a path bar, a filter row, the list
 - **The path bar.** Each part of the path is a button. Select a part to jump to that folder in one click. The current folder is the last part, and it is not a button.
 - **Select a folder.** Click a folder once to select it. The row gets an orange bar and the tag **Selected**. Press Space on a row for the same result.
 - **Open a folder.** Double-click a folder to go into it. Press Enter on a row for the same result. **Up one level** is always the first row of a subfolder.
+- **Up one level above the allowed folders.** The picker only lets you work in some folders, such as `/mnt`, `/home` and `/root`. If you go up from one of them, the picker shows `/` with only the folders that lead to an allowed folder, for example **boot** and **tmp**. Other folders, such as `usr` and `etc`, do not appear. You can open a folder that only leads to an allowed folder, but you cannot select it. Its row has a short note on hover. While you look at such a list, **Start New** and **Resume** are off. Open a folder inside to use them.
 - **Folder outside `/mnt`.** A path that does not start with `/mnt/` makes the picker frame and the drawer row glow red. Your array, your pools and your disks are all under `/mnt`.
 - **The target.** A workspace starts in the selected folder. If you selected none, it starts in the folder that the path bar shows.
 - **New folder.** Type a name in the field **New Folder...** and press **Create**. The picker goes into the folder that it created, so the next press of **Start New** starts the workspace there. If a name is typed before the first list loads, the picker keeps it. The picker clears the name when you go to another folder.
@@ -322,6 +323,8 @@ For other problems, see [Health, Activity and troubleshooting](health-and-troubl
 
 <details>
 <summary>Change history</summary>
+
+- **2026-10-24** — **Up one level** in the picker shows the way to the allowed folders and not an empty list. A folder that only leads to an allowed folder cannot be selected. Spec `docs/specs/WORKSPACE_PICKER_LIST_CONTROLS.md`, issue #762.
 
 - **2026-10-22** — A workspace whose folder was deleted shows **Workspace Folder Missing**, not "Storage Unavailable". The card offers no RAM install and goes away when you open another workspace. Spec `docs/specs/WORKSPACE_PATH_WAIT_RETRY.md`, issue #757.
 - **2026-10-22** — The settings have new labels: **Starting folder** and **Which path a workspace runs on**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

@@ -81,8 +81,12 @@ class ValidationService {
     /**
      * Allowed base directories for filesystem operations. The plugin folders are the live roots in
      * production, and the test sandbox roots under test (SecretPaths), so a test writes only into the sandbox.
+     *
+     * Public so that the workspace picker can list the folders that LEAD to an allowed
+     * base (#762, UtilityHandler::allowedChildren). The caller gets a copy of the list and
+     * cannot add a base.
      */
-    private static function allowedPathBases(): array {
+    public static function allowedPathBases(): array {
         return [
             '/mnt',
             '/home',
