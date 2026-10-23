@@ -96,6 +96,7 @@ require_once __DIR__ . '/services/DiagnosticsService.php';
 // Depends on NchanService (server clock), RedactionService (secret scrub) and
 // AtomicWriteService (all required above). Loaded before any caller that could
 // publish executes, so the NchanService::publish() tee always finds it.
+require_once __DIR__ . '/services/HumanIdentity.php'; // docs/specs/HUMAN_ACTOR_IDENTITY.md
 require_once __DIR__ . '/services/EventActor.php';
 require_once __DIR__ . '/services/EventLedger.php';
 // RELAY_WAITING_PILL.md (2026-09-09) Part 2 — capture-on-deliver samples for the

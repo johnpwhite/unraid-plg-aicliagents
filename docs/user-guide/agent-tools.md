@@ -97,7 +97,8 @@ These tools run at once and leave a line in the Activity tray. The line reads li
 | :-- | :-- | :-- |
 | Create a workspace. The folder must exist already. The tool never makes a folder. | `aicli_create_workspace` | `create-workspace` |
 | Change one field of a workspace: name, path, agent, position in the drawer, mute voice, spoken name, voice or speed | `aicli_update_workspace` | `update-workspace` |
-| Set the launch arguments of a workspace. No arguments clears them. | `aicli_set_workspace_args` | `set-args` |
+| Set the launch arguments of a workspace. No arguments clears them. These replace the arguments of the agent for that workspace. | `aicli_set_workspace_args` | `set-args` |
+| Set the launch arguments that every workspace of one agent uses, for example `--remote-control`. A workspace with its own arguments keeps them. No arguments clears them. The new arguments apply at the next start. | `aicli_set_agent_args` | `set-agent-args` |
 | Set or clear one environment variable of a workspace. A secret goes to the encrypted vault. | `aicli_set_workspace_env` | `set-env` |
 | Turn auto-launch on or off for an agent | `aicli_set_auto_launch` | `auto-launch` |
 | Choose the update channel of an agent. It does not install anything. | `aicli_set_agent_channel` | `set-channel` |
@@ -171,7 +172,8 @@ The rules:
 - With a **worktree**, the plugin makes a new git branch and folder under `<repo>/.claude/worktrees`. It never pushes, merges or resets.
 - A start is refused when a limit is reached, when the agent shows a usage limit (the answer gives the time it resets), or when the folder is a plugin state folder.
 - Two workspaces of one agent in one folder are not allowed. Use a worktree.
-- Only the workspace that started a helper, or you, can start or close it again. Another agent is refused.
+- Only the workspace that started a helper, or you, can close it again. Another agent is refused.
+- An agent can start any workspace that already exists and is closed. This works when **Let agents start helper workspaces** is **Off (default)**, because that switch guards only the making of helpers. The start shows in the Activity tray. It keeps the same checks as a start from the Manager: it waits for an agent upgrade or a home merge that is in progress.
 - The helper reports with one tool call when its task is over, with the result **done**, **failed** or **blocked** and a short summary. The parent gets a Relay message. The Activity tray shows one notice that names the parent. By default the plugin then closes the helper when it is idle again.
 - A helper may stop and ask for permission, for example to read a folder outside its own. The parent can answer for you, but only with a short "allow once" answer such as **1** or **yes**. The plugin refuses to let a parent answer a question about a push, a delete, the boot disk, the plugin's own state, another workspace or a remote shell. Those wait for you. Each answer is recorded with the question.
 - Text that a parent types into its helper starts with a tag, for example `[from parent main]`. The plugin writes the tag, so the helper knows the words come from its parent, and you see who typed them in the terminal.
@@ -225,6 +227,9 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 
 <details>
 <summary>Change history</summary>
+
+- **2026-10-24** — An agent can start any existing workspace, also when the helper switch is off. A new tool sets the launch arguments of a whole agent. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #542.
+- **2026-10-24** — The Activity tray shows who acted, for example "by root (John)", and who approved or rejected a proposal. Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 
 - **2026-10-23** — A helper can have a time limit (`maxMinutes`); the parent gets one message when it passes. A Codex helper starts with its folder already trusted, so it does not stop on a trust question. The Relay command works inside a Codex helper. When you close a helper in the drawer, the plugin later removes its flags file and its worktree if all work is merged. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-23** — In the drawer, a helper workspace shows under the workspace that started it, with an indent. A workspace with helpers has a small button that hides or shows them. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.

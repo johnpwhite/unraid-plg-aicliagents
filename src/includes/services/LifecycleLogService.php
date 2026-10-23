@@ -11,6 +11,7 @@
 namespace AICliAgents\Services;
 
 require_once __DIR__ . '/TraceContext.php';
+require_once __DIR__ . '/HumanIdentity.php';
 require_once __DIR__ . '/StorageTargetService.php';
 
 class LifecycleLogService {
@@ -59,6 +60,16 @@ class LifecycleLogService {
         // directly, NOT via LogService — preserves the no-LogService constraint).
         if (TraceContext::getId() !== null && !isset($payload['_trace'])) {
             $payload['_trace'] = TraceContext::getId();
+        }
+
+        // docs/specs/HUMAN_ACTOR_IDENTITY.md R4: a line written for a person's web request names the person.
+        if (!isset($payload['actor'])) {
+            try {
+                $who = HumanIdentity::name();
+            } catch (\Throwable $e) {
+                $who = '';
+            }
+            if ($who !== '') $payload['actor'] = $who;
         }
 
         $line = self::formatLine($level, $component, $event, $payload);

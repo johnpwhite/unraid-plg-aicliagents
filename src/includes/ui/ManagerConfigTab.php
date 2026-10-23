@@ -193,6 +193,13 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
                             <?=aicli_help_panel('spawn-unattended')?>
                         </dd>
 
+                        <?php /* HUMAN_ACTOR_IDENTITY.md: the name that follows the Unraid login in the Activity tray, the event ledger and the log, for example "root (John)". It saves through autoSaveConfig() like every other row; ConfigService::saveConfig() cleans it. */ ?>
+                        <dt>Your name in the records <?=aicli_help_btn('human-display-name', 'Your name in the records')?></dt>
+                        <dd>
+                            <input type="text" name="human_display_name" aria-label="Your name in the records" data-testid="human-display-name" maxlength="40" placeholder="for example John" value="<?=htmlspecialchars((string)($config['human_display_name'] ?? ''), ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0;" <?=$autoSave?>>
+                            <?=aicli_help_panel('human-display-name')?>
+                        </dd>
+
                         <?php /* PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md (2026-09-11): per-browser
                            only — stored in localStorage, never sent to the server on its own, and
                            never round-tripped through this form's own action=save. It travels only

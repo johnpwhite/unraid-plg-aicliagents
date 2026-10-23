@@ -71,6 +71,7 @@ Each row has three parts, and each part has one job:
 
 - **The title** says what happened, in plain words, and names the thing by its name: "Notebook page updated: Test plan", "Installing Claude Code", "Saving home: root", "Delete workspace "my-project"?". It never starts with a workspace name and never shows an internal id.
 - **The grey line** says where, who, or what comes next: the current step of a job ("Copying files"), who made a change ("by Codex CLI in model-eval"), or what to do after a failure ("Open the workspace and press Restart"). It never repeats the state.
+- **The person line** appears when you did the thing yourself in the web page. It reads "by root (John)": your Unraid login, then the name you set in **Your name in the records** (Settings, **General**, part **Advanced**). A row you approved or rejected reads "approved by root (John)" or "rejected by root (John)". A row that an agent or the system made has no person line, and an older row has none either.
 - **The chip** shows the state of work that is still going on. A finished record of a change (an agent updated a page, a continue was scheduled, a store was deleted) shows the time instead ("just now", "4 min ago"), because it has no state to report.
 
 | State (chip) | What it means | Buttons |
@@ -242,6 +243,7 @@ If the problem is not here, build a support bundle and ask on the forum thread f
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — A row in the Activity tray shows who did it, for example "by root (John)", and who approved or rejected a proposal. Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 - **2026-10-23** — The Health dot has an (i) button. Its panel lists the checks that are not fine and has a button to the Debug Console. Two pointers to the **Home Storage** tab now say **Storage**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The setting **Plugin management tools** is now called **Let agents manage the plugin** on the Configuration tab. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 

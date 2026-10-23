@@ -191,8 +191,8 @@ class SpawnService
     }
 
     /**
-     * Decision 2: only the workspace that created a workspace (`createdBy`), or a person, may start or stop
-     * it. A call with no workspace behind it is a person's shell. Null means allowed; else the refusal.
+     * Decision 2: only the workspace that created a workspace (`createdBy`), or a person, may stop
+     * it. (A start is open to any caller since #542.) A call with no workspace behind it is a person's shell. Null means allowed; else the refusal.
      *
      * @param array<string,mixed> $record
      */
@@ -202,7 +202,7 @@ class SpawnService
         if ($caller === '') return null;
         if ((string)($record['createdBy'] ?? '') === $caller) return null;
         $name = (string)($record['name'] ?? $record['id'] ?? 'that workspace');
-        return "Only the workspace that created '$name', or a person, may start or stop it.";
+        return "Only the workspace that created '$name', or a person, may stop it.";
     }
 
     // ======================================================================
@@ -788,20 +788,21 @@ class SpawnService
     // ======================================================================
 
     /**
-     * Start a closed workspace that the caller created (spec R2, decision 2). A person may start any workspace.
+     * Start a closed workspace. Any caller may start any existing workspace (John, 2026-10-24, issue #542;
+     * "Start without the helper switch" in the spec). It does not need the helper switch
+     * `spawn_enabled`: that switch guards the creation of helpers. It does not need the caller to be the
+     * creator: a start only opens a closed workspace and deletes nothing. The stop rule is unchanged.
      * It clears the "closed on purpose" mark and starts the workspace once, under the normal launch lock.
+     * The start path keeps every guard of the Manager start (agent upgrade, home merge, storage).
      *
      * @return array<string,mixed>
      */
     public static function startWorkspace(string $id): array
     {
         try {
-            if (!self::enabled()) return ['error' => self::disabledMessage()];
             $id = trim($id);
             $record = self::findRecord($id);
             if ($record === null) return ['error' => "No workspace with id '$id' was found."];
-            $refusal = self::refuseUnlessCreator($record);
-            if ($refusal !== null) return ['error' => $refusal];
             $name = (string)($record['name'] ?? $id);
             $path = (string)($record['path'] ?? '');
             $agentId = (string)($record['agentId'] ?? '');

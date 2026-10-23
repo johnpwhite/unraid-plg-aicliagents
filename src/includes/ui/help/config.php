@@ -156,7 +156,10 @@ HTML,
 <p>Gives agents tools to read the plugin's state and make routine changes. Reads change nothing. Changes appear in the Activity tray. Delete, upgrade, back up, restore and merge only propose, and wait for your approval. Off by default.</p>
 HTML,
     'spawn-enabled' => <<<'HTML'
-<p>Lets an agent start a helper workspace with one tool call. The helper gets its own folder, task and agent. Each start shows in the Activity tray and names the agent that asked. Off by default.</p>
+<p>Lets an agent start a helper workspace with one tool call. The helper gets its own folder, task and agent. Each start shows in the Activity tray and names the agent that asked. Off by default. An agent can still start a workspace that already exists when this is off.</p>
+HTML,
+    'human-display-name' => <<<'HTML'
+<p>The name that follows your Unraid login in the Activity tray, the event list and the log. For example, "root (John)". The login always shows, so this name only adds to it. Leave it empty to show the login only.</p>
 HTML,
     'spawn-caps' => <<<'HTML'
 <p>The most helpers that run at the same time: for one workspace, for one agent kind, and on the whole server. A start above a limit is refused. The first two limits are 1 to 10, and the total is 1 to 20.</p>

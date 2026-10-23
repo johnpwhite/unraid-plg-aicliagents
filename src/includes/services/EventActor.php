@@ -16,6 +16,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/HumanIdentity.php';
+
 final class EventActor {
 
     /** Test seam / script override: when set, current() returns this verbatim. */
@@ -49,6 +51,8 @@ final class EventActor {
         $client = self::firstNonEmpty($_SERVER['HTTP_X_AICLI_CLIENT'] ?? null, $_REQUEST['aicli_client'] ?? null);
         if ($client !== '') {
             $actor = ['type' => 'human', 'client' => 'browser:' . self::sanitizeClientId($client)];
+            $person = HumanIdentity::name();
+            if ($person !== '') $actor['user'] = $person;
             $device = self::firstNonEmpty($_SERVER['HTTP_X_AICLI_DEVICE'] ?? null, $_REQUEST['aicli_device'] ?? null);
             $label = self::sanitizeLabel($device);
             if ($label !== '') {
@@ -61,7 +65,8 @@ final class EventActor {
             return ['type' => 'system'];
         }
 
-        return ['type' => 'human'];
+        $person = HumanIdentity::name();
+        return $person !== '' ? ['type' => 'human', 'user' => $person] : ['type' => 'human'];
     }
 
     /** AdminService may not be loaded yet in a minimal caller — never fatal. */

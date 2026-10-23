@@ -20,7 +20,7 @@
  *     own checkpoints.
  *   Tier 2 (change — EXECUTES and is recorded in the Activity tray; GAP 2,
  *     2026-09-09): create-workspace, update-workspace, set-args, set-env,
- *     auto-launch, set-channel, check-updates, set-setting, speak
+ *     auto-launch, set-channel, set-agent-args, check-updates, set-setting, speak
  *     (AGENT_VOICE.md, 2026-09-11), send-input (WORKSPACE_SEND_INPUT.md,
  *     2026-09-12), favourite-add, favourite-remove (WORKSPACE_FAVOURITES.md,
  *     2026-09-12), spawn (AGENT_SPAWN_WORKSPACE.md, 2026-10-23).
@@ -119,6 +119,13 @@
  *                                meaningful with `channel pinned`; omitted
  *                                pins whatever version is installed right now.
  *                                Does not itself install or upgrade anything.
+ *   set-agent-args <agentId> [args...]
+ *                                CHANGES state. Sets the start options that
+ *                                every workspace of that agent uses (the
+ *                                agent-wide default, #542). A workspace with
+ *                                its own options keeps them. No args after the
+ *                                agent id clears the default. The same rule
+ *                                check as set-args refuses a bad character.
  *   check-updates                no arguments. CHANGES state (it refreshes and
  *                                persists the update-check cache every agent's
  *                                Store-tab dropdown reads). Does not install
@@ -401,6 +408,7 @@ const ADMIN_AGENT_USAGE = [
     'set-env' => 'set-env <id> <key> <value> [secret] -- CHANGES state; value is never printed back',
     'auto-launch' => 'auto-launch <agentId> <autoLaunch> [freshIfNoResume] -- CHANGES state',
     'set-channel' => 'set-channel <agentId> <channel> [pinnedVersion] -- CHANGES state',
+    'set-agent-args' => 'set-agent-args <agentId> [args...] -- CHANGES state; the start options of every workspace of that agent; no args after the agent id clears them',
     'check-updates' => 'check-updates -- CHANGES state (refreshes the update cache)',
     'set-setting' => 'set-setting <key> <value> -- CHANGES state; key must be on the allow-list',
     'preview-voice' => 'preview-voice <voiceId> [text...] [--speed=<0.5-2.0>] [--workspace=<id>] -- CHANGES state; speaks one short line in that voice so you can hear it, saves nothing',
@@ -737,6 +745,11 @@ try {
             $chArgs = ['agentId' => $chAgentId, 'channel' => $channel];
             if ($pinned !== '') $chArgs['pinned'] = $pinned;
             $result = AdminMcpTools::call('aicli_set_agent_channel', $chArgs);
+            break;
+        case 'set-agent-args':
+            $saAgentId = (string)($argv[2] ?? '');
+            $saValue = implode(' ', array_slice($argv, 3));
+            $result = AdminMcpTools::call('aicli_set_agent_args', ['agentId' => $saAgentId, 'args' => $saValue]);
             break;
         case 'check-updates':
             $result = AdminMcpTools::call('aicli_check_updates', []);

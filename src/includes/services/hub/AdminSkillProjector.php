@@ -118,7 +118,10 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
   remove a favourite (a workspace's agent and folder).
   Confirm with the user before you call either one, the same as any other change tool.
 - `aicli_set_workspace_args` — set (or clear) a workspace's saved CLI
-  arguments.
+  arguments. These replace the agent-wide default for that workspace.
+- `aicli_set_agent_args` — set (or clear) the start options that every
+  workspace of one agent uses, for example `--remote-control`. A workspace
+  with its own arguments keeps them. The new options apply at the next start.
 - `aicli_set_workspace_env` — set (or clear) one environment variable for a
   workspace. The value is never echoed back, whether or not it is a secret.
 - `aicli_set_auto_launch` — turn an agent's auto-launch on or off. This
@@ -153,9 +156,9 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
 - `aicli_spawn_workspace` — start a helper workspace in ONE call: it makes the
   workspace, gives it flags and a task, and starts it. See "Start a helper
   workspace" below before your first call.
-- `aicli_start_workspace` and `aicli_stop_workspace` — start or close a
-  workspace that YOU created (for example a helper). See "Start a helper
-  workspace" below.
+- `aicli_start_workspace` — start any closed workspace. It works when the
+  helper switch is off. `aicli_stop_workspace` — close a workspace that YOU
+  created (for example a helper). See "Start a helper workspace" below.
 - `aicli_finish_task` — from a HELPER workspace only: report that your task is
   done, failed or blocked. See "Start a helper workspace" below.
 - `aicli_propose_autocontinue_pattern` — add one auto-continue pattern (with
@@ -255,6 +258,7 @@ Change actions (CHANGE actions: read "Confirm before you change" first):
 - `favourite-remove <id>`
 - `voicemail-heard <id>` or `voicemail-heard --workspace=<id> --all`
 - `set-args <id> [args...]`
+- `set-agent-args <agentId> [args...]`
 - `set-env <id> <key> <value> [secret]`
 - `auto-launch <agentId> <autoLaunch> [freshIfNoResume]`
 - `set-channel <agentId> <channel> [pinnedVersion]`
@@ -513,8 +517,10 @@ first line with `aicli_send_input`, as the reply says.
 
 Start and stop: `aicli_start_workspace` (CLI: `start-workspace <id>`) starts a
 closed workspace, and `aicli_stop_workspace` (CLI: `stop-workspace <id>`) closes
-one. Both work only on a workspace that YOU created, and for a person. Another
-workspace's call is refused. A stop is not a delete: it needs no approval,
+one. A start works on any existing workspace, also when "Let agents start helper
+workspaces" is off: that switch guards only the creation of helpers. A stop works
+only on a workspace that YOU created, and for a person. Another workspace's stop
+call is refused. A stop is not a delete: it needs no approval,
 because it only ends the session. For a helper made with `autoClose` the stop
 also removes the helper from the list. Its worktree is removed only when it is
 merged and has no uncommitted change; otherwise it stays and the reply names the

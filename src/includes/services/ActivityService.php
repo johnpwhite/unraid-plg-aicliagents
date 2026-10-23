@@ -17,6 +17,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/HumanIdentity.php';
+
 class ActivityService {
 
     /** Registry directory (tmpfs — cleared on reboot, which is correct: no op survives one). */
@@ -116,6 +118,7 @@ class ActivityService {
         if (isset($entry['meta']) && is_array($entry['meta'])) {
             $entry['meta'] = self::cleanMeta($entry['meta']);
         }
+        self::stampActor($entry);
         self::save($entry);
         return $entry;
     }
@@ -159,6 +162,40 @@ class ActivityService {
             if ($meta['cancel'] === 'none') $meta['cancel'] = 'none'; else unset($meta['cancel']);
         }
         return $meta;
+    }
+
+    /**
+     * docs/specs/HUMAN_ACTOR_IDENTITY.md R4: a record made by a person's web request names the person in
+     * `actor`, for example "root (John)". A record from an agent, a cron job or a worker has no person,
+     * so it gets no field. A caller that sets `actor` itself keeps its value.
+     *
+     * @param array<string,mixed> $entry
+     */
+    private static function stampActor(array &$entry): void {
+        if (isset($entry['actor']) && is_string($entry['actor']) && $entry['actor'] !== '') return;
+        unset($entry['actor']);
+        try {
+            $who = HumanIdentity::name();
+        } catch (\Throwable $e) {
+            $who = '';
+        }
+        if ($who !== '') $entry['actor'] = $who;
+    }
+
+    /**
+     * Add the signed-in person to a set of fields, under $key (approvedBy, rejectedBy), when one is known.
+     *
+     * @param array<string,mixed> $fields
+     * @return array<string,mixed>
+     */
+    private static function withActor(array $fields, string $key): array {
+        try {
+            $who = HumanIdentity::name();
+        } catch (\Throwable $e) {
+            $who = '';
+        }
+        if ($who !== '') $fields[$key] = $who;
+        return $fields;
     }
 
     /**
@@ -399,7 +436,7 @@ class ActivityService {
         return self::transitionIf(
             $opId,
             [self::STATUS_PENDING_APPROVAL],
-            ['status' => 'approved', 'step' => 'Approved — running']
+            self::withActor(['status' => 'approved', 'step' => 'Approved — running'], 'approvedBy')
         );
     }
 
@@ -448,7 +485,7 @@ class ActivityService {
         $opId = self::safeOpId($opId);
         if ($opId === null) return false;
         // Same lock as approve(): Approve and Reject together can never both succeed.
-        return self::transitionIf($opId, [self::STATUS_PENDING_APPROVAL], ['status' => 'failed', 'error' => $reason]) !== null;
+        return self::transitionIf($opId, [self::STATUS_PENDING_APPROVAL], self::withActor(['status' => 'failed', 'error' => $reason], 'rejectedBy')) !== null;
     }
 
     /**

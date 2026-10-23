@@ -87,6 +87,16 @@
         return t;
     }
 
+    // docs/specs/HUMAN_ACTOR_IDENTITY.md R6: the person who acted, for example "by root (John)". An approval
+    // or a rejection names the person who clicked. An old entry has none of these fields, so it draws nothing.
+    function actorLine(a) {
+        function clean(v) { return typeof v === 'string' ? v.trim() : ''; }
+        if (clean(a.approvedBy) !== '') return 'approved by ' + clean(a.approvedBy);
+        if (clean(a.rejectedBy) !== '') return 'rejected by ' + clean(a.rejectedBy);
+        if (clean(a.actor) !== '') return 'by ' + clean(a.actor);
+        return '';
+    }
+
     // R3: a finished record of a change shows its age where the pill would be.
     function isRecord(a) {
         return !!(a.meta && a.meta.kind === 'record');
@@ -1134,6 +1144,7 @@
                 // What the last Force inject actually did — see _action().
                 + (this._relayNote[a.opId] ? '<div class="consequence">' + esc(this._relayNote[a.opId]) + '</div>' : '')
                 + (grey ? '<div class="step">' + esc(grey) + '</div>' : '')
+                + (actorLine(a) ? '<div class="step" data-testid="activity-actor">' + esc(actorLine(a)) + '</div>' : '')
                 + (a.error && a.status === 'failed' ? '<div class="err">' + esc(a.error) + '</div>' : '')
                 + (active ? '<div class="bar' + (a.status === 'stalled' ? ' stalled' : '') + '"><div style="width:' + pct + '%"></div></div>' : '')
                 + (btns ? '<div class="btns">' + btns + '</div>' : '')
@@ -1145,7 +1156,7 @@
     AicliActivityTray.layout = { clearAvoid: _clearAvoid, pillShortText: _pillShortText };
     // Pure row rules (ACTIVITY_TRAY_PLAIN_NOTICES.md), read by ui-build/src/__tests__/activityTrayRows.test.ts.
     AicliActivityTray.rules = {
-        stepText: stepText, pillWord: pillWord, greyLine: greyLine, ageText: ageText,
+        stepText: stepText, pillWord: pillWord, greyLine: greyLine, actorLine: actorLine, ageText: ageText,
         isRecord: isRecord, showsCancel: showsCancel, statementText: statementText
     };
 

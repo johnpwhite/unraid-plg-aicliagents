@@ -13,6 +13,7 @@ namespace AICliAgents\Services;
 require_once __DIR__ . '/HomeCacheService.php';
 require_once __DIR__ . '/AgentTempService.php';
 require_once __DIR__ . '/StorageBackendPolicyService.php';
+require_once __DIR__ . '/HumanIdentity.php';
 
 class ConfigService {
     private static ?string $lastWorkspaceSaveMessage = null;
@@ -147,6 +148,9 @@ class ConfigService {
             'spawn_max_total'                      => '6',
             'spawn_max_per_agent'                  => '2',
             'spawn_allow_unattended'               => '0',
+            // HUMAN_ACTOR_IDENTITY.md: the name shown after the Unraid login in the records of who acted,
+            // for example "root (John)". Empty shows the login only. Attribution only, never a right.
+            'human_display_name'                   => '',
             // ARTEFACTS.md (Notebook): humans change these on Settings > Notebook
             // only. An agent may not: none of them is on AdminService::SETTINGS_ALLOWLIST.
             // notebook_folder is the folder name in each project root
@@ -511,6 +515,13 @@ class ConfigService {
                     && (int)$capRaw >= $capMin && (int)$capRaw <= $capMax;
                 $newConfig[$spawnCap] = (string)($capOk ? (int)$capRaw : $capDefault);
             }
+        }
+
+        // HUMAN_ACTOR_IDENTITY.md R3: the display name is one short line of plain text.
+        if (array_key_exists('human_display_name', $newConfig)) {
+            $newConfig['human_display_name'] = is_scalar($newConfig['human_display_name'])
+                ? HumanIdentity::sanitizeDisplay((string)$newConfig['human_display_name']) : '';
+            HumanIdentity::reset();
         }
 
         // BOOT_DISK_SPACE.md R4: keep_previous_version is 0 or 1.

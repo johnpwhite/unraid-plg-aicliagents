@@ -658,11 +658,13 @@ class AdminService {
             'voicemail_max_age_days'      => ['group' => 'voice', 'description' => 'How many days to keep a voice mail message, 1 to 90. Older messages are removed whether they were heard or not.'],
 
             // ---- helper workspaces (AGENT_SPAWN_WORKSPACE.md) — a person changes these on Settings; an agent cannot raise its own limits ----
-            'spawn_enabled'          => ['group' => 'spawn', 'description' => 'Let agents start helper workspaces: 1 turns on aicli_spawn_workspace, aicli_start_workspace, aicli_stop_workspace and aicli_finish_task. 0 is off (default). Changes only on the Settings page, General, Advanced — an agent cannot change it.'],
+            'spawn_enabled'          => ['group' => 'spawn', 'description' => 'Let agents start helper workspaces: 1 turns on aicli_spawn_workspace, aicli_stop_workspace and aicli_finish_task. 0 is off (default). aicli_start_workspace works with this switch off: it starts a workspace that already exists. Changes only on the Settings page, General, Advanced — an agent cannot change it.'],
             'spawn_max_children'     => ['group' => 'spawn', 'description' => 'The most helper workspaces that run for one parent workspace at the same time, 1 to 10 (default 3). Changes only on the Settings page.'],
             'spawn_max_total'        => ['group' => 'spawn', 'description' => 'The most helper workspaces that run on this server at the same time, 1 to 20 (default 6). Changes only on the Settings page.'],
             'spawn_max_per_agent'    => ['group' => 'spawn', 'description' => 'The most helper workspaces of one agent kind that run at the same time, 1 to 10 (default 2). Changes only on the Settings page.'],
             'spawn_allow_unattended' => ['group' => 'spawn', 'description' => 'Let helpers run without asking: 1 lets a spawn use the unattended flags of the agent (for example the Codex sandbox bypass), and only in a worktree that the spawn tool made. 0 is off (default). Changes only on the Settings page.'],
+            // HUMAN_ACTOR_IDENTITY.md
+            'human_display_name'     => ['group' => 'general', 'description' => 'The name shown after the Unraid login in the records of who acted, for example "root (John)". Empty shows the login only. Changes only on the Settings page, General, Advanced.'],
 
             // ---- notebook (ARTEFACTS.md) — a person changes these on Settings, Notebook; an agent cannot ----
             'notebook_enabled'            => ['group' => 'notebook', 'description' => 'The Notebook drawer and the artefact tools. 1 is on (default), 0 is off. Changes only on the Settings page, Notebook — an agent cannot change it.'],
@@ -1433,6 +1435,40 @@ class AdminService {
             return ['id' => $id, 'args' => $args];
         } catch (\Throwable $e) {
             return self::failure('setWorkspaceArgs', $e);
+        }
+    }
+
+    /**
+     * Set the start options (command-line arguments) that every workspace of one agent uses (issue #542,
+     * docs/specs/AGENT_SPAWN_WORKSPACE.md "Start without the helper switch"). Reuses ArgsService::saveAgentArgs(),
+     * the call ArgsHandler::saveAgentArgs() (the `save_agent_args` AJAX action) makes, and the same rule check
+     * ArgsService::validateArgs() as setWorkspaceArgs(), so this tool cannot accept anything the Manager editor
+     * would refuse. A workspace's own options still replace this default (ArgsService::getEffectiveArgs()).
+     * An empty $args clears the agent-wide options.
+     *
+     * @return array<string,mixed>
+     */
+    public static function setAgentArgs(string $agentId, string $args): array {
+        try {
+            $agentId = trim($agentId);
+            if (!self::agentExists($agentId)) {
+                return ['error' => "Unknown agent '$agentId'. Ask aicli_list_agents for valid ids."];
+            }
+            if (ValidationService::validateId($agentId) === false) {
+                return ['error' => "'$agentId' is not a valid agent id."];
+            }
+            $args = trim($args);
+            $errors = ArgsService::validateArgs($args);
+            if ($errors) {
+                return ['error' => 'Rejected characters: ' . implode(', ', $errors)];
+            }
+            if (!ArgsService::saveAgentArgs($agentId, $args)) return ['error' => 'Write failed.'];
+            if (ArgsService::getAgentArgs($agentId) !== $args) return ['error' => 'The start options did not persist.'];
+            // Args are not secrets — the value is safe to carry in the ledger.
+            self::emitEvent('agent.args', ['agentId' => $agentId], "Start options changed for agent '$agentId'", ['args' => $args, 'scope' => 'agent']);
+            return ['agentId' => $agentId, 'args' => $args];
+        } catch (\Throwable $e) {
+            return self::failure('setAgentArgs', $e);
         }
     }
 
