@@ -2414,6 +2414,16 @@
     .storage-entity-card .se-backup-status { flex: 1 1 200px; }
     .storage-entity-card .se-actions { flex-wrap: wrap; }
     .storage-entity-card .se-body > .aicli-help-panel { width: auto; }
+    /* #760: nothing in a card runs past its right edge. A row of controls wraps, the terminal user
+       field keeps room for a user name, and the long convert button wraps its text. */
+    .aicli-card-body .input-row { flex-wrap: wrap !important; row-gap: 8px !important; }
+    .aicli-card-body .input-row > span { white-space: nowrap; }
+    #user_select { min-width: 9em !important; }
+    [id^="aicli-kind-state-"] { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+    [id^="aicli-kind-state-"] > button {
+        white-space: normal !important; max-width: 100% !important; box-sizing: border-box;
+        height: auto !important; min-height: 44px; margin-left: 0 !important; text-align: center; overflow-wrap: anywhere;
+    }
     /* The (i) of a line of the Boot disk space card sits right of the label. */
     #aicli-boot-space-card .aicli-bs-info { vertical-align: middle; }
 </style>
