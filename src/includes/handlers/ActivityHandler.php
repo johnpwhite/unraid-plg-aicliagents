@@ -205,6 +205,13 @@ class ActivityHandler
             return ['status' => 'ok'];
         }
 
+        // #474: the "<box> is not reachable" row is also a live view (of the linked-box outbox).
+        // Save the Dismiss on the server, or the next poll draws the row again.
+        if (preg_match('/^relay_peer_queue__([A-Za-z0-9_-]+)$/D', $opId, $m)) {
+            \AICliAgents\Services\RelayPeerService::dismissQueueNotice($m[1]);
+            return ['status' => 'ok'];
+        }
+
         // STORAGE_RECLAIM_NOTICE.md: "Later" on the storage tidy-up ask. Remember it for
         // this wait only, so the same wait does not ask again; a new wait does.
         if (strpos($opId, \AICliAgents\Services\StorageReclaimNoticeService::OP_PREFIX) === 0) {

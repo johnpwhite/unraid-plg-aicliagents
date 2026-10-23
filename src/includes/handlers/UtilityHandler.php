@@ -430,6 +430,9 @@ class UtilityHandler {
     private const DIRECTORY_PAGE_MAX = 100;
     private const DIRECTORY_PAGE_MAX_NUMBER = 10;
     private const DIRECTORY_SCAN_MAX = 1000;
+    private const DIRECTORY_SORT_MODES = ['name-asc', 'name-desc', 'newest', 'oldest'];
+    /** The filter starts at this many characters (same rule as ui-build/src/lib/dirListControls.ts). */
+    private const DIRECTORY_FILTER_MIN_CHARS = 3;
 
     private static function listDir() {
         $rawPath = $_GET['path'] ?? '/mnt';
@@ -450,7 +453,15 @@ class UtilityHandler {
             return ['status' => 'error', 'message' => 'Path not found or access denied'];
         }
         $scanPath = \AICliAgents\Services\PoolPathService::resolvePoolPath($path) ?? $path;
-        $listing = self::readDirectoryPage($scanPath, $path, $page, $limit);
+        // #474: with a sort, the server filters and sorts the whole folder (up to the
+        // scan limit) and then cuts the page. Without a sort, the old paging holds.
+        $sort = $_GET['sort'] ?? '';
+        $filter = $_GET['filter'] ?? '';
+        if (is_string($sort) && in_array($sort, self::DIRECTORY_SORT_MODES, true)) {
+            $listing = self::readDirectorySorted($scanPath, $path, $page, $limit, $sort, is_string($filter) ? $filter : '');
+        } else {
+            $listing = self::readDirectoryPage($scanPath, $path, $page, $limit);
+        }
         if (($listing['error'] ?? '') !== '') {
             return ['status' => 'error', 'message' => 'Directory is temporarily unavailable'];
         }
@@ -514,6 +525,65 @@ class UtilityHandler {
             $items[] = ['name' => $file, 'path' => rtrim($logicalPath, '/') . '/' . $file, 'mtime' => $mtime === false ? 0 : $mtime];
         }
         closedir($handle);
+        return ['items' => $items, 'has_more' => $hasMore, 'scan_capped' => $scanCapped, 'error' => ''];
+    }
+
+    /**
+     * #474: one page of the whole folder, filtered by name and sorted.
+     * It reads at most DIRECTORY_SCAN_MAX entries, like readDirectoryPage.
+     * The order is the one the picker shows: natural order, case does not
+     * matter. "newest" and "oldest" use the modified time, then the name.
+     * The filter keeps names that contain the text. Text shorter than
+     * DIRECTORY_FILTER_MIN_CHARS filters nothing.
+     *
+     * @return array{items:array<int,array{name:string,path:string,mtime:int}>,has_more:bool,scan_capped:bool,error:string}
+     */
+    private static function readDirectorySorted(string $scanPath, string $logicalPath, int $page, int $limit, string $sort, string $filter): array {
+        $handle = @opendir($scanPath);
+        if ($handle === false) return ['items' => [], 'has_more' => false, 'scan_capped' => false, 'error' => 'open'];
+        $needle = trim($filter);
+        $useFilter = (function_exists('mb_strlen') ? mb_strlen($needle) : strlen($needle)) >= self::DIRECTORY_FILTER_MIN_CHARS;
+        $names = [];
+        $scanned = 0;
+        $scanCapped = false;
+        while (($file = readdir($handle)) !== false) {
+            if ($file === '.' || $file === '..') continue;
+            if (++$scanned > self::DIRECTORY_SCAN_MAX) {
+                $scanCapped = true;
+                break;
+            }
+            $full = rtrim($scanPath, '/') . '/' . $file;
+            if (!is_dir($full) || !is_readable($full)) continue;
+            if ($useFilter) {
+                $hit = function_exists('mb_stripos') ? mb_stripos($file, $needle) : stripos($file, $needle);
+                if ($hit === false) continue;
+            }
+            $names[] = $file;
+        }
+        closedir($handle);
+        $mtimes = [];
+        if ($sort === 'newest' || $sort === 'oldest') {
+            foreach ($names as $name) {
+                $m = @filemtime(rtrim($scanPath, '/') . '/' . $name);
+                $mtimes[$name] = $m === false ? 0 : $m;
+            }
+        }
+        $byName = static fn(string $a, string $b): int => strnatcasecmp($a, $b);
+        if ($sort === 'name-desc') usort($names, static fn(string $a, string $b): int => $byName($b, $a));
+        elseif ($sort === 'newest') usort($names, static fn(string $a, string $b): int => ($mtimes[$b] <=> $mtimes[$a]) ?: $byName($a, $b));
+        elseif ($sort === 'oldest') usort($names, static fn(string $a, string $b): int => ($mtimes[$a] <=> $mtimes[$b]) ?: $byName($a, $b));
+        else usort($names, $byName);
+        $skip = ($page - 1) * $limit;
+        $slice = array_slice($names, $skip, $limit);
+        $hasMore = count($names) > $skip + $limit;
+        $items = [];
+        foreach ($slice as $name) {
+            if (!isset($mtimes[$name])) {
+                $m = @filemtime(rtrim($scanPath, '/') . '/' . $name);
+                $mtimes[$name] = $m === false ? 0 : $m;
+            }
+            $items[] = ['name' => $name, 'path' => rtrim($logicalPath, '/') . '/' . $name, 'mtime' => $mtimes[$name]];
+        }
         return ['items' => $items, 'has_more' => $hasMore, 'scan_capped' => $scanCapped, 'error' => ''];
     }
 

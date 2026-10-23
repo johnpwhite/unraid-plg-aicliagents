@@ -63,7 +63,7 @@ The picker remembers the choice in this browser. If a folder holds only hidden f
 
 A row above the list has a filter field and a sort menu.
 
-- **Filter folders.** Type three letters or more. The list keeps the folders whose name contains the letters. The case does not matter. With fewer than three letters, the list stays whole. The text "N of M folders" shows while a filter is on. The cross in the field, or the Escape key, clears the filter. If no folder matches, the list says "No folder matches" and the text you typed. **Up one level** stays.
+- **Filter folders.** Type three letters or more. The list keeps the folders whose name contains the letters. The case does not matter. With fewer than three letters, the list stays whole. The filter and the sort cover every folder in the list, also the folders that "Show more folders" has not loaded yet. The text "N of M folders" shows while a filter is on, or "N folders match" when every found folder is shown. The cross in the field, or the Escape key, clears the filter. If no folder matches, the list says "No folder matches" and the text you typed. **Up one level** stays.
 - **Sort folders.** The default is **Name A–Z**. The names sort in natural order, so `a2` comes before `a10`. You can also choose **Name Z–A**, **Newest first** and **Oldest first**. The two time choices show only when every folder in the list has a modified time.
 
 When you open another folder, the filter clears. The sort choice stays. The picker keeps the sort choice in this browser.

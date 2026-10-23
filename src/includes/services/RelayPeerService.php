@@ -1100,6 +1100,25 @@ class RelayPeerService {
         ];
     }
 
+    /**
+     * #474: save a Dismiss of the "box is not reachable" tray row. The row is a live view of the
+     * outbox, so the person's choice is saved on the server (every device stops showing it).
+     * The record holds the stamp of the oldest waiting message and the number of waiting
+     * messages. queueActivities() shows the row again when a new message joins the wait.
+     * Returns false when the box is not known or nothing waits for it.
+     */
+    public static function dismissQueueNotice(string $peerId): bool {
+        if (RelayPeerStore::find($peerId) === null) return false;
+        $files = self::outboxFiles($peerId);
+        if ($files === []) return false;
+        $first = json_decode((string)@file_get_contents($files[0]), true);
+        return RelayPeerStore::writeRuntime($peerId, 'queue_dismissed', [
+            'first_queued_at' => (int)(is_array($first) ? ($first['queued_at'] ?? 0) : 0),
+            'count' => count($files),
+            'at' => self::now(),
+        ]);
+    }
+
     /** Activity-tray entries: messages waiting over 5 minutes for a peer that does not answer (spec UI). */
     public static function queueActivities(): array {
         if (!self::enabled()) return [];
@@ -1111,6 +1130,11 @@ class RelayPeerService {
             $age = self::now() - (int)(is_array($first) ? ($first['queued_at'] ?? self::now()) : self::now());
             if ($age < self::QUEUE_NOTICE_AFTER) continue;
             $n = count($files); $box = RelayPeerStore::displayName($row);
+            // #474: the person dismissed this notice. It stays hidden while the same wait has
+            // no new message. A new message (a larger count) or a new wait brings it back.
+            $gone = RelayPeerStore::readRuntime($row['id'], 'queue_dismissed', []);
+            if ($gone !== [] && (int)($gone['first_queued_at'] ?? -1) === (int)(is_array($first) ? ($first['queued_at'] ?? 0) : 0)
+                && $n <= (int)($gone['count'] ?? 0)) continue;
             $out[] = [
                 'opId' => 'relay_peer_queue__' . $row['id'], 'type' => 'relay_peer_queue',
                 // Row 61: the box is the subject; the count goes to the grey line.
