@@ -835,22 +835,57 @@ chmod +x /tmp/aicli-*.sh
 # R-019 (#597): Unraid fetches a FILE only when the cached copy is missing, so a
 # truncated download or a proxy error page kept under the cache name blocked every
 # install of this version. Two guards:
-#  1. The engine must parse. A copy that does not is deleted (flash and /tmp) and
-#     fetched once more. If it is still bad, the abort below runs and no damaged
-#     copy is left on flash for the next try.
+#  1. Every cached script and page below is checked before the engine runs. A script
+#     must start with a shebang and parse (bash -n). A page must start with its Menu
+#     line. A damaged copy is deleted (flash and /tmp) and fetched once more from the
+#     same repo path. If the new copy is also bad, no copy stays on flash.
+#     Why no SHA256 for these files: each URL names the moving master branch, so a
+#     pinned hash would fail every install after the next ordinary commit to a file.
+#     Only src.tar.gz changes at a publish alone, so only it has a hash.
 #  2. A SHA-256 that the plugin file declares for the source payload (a SHA256
 #     element inside its FILE entry; Unraid checks it too) is passed to the engine.
 #     The engine checks the payload and downloads it again when it is damaged.
-if [ -f /tmp/aicli-engine.sh ] &amp;&amp; ! bash -n /tmp/aicli-engine.sh 2&gt;/dev/null; then
-    rm -f /tmp/aicli-engine.sh "$LOCAL_CACHE/aicli-engine-$CACHE_VERSION.sh"
-    if curl -fsSL --retry 2 --max-time 60 -o /tmp/aicli-engine.sh.dl "$GIT_URL/src/scripts/installer/install-engine.sh" 2&gt;/dev/null &amp;&amp; bash -n /tmp/aicli-engine.sh.dl 2&gt;/dev/null; then
-        cp -f /tmp/aicli-engine.sh.dl "$LOCAL_CACHE/aicli-engine-$CACHE_VERSION.sh" 2&gt;/dev/null
-        mv -f /tmp/aicli-engine.sh.dl /tmp/aicli-engine.sh
-        chmod +x /tmp/aicli-engine.sh
+# BEGIN cached-file-check
+aicli_cached_file_ok() {
+    # $1 = file, $2 = kind (sh or page)
+    [ -s "$1" ] || return 1
+    case "$2" in
+        sh)   [ "$(head -c 2 "$1" 2&gt;/dev/null)" = "#!" ] &amp;&amp; bash -n "$1" 2&gt;/dev/null ;;
+        page) head -n 1 "$1" 2&gt;/dev/null | grep -q '^Menu=' ;;
+        *)    return 1 ;;
+    esac
+}
+aicli_refresh_cached_file() {
+    # $1 = cache name without version (aicli-x.sh), $2 = repo path, $3 = kind
+    local tmpf="/tmp/$1" flash="$LOCAL_CACHE/${1%.*}-$CACHE_VERSION.${1##*.}" dl="/tmp/$1.dl"
+    [ -f "$tmpf" ] || return 0
+    aicli_cached_file_ok "$tmpf" "$3" &amp;&amp; return 0
+    rm -f "$tmpf" "$flash"
+    if curl -fsSL --retry 2 --max-time 60 -o "$dl" "$GIT_URL/$2" 2&gt;/dev/null &amp;&amp; aicli_cached_file_ok "$dl" "$3"; then
+        cp -f "$dl" "$flash" 2&gt;/dev/null
+        mv -f "$dl" "$tmpf"
+        chmod +x "$tmpf"
     else
-        rm -f /tmp/aicli-engine.sh.dl
+        rm -f "$dl"
     fi
-fi
+    return 0
+}
+# One line for each cached FILE of this plugin file: cache name|repo path|kind.
+AICLI_CACHED_FILES="aicli-clean.sh|src/scripts/installer/cleanup.sh|sh
+aicli-legacy.sh|src/scripts/installer/migrate-from-geminicli.sh|sh
+aicli-runtime.sh|src/scripts/installer/runtime.sh|sh
+aicli-ui.sh|src/scripts/installer/ui-assets.sh|sh
+aicli-storage.sh|src/scripts/installer/storage.sh|sh
+aicli-finalize.sh|src/scripts/installer/finalize.sh|sh
+aicli-repair.sh|src/scripts/user/repair-plugin.sh|sh
+aicli-stop.sh|src/scripts/user/stop-plugin.sh|sh
+aicli-stop-warning.page|src/ArrayStopWarning.page|page
+aicli-engine.sh|src/scripts/installer/install-engine.sh|sh
+aicli-uninstaller.sh|src/scripts/uninstaller/uninstall-engine.sh|sh"
+while IFS='|' read -r _cn _cp _ck; do
+    [ -n "$_cn" ] &amp;&amp; aicli_refresh_cached_file "$_cn" "$_cp" "$_ck"
+done &lt;&lt;&lt; "$AICLI_CACHED_FILES"
+# END cached-file-check
 AICLI_PLG_SELF=""
 for _p in "/tmp/plugins/unraid-aicliagents.plg" "/boot/config/plugins/unraid-aicliagents.plg"; do
     [ -f "$_p" ] &amp;&amp; { AICLI_PLG_SELF="$_p"; break; }

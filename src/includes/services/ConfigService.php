@@ -791,9 +791,83 @@ class ConfigService {
         }
     }
 
+    /** @var (callable(string):bool)|null test seam: replaces FileStorage::ensureReady("home/<user>")->ok. */
+    public static $homeReadyProbe = null;
+
+    /**
+     * Pause (microseconds) before the one retry of a failed home mount. The default is
+     * half a second. AICLI_HOME_MOUNT_RETRY_PAUSE_MS is a test-only override
+     * (tests/bootstrap.php sets 0); production never sets it.
+     */
+    private static function homeMountRetryPauseUs(): int {
+        $e = getenv('AICLI_HOME_MOUNT_RETRY_PAUSE_MS');
+        if ($e !== false && $e !== '' && is_numeric($e) && (int)$e >= 0) return (int)$e * 1000;
+        return 500000;
+    }
+
+    /**
+     * #692: where state goes while the home mount is not available. The folder lies
+     * OUTSIDE the mount point (work/<user>/home). A write into the bare mount point is
+     * hidden when the overlay mounts on top of it, and the settings write is lost.
+     */
+    public static function unmountedStatePath(string $user): string {
+        $safe = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
+        return rtrim(SecretPaths::stateRoot(), '/') . "/state_unmounted/$safe/.aicli";
+    }
+
+    private static function homeReady(string $user): bool {
+        if (self::$homeReadyProbe !== null) return (bool)(self::$homeReadyProbe)($user);
+        return FileStorage::ensureReady("home/$user")->ok;   // Epic #1310: facade intent
+    }
+
+    /**
+     * #692: move state that was written while the home was not mounted into the mounted
+     * home. A file that already exists in the mounted home wins and is not overwritten.
+     * What is left over (a conflict) is parked in state_unmounted_conflict/, so the next
+     * call does not scan it again. Best effort: it never throws.
+     */
+    public static function adoptUnmountedState(string $user, string $statePath): int {
+        $src = self::unmountedStatePath($user);
+        if (!is_dir($src)) return 0;
+        $moved = 0; $left = 0;
+        try {
+            @mkdir($statePath, 0755, true);
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($src, \FilesystemIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($it as $item) {
+                $rel = substr($item->getPathname(), strlen($src) + 1);
+                $dst = $statePath . '/' . $rel;
+                if ($item->isDir()) { @mkdir($dst, 0755, true); continue; }
+                if (file_exists($dst)) { $left++; continue; }
+                if (@copy($item->getPathname(), $dst)) { @unlink($item->getPathname()); $moved++; } else { $left++; }
+            }
+        } catch (\Throwable $e) {
+            $left++;
+            LogService::log("getUserStatePath: could not adopt state written while '$user' was not mounted: " . $e->getMessage(), LogService::LOG_WARN, "ConfigService");
+        }
+        $top = dirname($src);
+        if ($left === 0) {
+            @shell_exec('rm -rf ' . escapeshellarg($top) . ' 2>/dev/null');   // nosemgrep: php.lang.security.exec-use.exec-use
+        } else {
+            $park = rtrim(SecretPaths::stateRoot(), '/') . '/state_unmounted_conflict/' . basename($top) . '-' . date('YmdHis');
+            @mkdir(dirname($park), 0755, true);
+            @rename($top, $park);
+            LogService::log("getUserStatePath: $left file(s) written while '$user' was not mounted conflict with the mounted home; parked in $park", LogService::LOG_WARN, "ConfigService");
+        }
+        LogService::log("getUserStatePath: adopted $moved file(s) written while '$user' was not mounted", LogService::LOG_INFO, "ConfigService");
+        return $moved;
+    }
+
     /**
      * Helper to get the base path for user-specific state (.aicli inside their home).
      * D-333: Forces mount of home storage to ensure data is written to ZRAM/SquashFS stack.
+     *
+     * #692: when the mount is not available (after one retry), the path is NOT the bare
+     * folder under the mount point. It is unmountedStatePath(), outside the mount point,
+     * so a later mount cannot hide what was written. The next call that finds the mount
+     * ready moves that state into the home (adoptUnmountedState).
      */
     public static function getUserStatePath() {
         self::refuseLiveStateInTests();
@@ -802,8 +876,19 @@ class ConfigService {
         if (empty($user)) $user = 'root';
 
         // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
-        if (!FileStorage::ensureReady("home/$user")->ok) {   // Epic #1310: facade intent
-            LogService::log("getUserStatePath: home mount unavailable for '$user' — reads/writes will target bare tmpfs and may be lost", LogService::LOG_WARN, "ConfigService");
+        $ready = self::homeReady($user);
+        if (!$ready) {
+            // The first mount can fail once (the mount point vanished between mkdir and mount, #692).
+            $pause = self::homeMountRetryPauseUs();
+            if ($pause > 0) usleep($pause);
+            $ready = self::homeReady($user);
+        }
+        if (!$ready) {
+            $fallback = self::unmountedStatePath($user);
+            self::refuseLiveStateInTests($fallback);
+            LogService::log("getUserStatePath: home mount unavailable for '$user' — state goes to $fallback (outside the mount point) until the home mounts", LogService::LOG_WARN, "ConfigService");
+            self::ensureStateDirOwnedBy($fallback, $user);
+            return $fallback;
         }
 
         // #646: the state root is injectable (AICLI_STATE_ROOT); tests/bootstrap.php redirects it.
@@ -820,6 +905,7 @@ class ConfigService {
         // write. No-op for root sessions (root owns everything already).
         self::ensureStateDirOwnedBy($statePath, $user);
 
+        self::adoptUnmountedState($user, $statePath);
         return $statePath;
     }
 
