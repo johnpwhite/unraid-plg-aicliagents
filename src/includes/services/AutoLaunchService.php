@@ -37,6 +37,28 @@ class AutoLaunchService
     public static $startRunner = null;
     public static ?string $stateFileOverride = null;
     public static ?string $lockFileOverride = null;
+    /** Test seam: callable(string $sid): bool — replaces ProcessManager::isTtydBound() in the sweep. */
+    public static $ttydBoundProbe = null;
+
+    /** Is a real ttyd bound to the socket of this workspace? */
+    private static function ttydBound(string $sid): bool
+    {
+        if (is_callable(self::$ttydBoundProbe)) return (bool)call_user_func(self::$ttydBoundProbe, $sid);
+        return ProcessManager::isTtydBound($sid);
+    }
+
+    /**
+     * #759: a workspace is launched when its agent runs in tmux AND a ttyd is bound to its
+     * socket. A launch that a timeout ended after the tmux step leaves the agent and no
+     * ttyd; the browser cannot attach, so that workspace still counts as not launched.
+     * The answer changes while another process launches the workspace, so it is impure.
+     *
+     * @phpstan-impure
+     */
+    private static function isLaunched(string $sid): bool
+    {
+        return ProcessManager::isRunning($sid) && self::ttydBound($sid);
+    }
 
     private static function stateFile(): string
     {
@@ -319,7 +341,10 @@ class AutoLaunchService
                     continue;
                 }
 
-                if (ProcessManager::isRunning($sid)) {
+                // #759: a live tmux session is not enough. A launch that a timeout
+                // killed after ensure-session leaves the agent in tmux and no ttyd,
+                // and the browser cannot attach. Skip only when the ttyd is bound too.
+                if (self::isLaunched((string)$sid)) {
                     $skipped++;
                     continue;
                 }
@@ -350,11 +375,33 @@ class AutoLaunchService
                 }
 
                 $chatId = $resumeId !== null ? 'auto' : '';
-                self::log("Auto-launching workspace $sid for $agentId (trigger=$reason)", AICLI_LOG_INFO);
-                if (is_callable(self::$startRunner)) {
-                    call_user_func(self::$startRunner, $sid, $path, $chatId, $agentId);
-                } else {
-                    TerminalService::startTerminal($sid, $path, $chatId, $agentId, 'auto_launch');
+
+                // #759: one launch of one workspace at a time, for every trigger.
+                // The crash reconcile, the array start and the install can run
+                // within seconds of each other. Take the workspace lock without
+                // waiting. When another request holds it, that request launches
+                // the workspace, so this trigger does nothing.
+                if (!SessionLaunchLock::acquire((string)$sid, 0.0)) {
+                    $skipped++;
+                    self::log("Auto-launch of $sid skipped: another launch of this workspace is running (trigger=$reason)", AICLI_LOG_INFO);
+                    continue;
+                }
+                $startResult = null;
+                try {
+                    // Check again under the lock: the holder before us may have finished.
+                    if (self::isLaunched((string)$sid)) {
+                        $skipped++;
+                        self::log("Auto-launch of $sid skipped: another launch already finished (trigger=$reason)", AICLI_LOG_INFO);
+                        continue;
+                    }
+                    self::log("Auto-launching workspace $sid for $agentId (trigger=$reason)", AICLI_LOG_INFO);
+                    if (is_callable(self::$startRunner)) {
+                        $startResult = call_user_func(self::$startRunner, $sid, $path, $chatId, $agentId);
+                    } else {
+                        $startResult = TerminalService::startTerminal($sid, $path, $chatId, $agentId, 'auto_launch');
+                    }
+                } finally {
+                    SessionLaunchLock::release((string)$sid);
                 }
 
                 // T-10 (ACTIVITY_TRAY.md): startTerminal reports its own failures by
@@ -368,9 +415,17 @@ class AutoLaunchService
                 // "ttyd exists". A headless relaunch that brought up ttyd but no
                 // agent (the old Bug #1067 failure mode) now correctly reports
                 // failed here instead of falsely succeeding.
-                if (!ProcessManager::isRunning($sid)) {
+                //
+                // #759: the launch is a success only when the agent runs AND a ttyd
+                // is bound. A start that returned ok=false is a failure too, even
+                // when the agent runs.
+                $agentUp = ProcessManager::isRunning($sid);
+                $bound = $agentUp && self::ttydBound((string)$sid);
+                $startRefused = is_array($startResult) && array_key_exists('ok', $startResult) && $startResult['ok'] === false;
+                if (!$agentUp || !$bound || $startRefused) {
                     $failed++;
-                    self::log("Auto-launch failed for $sid ($agentId): session did not start (trigger=$reason)", AICLI_LOG_WARN);
+                    $step = !$agentUp ? 'agent session (tmux)' : ($startRefused ? 'start step ' . (string)($startResult['reason'] ?? 'unknown') : 'terminal server (ttyd) socket');
+                    self::log("Auto-launch failed for $sid ($agentId): no live terminal after the start; stopped at: $step (trigger=$reason)", AICLI_LOG_ERROR);
                     // ACTIVITY_TRAY_PLAIN_NOTICES.md rows 4-5: title "<Agent name> did not start",
                     // one red sentence, the way out as the grey line, and the Retry button.
                     TerminalService::recordStartFailure(
@@ -462,7 +517,7 @@ class AutoLaunchService
             // never arm a grace timer or count a "failure" for it, exactly
             // like an upgrade-owned relaunch. See
             // docs/specs/2026-04-27-auto-launch-workspaces-design.md.
-            if (!$config['autoLaunch'] || ProcessManager::isRunning($sid)
+            if (!$config['autoLaunch'] || self::isLaunched((string)$sid)
                 || self::upgradeOwnsRelaunch($agentId) || AutoLaunchSuppression::isSuppressed($sid)) {
                 unset($state[$sid]);
                 continue;
@@ -502,7 +557,8 @@ class AutoLaunchService
                 ? call_user_func(self::$launcher, $eligible)
                 : self::launchAllPending(null, 'supervisor_crash_reconcile', $eligible);
             foreach ($eligible as $sid) {
-                if (ProcessManager::isRunning($sid)) {
+                // #759: done only with a bound ttyd; an agent with no ttyd is retried at the next tick.
+                if (self::isLaunched((string)$sid)) {
                     unset($state[$sid]);
                     $launched++;
                 } elseif (!empty($res['busy'])) {

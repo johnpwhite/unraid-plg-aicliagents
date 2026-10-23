@@ -162,8 +162,93 @@ class TerminalService {
         return "$agentName did not start.";
     }
 
+    /**
+     * #759: the launch step that runs now, and the workspace it belongs to. A
+     * `timeout` around a caller (the supervisor reconcile runs under `timeout 20`,
+     * the array-start event under `timeout 60`) ends the launch with SIGTERM, and
+     * PHP then stops with no log line. The trap below writes one ERROR line that
+     * names the workspace and the step. Null when no launch runs.
+     * @var array{id:string,agentId:string,phase:string}|null
+     */
+    private static ?array $launchTrap = null;
+
+    /** @var int depth of nested launches that share one trap (a restart calls start inside start) */
+    private static int $launchTrapDepth = 0;
+
+    /** @var mixed the SIGTERM handler that was set before the trap, to restore */
+    private static $launchTrapPrevious = null;
+
+    /** @var bool the async-signals setting before the trap */
+    private static bool $launchTrapAsync = false;
+
+    /** Remember the step that runs now (shown in the ERROR line if a signal ends the launch). */
+    private static function launchStep(string $step): void
+    {
+        if (self::$launchTrap !== null) self::$launchTrap['phase'] = $step;
+    }
+
+    /**
+     * Write the ERROR line of a launch that a signal ended, and show it in the
+     * activity tray. Public so a test can call it without a real signal.
+     */
+    public static function onLaunchSignal(int $signal): void
+    {
+        $t = self::$launchTrap;
+        if ($t === null) return;
+        $id = $t['id'];
+        LogService::log("CRITICAL: the launch of $id was stopped by signal $signal during step: " . $t['phase'] . ". The workspace may have an agent and no terminal server (ttyd).", LogService::LOG_ERROR, "TerminalService");
+        try {
+            $agentName = UtilityService::trayAgentName($t['agentId']);
+            self::recordStartFailure("start_$id", $agentName, "$agentName did not finish starting.", self::START_RECOVERY,
+                ['sessionId' => $id, 'agentId' => $t['agentId']]);
+        } catch (\Throwable $e) {
+            // The log line above is the record. The tray is a courtesy.
+        }
+    }
+
+    /** Set the trap for SIGTERM when the pcntl extension exists. Nested calls share one trap. */
+    private static function armLaunchTrap(string $id, string $agentId): void
+    {
+        if (self::$launchTrapDepth++ > 0) return;   // the outer launch owns the trap
+        self::$launchTrap = ['id' => $id, 'agentId' => $agentId, 'phase' => 'preparing'];
+        if (!function_exists('pcntl_signal') || !function_exists('pcntl_async_signals') || !defined('SIGTERM')) return;
+        self::$launchTrapAsync = pcntl_async_signals();
+        pcntl_async_signals(true);
+        self::$launchTrapPrevious = function_exists('pcntl_signal_get_handler') ? pcntl_signal_get_handler(SIGTERM) : SIG_DFL;
+        $previous = self::$launchTrapPrevious;
+        pcntl_signal(SIGTERM, static function (int $sig) use ($previous): void {
+            self::onLaunchSignal($sig);
+            if (is_callable($previous)) { $previous($sig); return; }
+            pcntl_signal($sig, SIG_DFL);
+            if (function_exists('posix_kill')) posix_kill(getmypid(), $sig);
+        });
+    }
+
+    /** Remove the trap again when the outer launch ends. */
+    private static function disarmLaunchTrap(): void
+    {
+        if (--self::$launchTrapDepth > 0) return;
+        self::$launchTrapDepth = 0;
+        self::$launchTrap = null;
+        if (function_exists('pcntl_signal') && defined('SIGTERM') && self::$launchTrapPrevious !== null) {
+            pcntl_signal(SIGTERM, self::$launchTrapPrevious);
+            pcntl_async_signals(self::$launchTrapAsync);
+        }
+        self::$launchTrapPrevious = null;
+    }
+
     /** startTerminal() body. Call it only while this process holds the workspace's SessionLaunchLock. */
     private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin): array {
+        self::armLaunchTrap((string)$id, (string)$agentId);
+        try {
+            return self::startTerminalSteps($id, $path, $chatId, $agentId, $origin);
+        } finally {
+            self::disarmLaunchTrap();
+        }
+    }
+
+    /** The steps of a start. Called by startTerminalLocked() only. */
+    private static function startTerminalSteps($id, $path, $chatId, $agentId, string $origin): array {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
         
         // 1. Pre-launch checks
@@ -538,6 +623,7 @@ class TerminalService {
         $ensureLog = SecretPaths::stateRoot() . "/ensure-$id.log";
         ActivityService::update($actId, ['step' => $startStep('Launching agent'), 'progress' => 60]);
         $ensureRc = 0;
+        self::launchStep('ensure-session (agent in tmux)');
         if ($origin === self::ORIGIN_BRIDGE_WARM) {
             // TERMINAL_BACKGROUND_WARM.md: a bridge warm-up attaches to a tmux
             // session the caller found live under the workspace lock. It never
@@ -561,6 +647,7 @@ class TerminalService {
             LogService::log("Detached agent session is live for $id ($agentId).", LogService::LOG_INFO, "TerminalService");
         }
 
+        self::launchStep('after ensure-session, before the ttyd start');
         // D-207: Use runuser -u (non-login) to maintain inherited env if possible,
         // but explicitly inject all AICli variables via the 'env' command wrapper.
         $cmd = "$ttyd -i " . escapeshellarg($sock) . " -p 0 -W -d0 " .
@@ -576,6 +663,7 @@ class TerminalService {
         $out = $spawned > 0 ? [(string)$spawned] : [];
         
         $pid = trim($out[0] ?? '');
+        self::launchStep('waiting for the ttyd socket');
         LogService::log("Launch result - PID: $pid", LogService::LOG_DEBUG, "TerminalService");
 
         if (ctype_digit($pid)) {
