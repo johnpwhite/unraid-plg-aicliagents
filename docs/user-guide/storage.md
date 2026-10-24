@@ -430,10 +430,11 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | **Home** *name*: **quarantine** | Damaged agent databases that the plugin set aside and replaced. Shown only when the folder holds something. | **Archive…** and **Remove**. See "Archive or remove old data of a home". |
 | **Home** *name*: **data of deleted OpenCode workspaces** | OpenCode keeps one database for each workspace. This line counts the data of workspaces that are not in your workspace list or your favourites any more. Included in the **conversation history** line. | **Archive…** and **Remove**. |
 | **Home** *name*: **large Codex session logs** | Codex session logs of 1 MB or more that did not change for 14 days. Included in the **conversation history** line. | **Archive…** and **Remove**. |
+| **Home** *name*: **large session logs of other agents** | Sessions of Claude Code, Gemini CLI, Qwen Code, GitHub Copilot, Grok Build, Kimi Code and Antigravity CLI that are 1 MB or more in total and did not change for 14 days. Included in the **conversation history** line. | **Archive…** and **Remove**. |
 | **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Merge layers". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
-| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, old layer images that a newer merged layer replaced (one item for each home or agent), and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. |
+| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, old layer images that a newer merged layer replaced (one item for each home or agent), and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. When old layer images are listed, also **Archive layer images…**. See "Archive old layer images". |
 | **Plugin files** | The rest of the plugin folder: program files, saved copies of earlier versions, settings and state. | None. |
 
 A home in plain folders has the first three **Home** lines. A home with layers has the line **saved layers**.
@@ -451,11 +452,12 @@ An item **Old layer images that a newer merged layer replaced** is a layer file 
 
 ### Archive or remove old data of a home
 
-Three lines of the card can move old data off the boot disk. Each line has a small **i** mark (hold the mouse over it for a short note) and two buttons.
+Four lines of the card can move old data off the boot disk. Each line has a small **i** mark (hold the mouse over it for a short note) and two buttons.
 
 - **quarantine**: databases that an agent set aside because they were damaged.
 - **data of deleted OpenCode workspaces**: OpenCode data of workspaces that you deleted. Data of a workspace that is in your list, or is a favourite, is never listed.
 - **large Codex session logs**: Codex logs of 1 MB or more, not changed for 14 days. Codex cannot resume a session that you archive or remove. These logs are also counted in the line **conversation history**. For many agents at once, use **Move old sessions…**, which can bring sessions back.
+- **large session logs of other agents**: the same rule for Claude Code, Gemini CLI, Qwen Code, GitHub Copilot, Grok Build, Kimi Code and Antigravity CLI. The files of one session count together, and the session is as new as its newest file. An agent cannot resume a session that you archive or remove, unless you restore it. The agents that keep their history in one database (OpenCode, Kilo Code, Goose) have no such line, because a database cannot be split into sessions.
 
 To archive:
 
@@ -469,6 +471,22 @@ The plugin copies each file, checks the copy with a SHA-256 value, writes a list
 To remove, press **Remove** on the line. Expect: a dialog that names the items and the space it frees. Press **Remove** to continue. Nothing is copied first, so the data is gone for good. Use **Archive…** when you may want it later.
 
 In both cases the plugin leaves an item alone when a program has one of its files open, or when OpenCode data changed in the last day. The line then says how many items it left. If the workspace list is empty or unreadable, the plugin offers no OpenCode data at all, because it cannot tell which data is in use. The buttons are grey during a storage migration.
+
+### Archive old layer images
+
+The line **Left over** can list **Old layer images that a newer merged layer replaced**. Next to **Remove** it then has **Archive layer images…**. Use it when you want to keep a copy of these files before they go.
+
+1. Make a folder inside a pool first, as for any archive.
+2. Press **Archive layer images…** on the line **Left over**. Expect: a dialog with the size and the number of homes and agents. It says that the plugin does not put an archived image back.
+3. Pick the pool and the folder. Press **Archive**. Expect: a message "Archive started" and a progress entry **Archive old layer images** in the Activity tray.
+
+The plugin copies each file, checks the copy, writes the list of files, and only then removes the file from the boot disk. Just before each file goes, the plugin checks again that no mount and no program uses it, and that the layer list still does not name it. A file that is in use stays on the boot disk, and its copy stays in the archive. The plugin does not restore this kind of archive: an old layer image is not in the layer list, so the plugin could not use it. The copy is for safekeeping.
+
+### Large writes stop before the boot disk is too full
+
+The plugin does not start a large write to the boot disk when it would make the disk more than 85 % full. This covers packing an agent, installing an agent, a change of **Home storage** or **Agent storage**, **Restore from an archive…** and **Bring back…**. Small writes, such as settings, are not stopped. Saving a home as a new layer and merging layers are never held back by this level: they stop only when the disk is really full.
+
+When a write is stopped, the plugin writes nothing. The Activity tray shows an entry, for example "Not started: the restore from an archive needs 600 MB on the boot disk. The boot disk is 82 % full, and this would make it 88 % full. The plugin keeps it below 85 %. Free at least 300 MB first." Free some space with the buttons of this card, then try again. Act on the warning at 80 %, before the disk is really full.
 
 An agent can ask for the same actions with the tools `aicli_archive_boot_data` and `aicli_remove_boot_data`. They only propose: nothing moves until you approve the item in the Activity tray. `aicli_get_boot_space` lists the lines.
 
@@ -683,6 +701,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — The card **Boot disk space** has **Archive layer images…** on the line **Left over**, a line for large session logs of the other agents (Claude Code, Gemini, Qwen, Copilot, Grok, Kimi, Antigravity), and it stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-23** — The card **Boot disk space** has **Restore from an archive…**, an early warning at 80% (the Unraid notification stays at 85%), and lists old layer images that a newer merged layer replaced under **Left over**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #755.
 - **2026-10-23** — The Health dot has an (i) button that shows the checks that are not fine. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration fields in this guide use the new labels: **Where homes are stored** and **Where agents are stored** (they were **Home Storage** and **Agent Storage**), next to the settings **Home storage** and **Agent storage**. A home in plain folders no longer shows the body line "Saved straight to disk…"; its status line says it. Issue #750.

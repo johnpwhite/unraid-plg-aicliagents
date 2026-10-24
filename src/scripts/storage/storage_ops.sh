@@ -1366,6 +1366,11 @@ backend_migration_check_layer_space() {
             ;;
     esac
     need_mb=$(( (source_bytes + source_bytes / 10 + 1048575) / 1048576 + BACKEND_MIGRATION_BAKE_MARGIN_MB ))
+    # #724 (R8): on the boot disk the new layer must also keep the use at or below 85 %.
+    local level_need
+    level_need="$(_boot_level_need_mb "$persist" "$source_bytes")"
+    case "$level_need" in ''|*[!0-9]*) level_need=0 ;; esac
+    [ "$level_need" -gt "$need_mb" ] && need_mb="$level_need"
     available_mb="$(df -Pm "$persist" 2>/dev/null | awk 'NR==2 {print $4}')"
     case "$available_mb" in
         ''|*[!0-9]*)
@@ -2169,14 +2174,14 @@ else
         # F14 (#599): the worst case (no compression) is only the first test. When
         # it fails, test again with the compression ratio of the newest layer, so a
         # save is not refused for a layer that will fit while the data sits in RAM.
-        if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+        if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES" save; then
             _EST_WORST="$_EST_BYTES"
             _EST_BYTES="$(_layer_realistic_estimate "$PERSIST_PATH" "$TYPE" "$ID" "$_EST_WORST")"
-            if [ "$_EST_BYTES" -lt "$_EST_WORST" ] && _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+            if [ "$_EST_BYTES" -lt "$_EST_WORST" ] && _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES" save; then
                 log "The worst-case size of the new layer (${_EST_WORST} bytes) does not fit, but the compression of the last layer puts it at about ${_EST_BYTES} bytes; it fits. Baking."
             fi
         fi
-        if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+        if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES" save; then
             error "Not enough boot disk space to save $ID: the new $_BAKE_KIND layer on $PERSIST_PATH needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — bake not started. The changes stay in the writable layer."
             # The figures for the supervisor's notification and tray entry (#388).
             write_no_space_note "$TYPE" "$ID" "${_FIT_NEED_MB:-0}" "${_FIT_FREE_MB:-unknown}"
@@ -3129,10 +3134,10 @@ _EST_UPPER_BYTES="$(_dir_bytes "$UPPER_DIR")"
 _EST_BYTES=$(( $(_layer_total_bytes "${OLD_LAYERS[@]}") + _EST_UPPER_BYTES ))
 # F14 (#599): when the worst case does not fit, count the writable layer at the
 # compression ratio of the newest layer (the old layers are already compressed).
-if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES" save; then
     _EST_BYTES=$(( $(_layer_total_bytes "${OLD_LAYERS[@]}") + $(_layer_realistic_estimate "$PERSIST_PATH" "$TYPE" "$ID" "$_EST_UPPER_BYTES") ))
 fi
-if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES"; then
+if ! _layer_fits_space "$PERSIST_PATH" "$_EST_BYTES" save; then
     error "Not enough boot disk space to merge the layers of $ID: the consolidated layer on $PERSIST_PATH needs about ${_FIT_NEED_MB} MB (estimate plus margin), ${_FIT_FREE_MB} MB free — consolidate not started."
     write_no_space_note "$TYPE" "$ID" "${_FIT_NEED_MB:-0}" "${_FIT_FREE_MB:-unknown}"
     update_task_status "Deferred" 0 "Not enough free space on Flash"
@@ -4396,6 +4401,10 @@ fi
 _GR_SRC_BYTES="$(du -sb "$_GR_SCRATCH" 2>/dev/null | awk '{print $1}')"
 case "$_GR_SRC_BYTES" in ''|*[!0-9]*) _GR_SRC_BYTES=0 ;; esac
 _GR_NEED_MB=$(( _GR_SRC_BYTES / 1048576 + 100 ))
+# #724 (R8): on the boot disk the plain copy must also keep the use at or below 85 %.
+_GR_LEVEL_MB="$(_boot_level_need_mb "$PERSIST_PATH" "$_GR_SRC_BYTES")"
+case "$_GR_LEVEL_MB" in ''|*[!0-9]*) _GR_LEVEL_MB=0 ;; esac
+[ "$_GR_LEVEL_MB" -gt "$_GR_NEED_MB" ] && _GR_NEED_MB="$_GR_LEVEL_MB"
 if ! check_disk_space "$PERSIST_PATH/.diskcheck" "$_GR_NEED_MB"; then
     error "Insufficient space on $PERSIST_PATH for the passthrough copy (${_GR_NEED_MB}MB needed)."
     _gr_cleanup_scratch

@@ -2759,6 +2759,14 @@ class AdminService {
                         'bytes' => (int)$p['bytes'], 'units' => (int)($p['units'] ?? 0), 'files' => (int)($p['files'] ?? 0),
                         'note' => (string)($p['note'] ?? ''), 'info' => (string)($p['info'] ?? '')];
         }
+        // #724: the superseded layer images are one more line (kind superseded_layers, user "all").
+        $layer = BootArchiveService::lineFor($data, BootArchiveService::KIND_LAYERS, BootArchiveService::LAYER_USER);
+        if ($layer !== null && (int)$layer['bytes'] > 0) {
+            $d = BootArchiveService::describe(BootArchiveService::KIND_LAYERS);
+            $lines[] = ['kind' => BootArchiveService::KIND_LAYERS, 'user' => BootArchiveService::LAYER_USER, 'label' => 'Left over: ' . $d['label'],
+                        'bytes' => (int)$layer['bytes'], 'units' => (int)($layer['units'] ?? 0), 'files' => (int)($layer['files'] ?? 0),
+                        'note' => (int)($layer['units'] ?? 0) . ' home or agent(s)', 'info' => $d['info']];
+        }
         $disk = is_array($data['disk'] ?? null) ? $data['disk'] : null;
         return ['measured_at' => (int)($data['measured_at'] ?? 0), 'has_data' => $data !== null,
                 'disk' => $disk === null ? null : ['size' => (int)$disk['size'], 'used' => (int)$disk['used'], 'free' => (int)$disk['free']],
@@ -2773,9 +2781,12 @@ class AdminService {
     public static function validateBootArchive(string $mode, string $kind, string $user, string $folder = ''): array {
         $kind = trim($kind); $user = trim($user); $folder = trim($folder);
         if (!BootArchiveService::isKind($kind)) {
-            return ['error' => "'$kind' is not a kind of data. Use one of: " . implode(', ', BootArchiveService::KINDS) . '.'];
+            return ['error' => "'$kind' is not a kind of data. Use one of: " . implode(', ', BootArchiveService::ALL_KINDS) . '.'];
         }
         if (!BootArchiveService::isUser($user)) return ['error' => 'A valid home name is required in `user`.'];
+        if ($kind === BootArchiveService::KIND_LAYERS && $user !== BootArchiveService::LAYER_USER) {
+            return ['error' => 'For the kind ' . BootArchiveService::KIND_LAYERS . ', `user` must be "' . BootArchiveService::LAYER_USER . '".'];
+        }
         $line = BootArchiveService::lineFor(BootSpaceService::read(), $kind, $user);
         if ($line === null || (int)$line['bytes'] < 1) {
             $have = [];
@@ -2787,11 +2798,11 @@ class AdminService {
         if ($mode === 'archive') {
             $chk = BootArchiveService::checkTarget($folder);
             if ($chk['error'] !== null) return ['error' => (string)$chk['error']];
-            $text = "Archive the " . $d['label'] . " of home $user ($size, " . (int)($line['units'] ?? 0) . " item(s)) to "
+            $text = "Archive the " . $d['label'] .  ($kind === BootArchiveService::KIND_LAYERS ? "" : " of home $user") . " ($size, " . (int)($line['units'] ?? 0) . " item(s)) to "
                 . BootArchiveService::archiveBase($chk['folder']) . '. Each file is copied and checked with SHA-256, listed in a manifest file, and only then removed from the boot disk. Items that a process uses stay.';
         } else {
             $folder = '';
-            $text = "Remove the " . $d['label'] . " of home $user ($size, " . (int)($line['units'] ?? 0) . " item(s)) from the boot disk for good. Nothing is copied first. Items that a process uses stay.";
+            $text = "Remove the " . $d['label'] .  ($kind === BootArchiveService::KIND_LAYERS ? "" : " of home $user") . " ($size, " . (int)($line['units'] ?? 0) . " item(s)) from the boot disk for good. Nothing is copied first. Items that a process uses stay.";
         }
         return ['description' => $text, 'params' => ['mode' => $mode, 'kind' => $kind, 'user' => $user, 'folder' => $folder]];
     }
@@ -2976,7 +2987,7 @@ class AdminService {
             case 'aicli_archive_boot_data':
             case 'aicli_remove_boot_data':
                 $kindWord = BootArchiveService::isKind((string)($params['kind'] ?? '')) ? BootArchiveService::describe((string)$params['kind'])['label'] : 'old data';
-                return ($tool === 'aicli_archive_boot_data' ? 'Archive ' : 'Remove ') . $kindWord . ($user !== '' ? " of home $user" : '') . '?';
+                return ($tool === 'aicli_archive_boot_data' ? 'Archive ' : 'Remove ') . $kindWord . ($user !== '' && $user !== BootArchiveService::LAYER_USER ? " of home $user" : '') . '?';
             case 'aicli_purge_artefact':
                 $title = trim((string)($params['title'] ?? ''));
                 return $title !== '' ? 'Remove the Notebook file "' . $title . '" for good?' : 'Remove a Notebook file for good?';

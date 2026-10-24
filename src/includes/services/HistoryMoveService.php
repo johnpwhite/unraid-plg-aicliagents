@@ -360,6 +360,10 @@ class HistoryMoveService
         if ($free > 0 && $need + 64 * 1048576 > $free) {
             return self::fail($res, 'The boot disk has not enough free space to bring these sessions back.');
         }
+        // R8 (#724): a large write to the boot disk must not push it over 85 %.
+        if (!class_exists(BootSpaceService::class, false)) require_once __DIR__ . '/BootSpaceService.php';
+        $refused = BootSpaceService::writeGuard($homeDir, $need, 'bringing the sessions back', $opts);
+        if ($refused !== null) return self::fail($res, $refused);
 
         $log = self::walOpen($base);
         $copier = $opts['copy'] ?? [self::class, 'copyFile'];

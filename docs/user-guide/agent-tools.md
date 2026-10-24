@@ -126,7 +126,7 @@ The workspace tools, the schedule tools and `aicli_add_favourite` accept an empt
 | Back up a home | `aicli_backup_home` | `backup-home` | The plugin closes every running session of that user, copies the home to the backup target, and starts the sessions again. A warm backup skips the close. |
 | Restore a home | `aicli_restore_home` | `restore-home` | The plugin closes every running session of that user, saves a "pre-restore" safety copy (unless the proposal says otherwise), restores the home, and starts the sessions again. **Replace** makes the home match the copy. **Merge** only adds files. |
 | Merge the layers of a home into one | `aicli_consolidate_home` | `consolidate-home` | The plugin closes every running session of that user, merges the layers, and starts the sessions again. |
-| Archive old data of a home off the boot disk (quarantine, data of deleted OpenCode workspaces, large Codex logs) | `aicli_archive_boot_data` | `archive-boot-data` | A background job copies each file to a folder you named on a pool, checks the copy, lists it in a manifest file, and then removes the file from the boot disk. The folder must already exist. |
+| Archive old data of a home off the boot disk (quarantine, data of deleted OpenCode workspaces, large Codex logs, large session logs of the other agents, old layer images) | `aicli_archive_boot_data` | `archive-boot-data` | A background job copies each file to a folder you named on a pool, checks the copy, lists it in a manifest file, and then removes the file from the boot disk. The folder must already exist. For old layer images the home name is `all`. The plugin does not restore an archive of old layer images. |
 | Remove that data for good | `aicli_remove_boot_data` | `remove-boot-data` | A background job removes the items from the boot disk. Nothing is copied first. |
 | Remove a Notebook file for good | `aicli_purge_artefact` | `artefact-purge` | The file is removed. An agent should archive a page instead, unless you asked for the file to be gone. |
 
@@ -228,6 +228,7 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — The tools `aicli_archive_boot_data`, `aicli_remove_boot_data` and `aicli_get_boot_space` also cover the large session logs of the other agents and the old layer images (home name `all`). Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-24** — An agent can start any existing workspace, also when the helper switch is off. A new tool sets the launch arguments of a whole agent. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #542.
 - **2026-10-24** — The Activity tray shows who acted, for example "by root (John)", and who approved or rejected a proposal. Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 

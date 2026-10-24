@@ -6,6 +6,10 @@
  *     quarantine        <home>/.aicli/quarantine/        databases that an agent set aside
  *     opencode_orphans  <home>/.local/share/aicli-opencode/ws-*   data of OpenCode workspaces that no longer exist
  *     codex_sessions    <home>/.codex/sessions/          big Codex session logs older than 14 days
+ *     agent_sessions    the session logs of the other agents (Claude, Gemini, Qwen, Copilot, Grok, Kimi,
+ *                       Antigravity): sessions of 1 MB or more, not changed for 14 days (#724)
+ *   A fifth kind does not live in a home: superseded_layers, the layer images that a newer merged layer
+ *   replaced (#724). processLayers() archives or removes them.
  *   select() finds the items that may go. measureHome() gives the sizes for the Boot disk space
  *   card. process() archives the items to a folder on a pool (copy, SHA-256 check, manifest, then
  *   remove from the home) or removes them.
@@ -34,7 +38,14 @@ class BootArchiveService
     public const KIND_QUARANTINE = 'quarantine';
     public const KIND_OPENCODE = 'opencode_orphans';
     public const KIND_CODEX = 'codex_sessions';
-    public const KINDS = [self::KIND_QUARANTINE, self::KIND_OPENCODE, self::KIND_CODEX];
+    public const KIND_AGENT_SESSIONS = 'agent_sessions';
+    /** Not a home kind: layer images in the persistence folders. The "user" of this kind is always LAYER_USER. */
+    public const KIND_LAYERS = 'superseded_layers';
+    public const LAYER_USER = 'all';
+    /** The kinds that live in a plain home. measureHome() and select() work on these. */
+    public const KINDS = [self::KIND_QUARANTINE, self::KIND_OPENCODE, self::KIND_CODEX, self::KIND_AGENT_SESSIONS];
+    /** Every kind that a job may name. */
+    public const ALL_KINDS = [self::KIND_QUARANTINE, self::KIND_OPENCODE, self::KIND_CODEX, self::KIND_AGENT_SESSIONS, self::KIND_LAYERS];
 
     /** A Codex log is "large" from this size (allocated bytes). */
     public const CODEX_MIN_BYTES = 1048576;
@@ -69,13 +80,53 @@ class BootArchiveService
                     'title' => 'Large Codex session logs',
                     'info' => 'Codex session logs of ' . (self::CODEX_MIN_BYTES / 1048576) . ' MB or more, not changed for ' . self::CODEX_DAYS . ' days. Codex cannot resume a session that is archived or removed. These sizes are also part of the conversation history above.',
                     'root' => '.codex/sessions'];
+            case self::KIND_AGENT_SESSIONS:
+                return ['label' => 'large session logs of other agents',
+                    'title' => 'Large session logs of other agents',
+                    'info' => 'Session logs of Claude Code, Gemini, Qwen, Copilot, Grok, Kimi and Antigravity that are ' . (self::CODEX_MIN_BYTES / 1048576) . ' MB or more and not changed for ' . self::CODEX_DAYS . ' days. An agent cannot resume a session that is archived or removed. These sizes are also part of the conversation history above.',
+                    'root' => '.claude/projects'];
+            case self::KIND_LAYERS:
+                return ['label' => 'old layer images',
+                    'title' => 'Old layer images',
+                    'info' => 'Layer images (.sqsh files) that a newer merged layer replaced. No mount reads them. The plugin does not put an archived image back: the copy is for safekeeping only.',
+                    'root' => ''];
         }
         return ['label' => $kind, 'title' => $kind, 'info' => '', 'root' => ''];
     }
 
     public static function isKind(string $kind): bool
     {
-        return in_array($kind, self::KINDS, true);
+        return in_array($kind, self::ALL_KINDS, true);
+    }
+
+    /** The folders (relative to the home) that hold the data of a home kind. */
+    public static function roots(string $kind): array
+    {
+        if ($kind === self::KIND_AGENT_SESSIONS) {
+            $roots = [];
+            foreach (self::sessionAgents() as $id) {
+                foreach (HistoryStoreService::stores()[$id]['roots'] as $r) $roots[$r] = true;
+            }
+            return array_keys($roots);
+        }
+        $root = self::describe($kind)['root'];
+        return $root === '' ? [] : [$root];
+    }
+
+    /**
+     * The agents that the kind agent_sessions covers: every agent that keeps one file or folder for each
+     * session AND whose layout was checked against its official source and a real home
+     * (HistoryStoreService::stores(), 'verified'). Codex has its own kind.
+     * @return string[]
+     */
+    public static function sessionAgents(): array
+    {
+        $ids = [];
+        foreach (HistoryStoreService::stores() as $id => $s) {
+            if ($id === 'codex-cli' || $s['kind'] !== 'files' || empty($s['verified'])) continue;
+            $ids[] = $id;
+        }
+        return $ids;
     }
 
     /** A home id as the plugin makes it: no slash, no leading dot. */
@@ -187,7 +238,7 @@ class BootArchiveService
     public static function select(string $homeDir, string $user, string $kind, array $seams = []): array
     {
         $res = ['units' => [], 'skipped' => [], 'partial' => false];
-        if (!self::isKind($kind)) return $res;
+        if (!in_array($kind, self::KINDS, true)) return $res;   // the layer kind has no home
         $home = rtrim($homeDir, '/');
         if (!is_dir($home) || is_link($home)) return $res;
         $now = (int)($seams['now'] ?? time());
@@ -224,6 +275,30 @@ class BootArchiveService
                 if ($files) $groups[$name] = $files;
             }
             self::collect($res, $groups, $home, $seams, self::RECENT_SECONDS, $now);
+        } elseif ($kind === self::KIND_AGENT_SESSIONS) {
+            // One item is one session of one agent (all of its files). The layout rules are the ones of
+            // HistoryStoreService, so an index or a database file that is not a session is never selected.
+            $groups = [];
+            $cut = $now - self::CODEX_DAYS * 86400;
+            foreach (self::sessionAgents() as $agentId) {
+                $p2 = false;
+                $units = HistoryStoreService::scanUnits($home, $agentId, $deadline, $p2);
+                if ($p2) $partial = true;
+                foreach ($units as $u) {
+                    $files = []; $bytes = 0; $newest = 0;
+                    foreach ($u['files'] as $f) {
+                        $st = @lstat($f['abs']);
+                        if ($st === false) continue;
+                        $b = HistoryStoreService::allocated($f['abs']);
+                        $files[] = ['rel' => $f['rel'], 'abs' => $f['abs'], 'bytes' => $b, 'mtime' => (int)$st['mtime']];
+                        $bytes += $b;
+                        $newest = max($newest, (int)$st['mtime']);
+                    }
+                    if (!$files || $bytes < self::CODEX_MIN_BYTES || $newest > $cut) continue;
+                    $groups[$agentId . '/' . $u['key']] = $files;
+                }
+            }
+            self::collect($res, $groups, $home, $seams, 0, $now);
         } else {
             $groups = [];
             $cut = $now - self::CODEX_DAYS * 86400;
@@ -296,7 +371,7 @@ class BootArchiveService
             $f = $figures[$kind] ?? null;
             if (!is_array($f) || (int)($f['units'] ?? 0) < 1) continue;
             $d = self::describe($kind);
-            $note = (int)$f['units'] . ($kind === self::KIND_CODEX ? ' log(s)' : ' item(s)')
+            $note = (int)$f['units'] . ($kind === self::KIND_CODEX ? ' log(s)' : ($kind === self::KIND_AGENT_SESSIONS ? ' session(s)' : ' item(s)'))
                 . ((int)($f['skipped'] ?? 0) > 0 ? ', ' . (int)$f['skipped'] . ' in use or too new, left alone' : '');
             $parts[] = [
                 'key' => 'archive:' . $kind . ':' . $user, 'group' => 'home', 'user' => $user, 'kind' => $kind,
@@ -313,6 +388,17 @@ class BootArchiveService
     /** The line of the last measurement for a kind and a home, or null. */
     public static function lineFor(?array $data, string $kind, string $user): ?array
     {
+        if ($kind === self::KIND_LAYERS) {
+            // The layer images are not a line of a home. The Left over line carries their figures.
+            if ($user !== self::LAYER_USER) return null;
+            foreach (($data['parts'] ?? []) as $p) {
+                if (($p['key'] ?? '') === 'leftover' && is_array($p['superseded'] ?? null)) {
+                    return ['key' => 'archive:' . self::KIND_LAYERS . ':' . self::LAYER_USER, 'kind' => self::KIND_LAYERS,
+                            'user' => self::LAYER_USER, 'label' => 'Old layer images'] + $p['superseded'];
+                }
+            }
+            return null;
+        }
         foreach (($data['parts'] ?? []) as $p) {
             if (($p['key'] ?? '') === 'archive:' . $kind . ':' . $user) return $p;
         }
@@ -384,6 +470,10 @@ class BootArchiveService
         if (!self::isKind($kind)) { $res['message'] = 'This kind of data is not known.'; return $res; }
         if (!self::isUser($user)) { $res['message'] = 'This home name is not valid.'; return $res; }
         if (!in_array($mode, ['archive', 'remove'], true)) { $res['message'] = 'The mode must be archive or remove.'; return $res; }
+        if ($kind === self::KIND_LAYERS) {
+            if ($user !== self::LAYER_USER) { $res['message'] = 'This home name is not valid.'; return $res; }
+            return self::processLayers($mode, $folder, $seams);
+        }
         $home = rtrim($homeDir, '/');
         $realHome = realpath($home);
         if ($realHome === false || is_link($home)) { $res['message'] = 'This home was not found.'; return $res; }
@@ -487,10 +577,152 @@ class BootArchiveService
         return $res;
     }
 
+    // ---- superseded layer images (R8, #724) ---------------------------------------------------------
+
+    /**
+     * The layer-image context for this moment, or null when the rule cannot run (a test without the
+     * manifest). Seams: persist, home_persist, manifest_entities, used_files, in_use, now.
+     * @return array<string,mixed>|null
+     */
+    private static function layerCtx(array $seams): ?array
+    {
+        $persist = rtrim((string)($seams['persist'] ?? BootSpaceService::persistPath()), '/');
+        $homePersist = rtrim((string)($seams['home_persist'] ?? (isset($seams['persist'])
+            ? $persist
+            : StoragePathResolver::homePersistPathFromConfig(ConfigService::getConfig()))), '/');
+        if ($homePersist === '') $homePersist = $persist;
+        $ctx = BootSpaceService::layerContext($seams, $persist, $homePersist);
+        return isset($ctx['manifest_entities']) ? $ctx : null;
+    }
+
+    /**
+     * The superseded layer images now: one item for each home or agent (BootSpaceService::supersededLayers()).
+     * The rule is evaluated live every time it is called, so a loop device or a mount that appeared
+     * after the last measurement is seen. Walks the persistence folders: background job only.
+     * @return array<int,array<string,mixed>>
+     */
+    public static function layerItems(array $seams = []): array
+    {
+        $ctx = self::layerCtx($seams);
+        if ($ctx === null) return [];
+        $size = $seams['du'] ?? static function (string $f): int { return HistoryStoreService::allocated($f); };
+        return BootSpaceService::supersededLayers($ctx['layer_dirs'], $ctx['manifest_entities'], $size, $ctx);
+    }
+
+    /**
+     * Archive or remove the superseded layer images. Same steps and safety rules as process(): the copy
+     * is checked (size and SHA-256), listed in the manifest, and only then does the original go. A file
+     * that a loop device, a mount or a process uses is never touched: the rule is run again right before
+     * each original is removed. A restore of this kind is not offered (the plugin cannot use an old image).
+     * Seams: those of layerCtx(), plus now, copy, free, progress, mounted, host, date.
+     * @return array{status:string,message:string,done:int,files:int,bytes:int,skipped:array<int,array{id:string,reason:string}>,manifest:string,dest:string}
+     */
+    public static function processLayers(string $mode, string $folder = '', array $seams = []): array
+    {
+        $res = ['status' => 'error', 'message' => '', 'done' => 0, 'files' => 0, 'bytes' => 0, 'skipped' => [], 'manifest' => '', 'dest' => ''];
+        if (!in_array($mode, ['archive', 'remove'], true)) { $res['message'] = 'The mode must be archive or remove.'; return $res; }
+        $items = self::layerItems($seams);
+        if (!$items) {
+            $res['status'] = 'ok';
+            $res['message'] = 'Nothing to ' . ($mode === 'archive' ? 'archive' : 'remove') . '.';
+            return $res;
+        }
+        $ctx = self::layerCtx($seams);
+        $dirs = (array)($ctx['layer_dirs'] ?? []);
+
+        $base = ''; $manifestPath = ''; $entries = [];
+        if ($mode === 'archive') {
+            $chk = self::checkTarget($folder, $seams);
+            if ($chk['error'] !== null) { $res['message'] = (string)$chk['error']; return $res; }
+            $base = self::archiveBase($chk['folder'], $seams);
+            $total = 0;
+            foreach ($items as $it) $total += (int)$it['bytes'];
+            $free = isset($seams['free']) ? (int)($seams['free'])($chk['folder']) : (int)@disk_free_space($chk['folder']);
+            if ($free < $total + self::ROOM_MARGIN) {
+                $res['message'] = 'The target has too little room. It needs ' . BootSpaceService::human($total + self::ROOM_MARGIN) . ' free.';
+                return $res;
+            }
+            if (!is_dir($base) && !@mkdir($base, 0755, true) && !is_dir($base)) {
+                $res['message'] = 'The archive folder could not be made.';
+                return $res;
+            }
+            $manifestPath = $base . '/MANIFEST-' . self::KIND_LAYERS . '-' . self::LAYER_USER . '-' . date('His', (int)($seams['now'] ?? time())) . '.json';
+            $res['dest'] = $base;
+        }
+
+        $copier = $seams['copy'] ?? [HistoryMoveService::class, 'copyFile'];
+        $count = count($items); $i = 0;
+        foreach ($items as $it) {
+            $i++;
+            $id = substr((string)$it['key'], strlen('superseded:'));
+            if (isset($seams['progress'])) ($seams['progress'])(['done' => $i - 1, 'total' => $count, 'id' => $id]);
+            $files = array_values(array_map('strval', (array)($it['files'] ?? [])));
+            $made = [];
+            if ($mode === 'archive') {
+                $why = null;
+                foreach ($files as $f) {
+                    $rel = $id . '/' . basename($f);
+                    $why = self::copyChecked($rel, $f, $base . '/' . self::LAYER_USER . '/' . self::KIND_LAYERS . '/' . $rel, $copier, $made);
+                    if ($why !== null) break;
+                }
+                if ($why !== null) {
+                    foreach ($made as $m) { if ($m['fresh']) @unlink($m['dst']); }
+                    $res['skipped'][] = ['id' => $id, 'reason' => $why];
+                    continue;
+                }
+                foreach ($made as $m) {
+                    $entries[] = ['file' => $m['rel'], 'item' => $id, 'size' => $m['size'], 'sha256' => $m['sha'],
+                                  'mtime' => $m['mtime'], 'archived_at' => time()];
+                }
+                self::writeManifest($manifestPath, self::LAYER_USER, self::KIND_LAYERS, $entries);
+                $res['manifest'] = $manifestPath;
+            }
+
+            // Find the images again with the live rule. An image that a loop device, a mount or a process
+            // uses now, or that is no longer superseded, stays. Then remove what is left on the list.
+            $still = [];
+            foreach (self::layerItems($seams) as $again) {
+                if (($again['key'] ?? '') === $it['key']) { foreach ((array)$again['files'] as $f) $still[(string)$f] = true; }
+            }
+            $byRel = [];
+            foreach ($made as $m) $byRel[$m['rel']] = $m;
+            $removed = 0; $kept = 0; $bytes = 0;
+            foreach ($files as $f) {
+                $dir = dirname($f);
+                $ok = isset($still[$f]) && in_array($dir, $dirs, true) && !is_link($f) && is_file($f);
+                if ($ok && $mode === 'archive') {
+                    clearstatcache(true, $f);
+                    $m = $byRel[$id . '/' . basename($f)] ?? null;
+                    $st = @stat($f);
+                    if ($m === null || $st === false || (int)$st['size'] !== $m['size'] || (int)$st['mtime'] !== $m['mtime']) $ok = false;
+                }
+                if (!$ok) { $kept++; continue; }
+                $b = HistoryStoreService::allocated($f);
+                if (@unlink($f)) { $removed++; $bytes += $b; } else { $kept++; }
+            }
+            $res['files'] += $removed;
+            $res['bytes'] += $bytes;
+            if ($removed > 0 && $kept === 0) {
+                $res['done']++;
+            } elseif ($removed > 0) {
+                $res['done']++;
+                $res['skipped'][] = ['id' => $id, 'reason' => $kept . ' file(s) stayed because a mount or a process uses them.' . ($mode === 'archive' ? ' The copies stay in the archive.' : '')];
+            } else {
+                $res['skipped'][] = ['id' => $id, 'reason' => 'A mount or a process uses the images now, or they are no longer replaced.' . ($mode === 'archive' ? ' The copies stay in the archive.' : '')];
+            }
+        }
+        if (isset($seams['progress'])) ($seams['progress'])(['done' => $count, 'total' => $count, 'id' => '']);
+        $res['status'] = 'ok';
+        $verb = $mode === 'archive' ? 'Archived' : 'Removed';
+        $res['message'] = $verb . ' ' . $res['files'] . ' layer image(s) (' . BootSpaceService::human($res['bytes']) . ').'
+            . ($res['skipped'] ? ' ' . count($res['skipped']) . ' item(s) stayed in part or whole.' : '');
+        return $res;
+    }
+
     // ---- restore (R8, #755) ------------------------------------------------------------------------
 
     /** The name of a manifest file: MANIFEST-<kind>-<user>-<HHMMSS>.json */
-    public const MANIFEST_RE = '/^MANIFEST-(quarantine|opencode_orphans|codex_sessions)-([A-Za-z0-9_][A-Za-z0-9._-]{0,127})-(\d{6})\.json$/D';
+    public const MANIFEST_RE = '/^MANIFEST-(quarantine|opencode_orphans|codex_sessions|agent_sessions)-([A-Za-z0-9_][A-Za-z0-9._-]{0,127})-(\d{6})\.json$/D';
     /** The plan shows at most this many files in the dialog. The counts cover all files. */
     public const PLAN_ROWS = 300;
     /** What a person may choose for a file that is different in the home. */
@@ -582,6 +814,14 @@ class BootArchiveService
         foreach (explode('/', $rel) as $seg) {
             if ($seg === '' || $seg === '.' || $seg === '..') return 'The path is not safe.';
         }
+        if ($kind === self::KIND_AGENT_SESSIONS) {
+            // The path must be a session file of one of the agents of this kind (the rules of HistoryStoreService).
+            foreach (self::sessionAgents() as $agentId) {
+                if (HistoryStoreService::unitKey($agentId, $rel) !== null) return null;
+            }
+            return 'The path lies outside the folders this archive came from.';
+        }
+        if ($kind === self::KIND_LAYERS) return 'This kind of archive cannot be restored.';
         $root = self::describe($kind)['root'] . '/';
         if (strncmp($rel, $root, strlen($root)) !== 0) return 'The path lies outside the folder this archive came from.';
         if ($kind === self::KIND_OPENCODE && preg_match('#^\.local/share/aicli-opencode/ws-[0-9a-f]{16}/#', $rel) !== 1) {
@@ -714,6 +954,9 @@ class BootArchiveService
             $res['message'] = 'The boot disk has too little room. The restore needs ' . BootSpaceService::human($need + self::ROOM_MARGIN) . ' free.';
             return $res;
         }
+        // R8 (#724): a large write to the boot disk must not push it over 85 %.
+        $refused = BootSpaceService::writeGuard($home, $need, 'the restore from an archive', $seams);
+        if ($refused !== null) { $res['message'] = $refused; return $res; }
         $open = null;
         $copier = $seams['copy'] ?? [HistoryMoveService::class, 'copyFile'];
         $owner = @stat($home);
@@ -876,11 +1119,13 @@ class BootArchiveService
     /** Remove the folders that the removal emptied, up to (not including) the root of the kind. */
     private static function pruneEmptyDirs(string $home, string $kind, array $rels): void
     {
-        $root = $home . '/' . self::describe($kind)['root'];
         $dirs = [];
-        foreach ($rels as $rel) {
-            $d = dirname($home . '/' . $rel);
-            while (strlen($d) > strlen($root) && strpos($d, $root . '/') === 0) { $dirs[$d] = strlen($d); $d = dirname($d); }
+        foreach (self::roots($kind) as $r) {
+            $root = $home . '/' . $r;
+            foreach ($rels as $rel) {
+                $d = dirname($home . '/' . $rel);
+                while (strlen($d) > strlen($root) && strpos($d, $root . '/') === 0) { $dirs[$d] = strlen($d); $d = dirname($d); }
+            }
         }
         arsort($dirs);
         foreach (array_keys($dirs) as $d) {

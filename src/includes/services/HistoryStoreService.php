@@ -434,7 +434,7 @@ class HistoryStoreService
      * @param bool $partial set to true when the deadline stopped the scan
      * @return array<string,array{key:string,mtime:int,bytes:int,files:array<int,array{rel:string,abs:string}>}>
      */
-    private static function scanUnits(string $homeDir, string $agentId, float $deadline, &$partial): array
+    public static function scanUnits(string $homeDir, string $agentId, float $deadline, &$partial): array
     {
         $partial = false;
         $store = self::stores()[$agentId];

@@ -337,13 +337,15 @@ The card **System memory** shows how much of the memory of Unraid (the RAM disk)
 
 ### Boot disk space card: archive and remove
 
-The card **Boot disk space** (see [Home and agent storage](storage.md), "Boot disk space") has three lines that offer **Archive…** and **Remove**. A line shows only while it has something to move. A small **(i)** beside the name of the line gives a short note.
+The card **Boot disk space** (see [Home and agent storage](storage.md), "Boot disk space") has four lines that offer **Archive…** and **Remove**. A line shows only while it has something to move. A small **(i)** beside the name of the line gives a short note.
 
 | Control | What it does | At once | Agent |
 | :-- | :-- | :-- | :-- |
 | **Home** *name*: **quarantine** | Counts the damaged agent databases that the plugin set aside. | Shows the size and the number of items. | Read: `aicli_get_boot_space` |
 | **Home** *name*: **data of deleted OpenCode workspaces** | Counts the OpenCode data of workspaces that are not in the workspace list or the favourites. Data of a workspace that exists is never counted. | Shows the size and the number of items. | Read: `aicli_get_boot_space` |
 | **Home** *name*: **large Codex session logs** | Counts Codex session logs of 1 MB or more that did not change for 14 days. The size is also part of **conversation history**. | Shows the size and the number of items. | Read: `aicli_get_boot_space` |
+| **Home** *name*: **large session logs of other agents** | Counts the sessions of Claude Code, Gemini CLI, Qwen Code, GitHub Copilot, Grok Build, Kimi Code and Antigravity CLI that are 1 MB or more in total and did not change for 14 days. The size is also part of **conversation history**. | Shows the size and the number of sessions. | Read: `aicli_get_boot_space` |
+| **Left over**: **Archive layer images…** | Shows while old layer images are listed (**Old layer images that a newer merged layer replaced**). It opens the same dialog as **Archive…**. The plugin does not put an archived layer image back. | Dialog, then a background job. | Proposal only: `aicli_archive_boot_data` with the kind `superseded_layers` and the home name `all` |
 | **Archive…** | Opens a dialog. You pick a pool and a folder that already exists in it. The plugin copies each file to `<folder>/aicliagents-archive/<server name>/<date>/`, checks the copy, lists it in a manifest file, and then removes the file from the boot disk. It makes no new top-level folder on a pool. It refuses the boot disk, RAM, `/mnt/user` and the pool itself. | Starts a background job. The Activity tray shows the progress. | Proposal only: `aicli_archive_boot_data` |
 | **Remove** | Opens a confirm dialog that names the items. It removes them from the boot disk for good, with no copy. | Confirm dialog, then a background job. | Proposal only: `aicli_remove_boot_data` |
 
@@ -525,6 +527,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — The card **Boot disk space** has a line for large session logs of the other agents, and **Archive layer images…** on the line **Left over**. The plugin also stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-24** — New setting **Your name in the records** in **General**, part **Advanced**. The Activity tray, the event list and the log show the Unraid login with this name, for example "root (John)". Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 - **2026-10-24** — **Let agents start helper workspaces** no longer blocks an agent from starting a workspace that already exists. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #542.
 - **2026-10-23** — The **Boot disk space** card has **Restore from an archive…** and an early warning at 80 %. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #755.

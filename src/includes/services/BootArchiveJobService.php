@@ -43,6 +43,9 @@ class BootArchiveJobService
     public static function title(string $mode, string $kind, string $user): string
     {
         $d = BootArchiveService::describe($kind);
+        if ($kind === BootArchiveService::KIND_LAYERS) {
+            return (['archive' => 'Archive ', 'remove' => 'Remove '][$mode] ?? 'Remove ') . $d['label'];
+        }
         $verb = ['archive' => 'Archive ', 'remove' => 'Remove ', 'restore' => 'Restore ', 'restore_plan' => 'Check the archive of '][$mode] ?? 'Remove ';
         return $verb . $d['label'] . ' of home ' . $user;
     }
@@ -57,6 +60,11 @@ class BootArchiveJobService
     {
         $kind = (string)($opts['kind'] ?? ''); $user = (string)($opts['user'] ?? ''); $mode = (string)($opts['mode'] ?? '');
         if (!BootArchiveService::isKind($kind) || !BootArchiveService::isUser($user) || !in_array($mode, self::MODES, true)) {
+            return [null, 'The request is not valid.'];
+        }
+        // The layer images have no home and no restore (BOOT_DISK_SPACE.md R8, #724).
+        if ($kind === BootArchiveService::KIND_LAYERS
+            && ($user !== BootArchiveService::LAYER_USER || !in_array($mode, ['archive', 'remove'], true))) {
             return [null, 'The request is not valid.'];
         }
         $isRestore = in_array($mode, ['restore', 'restore_plan'], true);

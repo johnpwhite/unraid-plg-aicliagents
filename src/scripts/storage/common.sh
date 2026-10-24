@@ -477,7 +477,26 @@ _layer_total_bytes() {
     printf '%d\n' "$sum"
 }
 
-# _layer_fits_space <persist> <estimate_bytes>
+# _boot_level_need_mb <path> <estimate_bytes> — #724 (R8): the free space in MB that a large write of
+# about <estimate_bytes> (+10 %) needs so that the boot disk stays at or below AICLI_BOOT_WRITE_LIMIT_PCT
+# (default 85, the level of the card and the push notice; the PHP twin is BootSpaceService::writeGuard).
+# free >= estimate + (100 - limit) % of the disk size. Prints 0 when <path> is not on the boot disk (the
+# file system of AICLI_BOOT_PATH, default /boot), when the size is unknown, or when the limit is 100 or more.
+# A small config write never calls this.
+_boot_level_need_mb() {
+    local path="${1:-}" est="${2:-0}" limit="${AICLI_BOOT_WRITE_LIMIT_PCT:-85}" bootp="${AICLI_BOOT_PATH:-/boot}" d1 d2 size_mb
+    case "$est" in ''|*[!0-9]*) est=0 ;; esac
+    case "$limit" in ''|*[!0-9]*) limit=85 ;; esac
+    if [ "$limit" -ge 100 ] || [ -z "$path" ]; then printf '0\n'; return 0; fi
+    d1="$(stat -c %d "$path" 2>/dev/null)"; d2="$(stat -c %d "$bootp" 2>/dev/null)"
+    if [ -z "$d1" ] || [ "$d1" != "$d2" ]; then printf '0\n'; return 0; fi
+    size_mb="$(df -Pm "$path" 2>/dev/null | awk 'NR==2 {print $2}')"
+    case "$size_mb" in ''|*[!0-9]*) printf '0\n'; return 0 ;; esac
+    printf '%d\n' $(( (est + est / 10 + 1048575) / 1048576 + size_mb * (100 - limit) / 100 ))
+}
+
+# _layer_fits_space <persist> <estimate_bytes> [save]
+# (the optional third argument "save" skips the 85 % level rule, see below)
 # #338 (2026-09-26, .4 reached 100 % /boot): true when the persist target has
 # room for a new layer of about <estimate_bytes> (+10 %) plus a margin
 # (AICLI_LAYER_SPACE_MARGIN_MB, default 64). A bake or pack must not START when
@@ -486,10 +505,18 @@ _layer_total_bytes() {
 # caller's log line. Free space that cannot be read does not block (the same
 # rule as check_disk_space).
 _layer_fits_space() {
-    local persist="${1:-}" est="${2:-0}" margin="${AICLI_LAYER_SPACE_MARGIN_MB:-64}" free
+    local persist="${1:-}" est="${2:-0}" margin="${AICLI_LAYER_SPACE_MARGIN_MB:-64}" free level_need
     case "$est" in ''|*[!0-9]*) est=0 ;; esac
     case "$margin" in ''|*[!0-9]*) margin=64 ;; esac
     _FIT_NEED_MB=$(( (est + est / 10 + 1048575) / 1048576 + margin ))
+    # #724 (R8): on the boot disk the write must also keep the use at or below 85 %. The figure is the
+    # free space that this needs, so the callers' "needs about N MB, M MB free" text stays true.
+    # John, 2026-10-24: "never hold back saves". The third argument "save" (a home bake, a home or agent
+    # merge) skips the level rule: such a write keeps the old rule only (defer when the disk is really full).
+    level_need=0
+    [ "${3:-}" = "save" ] || level_need="$(_boot_level_need_mb "$persist" "$est")"
+    case "$level_need" in ''|*[!0-9]*) level_need=0 ;; esac
+    [ "$level_need" -gt "$_FIT_NEED_MB" ] && _FIT_NEED_MB="$level_need"
     free="$(df -Pm "$persist" 2>/dev/null | awk 'NR==2 {print $4}')"
     _FIT_FREE_MB="${free:-unknown}"
     case "$free" in ''|*[!0-9]*) return 0 ;; esac

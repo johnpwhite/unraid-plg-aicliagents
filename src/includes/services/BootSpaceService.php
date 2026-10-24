@@ -212,6 +212,77 @@ class BootSpaceService
         return ['level' => $level, 'tray' => $tray, 'notify' => $notify];
     }
 
+    /**
+     * The guard for large writes to the boot disk (docs/specs/BOOT_DISK_SPACE.md R8, #724). The plugin
+     * refuses a large write that would push the boot disk over WARN_PCT (85 %), the level that the card and
+     * the push notice already use. The shell twin is `_boot_level_need_mb` in scripts/storage/common.sh
+     * (used by `_layer_fits_space`); a test pins that the limits match.
+     *
+     * Pure rule. Used and total are in bytes. Returns the use after the write in percent, and how much
+     * must be freed first (0 when the write is allowed).
+     * @return array{allowed:bool,after_pct:float,now_pct:float,free_first:int}
+     */
+    public static function writeCheck(int $total, int $used, int $bytes, int $limitPct = self::WARN_PCT): array
+    {
+        if ($total <= 0) return ['allowed' => true, 'after_pct' => 0.0, 'now_pct' => 0.0, 'free_first' => 0];
+        $after = $used + max(0, $bytes);
+        $allowed = $after * 100 <= $total * $limitPct;
+        $free = $allowed ? 0 : (int)ceil($after - $total * $limitPct / 100);
+        return ['allowed' => $allowed, 'after_pct' => round(100 * $after / $total, 1),
+                'now_pct' => round(100 * $used / $total, 1), 'free_first' => $free];
+    }
+
+    /** True when $path lies on the same file system as the boot disk. A path that does not exist yet uses its nearest parent. */
+    public static function onBootDisk(string $path, ?string $bootPath = null): bool
+    {
+        $boot = $bootPath ?? ((($e = getenv('AICLI_BOOT_PATH')) !== false && $e !== '') ? $e : '/boot');
+        $b = @stat($boot);
+        if ($b === false) return false;
+        $p = $path;
+        while ($p !== '' && $p !== '/' && !file_exists($p)) $p = dirname($p);
+        $s = @stat($p === '' ? '/' : $p);
+        return $s !== false && (int)$s['dev'] === (int)$b['dev'];
+    }
+
+    /**
+     * Guard one large write. Returns null when the write may go on. Otherwise returns a plain message,
+     * and (unless the seam no_track is set) puts one Activity tray record on the failed list, so the person sees
+     * why nothing was written. A path that is not on the boot disk is never refused here.
+     * Small config writes do not call this: only copies of 1 MB or more do.
+     *
+     * Seams: boot_path, on_boot (bool), disk (array size, used), no_track.
+     */
+    public static function writeGuard(string $path, int $bytes, string $what, array $seams = []): ?string
+    {
+        $on = array_key_exists('on_boot', $seams) ? (bool)$seams['on_boot'] : self::onBootDisk($path, $seams['boot_path'] ?? null);
+        if (!$on) return null;
+        if (isset($seams['disk'])) {
+            $total = (int)($seams['disk']['size'] ?? 0); $used = (int)($seams['disk']['used'] ?? 0);
+        } else {
+            $probe = $path;
+            while ($probe !== '' && $probe !== '/' && !file_exists($probe)) $probe = dirname($probe);
+            $total = (int)@disk_total_space($probe); $used = max(0, $total - (int)@disk_free_space($probe));
+        }
+        $c = self::writeCheck($total, $used, $bytes);
+        if ($c['allowed']) return null;
+        $msg = 'Not started: ' . $what . ' needs ' . self::human($bytes) . ' on the boot disk. The boot disk is ' . $c['now_pct']
+            . ' % full, and this would make it ' . $c['after_pct'] . ' % full. The plugin keeps it below ' . self::WARN_PCT
+            . ' %. Free at least ' . self::human($c['free_first']) . ' first (Storage, Boot disk space shows what uses it).';
+        if (empty($seams['no_track'])) {
+            try {
+                $slug = trim((string)preg_replace('/[^a-z0-9]+/', '_', strtolower($what)), '_');
+                ActivityService::fail('boot_write_refused_' . substr($slug, 0, 60), $msg,
+                    'Free some space on the boot disk, then try again.',
+                    ['type' => 'storage', 'label' => 'A large write to the boot disk was refused']);
+            } catch (\Throwable $e) { /* a tray record must never break the refusal */ }
+        }
+        try {
+            LifecycleLogService::log(LifecycleLogService::LEVEL_WARN, 'storage', 'boot_write_refused',
+                ['what' => $what, 'bytes' => $bytes, 'now_pct' => $c['now_pct'], 'after_pct' => $c['after_pct']]);
+        } catch (\Throwable $e) { /* a log must never break the refusal */ }
+        return $msg;
+    }
+
     /** Size, use, free space, mount and file system of the disk that holds $path. */
     public static function diskInfo(string $path): array
     {
@@ -805,7 +876,16 @@ class BootSpaceService
                 self::layerContext($seams, $persist, $homePersist));
             $lo = 0; foreach ($items as $it) $lo += $it['bytes'];
             if (self::isInside($persist, $pluginDir)) $insideTotal += $lo;
-            $parts[] = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
+            // R8 (#724): the superseded layer images can also be archived. Their figures ride on this line.
+            $sup = ['bytes' => 0, 'units' => 0, 'files' => 0, 'names' => []];
+            foreach ($items as $it) {
+                if (strpos((string)$it['key'], 'superseded:') !== 0) continue;
+                $sup['bytes'] += (int)$it['bytes'];
+                $sup['units']++;
+                $sup['files'] += count((array)($it['files'] ?? []));
+                if (count($sup['names']) < BootArchiveService::NAMES_SHOWN) $sup['names'][] = substr((string)$it['key'], strlen('superseded:'));
+            }
+            $leftPart = ['key' => 'leftover', 'group' => 'leftover', 'label' => 'Left over', 'bytes' => $lo,
                 'items' => array_map(static function ($it) {
                     $out = ['key' => $it['key'], 'label' => $it['label'], 'bytes' => $it['bytes']];
                     if (isset($it['locked'])) $out['locked'] = (bool)$it['locked'];
@@ -816,6 +896,11 @@ class BootSpaceService
                 'action' => array_filter($items, static fn(array $it): bool => empty($it['locked'])) !== []
                     ? self::action('remove_leftover', 'Remove')
                     : self::action('remove_leftover', 'Remove', false, 'Nothing is left over.')];
+            if ($sup['units'] > 0) {
+                $leftPart['superseded'] = $sup;
+                $leftPart['extra_actions'] = [self::action('archive_superseded', 'Archive layer images…')];
+            }
+            $parts[] = $leftPart;
         } else {
             $complete = false;
         }

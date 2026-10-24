@@ -78,7 +78,9 @@
         return '<div style="text-align:left; font-size:12px; line-height:1.6;" data-testid="archive-boot-data-dialog">' +
             '<div style="margin-bottom:8px;">Move <b>' + esc(part.label || part.kind) + '</b> (' + (Number(plan.units) || 0) + ' item(s), <b>' + human(plan.bytes) + '</b>) ' +
             'to a folder on a pool. Each file is copied, checked with SHA-256, listed in a manifest file, and only then removed from the boot disk. ' +
-            'Items that a process uses stay.</div>' +
+            'Items that a process uses stay.' +
+            (part.kind === 'superseded_layers' ? ' A newer merged layer holds this data. The plugin does not put an archived image back: the copy is for safekeeping only.' : '') +
+            '</div>' +
             '<label style="display:block;">Pool</label>' +
             '<select id="aicli-ba-pool" style="width:100%; margin-bottom:6px;"' + (noPool ? ' disabled' : '') + '>' + opts + '</select>' +
             '<label style="display:block;">Folder in the pool (it must already exist)</label>' +
@@ -132,6 +134,21 @@
                 $('#aicli-ba-dest').text(destText($('#aicli-ba-pool').val(), ($('#aicli-ba-folder').val() || '').trim(), plan));
             });
         });
+    };
+
+    // Pure: the part of the archive dialog for the old layer images. They ride on the Left over line
+    // (part.superseded: bytes, units, files, names). The job has the kind superseded_layers and the user "all".
+    function layerPart(leftover) {
+        var s = (leftover && leftover.superseded) || {};
+        return { key: 'archive:superseded_layers:all', kind: 'superseded_layers', user: 'all', label: 'old layer images',
+                 bytes: Number(s.bytes) || 0, units: Number(s.units) || 0, files: Number(s.files) || 0, names: s.names || [] };
+    }
+    reg.layerPart = layerPart;   // test seam
+
+    reg.actions['archive_superseded'] = function (leftover) {
+        var p = layerPart(leftover);
+        if (!p.units) { fail('No old layer image is left over.'); return; }
+        reg.actions['archive_boot_data'](p);
     };
 
     reg.actions['remove_boot_data'] = function (part) {
