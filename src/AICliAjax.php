@@ -121,15 +121,15 @@ if (isset($_GET['action'])) {
     // bigger than post_max_size and empties $_POST — that would otherwise
     // fail the CSRF check below and hide the real cause behind "Invalid CSRF
     // Token". Catch it here, before CSRF, for the two upload actions only.
-    if (($action === 'save_file' || $action === 'save_file_chunk' || $action === 'notebook_asset_upload' || $action === 'notebook_import')
-        && !empty($_SERVER['CONTENT_LENGTH']) && empty($_POST)) {
-        $postMaxBytes = \AICliAgents\Handlers\UtilityHandler::getUploadLimits()['post_max_bytes'];
-        $contentLength = (int) $_SERVER['CONTENT_LENGTH'];
-        if ($postMaxBytes > 0 && $contentLength > $postMaxBytes) {
-            $limitMb = round($postMaxBytes / 1048576, 1);
-            aicli_log("Upload overflow: Content-Length $contentLength exceeds post_max_size $postMaxBytes bytes (action=$action)", AICLI_LOG_ERROR, "AICliAjax");
+    // The decision is ValidationService::uploadOversizeRefusal() (unit tested with the four actions,
+    // the Content-Length and the empty $_POST).
+    if (in_array($action, ValidationService::UPLOAD_ACTIONS, true)) {
+        $oversize = ValidationService::uploadOversizeRefusal(
+            $action, $_SERVER, $_POST, \AICliAgents\Handlers\UtilityHandler::getUploadLimits()['post_max_bytes']);
+        if ($oversize !== null) {
+            aicli_log($oversize['log'], AICLI_LOG_ERROR, "AICliAjax");
             ob_end_clean();
-            echo json_encode(['status' => 'error', 'message' => "This upload is too large for one request. The server accepts up to {$limitMb} MB per request (post_max_size). Retry — the overlay should split large files into smaller chunks."]);
+            echo json_encode(['status' => 'error', 'message' => $oversize['message']]);
             exit;
         }
     }
@@ -140,14 +140,10 @@ if (isset($_GET['action'])) {
     // form and Unraid answered with HTML. (Multipart is no way out: it hangs on
     // Unraid's nginx, D-405.) Turn it back into standard base64 here, once,
     // for the handlers' strict base64_decode. A request without enc is left alone.
-    if (in_array($action, ['save_file', 'save_file_chunk', 'notebook_asset_upload', 'notebook_import'], true)
-        && ($_POST['enc'] ?? '') === 'b64url') {
-        foreach (['filedata', 'data'] as $b64Key) {
-            if (isset($_POST[$b64Key]) && is_string($_POST[$b64Key])) {
-                $_POST[$b64Key] = \AICliAgents\Handlers\UtilityHandler::fromBase64Url($_POST[$b64Key]);
-                $_REQUEST[$b64Key] = $_POST[$b64Key];
-            }
-        }
+    // The decision is UtilityHandler::decodeUploadBody() (unit tested). NotebookHandler reads $_REQUEST.
+    foreach (\AICliAgents\Handlers\UtilityHandler::decodeUploadBody($action, $_POST) as $b64Key => $b64Val) {
+        $_POST[$b64Key] = $b64Val;
+        $_REQUEST[$b64Key] = $b64Val;
     }
 
     // Validate session ID
@@ -167,23 +163,16 @@ if (isset($_GET['action'])) {
     // local_prepend.php (auto_prepend_file) validates CSRF from $_POST or X-CSRF-TOKEN
     // header for POST requests, then unsets them. We re-check here from $_REQUEST
     // (which retains the GET copy) so GET-based callers also pass.
-    if (!ValidationService::isCsrfExemptRead($action)) {
-        $var = @parse_ini_file("/var/local/emhttp/var.ini");
-        $expected = trim((string)($var['csrf_token'] ?? ''));
-        $received = $_REQUEST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
-        if (is_array($received)) $received = end($received);
-        $received = trim((string)$received);
-
-        $csrfRefusal = ValidationService::csrfTokenRefusal($expected, $_REQUEST, $_SERVER);
-        if ($csrfRefusal !== null) {
-            // S10: log only the action and whether a token arrived. Printing the
-            // expected or received token would put a live secret in the log.
-            $gotToken = ($received !== '') ? 'yes' : 'no';
-            aicli_log("CSRF check failed for action: $action (token received: $gotToken)", AICLI_LOG_ERROR, "AICliAjax");
-            ob_end_clean();
-            echo json_encode(['status' => 'error', 'message' => $csrfRefusal]);
-            exit;
-        }
+    // The decision is ValidationService::csrfDecision() (unit tested): an exempt raw read is never
+    // refused, every other action needs the server token. S10: its log line names the action and
+    // says only whether a token arrived. It never holds the expected or the received token.
+    $var = ValidationService::isCsrfExemptRead($action) ? [] : @parse_ini_file("/var/local/emhttp/var.ini");
+    $csrf =ValidationService::csrfDecision($action, trim((string)($var['csrf_token'] ?? '')), $_REQUEST, $_SERVER);
+    if ($csrf['refusal'] !== null) {
+        aicli_log((string)$csrf['log'], AICLI_LOG_ERROR, "AICliAjax");
+        ob_end_clean();
+        echo json_encode(['status' => 'error', 'message' => $csrf['refusal']]);
+        exit;
     }
 
     // R-06 trace correlation: adopt the client's X-Aicli-Trace header (or the

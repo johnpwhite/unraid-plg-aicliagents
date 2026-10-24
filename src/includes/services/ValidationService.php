@@ -51,6 +51,49 @@ class ValidationService {
     }
 
     /**
+     * The CSRF decision of the AJAX dispatcher, as pure data (Forgejo #669).
+     * An exempt read (a raw media stream) is never refused. Every other action needs a token that
+     * matches the server token, from the request or from the X-CSRF-TOKEN header.
+     * When it refuses, 'log' is the line for the debug log. S10: that line names the action and
+     * says only whether a token arrived. It never holds the expected or the received token.
+     *
+     * @return array{refusal:?string,log:?string}
+     */
+    public static function csrfDecision($action, string $expected, array $request, array $server): array {
+        if (self::isCsrfExemptRead($action)) return ['refusal' => null, 'log' => null];
+        $refusal = self::csrfTokenRefusal($expected, $request, $server);
+        if ($refusal === null) return ['refusal' => null, 'log' => null];
+        $received = $request['csrf_token'] ?? $server['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (is_array($received)) $received = end($received);
+        $gotToken = trim((string)$received) !== '' ? 'yes' : 'no';
+        $name = is_scalar($action) ? (string)$action : '';
+        return ['refusal' => $refusal, 'log' => "CSRF check failed for action: $name (token received: $gotToken)"];
+    }
+
+    /** The four actions that carry an uploaded file body (oversize guard and enc=b64url decode). */
+    public const UPLOAD_ACTIONS = ['save_file', 'save_file_chunk', 'notebook_asset_upload', 'notebook_import'];
+
+    /**
+     * WORKSPACE_UPLOAD_MULTI_CHUNKED.md R5, as pure data (Forgejo #669). PHP drops a POST body that is
+     * bigger than post_max_size and leaves $_POST empty. That would look like a CSRF failure, so the
+     * dispatcher asks this first, for the four upload actions only. It answers only when a body was
+     * announced (Content-Length), PHP kept no field, and the length is over a limit that is set.
+     *
+     * @return array{log:string,message:string}|null
+     */
+    public static function uploadOversizeRefusal($action, array $server, array $post, int $postMaxBytes): ?array {
+        if (!is_string($action) || !in_array($action, self::UPLOAD_ACTIONS, true)) return null;
+        if (empty($server['CONTENT_LENGTH']) || !empty($post)) return null;
+        $contentLength = (int)$server['CONTENT_LENGTH'];
+        if ($postMaxBytes <= 0 || $contentLength <= $postMaxBytes) return null;
+        $limitMb = round($postMaxBytes / 1048576, 1);
+        return [
+            'log' => "Upload overflow: Content-Length $contentLength exceeds post_max_size $postMaxBytes bytes (action=$action)",
+            'message' => "This upload is too large for one request. The server accepts up to {$limitMb} MB per request (post_max_size). Retry — the overlay should split large files into smaller chunks.",
+        ];
+    }
+
+    /**
      * True when $user is safe to put in the task-status file name (get_task_status).
      * Accepts only a POSIX-like user name or the sentinel "agents". The `D` flag
      * stops a trailing newline from passing. "../x" and an empty value fail.

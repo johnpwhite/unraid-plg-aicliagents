@@ -1012,6 +1012,26 @@ class UtilityHandler {
     }
 
     /**
+     * #515, as pure data (Forgejo #669): the dispatcher turns the URL-safe base64 of an upload body
+     * back into standard base64. It does so for the four upload actions only, and only when the
+     * request says enc=b64url. A request without enc is left alone.
+     * Returns the fields that changed (name => new value). The caller writes them to $_POST and $_REQUEST.
+     *
+     * @return array<string,string>
+     */
+    public static function decodeUploadBody($action, array $post): array {
+        if (!is_string($action) || !in_array($action, \AICliAgents\Services\ValidationService::UPLOAD_ACTIONS, true)) return [];
+        if (($post['enc'] ?? '') !== 'b64url') return [];
+        $changed = [];
+        foreach (['filedata', 'data'] as $key) {
+            if (isset($post[$key]) && is_string($post[$key])) {
+                $changed[$key] = self::fromBase64Url($post[$key]);
+            }
+        }
+        return $changed;
+    }
+
+    /**
      * docs/specs/WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3 — the client asks this
      * once per overlay open to size its chunks. `chunk_bytes` is the biggest
      * RAW (pre-base64) chunk that still fits the server's `post_max_size`
