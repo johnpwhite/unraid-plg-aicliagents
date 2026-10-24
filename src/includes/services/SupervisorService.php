@@ -14,6 +14,7 @@
 namespace AICliAgents\Services;
 
 require_once __DIR__ . '/TraceContext.php';
+require_once __DIR__ . '/StorageJobProgressService.php';
 
 class SupervisorService {
 
@@ -797,7 +798,7 @@ class SupervisorService {
      * "phase". In the write phase the label also shows the percentage when it
      * is known. An unknown phase gives the generic "running" label.
      */
-    public static function consolidatePhaseStep(string $phase, ?int $pct = null): string {
+    public static function consolidatePhaseStep(string $phase, ?int $pct = null, ?int $leftSec = null): string {
         $labels = [
             'closing'     => 'Closing sessions',
             'pre-flight'  => 'Checking the home',
@@ -809,7 +810,9 @@ class SupervisorService {
         ];
         $label = $labels[$phase] ?? 'Running';
         if ($phase === 'writing' && $pct !== null) {
-            $label = 'Writing the new layer, ' . max(0, min(100, $pct)) . ' % (can take several minutes)';
+            // #443: with an estimate from the last merge the line says the time left.
+            $label = 'Writing the new layer, ' . max(0, min(100, $pct)) . ' %'
+                . ($leftSec !== null ? ', ' . StorageJobProgressService::leftText($leftSec) : ' (can take several minutes)');
         }
         return $label;
     }
@@ -973,7 +976,7 @@ class SupervisorService {
      * task status file of the home. Null when the file is missing, stale
      * (older than 10 minutes) or not in the write step.
      */
-    private static function consolidateWritePercent(string $entity): ?int {
+    public static function consolidateWritePercent(string $entity): ?int {
         if (strpos($entity, 'home/') !== 0) return null;
         $id = substr($entity, 5);
         if ($id === '' || preg_match('/^[A-Za-z0-9._-]+$/D', $id) !== 1) return null;
@@ -1325,10 +1328,15 @@ class SupervisorService {
                         $progress = HistoryJobService::runningProgress($jobId);
                     } elseif ($jobOp === 'consolidate' && (string)($job['phase'] ?? '') !== '') {
                         // Forgejo #454: a home merge names its phase and moves its bar.
-                        $pct = self::consolidateWritePercent((string)($job['entity'] ?? ''));
-                        $phase = (string)$job['phase'];
-                        $step = self::consolidatePhaseStep($phase, $pct);
-                        $progress = self::consolidatePhaseProgress($phase, $pct);
+                        // #443: the same figures as the home card (percent, estimate from the last merge).
+                        $prog = StorageJobProgressService::forJob($job, (string)($job['entity'] ?? ''));
+                        $step = $prog['text'] ?? self::consolidatePhaseStep((string)$job['phase']);
+                        $progress = $prog['progress'] ?? self::consolidatePhaseProgress((string)$job['phase']);
+                    } elseif ($jobOp === 'bake' && strpos((string)($job['entity'] ?? ''), 'home/') === 0) {
+                        // #443: a Persist names what it does, with the percent, the bytes and the estimate.
+                        $prog = StorageJobProgressService::forJob($job, (string)$job['entity']);
+                        $step = $prog['text'] ?? 'Running';
+                        $progress = $prog['progress'] ?? 50;
                     } elseif ($jobOp === 'graduate' && (string)($job['phase'] ?? '') !== '') {
                         // #496: a conversion to plain folders names each step.
                         $phase = (string)$job['phase'];

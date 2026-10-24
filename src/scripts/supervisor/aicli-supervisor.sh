@@ -1699,6 +1699,48 @@ _op_reconcile() {
 }
 
 # ---------------------------------------------------------------------------
+# #443: the history of completed saves and merges, for "about N min left".
+# One small file per op and entity on the flash drive, so a restart keeps it.
+# Content: "<duration_s> <input_bytes or 0> <finished_at>".
+# KEEP IN SYNC with StorageJobProgressService::historyPath (same name rule).
+# ---------------------------------------------------------------------------
+_run_history_file() {
+    local op="${1:-}" type="${2:-}" id="${3:-}"
+    printf '%s/run-history/%s_%s_%s\n' "${PLUGIN_BASE:-${AICLI_FLASH_ROOT:-}}" \
+        "${op//[^a-z]/}" "${type//[^A-Za-z0-9._-]/_}" "${id//[^A-Za-z0-9._-]/_}"
+}
+
+# _run_history_record <op> <type> <id> <duration_s> [bytes]
+# A run under 15 seconds gives no useful estimate and is not kept. Never fails the job.
+_run_history_record() {
+    local op="${1:-}" type="${2:-}" id="${3:-}" dur="${4:-}" bytes="${5:-0}" f
+    case "$dur" in ''|*[!0-9]*) return 0 ;; esac
+    case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+    [ "$dur" -ge 15 ] || return 0
+    f="$(_run_history_file "$op" "$type" "$id")"
+    mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+    printf '%s %s %s\n' "$dur" "$bytes" "$(date +%s)" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null || rm -f "$f.tmp" 2>/dev/null
+    return 0
+}
+
+# _bake_measure_input <upper_dir> <out_file>
+# #443: measure the bytes the save will pack, in the background, for "120 MB of 340 MB".
+# Cheap by design: du runs at the lowest priority and is stopped after 20 seconds. A
+# measure that does not finish leaves no file, and the card shows the percent only.
+_bake_measure_input() {
+    local upper="${1:-}" out="${2:-}"
+    [ -n "$upper" ] && [ -d "$upper" ] && [ -n "$out" ] || return 0
+    (
+        [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        local n
+        n="$(nice -n 19 timeout 20 du -sb "$upper" 2>/dev/null | awk 'NR==1{print $1}')"
+        case "$n" in ''|*[!0-9]*) exit 0 ;; esac
+        printf '%s' "$n" > "$out.tmp" 2>/dev/null && mv -f "$out.tmp" "$out" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Op handler: bake
 # Spawns a child process running commit_stack.sh. Writes work.json.
 # ---------------------------------------------------------------------------
@@ -1739,6 +1781,11 @@ _op_bake() {
     # SupervisorService::bakePercentPath (same name rule for type and id).
     local bake_pct_file="${MOUNT_ROOT}/bake-pct-${type//[^a-z]/}-${id//[^A-Za-z0-9._-]/_}"
     rm -f "$bake_pct_file" 2>/dev/null || true
+    # #443: the size of the input, for "120 MB of 340 MB". KEEP IN SYNC with
+    # StorageJobProgressService::inputBytesPath.
+    local bake_bytes_file="${MOUNT_ROOT}/bake-bytes-${type//[^a-z]/}-${id//[^A-Za-z0-9._-]/_}"
+    rm -f "$bake_bytes_file" 2>/dev/null || true
+    _bake_measure_input "$upper_dir" "$bake_bytes_file"
     set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
@@ -1779,6 +1826,12 @@ _op_bake() {
     local now
     now=$(date +%s)
     _LAST_COMPLETED_AT="$now"
+
+    # #443: keep the duration (and size) of a completed save for the next estimate.
+    if [ "$exit_code" -eq 0 ]; then
+        _run_history_record bake "$type" "$id" "$((now - started_at))" "$(cat "$bake_bytes_file" 2>/dev/null)"
+    fi
+    rm -f "$bake_bytes_file" "$bake_bytes_file.tmp" 2>/dev/null || true
 
     # #357: an exit 2 whose defer reason says no layer was written is NOT a
     # completed bake. Log it as bake_not_saved; _job_finalize reads the same
@@ -1948,9 +2001,15 @@ _op_consolidate() {
     # Spawn child — subshell drops the inherited single-instance lock fd FIRST
     # (Bug #757); see _op_bake. A consolidate can run for many minutes; an
     # orphaned one must not block a fresh supervisor.
+    # #443: the write of the new layer reports its mksquashfs percentage to this file, the
+    # same file a save uses (SupervisorService::bakePercentPath), so the card and the tray
+    # read one place. The merge also writes it to its task-status file (#454).
+    local consol_pct_file="${MOUNT_ROOT}/bake-pct-${type//[^a-z]/}-${id//[^A-Za-z0-9._-]/_}"
+    rm -f "$consol_pct_file" 2>/dev/null || true
     set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
+        export AICLI_BAKE_PCT_FILE="$consol_pct_file"
         exec bash "${STORAGE_DIR}/storagectl.sh" consolidate --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
@@ -1982,8 +2041,11 @@ _op_consolidate() {
     local now
     now=$(date +%s)
     _LAST_COMPLETED_AT="$now"
+    rm -f "$consol_pct_file" 2>/dev/null || true   # #443: the percentage belongs to this merge only
 
     if [ "$exit_code" -eq 0 ]; then
+        # #443: keep the duration of a completed merge for the next estimate.
+        _run_history_record consolidate "$type" "$id" "$((now - started_at))" 0
         # Reset failure counter on success
         _consolidate_fail_reset "$entity"
         log_info "Consolidate completed: $entity"

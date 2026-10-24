@@ -362,8 +362,8 @@ The card also warns early about a full boot disk. At 80 % it shows a warning in 
 
 | Control | What it does | At once |
 | :-- | :-- | :-- |
-| **Save now** | Saves the unsaved changes of the home into a layer. | Confirm dialog "Persist Home Changes?" with the button **Persist Now**. |
-| **Merge layers** | Saves unsaved changes and merges all layers into one. It is off when there is one layer and no unsaved change. | Asks you to confirm. Workspaces of the home pause and resume when it ends. |
+| **Save now** | Saves the unsaved changes of the home into a layer. While it runs, the card shows the percent ("Saving 35 %"), the size and the time left. | Confirm dialog "Persist Home Changes?" with the button **Persist Now**. |
+| **Merge layers** | Saves unsaved changes and merges all layers into one. It is off when there is one layer and no unsaved change. While it runs, the card shows the percent and the Activity tray shows the step and the time left. | Asks you to confirm. Workspaces of the home pause and resume when it ends. |
 | **Convert to plain folders** | Appears when the home has layers and its folder is not on a USB flash drive. It changes the home to plain folders in the same place. Then the home needs no more saves or tidy-ups. A home in plain folders has no **Save now** or **Merge layers** button. | Confirm dialog "Convert to plain folders?". Every workspace of the home closes and opens again. |
 | **Remove old layers** | Appears on the home card only after a conversion to plain folders, while the plugin keeps the old layers for a rollback. The line next to it shows their size and the date of the automatic removal (14 days after the conversion). It removes them at once. | Confirm dialog "Remove old layers?" with the button **Remove**. |
 | **Repair** | Appears when a home is not mounted. It unmounts and mounts the layers again. | Confirm dialog "Repair home storage?". It may briefly interrupt active sessions. |
@@ -527,6 +527,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — The buttons **Save now** and **Merge layers** on a home card show a percent while they run, and the Activity tray shows the size and the time left. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-24** — The card **Boot disk space** has a line for large session logs of the other agents, and **Archive layer images…** on the line **Left over**. The plugin also stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-24** — New setting **Your name in the records** in **General**, part **Advanced**. The Activity tray, the event list and the log show the Unraid login with this name, for example "root (John)". Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 - **2026-10-24** — **Let agents start helper workspaces** no longer blocks an agent from starting a workspace that already exists. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #542.

@@ -117,7 +117,10 @@ $wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user
         }
         $st = \AICliAgents\Services\InstallerService::upgradeSaveStatus(
             (string)($snap['state'] ?? 'waiting'), (string)$user, $pct,
-            (int)($snap['elapsed_s'] ?? 0), time() - $lastMoveAt
+            (int)($snap['elapsed_s'] ?? 0), time() - $lastMoveAt,
+            // #443: the size of the input (when it was measured) and the time of the last save.
+            \AICliAgents\Services\StorageJobProgressService::inputBytes('home', (string)$user),
+            \AICliAgents\Services\StorageJobProgressService::previousRunSec('bake', 'home/' . $user)
         );
         setInstallStatus($st['text'], $st['progress'], $agentId);
     },

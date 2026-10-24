@@ -258,7 +258,8 @@ class StorageMetricsService {
                 ['last_backup' => $_bk['last_backup'] ?? null,
                  'last_backup_run' => $_bk['last_run'] ?? null,
                  'backup' => $_bkSummary],
-                ['job' => SupervisorService::activeJobFor('home/' . (string)$_u, $_jobs)]);
+                ['job' => StorageJobProgressService::withProgress(
+                    SupervisorService::activeJobFor('home/' . (string)$_u, $_jobs), 'home/' . (string)$_u, $_jobs)]);
         }
         foreach ($agents as $_a => $_st) {
             $_hasLayers = (($_st['layers'] ?? 0) > 0);

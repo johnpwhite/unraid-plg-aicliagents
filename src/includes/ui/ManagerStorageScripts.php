@@ -89,7 +89,9 @@ function refreshStats() {
             // EVENT_FIRST_RECONCILIATION.md fact table: "Storage figures after any
             // job … 30s". The aicli_storage_status push (NchanSubscribers.php)
             // patches the figures between reads; this poll is the reconcile.
-            if (statsInterval !== 30000) { statsInterval = 30000; resetStatsTimer(); }
+            // #443: while a save or a merge reports its progress, read every 5 seconds so the figures move.
+            var wantInterval = aicliStatsIntervalFor(data.homes);
+            if (statsInterval !== wantInterval) { statsInterval = wantInterval; resetStatsTimer(); }
         }
         if (data.rootfs) aicliRenderRootfs(data.rootfs);
         // WP #748 J / Phase B: per-agent cards removed from the Storage tab.
@@ -234,10 +236,23 @@ function renderLayerList(layers, dirtyMb, upperMode) {
 // AJAX handlers stay registered (home flows still use them; advanced/admin
 // paths can hit them directly) but lose their UI entry point on this tab.
 
+// #443: how often the Storage tab reads the status. A running save or merge sends a
+// `progress` field (percent, bytes, estimate); the tab then reads every 5 seconds.
+// With no such job it reads every 30 seconds.
+function aicliStatsIntervalFor(homes) {
+    var busy = false;
+    Object.keys(homes || {}).forEach(function (u) {
+        var j = homes[u] && homes[u].job;
+        if (j && j.state === 'running' && j.progress) busy = true;
+    });
+    return busy ? 5000 : 30000;
+}
+
 // HOME_STORAGE_CARD_JOB_STATE.md (Forgejo #247): what the card says about the
 // supervisor job that is queued, running or deferred for a home. `job` is the
 // server's own field on the snapshot (StorageMetricsService), so every device
 // shows the same state and the same lock. Returns null when there is no job.
+// #443: a running save or merge also has `job.progress` (percent, bytes, estimate).
 function homeJobLabel(job) {
     if (!job || !job.state) return null;
     var verb = { bake: 'Saving', consolidate: 'Merging layers', mount: 'Mounting', unmount: 'Unmounting',
@@ -250,6 +265,13 @@ function homeJobLabel(job) {
                     mount_busy: 'this home is in use; the plugin retries when it is idle' }[job.defer_reason] || 'the plugin will retry';
         return { text: verb + ' — waiting', title: verb + ' is waiting: ' + why + '.', deferred: true };
     }
+    // #443: a running save or merge sends its figures. The badge shows the percent; the
+    // title is the full line (phase, bytes, time so far, time left).
+    var p = job.progress;
+    if (p && p.text) {
+        var pctText = (p.pct === null || p.pct === undefined) ? '…' : ' ' + Number(p.pct) + ' %';
+        return { text: verb + pctText, title: escapeHtml(String(p.text)), deferred: false };
+    }
     return { text: verb + '…', title: verb + ' is running now. The figures refresh when it finishes.', deferred: false };
 }
 
@@ -258,6 +280,8 @@ function homeJobLabel(job) {
 // used by the card's upper-layer figure, so this is an estimate of the work
 // remaining rather than a made-up percentage.
 function homeJobRemaining(job, dirtyMb) {
+    // #443: the server's own figures win: "120 MB of 340 MB · about 4 min left".
+    if (job && job.progress && job.progress.detail) return escapeHtml(String(job.progress.detail));
     if (!job || Number(dirtyMb || 0) <= 0) return '';
     var action = job.op === 'consolidate' ? 'merge' : (job.op === 'bake' ? 'save' : 'process');
     return '~' + formatSize(Number(dirtyMb) * 1048576) + ' to ' + action;

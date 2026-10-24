@@ -272,6 +272,12 @@ All buttons are off while a job runs on that home. The lock comes from the serve
 2. Press **Persist Now**. Expect: "Queued — watch the activity tray for progress."
 3. Watch the Activity tray at the bottom right. A pill shows the job: queued, running, done.
 
+While the save runs, the card shows "Saving 35 %" in orange under the size line. Point at it to read the full line, for example "Saving workspace data (home root), 35 % done (119 MB of 340 MB), 3 min so far, about 6 min left...". The Activity tray shows the same line and a bar that moves. The card reads the status every 5 seconds while a save runs. Expect:
+
+- Before the first percent arrives, the line shows only the time so far.
+- The size, "119 MB of 340 MB", shows only when the plugin could measure the changes quickly. If it could not, you see the percent only.
+- "about 6 min left" shows only after the plugin has saved this home once before for 15 seconds or more. The estimate is the time of the last save. When this save is slower than the last one, the plugin uses the speed of this save, so the figure grows. A first save shows no estimate.
+
 A save does not close anything. If workspaces are still open, the memory number may stay high after the save. The data is safe on disk. The tray then says "Saved to flash — ~N MB stays in RAM until this home's open sessions close." The plugin frees that memory when the last workspace of the home closes.
 
 If the home has no changes since the last save, the message is **Nothing to save**. This is a neutral message, not a success and not an error. The Activity tray says the same for a save that waited in the queue.
@@ -294,6 +300,7 @@ The button is on when the home has two or more layers, or one layer and unsaved 
 
 During a merge:
 
+- The home card shows "Merging layers 50 %" while the new layer is written. The Activity tray shows the step by name: "Closing sessions", "Checking the home", "Backing up databases", "Writing the new layer, 50 %, about 5 min left", "Checking the new layer", "Removing old layers" and "Resuming sessions". "about 5 min left" shows after the plugin has merged this home once before. A merge shows no size in MB, because it joins many layers and the plugin cannot measure that quickly.
 - A blue banner shows on the **Storage** tab and on the terminal page: "Storage tidy-up in progress".
 - Each workspace of the home shows "Consolidating this home's storage… Session will resume automatically". Opening or reconnecting a workspace does not restart it until the merge ends. This lets the merge finish.
 - Repair, merge, move, backup and restore are paused. If you press one, a message says that a consolidation is running.
@@ -701,6 +708,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — **Save now** and **Merge layers** show their progress on the home card and in the Activity tray: a percent that moves, the size ("119 MB of 340 MB") when the plugin could measure it, and "about N min left" when the home was saved or merged before. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-24** — The card **Boot disk space** has **Archive layer images…** on the line **Left over**, a line for large session logs of the other agents (Claude Code, Gemini, Qwen, Copilot, Grok, Kimi, Antigravity), and it stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-23** — The card **Boot disk space** has **Restore from an archive…**, an early warning at 80% (the Unraid notification stays at 85%), and lists old layer images that a newer merged layer replaced under **Left over**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #755.
 - **2026-10-23** — The Health dot has an (i) button that shows the checks that are not fine. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

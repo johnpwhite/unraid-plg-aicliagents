@@ -47,25 +47,13 @@ class InstallerService {
      * @param int     $stalledSec seconds for which $pct did not change
      * @return array{text:string,progress:int}
      */
-    public static function upgradeSaveStatus(string $state, string $user, ?int $pct, int $elapsedSec, int $stalledSec = 0): array {
-        $home = 'Saving workspace data (home ' . $user . ')';
+    public static function upgradeSaveStatus(string $state, string $user, ?int $pct, int $elapsedSec, int $stalledSec = 0, ?int $totalBytes = null, ?int $previousSec = null): array {
         if ($state !== 'running') {
-            return ['text' => $home . ': waiting for the save to start...', 'progress' => 6];
+            return ['text' => 'Saving workspace data (home ' . $user . '): waiting for the save to start...', 'progress' => 6];
         }
-        $elapsedSec = max(0, $elapsedSec);
-        $time = $elapsedSec < 60 ? "$elapsedSec s" : intdiv($elapsedSec, 60) . ' min';
-        if ($pct === null) {
-            return ['text' => $home . ", $time so far...", 'progress' => 6];
-        }
-        $pct = max(0, min(100, $pct));
-        $progress = 6 + (int)floor($pct * 3 / 100);
-        if ($stalledSec >= 120) {
-            return [
-                'text' => $home . ", $pct % done, $time so far. The save is slow. It is still working.",
-                'progress' => $progress,
-            ];
-        }
-        return ['text' => $home . ", $pct % done, $time so far...", 'progress' => $progress];
+        // #443: one builder for the upgrade card, the Activity tray and the home card.
+        require_once __DIR__ . '/StorageJobProgressService.php';
+        return StorageJobProgressService::saveRunningStatus($user, $pct, $elapsedSec, $stalledSec, $totalBytes, $previousSec);
     }
 
     /**
