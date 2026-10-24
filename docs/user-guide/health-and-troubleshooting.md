@@ -102,7 +102,7 @@ The plugin watches each running job. A job that sends no sign of life for 2 minu
 
 ### Cancel and Dismiss
 
-**Cancel** stops a running install and its helper programs; it appears only where it can stop something, so a storage job or a version check has no Cancel. A cancelled row shows "Cancelled" in grey. **Dismiss** removes a row for a job that ended. You cannot dismiss a running job, so you cannot lose track of live work. You cannot dismiss a proposal. You decide it with **Approve** or **Reject**. The tray lives in the server's RAM and starts empty after a reboot.
+**Cancel** stops a running install and its helper programs; it appears only where it can stop something, so a storage job or a version check has no Cancel. A cancelled row shows "Cancelled" in grey. **Dismiss** removes a row for a job that ended. You cannot dismiss a running job, so you cannot lose track of live work. You cannot dismiss a proposal. You decide it with **Approve** or **Reject**. You also cannot dismiss an approved action until it has finished, so the record of what you approved stays. If you try, the row tells you why. The tray lives in the server's RAM and starts empty after a reboot.
 
 ### The storage tidy-up
 

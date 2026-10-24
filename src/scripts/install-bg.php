@@ -103,10 +103,25 @@ if (!$slot['ok']) {
 $cfg = function_exists('getAICliConfig') ? getAICliConfig() : [];
 $user = $cfg['user'] ?? 'root';
 if (empty($user)) $user = 'root';
+// #443: show the real state of the save (waiting, running, percentage, slow), not a
+// fixed "queued" line. The callback runs every 3 seconds while the save is queued or
+// runs. $lastPct and $lastMoveAt find a percentage that does not move.
+$lastPct = null;
+$lastMoveAt = time();
 $wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user, 300, 6,
-    function () use ($agentId) {
-        setInstallStatus("Upgrade queued — saving workspace data first...", 5, $agentId);
-    }
+    function (array $snap = []) use ($agentId, $user, &$lastPct, &$lastMoveAt) {
+        $pct = $snap['pct'] ?? null;
+        if ($pct !== $lastPct) {
+            $lastPct = $pct;
+            $lastMoveAt = time();
+        }
+        $st = \AICliAgents\Services\InstallerService::upgradeSaveStatus(
+            (string)($snap['state'] ?? 'waiting'), (string)$user, $pct,
+            (int)($snap['elapsed_s'] ?? 0), time() - $lastMoveAt
+        );
+        setInstallStatus($st['text'], $st['progress'], $agentId);
+    },
+    3.0
 );
 aicli_log("Pre-install bake wait: {$wait['status']} (waited {$wait['waited_s']}s, user=$user)", AICLI_LOG_INFO);
 \AICliAgents\Services\LifecycleLogService::log(

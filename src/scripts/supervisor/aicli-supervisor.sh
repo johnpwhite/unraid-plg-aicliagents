@@ -1734,6 +1734,11 @@ _op_bake() {
     # must not keep the lock held (a bake can run for minutes). The `exec`
     # replaces the subshell with storagectl (Phase 5: it dispatches to op_bake),
     # so $! and the watchdog's kill -0/-TERM/-KILL still target the right PID.
+    # #443: mksquashfs writes its percentage to this file every 5 seconds, so the
+    # upgrade can show how far the save is. KEEP IN SYNC with
+    # SupervisorService::bakePercentPath (same name rule for type and id).
+    local bake_pct_file="${MOUNT_ROOT}/bake-pct-${type//[^a-z]/}-${id//[^A-Za-z0-9._-]/_}"
+    rm -f "$bake_pct_file" 2>/dev/null || true
     set -m   # #581: the job runs in its own process group, so the watchdog can signal the whole tree
     (
         [ -n "${SUP_LOCK_FD:-}" ] && exec {SUP_LOCK_FD}>&- 2>/dev/null
@@ -1741,6 +1746,7 @@ _op_bake() {
         # Forgejo #445: the bake tells an automatic trigger from a person's
         # Persist, so a busy home on a disk upper skips the pointless copy.
         export AICLI_BAKE_REASON="$reason"
+        export AICLI_BAKE_PCT_FILE="$bake_pct_file"
         exec bash "${STORAGE_DIR}/storagectl.sh" bake --type "$type" --id "$id" --persist "$persist_path" >/dev/null 2>&1
     ) &
     local child_pid=$!
@@ -1764,6 +1770,7 @@ _op_bake() {
     _wait_op_child "$child_pid"
     local exit_code="$_WAIT_OP_RC"
     _OP_EXIT="$exit_code"   # S-08: recorded verbatim in the job ledger (if tracked)
+    rm -f "$bake_pct_file" 2>/dev/null || true   # #443: the percentage belongs to this bake only
 
     _CHILD_PID=""
     _CHILD_OP=""
@@ -5343,6 +5350,36 @@ _do_flush() {
 # entry. Safe to run while the supervisor daemon is not running; uses the same
 # flock path as the daemon so concurrent runs are serialised.
 # ---------------------------------------------------------------------------
+# _phantom_prune_dir_locked <home|agent> <id> <dir> (#692)
+# Remove one smoke fixture folder while holding the per-entity mount-operation
+# lock. The lock path is the one common.sh::mount_op_lock_path gives and op_mount
+# holds (KEEP IN SYNC; the supervisor does not source common.sh). The lock is
+# taken with flock -n in a poll loop up to AICLI_PHANTOM_LOCK_WAIT_S seconds
+# (default 5): never a blocking flock. Exit codes: 0 removed, 1 not removed (a
+# mount is busy), 2 the lock stayed held (a mount is in progress).
+# AICLI_MOUNT_OP_LOCK_DIR is a test seam (BootIntegrityService reads it too).
+_phantom_prune_dir_locked() {
+    local ptype="${1:-home}" pid="${2:-}" dir="${3:-}"
+    [ -n "$pid" ] && [ -n "$dir" ] || return 1
+    local safe="${pid//[^a-zA-Z0-9_-]/_}"
+    local lock="${AICLI_MOUNT_OP_LOCK_DIR:-/var/run}/aicli-mount-op-${ptype}-${safe}.lock"
+    (
+        if command -v flock >/dev/null 2>&1; then
+            { exec 8>>"$lock"; } 2>/dev/null || exit 2
+            deadline=$(( $(date +%s) + ${AICLI_PHANTOM_LOCK_WAIT_S:-5} ))
+            until flock -n 8; do
+                [ "$(date +%s)" -ge "$deadline" ] && exit 2
+                sleep 0.2
+            done
+        fi
+        # #512: a REAL umount only; a busy home stays, and so does its folder.
+        if mountpoint -q "$dir/home" 2>/dev/null; then
+            umount "$dir/home" 2>/dev/null || exit 1
+        fi
+        rm -rf "$dir" 2>/dev/null
+    )
+}
+
 _do_cleanup_phantoms() {
     local mpath
     mpath="$(manifest_path 2>/dev/null || echo "${PLUGIN_BASE}/layer_manifest.json")"
@@ -5413,10 +5450,16 @@ _do_cleanup_phantoms() {
             # Unmount if mounted, then remove. #512: a REAL umount only; a busy
             # home stays, and so does its folder (rm -rf would go into the live
             # mount). The next prune pass tries again.
-            if mountpoint -q "$entry/home" 2>/dev/null; then
-                umount "$entry/home" 2>/dev/null || continue
-            fi
-            rm -rf "$entry" 2>/dev/null && fs_pruned=$((fs_pruned + 1))
+            # #692: do this while holding the per-entity mount lock, the lock
+            # op_mount holds. A home whose mount runs now is skipped, because
+            # rm -rf would remove work/<user>/home between mkdir and mount.
+            local lock_type="home" prune_rc=0
+            [ "$base" = "$zram_agents" ] && lock_type="agent"
+            _phantom_prune_dir_locked "$lock_type" "$name" "$entry" || prune_rc=$?
+            case "$prune_rc" in
+                0) fs_pruned=$((fs_pruned + 1)) ;;
+                2) log_info "cleanup-phantoms: $name has a mount in progress — kept for the next pass" ;;
+            esac
         done
     done
     if [ "$fs_pruned" -gt 0 ]; then

@@ -583,20 +583,37 @@ class ActivityService {
     }
 
     /** Remove a finished/stalled/failed entry. Running entries must be cancelled first. */
+    /**
+     * Why an entry cannot be dismissed now, in words for the person. Null means
+     * that dismiss is allowed (or that the entry is gone).
+     *
+     * - running: the work is not finished. Cancel it first.
+     * - pending_approval: a decision is open. Reject it, do not hide it.
+     * - approved: the approved action is being carried out. Its record must stay
+     *   until it ends (#763). The executor's finish/fail would recreate a bare row.
+     */
+    public static function dismissRefusal(string $opId): ?string {
+        $opId = self::safeOpId($opId);
+        if ($opId === null) return 'invalid opId';
+        $entry = self::get($opId);
+        if ($entry === null) return null;
+        switch ($entry['status'] ?? '') {
+            case 'running':
+                return 'Cannot dismiss a running activity. Cancel it first.';
+            case self::STATUS_PENDING_APPROVAL:
+                return 'Cannot dismiss a proposal that waits for a decision. Approve it or reject it.';
+            case 'approved':
+                return 'Cannot dismiss an approved action. It keeps its record until it has finished.';
+        }
+        return null;
+    }
+
     public static function dismiss(string $opId): bool {
         $opId = self::safeOpId($opId);
         if ($opId === null) return false;
         $entry = self::get($opId);
         if ($entry === null) return true; // already gone
-        if (($entry['status'] ?? '') === 'running') return false;
-        // A pending Tier 3 proposal must be explicitly rejected (reject(), which
-        // records WHY), never silently swept away by the generic Dismiss button —
-        // the whole point of a pending item is that discarding it is a decision,
-        // not housekeeping.
-        if (($entry['status'] ?? '') === self::STATUS_PENDING_APPROVAL) return false;
-        // An approved proposal is being carried out: dismissing it mid-run would lose the
-        // outcome (the executor's finish/fail would recreate a bare row). Wait for the end.
-        if (($entry['status'] ?? '') === 'approved') return false;
+        if (self::dismissRefusal($opId) !== null) return false;
         @unlink(self::pathFor($opId));
         self::publish(['opId' => $opId, 'dismissed' => true]);
         return true;

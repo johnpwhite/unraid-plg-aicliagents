@@ -104,6 +104,8 @@ An agent with a newer version on its channel shows "update 2.1.307 available" in
 
 Expect: the card shows a progress bar and a status line. When the upgrade ends, the page reloads.
 
+The status line says what the plugin does now. When it closes workspaces, it reads "Closing workspace 2 of 3...". Then it saves your workspace data and reads, for example, "Saving workspace data (home root), 42 % done, 3 min so far...". The bar moves with the percentage. A save can take several minutes. If the percentage does not move for two minutes, the line adds "The save is slow. It is still working." The Activity tray shows the same line.
+
 ### Pick an exact version
 
 The **Version** chip opens a panel with the release channel and a list of versions. The list shows each version as `v1.2.3`, with the tags of the vendor, for example `[latest]`. The installed version ends with `(installed)`.
@@ -432,6 +434,7 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — An upgrade shows the real step: "Closing workspace 2 of 3...", then "Saving workspace data" with a percentage and the time, and it says when the save is slow. The old line "Upgrade queued — saving workspace data first" at 5 % is gone. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-22** — Each agent card has the same header as the cards of the Configuration tab, with a status line, an (i) button and the buttons **Install**, **Upgrade** and **Uninstall**. The chips are called **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The card foot shows the size and **Remove old versions**; the install method and the package name are behind the (i). The cards can be closed and moved. The button is called **Check for updates** and the status line reads "Checked 7 min ago". Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
 
 - **2026-10-22** — The two version check settings have new names on the Configuration tab: **Check for new agent versions** and **Keep version check results for**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

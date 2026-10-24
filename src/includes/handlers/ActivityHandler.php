@@ -221,7 +221,7 @@ class ActivityHandler
 
         return ActivityService::dismiss($opId)
             ? ['status' => 'ok']
-            : ['status' => 'error', 'message' => 'cannot dismiss a running activity — cancel it first'];
+            : ['status' => 'error', 'message' => ActivityService::dismissRefusal($opId) ?? 'Cannot dismiss this activity.'];
     }
 
     /**

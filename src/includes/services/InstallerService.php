@@ -14,6 +14,61 @@ use AICliAgents\Services\Sources\SourceResolver;
 
 class InstallerService {
     /**
+     * #443: the install-status line while the upgrade closes the open workspaces of the
+     * agent. $done workspaces are closed; the next one is number $done + 1 of $total.
+     * The bar stays at 5 while the workspaces close and goes to 6 when the last one is closed.
+     * Pure: no I/O.
+     *
+     * @return array{text:string,progress:int}
+     */
+    public static function upgradeClosingStatus(int $done, int $total): array {
+        $total = max(1, $total);
+        $done = max(0, min($total, $done));
+        if ($done >= $total) {
+            return ['text' => "Closed $total of $total workspaces.", 'progress' => 6];
+        }
+        $text = $total === 1
+            ? 'Closing 1 workspace...'
+            : 'Closing workspace ' . ($done + 1) . " of $total...";
+        return ['text' => $text, 'progress' => 5];
+    }
+
+    /**
+     * #443: the install-status line while the upgrade waits for the save of the home.
+     * It replaces the old fixed line "Upgrade queued, saving workspace data first" at 5 %.
+     * The bar goes from 6 to 9 with the percentage that mksquashfs reports. The line
+     * says what the save does now, how long it runs, and, when the percentage did not
+     * move for $stalledSec seconds (120 or more), that it is slow. Pure: no I/O.
+     *
+     * @param string  $state      'waiting' (the save has not started) or 'running'
+     * @param string  $user       the home that is saved
+     * @param ?int    $pct       the percentage of the layer write, null when none is known
+     * @param int     $elapsedSec seconds since the save started
+     * @param int     $stalledSec seconds for which $pct did not change
+     * @return array{text:string,progress:int}
+     */
+    public static function upgradeSaveStatus(string $state, string $user, ?int $pct, int $elapsedSec, int $stalledSec = 0): array {
+        $home = 'Saving workspace data (home ' . $user . ')';
+        if ($state !== 'running') {
+            return ['text' => $home . ': waiting for the save to start...', 'progress' => 6];
+        }
+        $elapsedSec = max(0, $elapsedSec);
+        $time = $elapsedSec < 60 ? "$elapsedSec s" : intdiv($elapsedSec, 60) . ' min';
+        if ($pct === null) {
+            return ['text' => $home . ", $time so far...", 'progress' => 6];
+        }
+        $pct = max(0, min(100, $pct));
+        $progress = 6 + (int)floor($pct * 3 / 100);
+        if ($stalledSec >= 120) {
+            return [
+                'text' => $home . ", $pct % done, $time so far. The save is slow. It is still working.",
+                'progress' => $progress,
+            ];
+        }
+        return ['text' => $home . ", $pct % done, $time so far...", 'progress' => $progress];
+    }
+
+    /**
      * #35: decide which version string to record after a successful install.
      * The on-disk probe is ground truth; but when it can't read a version and the
      * install was for an explicit target, that target IS what was installed — record

@@ -1521,7 +1521,8 @@ class SupervisorService {
         string $id,
         int $timeoutSec = 30,
         int $heartbeatGraceSec = 6,
-        ?callable $onWait = null
+        ?callable $onWait = null,
+        float $onWaitEverySec = 15.0
     ): array {
         $startedAt = microtime(true);
         $deadline = $startedAt + max(1, $timeoutSec);
@@ -1542,9 +1543,13 @@ class SupervisorService {
                 // Caller-visible wait feedback (and activity-heartbeat refresh):
                 // fire immediately on the first busy observation, then at most
                 // every ~15 s. Never let a callback fault break the wait.
-                if ($onWait !== null && (microtime(true) - $lastOnWait) >= 15.0) {
+                // #443: the callback gets the live state of the save (see
+                // saveSnapshot), so a caller can show the real phase and percentage.
+                if ($onWait !== null && (microtime(true) - $lastOnWait) >= $onWaitEverySec) {
                     $lastOnWait = microtime(true);
-                    try { $onWait(); } catch (\Throwable $e) { /* best-effort */ }
+                    try {
+                        $onWait(self::saveSnapshot($work, $queuedForOurs, self::bakePercent($type, $id), time(), $entity));
+                    } catch (\Throwable $e) { /* best-effort */ }
                 }
             } else {
                 $elapsed = microtime(true) - $startedAt;
@@ -1560,6 +1565,56 @@ class SupervisorService {
         }
 
         return ['status' => 'timeout', 'waited_s' => $timeoutSec];
+    }
+
+    /**
+     * #443: the file in which the running bake of an entity keeps its mksquashfs
+     * percentage. The supervisor sets AICLI_BAKE_PCT_FILE to this path for the
+     * bake it starts (aicli-supervisor.sh, _op_bake). KEEP IN SYNC with that script.
+     */
+    public static function bakePercentPath(string $type, string $id): string {
+        $safeType = preg_replace('/[^a-z]/', '', $type);
+        $safeId   = preg_replace('/[^A-Za-z0-9._-]/', '_', $id);
+        return SecretPaths::stateRoot() . '/bake-pct-' . $safeType . '-' . $safeId;
+    }
+
+    /**
+     * #443: the percentage (0 to 100) of the bake that runs now for $type/$id.
+     * Null when no bake writes one: the file is missing, is not a number, or was
+     * last written more than 120 seconds ago (the writer repeats the number every
+     * 5 seconds, so an old file belongs to a bake that ended).
+     */
+    public static function bakePercent(string $type, string $id, ?int $now = null): ?int {
+        $path = self::bakePercentPath($type, $id);
+        $mtime = @filemtime($path);
+        if ($mtime === false || ($now ?? time()) - $mtime > 120) return null;
+        $raw = trim((string)@file_get_contents($path));
+        if ($raw === '' || preg_match('/^\d{1,3}$/D', $raw) !== 1) return null;
+        $pct = (int)$raw;
+        return $pct > 100 ? null : $pct;
+    }
+
+    /**
+     * #443: what a save of $entity is doing now. Pure: the caller reads the inputs.
+     *
+     * @param ?array<string,mixed> $work   the supervisor work state (getWorkState)
+     * @param bool                 $queued a request for the entity waits in the queue
+     * @param ?int                 $pct    the bake percentage (bakePercent)
+     * @return array{state:string,pct:?int,elapsed_s:int} state is 'running', 'waiting' or 'idle'
+     */
+    public static function saveSnapshot(?array $work, bool $queued, ?int $pct, int $now, string $entity): array {
+        $running = is_array($work)
+            && ($work['state'] ?? '') === 'running'
+            && ($work['entity'] ?? '') === $entity;
+        if ($running) {
+            $since = (int)($work['op_started_at'] ?? 0);
+            return [
+                'state'     => 'running',
+                'pct'       => $pct,
+                'elapsed_s' => $since > 0 ? max(0, $now - $since) : 0,
+            ];
+        }
+        return ['state' => $queued ? 'waiting' : 'idle', 'pct' => null, 'elapsed_s' => 0];
     }
 
     /**

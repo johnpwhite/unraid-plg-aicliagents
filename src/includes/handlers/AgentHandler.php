@@ -634,7 +634,15 @@ class AgentHandler {
         // lost on every upgrade. captureResumeForClose runs its own per-session
         // quiesce wait, so no separate Ctrl-C loop / shared sleep is needed here.
         require_once __DIR__ . '/TerminalHandler.php';
+        $closeDone = 0;
         foreach ($sessions as $s) {
+            // #443: say which workspace closes now. A storage conversion ($writeManifest
+            // false) is not an upgrade and writes no install status.
+            if ($writeManifest) {
+                $cs = \AICliAgents\Services\InstallerService::upgradeClosingStatus($closeDone, count($sessions));
+                setInstallStatus($cs['text'], $cs['progress'], $agentId);
+            }
+            $closeDone++;
             $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $s['id']);
             // Non-root audit: shared multi-user lookup (quiesce + capture pass).
             [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
@@ -742,6 +750,10 @@ class AgentHandler {
         if (\AICliAgents\Services\UpgradeRelaunchService::writeManifest($agentId, $closedSet, true) === false) {
             aicli_log("Upgrade: failed to write relaunch manifest for $agentId — sessions will not auto-relaunch", AICLI_LOG_WARN);
         }
+
+        // #443: all workspaces are closed. The next line comes from the home save.
+        $cs = \AICliAgents\Services\InstallerService::upgradeClosingStatus(count($sessions), count($sessions));
+        setInstallStatus($cs['text'], $cs['progress'], $agentId);
 
         return $sessions;
     }
