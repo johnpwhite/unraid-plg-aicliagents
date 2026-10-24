@@ -144,6 +144,38 @@ class SecretPaths {
         return is_dir($dir) ? $dir : '';
     }
 
+    /** #764: most file names that one secrets listing returns. */
+    public const LIST_FILES_MAX = 200;
+
+    /**
+     * #764: the regular files directly inside a secrets folder, so the folder
+     * picker can show them and open one. Returns the name and the size of each
+     * file, sorted by name. It never reads a file's content. A link, a folder
+     * and a special file are left out.
+     *
+     * @return array<int,array{name:string,size:int}>
+     */
+    public static function listFiles(string $dir, ?bool &$truncated = null): array {
+        $truncated = false;
+        if (!is_dir($dir)) return [];
+        $entries = @scandir($dir);
+        if (!is_array($entries)) return [];
+        $files = [];
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') continue;
+            $full = rtrim($dir, '/') . '/' . $entry;
+            if (is_link($full) || !is_file($full)) continue;
+            if (count($files) >= self::LIST_FILES_MAX) {
+                // A file beyond the limit exists: say so, so the picker can tell the person.
+                $truncated = true;
+                break;
+            }
+            $size = @filesize($full);
+            $files[] = ['name' => (string)$entry, 'size' => $size === false ? 0 : (int)$size];
+        }
+        return $files;
+    }
+
     /**
      * Sets 0600 on every regular file directly inside $dir (loose modes —
      * e.g. the 0775 token files found on the test server predate this

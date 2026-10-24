@@ -501,6 +501,11 @@ class UtilityHandler {
         // (they are not directories), only the count is surfaced.
         if (\AICliAgents\Services\SecretPaths::isSecretDir($path)) {
             $response['normalised'] = \AICliAgents\Services\SecretPaths::normaliseModes($path);
+            // #764: the picker lists folders only, so a secrets folder looked empty and a
+            // token file in it could not be opened. Name and size only, never a value.
+            $secretTruncated = false;
+            $response['secret_files'] = \AICliAgents\Services\SecretPaths::listFiles($path, $secretTruncated);
+            $response['secret_files_truncated'] = $secretTruncated;
         }
         return $response;
     }

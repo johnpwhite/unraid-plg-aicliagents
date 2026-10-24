@@ -71,7 +71,7 @@ When you open another folder, the filter clears. The sort choice stays. The pick
 
 #### The Secrets shortcut
 
-The button **Secrets** is next to the hidden-folder button. It opens the folder of secret files of the Unraid user who runs your terminals. A running session can read the files in this folder. In this folder the picker shows **New secret file**. Type a name (letters, digits, dot, underscore and hyphen, up to 64 characters) and a value, then press **Save secret**. A name without a dot gets the ending `.token`. The new file opens in the file viewer. If the home of the user is not mounted, the picker says so, and you can try again when the array or the session is up.
+The button **Secrets** is next to the hidden-folder button. It opens the folder of secret files of the Unraid user who runs your terminals. A running session can read the files in this folder. In this folder the picker shows **New secret file**. Type a name (letters, digits, dot, underscore and hyphen, up to 64 characters) and a value, then press **Save secret**. A name without a dot gets the ending `.token`. The files that are already in the folder show as rows above the button. Tap a row to open that file. The new file opens in the file viewer. If the home of the user is not mounted, the picker says so, and you can try again when the array or the session is up.
 
 #### The Favourites strip
 
@@ -324,6 +324,7 @@ For other problems, see [Health, Activity and troubleshooting](health-and-troubl
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — The **Secrets** folder in the picker lists its files, and a tap opens one. Spec `docs/specs/FILE_VIEWER_SECRET_DROP.md`, issue #764.
 - **2026-10-24** — **Up one level** in the picker shows the way to the allowed folders and not an empty list. A folder that only leads to an allowed folder cannot be selected. Spec `docs/specs/WORKSPACE_PICKER_LIST_CONTROLS.md`, issue #762.
 
 - **2026-10-22** — A workspace whose folder was deleted shows **Workspace Folder Missing**, not "Storage Unavailable". The card offers no RAM install and goes away when you open another workspace. Spec `docs/specs/WORKSPACE_PATH_WAIT_RETRY.md`, issue #757.

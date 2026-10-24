@@ -161,6 +161,8 @@ An agent reads its environment variables only when it starts. It can read a file
 4. Type the value in the **Value** box. Press **Save secret**.
 5. Expect: the file opens in the viewer. The form shows the path that a running session reads at once: `$HOME/.claude/secrets/<name>`.
 
+The folder list shows folders only. In the secrets folder, the files of the folder show in a list above **New secret file**. Each row has a lock, the name and the size. Tap a row to open the file in the viewer. The list shows up to 200 files. When there are more, the picker says "More files are not shown." When you type the name of a file that is in the list, the plugin asks "A secret file named X already exists. Replace it?" The old file stays unless you confirm. A value cannot be empty: the plugin asks you to paste the token first. The new form scrolls into view on a phone.
+
 Only the owner can read the file. The plugin tightens a loose file when it lists the folder. The viewer shows a lock badge and hides the text until you press **Reveal**. **Copy file contents** works while the text is hidden. The value never goes into an address, a log or the Activity tray.
 
 ### Favourites
@@ -427,6 +429,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — The secrets folder in the picker lists its files, and a tap opens one. On a phone, the **Reveal** button shows its whole word. An empty value gets a clear message. Spec `docs/specs/FILE_VIEWER_SECRET_DROP.md`, issue #764.
 - **2026-10-23** — The Agent Store chips are called **Variables** and **Start options** in this guide (they were **Envs** and **Args**). The tabs of the dialog **Manage Session** keep the names **ENV**, **tmux** and **Args**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration tab has new cards. The continue settings, your patterns and the Terminal input safety rules are in the card **Automatic continue** (the last two in its part **Advanced**). The switch **Let agents manage the plugin** is in **General**, part **Advanced**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The settings have new labels: **Wait before each continue, and how many** and **Let agents manage the plugin**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
