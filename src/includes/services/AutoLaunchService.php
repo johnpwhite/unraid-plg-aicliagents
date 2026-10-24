@@ -368,6 +368,16 @@ class AutoLaunchService
                     continue;
                 }
 
+                // Issue #761 (GitHub #10): the array is stopping and plugin storage is on
+                // it. TerminalService::startTerminal refuses the start. Skip here, so the
+                // refusal is not shown as a failed start in the tray. The sweep that runs
+                // after the array start launches the workspace.
+                if (StorageMountService::storageBlockedByArrayStop()) {
+                    $skipped++;
+                    self::log("Auto-launch deferred for $sid ($agentId): the array is stopping and plugin storage is on it (trigger=$reason)", AICLI_LOG_INFO);
+                    continue;
+                }
+
                 $resumeId = ConfigService::getResumeId($path, $agentId, (string)$sid);
                 if ($resumeId === null && !$config['freshIfNoResume'] && !$resumePreviouslyRunning) {
                     $skipped++;

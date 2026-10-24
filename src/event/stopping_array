@@ -237,5 +237,13 @@ else
     nchan_notify
 fi
 
+# Issue #761 (GitHub #10): the stop flag guards the window in which the pool is
+# still mounted and emhttpd unmounts it. emhttpd fires stopping_array only after
+# it unmounted every disk and pool. That window is over: a mount from the pool
+# now fails on its own. If the flag stayed until the next array start, it would
+# block emergency sessions, the supervisor gate in a plugin update, and repair
+# for as long as the array stays stopped. event/disks_mounted removes it too.
+rm -f "${MOUNT_ROOT}/.array_stopping" 2>/dev/null || true
+
 lifecycle_log "info" "event_stopping_array" "array_stop_complete" "{\"storage_class\":\"$STORAGE_CLASS\"}" 2>/dev/null || true
 log "Array stop handler complete."

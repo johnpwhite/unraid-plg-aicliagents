@@ -715,7 +715,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.10.23.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/stop-plugin.sh</URL>
-<SHA256>d0812cc23b6e239d50e99508925297860804e1d274ed70b1c6009a990e6bbd98</SHA256>
+<SHA256>10f066fd7ef279c75833d280c6757c4f1d66154ffb31902c90a7ee7fa497f62e</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.10.23.01.page">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>

@@ -289,10 +289,24 @@ class TerminalService {
             return ['ok' => false, 'reason' => 'array_stopping'];
         }
 
+        // Issue #761 (GitHub #10): a workspace folder on flash or RAM passes the check
+        // above. But the start below still mounts the agent and the home from their
+        // persist paths, and while the array stops those mounts hold the pool. Auto-launch
+        // and the crash reconcile come through here too. The launch trap and the
+        // workspace lock are set by the caller, and this return releases both.
+        if (StorageMountService::storageBlockedByArrayStop()) {
+            LogService::log(
+                "Session $id deferred: the array is stopping and plugin storage is on it",
+                LogService::LOG_WARN,
+                "TerminalService"
+            );
+            return ['ok' => false, 'reason' => 'array_stopping'];
+        }
+
         // 2. Setup environment
         $config = ConfigService::getConfig();
         $registry = AgentRegistry::getRegistry();
-        
+
         // D-208: Special case for raw terminal feature (does not require registry entry)
         if ($agentId === 'terminal') {
             $agent = [

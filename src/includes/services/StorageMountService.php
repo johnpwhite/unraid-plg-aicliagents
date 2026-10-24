@@ -202,14 +202,54 @@ class StorageMountService {
         return self::isArrayStopping($varIni, $flag);
     }
 
+    /**
+     * Issue #761 (GitHub #10): is the array stopping while the plugin's own storage
+     * (the agent images or the homes) is on the array or a pool?
+     *
+     * A workspace folder on flash or RAM passes startBlockedByArrayStop(). But a start
+     * still mounts the agent and the home from their persist paths, and that mount
+     * holds the pool. This is the one predicate for the mount refusals: "the array
+     * is stopping AND the storage is on the array or a pool". Storage on flash or
+     * RAM is never blocked. The shell twin is aicli_blocked_by_array_stop().
+     * $varIni, $flag, $agentClass and $homeClass are test seams.
+     */
+    public static function storageBlockedByArrayStop(?string $varIni = null, ?string $flag = null, ?string $agentClass = null, ?string $homeClass = null): bool {
+        if (!self::isArrayStopping($varIni, $flag)) return false;
+        require_once __DIR__ . '/StoragePathResolver.php';
+        $agentClass = $agentClass ?? self::classifyPath(StoragePathResolver::agentPersistPath());
+        if ($agentClass === 'array' || strpos($agentClass, 'pool:') === 0) return true;
+        $homeClass = $homeClass ?? self::classifyPath(StoragePathResolver::homePersistPath('root'));
+        return $homeClass === 'array' || strpos($homeClass, 'pool:') === 0;
+    }
+
+    /**
+     * Issue #761 (GitHub #10): is $path on the array or a pool while the array is not
+     * started? Its storage is then missing by design, and event/stopping records that
+     * once as the degraded state array_stopped_storage_on_array. The polled mount
+     * paths use this to skip a warning that would reach syslog on every request.
+     * A pool that is missing while the array is Started still logs.
+     * $varIni and $class are test seams.
+     */
+    public static function storageDownWithArray(string $path, ?string $varIni = null, ?string $class = null): bool {
+        if ($path === '') return false;
+        $ini = $varIni ?? (string)@file_get_contents('/var/local/emhttp/var.ini');
+        if (!preg_match('/^fsState="([^"]*)"/m', $ini, $m) || $m[1] === 'Started') return false;
+        $class = $class ?? self::classifyPath($path);
+        return $class === 'array' || strpos($class, 'pool:') === 0;
+    }
+
     /** Forgejo #558: the message the start request returns while the array stops. */
     const ARRAY_STOPPING_MESSAGE = 'The array is stopping. This workspace starts again after the array is started.';
+
+    /** @var (callable(string):string)|null test seam: replaces the classify-path.sh call in classifyPath(). */
+    public static $classifyProbe = null;
 
     /**
      * Classify a path by storage type. Delegates to classify-path.sh (single source of truth).
      * Returns: 'flash' | 'array' | 'pool:<name>' | 'unassigned' | 'ram' | 'unknown'
      */
     public static function classifyPath(string $path): string {
+        if (self::$classifyProbe !== null) return (string)(self::$classifyProbe)($path);
         if (empty($path)) return 'unknown';
         $script = "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/classify-path.sh";
         if (!file_exists($script)) {
@@ -464,10 +504,19 @@ class StorageMountService {
      */
     private static function runAgentMount(string $agentId, string $mnt, int &$exit): bool {
         $exit = 1;
+        // Issue #761: while the array stops, storagectl refuses this mount. Return before
+        // it starts, so a polling page does not retry and log every refusal to flash.
+        // A mount that is already healthy stays usable; only a new mount waits.
+        if (self::storageBlockedByArrayStop()) {
+            if (self::isMounted($mnt) && self::isAgentMountHealthy($agentId)) { $exit = 0; return true; }
+            return false;
+        }
         $persistPath = StoragePathResolver::agentPersistPath();
 
         if (!self::isPathAvailable($persistPath)) {
-            LogService::log("Agent mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            if (!self::storageDownWithArray($persistPath)) {
+                LogService::log("Agent mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            }
             return false;
         }
 
@@ -663,6 +712,15 @@ class StorageMountService {
             LogService::log("Home $user has a queued write-fault repair; requesting a safe overlay refresh.", LogService::LOG_WARN, "StorageMountService");
         }
 
+        // Issue #761: while the array stops, storagectl refuses this mount. Return before
+        // it starts, so a polling page does not retry and log every refusal to flash.
+        // The healthy fast path above already returned; a home that is mounted but needs
+        // a repair stays usable, and the repair waits for the next idle request.
+        if (self::storageBlockedByArrayStop()) {
+            if (self::isMounted($mnt) && self::isHomeMountHealthy($user)) { $exit = 0; return true; }
+            return false;
+        }
+
         // Serialize concurrent mounts for the same user with an advisory lock.
         // Losers block until the winner finishes, then re-check before mounting.
         $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
@@ -701,7 +759,9 @@ class StorageMountService {
         $persistPath = StoragePathResolver::homePersistPath($user);
 
         if (!self::isPathAvailable($persistPath)) {
-            LogService::log("Home mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            if (!self::storageDownWithArray($persistPath)) {
+                LogService::log("Home mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
+            }
             if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
             return false;
         }

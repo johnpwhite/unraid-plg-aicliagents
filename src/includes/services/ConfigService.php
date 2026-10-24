@@ -826,6 +826,26 @@ class ConfigService {
         return rtrim(SecretPaths::stateRoot(), '/') . "/state_unmounted/$safe/.aicli";
     }
 
+    /** @var (callable():bool)|null test seam: replaces the "mount refused while the array stops" check. */
+    public static $arrayStopProbe = null;
+    /** @var (callable(string):bool)|null test seam: replaces the "home storage is down with the array" check. */
+    public static $arrayDownProbe = null;
+
+    /** Issue #761: is a home mount refused now, because the array stops and the storage is on it? */
+    private static function homeMountRefusedByArrayStop(): bool {
+        if (self::$arrayStopProbe !== null) return (bool)(self::$arrayStopProbe)();
+        require_once __DIR__ . '/StorageMountService.php';
+        return StorageMountService::storageBlockedByArrayStop();
+    }
+
+    /** Issue #761: is the home storage missing by design, because the array is not started? */
+    private static function homeStorageDownWithArray(string $user): bool {
+        if (self::$arrayDownProbe !== null) return (bool)(self::$arrayDownProbe)($user);
+        require_once __DIR__ . '/StorageMountService.php';
+        require_once __DIR__ . '/StoragePathResolver.php';
+        return StorageMountService::storageDownWithArray(StoragePathResolver::homePersistPath($user));
+    }
+
     private static function homeReady(string $user): bool {
         if (self::$homeReadyProbe !== null) return (bool)(self::$homeReadyProbe)($user);
         return FileStorage::ensureReady("home/$user")->ok;   // Epic #1310: facade intent
@@ -888,7 +908,11 @@ class ConfigService {
 
         // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
         $ready = self::homeReady($user);
-        if (!$ready) {
+        // Issue #761: while the array stops, the mount is refused on purpose. A retry cannot
+        // succeed, so do not wait for it. State still goes to the fallback below, which is
+        // outside the mount point: a refused mount never lets a write reach the bare folder.
+        $mountRefused = !$ready && self::homeMountRefusedByArrayStop();
+        if (!$ready && !$mountRefused) {
             // The first mount can fail once (the mount point vanished between mkdir and mount, #692).
             $pause = self::homeMountRetryPauseUs();
             if ($pause > 0) usleep($pause);
@@ -897,7 +921,11 @@ class ConfigService {
         if (!$ready) {
             $fallback = self::unmountedStatePath($user);
             self::refuseLiveStateInTests($fallback);
-            LogService::log("getUserStatePath: home mount unavailable for '$user' — state goes to $fallback (outside the mount point) until the home mounts", LogService::LOG_WARN, "ConfigService");
+            // Issue #761: expected while the array is down. Log it only otherwise, so an open
+            // page does not write one line a second to syslog.
+            if (!$mountRefused && !self::homeStorageDownWithArray($user)) {
+                LogService::log("getUserStatePath: home mount unavailable for '$user' — state goes to $fallback (outside the mount point) until the home mounts", LogService::LOG_WARN, "ConfigService");
+            }
             self::ensureStateDirOwnedBy($fallback, $user);
             return $fallback;
         }

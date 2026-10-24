@@ -272,6 +272,18 @@ if [ -d "$WORK_BASE" ]; then
     done
 fi
 
+# Issue #761 (GitHub #10): unmount every mount that is left below $1, deepest
+# first. Agent generations are mounted under $AGENT_BASE/.versions/<agent>/.
+# The glob in 8b skips them. It only reaches the generation behind each agent
+# symlink. A superseded generation that a running session kept stayed mounted,
+# and its layer file held the pool. AICLI_PROC_MOUNTS is a test seam.
+stop_plugin_unmount_below() {
+    local base="${1%/}/" mnt
+    while read -r mnt; do
+        [ -n "$mnt" ] && _stop_umount "$mnt"
+    done < <(awk -v base="$base" 'index($2, base) == 1 {print $2}' "${AICLI_PROC_MOUNTS:-/proc/mounts}" | sort -r)
+}
+
 # 8b. Unmount agent overlays
 # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 1 (2026-09-09): resolve_paths.sh is
 # already sourced above — route through its agent_base(), falling back to the
@@ -285,6 +297,7 @@ if [ -d "$AGENT_BASE" ]; then
     for mnt in "$AGENT_BASE"/*; do
         [ -d "$mnt" ] && _stop_umount "$mnt"
     done
+    stop_plugin_unmount_below "$AGENT_BASE"
 fi
 
 # 8c. Unmount individual SquashFS loop mounts (these hold /mnt/user open when home is on array)

@@ -135,6 +135,9 @@ class TaskService {
             case 'target_not_mounted':
                 // S-02 (#1352): UD devices can mount up to ~2 min after array start.
                 return 'Storage deferred: the persistence target\'s backing device is not mounted yet. Is the Unassigned Device attached? The operation will retry automatically.';
+            case 'array_stopping':
+                // Issue #761: a mount is refused while the array stops, so the pool can unmount.
+                return 'Storage deferred: the array is stopping, so the plugin does not mount from it now. Nothing was lost. The mount works again after the array is started.';
             case 'fat32_size_cap':
                 // S-09 (#1352): exit-4 precondition, surfaced when a caller maps it here.
                 return 'Operation refused: the projected layer size is approaching the FAT32 4 GiB per-file limit on the persistence target. Move persistence to a POSIX pool (see the Storage tab).';
@@ -252,6 +255,8 @@ class TaskService {
                 return "Waiting for another storage operation on this home to finish — it will $verb automatically on the next cycle.";
             case 'target_not_mounted':
                 return 'Waiting for the storage device to mount (is the Unassigned Device attached?) — it will retry automatically.';
+            case 'array_stopping':
+                return 'Waiting for the array: it is stopping, so the plugin does not mount from it now. The mount works again after the array is started.';
             case 'no_space':
                 return 'Not saved: there is not enough boot disk space (storage device) for the new layer. Your changes stay in RAM. Free some space on the boot disk, then save again.';
             case 'upper_not_empty':
