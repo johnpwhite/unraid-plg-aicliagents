@@ -1546,12 +1546,17 @@ class TerminalHandler {
             // restrict the search to the closing workspace's project subdir.
             $scanDirs = [];
             if (!empty($workspacePath)) {
-                // Dasherise the workspace path the same way claude does:
-                // leading slash dropped, every '/' replaced with '-'. So
-                // /mnt/user/python -> -mnt-user-python.
-                $proj = '-' . str_replace('/', '-', ltrim($workspacePath, '/'));
-                $candidate = "$homeDir/.claude/projects/$proj";
-                if (is_dir($candidate)) $scanDirs[] = $candidate;
+                // #783: Claude turns EVERY character that is not a letter or digit into '-'
+                // ('_' and '.' too), so /mnt/a_b -> -mnt-a-b. Try that key and the legacy one
+                // ('/' only), the same rule as ClaudeSessionNameResolver::projectKeys (#609).
+                foreach (\AICliAgents\Services\ClaudeSessionNameResolver::projectKeys(rtrim($workspacePath, '/')) as $proj) {
+                    $candidate = "$homeDir/.claude/projects/$proj";
+                    if (is_dir($candidate)) $scanDirs[] = $candidate;
+                }
+                // #783: a workspace with no conversation of its own has nothing to resume. Never
+                // scan every project: the newest conversation on the box belongs to another
+                // workspace, and a later start resumed it (a script run opened esp-teddy's live chat).
+                if (empty($scanDirs)) return null;
             }
             // Legacy fallback only when no workspace context was provided
             // (e.g. older callers). Keeps backwards compat for any future

@@ -77,7 +77,7 @@ class SpawnService
     public static ?array $blockedPrefixes = null;
     /** @var callable|null fn(array $argv, string $cwd): array{rc:int,out:string}. Replaces every git call. */
     public static $gitRunner = null;
-    /** @var callable|null fn(string $id, string $path, string $agentId): array. Replaces TerminalService::startTerminal(). */
+    /** @var callable|null fn(string $id, string $path, string $agentId, string $chatId): array. Replaces TerminalService::startTerminal(). */
     public static $startRunner = null;
     /** @var callable|null fn(string $id, string $agentId, string $path): array. Replaces the graceful close. */
     public static $closeRunner = null;
@@ -699,7 +699,7 @@ class SpawnService
             $relayEnv = AgentCommandEnvService::ensure($agentId, CodexTrustService::$homeForTests)['state'];
 
             AutoLaunchSuppression::clear($id);
-            $started = self::startWorkspaceProcess($id, $folder, $agentId);
+            $started = self::startWorkspaceProcess($id, $folder, $agentId, true);
 
             $delivery = $promptMode !== AgentLaunchProfile::PROMPT_NONE ? 'initial_prompt' : 'pane_input';
             $deliveryNote = '';
@@ -739,10 +739,16 @@ class SpawnService
     }
 
     /** @return array<string,mixed> */
-    private static function startWorkspaceProcess(string $id, string $path, string $agentId): array
+    /**
+     * #783: the FIRST start of a new helper or script run is always fresh (`_fresh_`): it is a new task, and a
+     * resume could only pick an older conversation of the folder (or, before #783, another workspace's). A later
+     * start of a closed workspace (aicli_start_workspace) resumes its own conversation (`auto`).
+     */
+    private static function startWorkspaceProcess(string $id, string $path, string $agentId, bool $fresh = false): array
     {
-        if (self::$startRunner !== null) return (self::$startRunner)($id, $path, $agentId);
-        return TerminalService::startTerminal($id, $path, 'auto', $agentId, 'spawn');
+        $chatId = $fresh ? '_fresh_' : 'auto';
+        if (self::$startRunner !== null) return (self::$startRunner)($id, $path, $agentId, $chatId);
+        return TerminalService::startTerminal($id, $path, $chatId, $agentId, 'spawn');
     }
 
     /**
