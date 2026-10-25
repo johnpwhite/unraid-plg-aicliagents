@@ -98,6 +98,18 @@ class TerminalService {
         return 'timeout -k ' . self::ENSURE_KILL_AFTER_SECONDS . ' ' . self::ENSURE_TIMEOUT_SECONDS . ' ' . $cmd;
     }
 
+    /**
+     * The ensure-session command, which makes the tmux server of the workspace and starts the agent in it.
+     * #781: it starts through aicli-clean-exec.sh, so the server and the agent get no descriptor above 2
+     * and umask 022 from the PHP process. Under aicli-run that process runs below the caller's script.
+     * $envStr is already shell-quoted (KEY='value' words).
+     */
+    public static function ensureSessionCommand(string $activeSrc, string $username, string $envStr, string $shell): string
+    {
+        return '/bin/bash ' . escapeshellarg($activeSrc . '/scripts/aicli-clean-exec.sh') . ' runuser -u ' . escapeshellarg($username)
+            . " -- env $envStr /bin/bash " . escapeshellarg($shell) . ' --ensure-session';
+    }
+
     /** True when `timeout` ended the command: 124 = stop signal, 137 = kill signal. */
     public static function isEnsureTimeout(int $rc): bool
     {
@@ -632,8 +644,7 @@ class TerminalService {
         // browser, so it survives the deploy and the sweep. ttyd's later attach
         // (interactive mode, on browser-connect) just connects to the live session.
         // Idempotent: if the session already exists this is a fast no-op.
-        $ensureCmd = "runuser -u " . escapeshellarg($username) . " -- env $envStr /bin/bash " .
-                     escapeshellarg($shell) . " --ensure-session";
+        $ensureCmd = self::ensureSessionCommand($activeSrc, $username, $envStr, $shell);
         $ensureLog = SecretPaths::stateRoot() . "/ensure-$id.log";
         ActivityService::update($actId, ['step' => $startStep('Launching agent'), 'progress' => 60]);
         $ensureRc = 0;
