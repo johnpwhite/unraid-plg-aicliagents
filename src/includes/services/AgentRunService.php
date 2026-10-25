@@ -572,6 +572,12 @@ final class AgentRunService
         if ($real === false || !is_file($real) || !is_readable($real)) return ['error' => 'That file does not exist or cannot be read.'];
         $size = @filesize($real);
         if ($size === false || $size > RunCallerIdentity::MAX_SCRIPT_BYTES) return ['error' => 'That file is too large for a script.'];
+        if (RunCallerIdentity::isUserScriptsOriginal($real)) {
+            // #778: User Scripts runs a changed copy. Hash the text of that copy, so the running copy matches.
+            $text = @file_get_contents($real);
+            if (!is_string($text)) return ['error' => 'That file cannot be read.'];
+            return ['path' => $real, 'sha256' => hash('sha256', RunCallerIdentity::userScriptsCopyText($text))];
+        }
         $hash = @hash_file('sha256', $real);
         if (!is_string($hash)) return ['error' => 'That file cannot be read.'];
         return ['path' => $real, 'sha256' => $hash];

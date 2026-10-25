@@ -37,11 +37,39 @@ final class RunCallerIdentity
     /** Programs that only pass a call on. They are in the chain, and they are never the caller script (R6). */
     private const PASS_THROUGH = ['cron', 'crond', 'runuser', 'su', 'sudo', 'timeout', 'nohup', 'setsid', 'flock', 'env', 'nice', 'ionice'];
 
-    /** The path of the copy that the User Scripts plugin runs (R7). Not checked on a live box yet. */
+    /**
+     * The folder of the copies that the User Scripts plugin runs (R7). Checked on prod02 on 2026-10-26
+     * (user.scripts startSchedule.php): it copies <originals>/<name>/script to <copies>/<name>/script,
+     * adds "#!/bin/bash" when the text has no "#!" line, removes every "\r", and runs the copy.
+     */
     private const USER_SCRIPTS_ROOT = '/tmp/user.scripts/tmpScripts';
+
+    /** The folder of the User Scripts originals: the path a person authorises on Settings, Script runs (#778). */
+    private const USER_SCRIPTS_ORIGINALS = '/boot/config/plugins/user.scripts/scripts';
 
     /** Test seam: replaces the folder of the User Scripts copies. Works only under PHPUnit. */
     public static ?string $userScriptsRoot = null;
+
+    /** Test seam: replaces the folder of the User Scripts originals. Works only under PHPUnit. */
+    public static ?string $userScriptsOriginals = null;
+
+    private static function originalsRoot(): string
+    {
+        return rtrim(self::underTest() && self::$userScriptsOriginals !== null ? self::$userScriptsOriginals : self::USER_SCRIPTS_ORIGINALS, '/');
+    }
+
+    /** True when $path is the original of a User Script: <originals>/<name>/script (#778). */
+    public static function isUserScriptsOriginal(string $path): bool
+    {
+        return preg_match('#^' . preg_quote(self::originalsRoot(), '#') . '/[^/]+/script$#D', $path) === 1;
+    }
+
+    /** The text of the copy that User Scripts makes from the text of an original (#778). */
+    public static function userScriptsCopyText(string $original): string
+    {
+        $text = strncmp($original, '#!', 2) === 0 ? $original : "#!/bin/bash\n" . $original;
+        return str_replace("\r", '', $text);
+    }
 
     /** Test seam: the folder that stands in for /proc. null means /proc. Works only under PHPUnit. */
     public static ?string $procRoot = null;
@@ -61,7 +89,7 @@ final class RunCallerIdentity
      * Who called? $startPid is the pid of the CLI. $selfEnv is the environment of the CLI (null reads getenv()).
      *
      * @param array<string,string>|null $selfEnv
-     * @return array{kind:string,path:string,sha256:string,userScript:string,uid:int,chain:list<array<string,mixed>>,insideWorkspace:bool}
+     * @return array{kind:string,path:string,sha256:string,userScript:string,copyPath:string,uid:int,chain:list<array<string,mixed>>,insideWorkspace:bool}
      *         kind is "script" or "interactive". For "interactive", path and sha256 are empty strings.
      */
     public static function identify(int $startPid, ?array $selfEnv = null): array
@@ -95,7 +123,7 @@ final class RunCallerIdentity
             $pid = $parent;
         }
 
-        $out = ['kind' => 'interactive', 'path' => '', 'sha256' => '', 'userScript' => '', 'uid' => $uid, 'chain' => $chain, 'insideWorkspace' => $inside];
+        $out = ['kind' => 'interactive', 'path' => '', 'sha256' => '', 'userScript' => '', 'copyPath' => '', 'uid' => $uid, 'chain' => $chain, 'insideWorkspace' => $inside];
         if ($decision === null || $reused) return $out;
         $script = self::scriptOf($decision[0], $decision[1], $decision[2]);
         if ($script === null) return $out;
@@ -104,14 +132,18 @@ final class RunCallerIdentity
         $userScript = '';
         $path = $script['path'];
         $quoted = preg_quote(rtrim(self::underTest() && self::$userScriptsRoot !== null ? self::$userScriptsRoot : self::USER_SCRIPTS_ROOT, '/'), '#');
+        $copyPath = '';
         if (preg_match('#^' . $quoted . '/([^/]+)/script$#D', $script['rawPath'], $m) === 1) {
-            // R7: record the User Scripts copy path itself.
+            // R7 (#778): the caller is the original that a person authorises. The copy path stays in the
+            // record. The hash stays the hash of the copy that bash has open.
             $userScript = $m[1];
-            $path = $script['rawPath'];
+            $copyPath = $script['rawPath'];
+            $path = self::originalsRoot() . '/' . $m[1] . '/script';
         }
         foreach ($chain as $i => $item) {
-            if ($item['pid'] === $decision[0]) $chain[$i]['script'] = $path;
+            if ($item['pid'] === $decision[0]) $chain[$i]['script'] = $copyPath !== '' ? $copyPath : $path;
         }
+        $out['copyPath'] = $copyPath;
         $out['kind'] = 'script';
         $out['path'] = $path;
         $out['sha256'] = $hash;
