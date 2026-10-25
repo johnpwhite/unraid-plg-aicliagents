@@ -350,6 +350,8 @@ A notebook is a folder called notebook in the root of the project. It holds one 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-25** — On a phone, the Project / Global switch and the Inbox, Working, Notes and Archive headings are big enough for a finger. The grey help text in the Notebook is darker, so it is easy to read in all four Unraid themes. Issue #768.
+- **2026-10-24** — On a phone, the editor and the Notebook fields use 16px text. The page no longer zooms in when you tap a field, so Save and the close button stay on the screen. Issue #766.
 - **2026-10-22** — The Notebook settings have new labels: **Show the Wiki page**, **Folder name**, **Production keys on connection cards**, **Speak a notice when a page waits for me** and **Quiet hours**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — Back and Forward buttons (and Alt+Left, Alt+Right) between notes that you open from a link. Spec `docs/specs/NOTEBOOK_WIKI_NAVIGATION.md`, issue #734.
 
