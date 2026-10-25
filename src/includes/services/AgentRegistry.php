@@ -531,11 +531,13 @@ class AgentRegistry {
                 'launch_profile' => [
                     'model'      => ['flag' => '--model {model}'],
                     'unattended' => ['flags' => '--dangerously-skip-permissions', 'needs_setting' => 'spawn_allow_unattended'],
-                    // AGENT_RUN_ENTRY_POINT.md R13: plan mode lets Claude Code read and think but not change files.
-                    // The same run also denies the tools that change files or plugin state: the file tools and the shell,
+                    // AGENT_RUN_ENTRY_POINT.md R13, #784: "dontAsk" refuses every tool that is not on the allowed list,
+                    // and it never asks (no person is at the terminal). The allowed list is the read tools and the report
+                    // (aicli_finish_task). Plan mode is not used: in plan mode Claude refused to call aicli_finish_task,
+                    // so a read-only run could never report. The same run also denies the tools that change files or plugin state: the file tools and the shell,
                     // and every plugin tool of the tiers "change" and "destructive" (except aicli_finish_task, the report)
                     // and the Relay tools that send or change things. See AgentLaunchProfile::denyList().
-                    'readonly'   => ['flags' => '--permission-mode plan', 'tools' => 'Read,Grep,Glob', 'mcp_servers' => true, 'setting_sources' => 'user', 'restricted' => true, 'min_version' => '2.1.302', 'deny_tools' => ['Edit', 'Write', 'NotebookEdit', 'Bash'], 'deny_plugin_tools' => true],
+                    'readonly'   => ['flags' => '--allowedTools=Read,Grep,Glob,mcp__aicli-admin__aicli_finish_task --permission-mode dontAsk', 'tools' => 'Read,Grep,Glob', 'mcp_servers' => true, 'setting_sources' => 'user', 'restricted' => true, 'min_version' => '2.1.302', 'deny_tools' => ['Edit', 'Write', 'NotebookEdit', 'Bash'], 'deny_plugin_tools' => true],
                     'prompt'     => ['mode' => 'positional'],
                 ],
                 // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys
