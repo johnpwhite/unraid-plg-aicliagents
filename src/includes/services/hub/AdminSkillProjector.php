@@ -285,6 +285,10 @@ Destructive actions (PROPOSE only — read "Destructive tools" below first):
 Run `$AICLI_ADMIN_COMMAND help` for the exact shape of every action, including
 which values each optional argument accepts.
 
+The action `run` is not for you. It lets a script that a person put on the
+Authorised scripts list start an agent (`aicli-run`). A call from inside a
+workspace is refused. To start a helper, use `spawn`.
+
 **The arguments are POSITIONAL. They are not flags.** Write
 `logs supervisor 200`, not `--context=supervisor --lines=200`. On 2026-09-08
 a peer agent guessed flag syntax for a sibling CLI from its own error text

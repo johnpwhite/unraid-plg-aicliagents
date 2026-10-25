@@ -65,6 +65,7 @@ require_once AICLI_GEN_SRC . '/includes/handlers/AutoLaunchHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/EnvHandler.php';
 require_once AICLI_GEN_SRC . '/includes/services/SshKeyService.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/SshHandler.php';
+require_once AICLI_GEN_SRC . '/includes/handlers/RunScriptsHandler.php'; // AGENT_RUN_ENTRY_POINT.md R9: the Authorised scripts list
 require_once AICLI_GEN_SRC . '/includes/handlers/ActivityHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/HubHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/GitHandler.php';
@@ -295,6 +296,7 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\AutoLaunchHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\EnvHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\SshHandler::handle($action, $id)
+                   ?? \AICliAgents\Handlers\RunScriptsHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\ActivityHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\HubHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\GitHandler::handle($action, $id)

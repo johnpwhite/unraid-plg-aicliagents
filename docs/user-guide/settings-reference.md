@@ -38,7 +38,7 @@ On a phone, the tables on this page scroll sideways. The controls on the page ar
 
 ## Configuration tab
 
-The Configuration tab shows nine cards: **General**, **Storage**, **Terminal**, **Automatic continue**, **Relay notices**, **Agent voice**, **Dictation**, **Notebook** and **SSH keys**. On a wide screen the page spreads the cards over several columns. On a phone it shows one column. Most cards have two parts. The main settings are always in view. The seldom-used settings are in the **Advanced** part, a section that you open when you need it. In this guide, each setting is under its card, and the rows of the **Advanced** part come after the heading **Advanced**.
+The Configuration tab shows ten cards: **General**, **Storage**, **Terminal**, **Automatic continue**, **Relay notices**, **Agent voice**, **Dictation**, **Notebook**, **Script runs** and **SSH keys**. On a wide screen the page spreads the cards over several columns. On a phone it shows one column. Most cards have two parts. The main settings are always in view. The seldom-used settings are in the **Advanced** part, a section that you open when you need it. In this guide, each setting is under its card, and the rows of the **Advanced** part come after the heading **Advanced**.
 
 ### General card
 
@@ -230,6 +230,27 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 | **Speak a notice when a page waits for me** | Speaks one short sentence when an agent adds a page that waits for you. It needs **Voice** to be on. | No (default) | Yes; No (default) | Turn it on when you work away from the screen. | Saves. | No |
 | **Quiet hours** | No Notebook notice is spoken in these hours, in the server's local time. The window may cross midnight. | Empty (no quiet hours) | HH:MM-HH:MM, for example 22:00-07:00, or empty | Set it so the server stays quiet at night. | Saves. A value in the wrong format keeps the old value. | No |
 | **Agent journal** | An agent may add short "what I did and why" lines to a page called Agent journal. The page keeps the newest 500 lines. Older lines move to the archive. | Off (default) | On; Off (default) | Turn it on when you want a record of agent work. | Saves. | No |
+
+### Script runs card
+
+The card **Script runs** lets a script on the server start an agent with the command `aicli-run`. See [Run an agent from a script](script-runs.md). No agent can change any of these settings. The status line shows the switch and the number of authorised scripts, for example **On · 2 scripts**.
+
+| Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| **Let scripts start agent runs** | With On, a script on the list can start an agent. With Off, the command refuses every call and creates nothing. | Off (default) | On; Off (default) | Turn it on when you add your first script. | Saves, nothing else. | No |
+| **Authorised scripts** | The scripts that may start an agent. Each entry has a name, the full path, a fingerprint, the agents it may start, the folders it may use, the highest mode, the user and the runs each day. A script that changed is refused until you trust the file again. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray. The agent runs as root. | Empty | **Add a script**, **Edit** and **Remove** | Add a script for each job. | Saves when you press **Save**. | No |
+
+#### Advanced
+
+The **Advanced** part of the card is closed at first. Its **(i)** button says what is inside. It holds the limits on runs, the time to approve a run and the switch for the start notice.
+
+| Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| **Runs open at one time** | The most runs that are open together, for all scripts. A call over the limit is held. | 2 | 1 to 10 | Raise it when scripts often overlap. | Saves, nothing else. | No |
+| **Runs each day** | The most runs that start in 24 hours, for all scripts. | 6 | 1 to 500 | Raise it for a busy server. | Saves, nothing else. | No |
+| **Wait before the same problem runs again** | A script can name a problem with a key. The same key starts no new run for this many hours. | 24 hours | 0 to 720 | Lower it when a problem needs a quick second look. | Saves, nothing else. | No |
+| **Time to approve a run** | A run that may change files waits for your approval. With no answer in this time, it ends and starts nothing. | 24 hours | 1 to 168 | Raise it when you look at the Activity tray rarely. | Saves, nothing else. | No |
+| **Notify me when a run starts** | Raises an Unraid notice when a run starts. Warnings, for example a refused script, always show. | Yes (default) | Yes (default); No | Turn it off for a script that runs often. | Saves, nothing else. | No |
 
 ### SSH keys card
 
@@ -527,6 +548,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-24** — New card **Script runs** with the switch **Let scripts start agent runs**, the list **Authorised scripts** and five limits in the part **Advanced**. The tab has ten cards. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — The buttons **Save now** and **Merge layers** on a home card show a percent while they run, and the Activity tray shows the size and the time left. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-24** — The card **Boot disk space** has a line for large session logs of the other agents, and **Archive layer images…** on the line **Left over**. The plugin also stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-24** — New setting **Your name in the records** in **General**, part **Advanced**. The Activity tray, the event list and the log show the Unraid login with this name, for example "root (John)". Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.

@@ -64,6 +64,13 @@ if [ -f "$EMHTTP_DEST/src/scripts/user/repair-plugin.sh" ]; then
     ln -sf "$EMHTTP_DEST/src/scripts/user/repair-plugin.sh" "/usr/local/bin/aicli-repair"
     log_ok "aicli-repair command available."
 fi
+# AGENT_RUN_ENTRY_POINT.md R2: the wrapper that a script calls to start an agent run. It only calls
+# `admin-agent.php run` with exec. The link points at the file, so a new generation needs no new link.
+if [ -f "$EMHTTP_DEST/src/scripts/aicli-run" ]; then
+    chmod +x "$EMHTTP_DEST/src/scripts/aicli-run"
+    ln -sf "$EMHTTP_DEST/src/scripts/aicli-run" "/usr/local/bin/aicli-run"
+    log_ok "aicli-run command available."
+fi
 
 # --- PHP Post-Install Tasks ---
 log_step "Initializing plugin services..."

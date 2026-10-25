@@ -531,6 +531,11 @@ class AgentRegistry {
                 'launch_profile' => [
                     'model'      => ['flag' => '--model {model}'],
                     'unattended' => ['flags' => '--dangerously-skip-permissions', 'needs_setting' => 'spawn_allow_unattended'],
+                    // AGENT_RUN_ENTRY_POINT.md R13: plan mode lets Claude Code read and think but not change files.
+                    // The same run also denies the tools that change files or plugin state: the file tools and the shell,
+                    // and every plugin tool of the tiers "change" and "destructive" (except aicli_finish_task, the report)
+                    // and the Relay tools that send or change things. See AgentLaunchProfile::denyList().
+                    'readonly'   => ['flags' => '--permission-mode plan', 'tools' => 'Read,Grep,Glob', 'mcp_servers' => true, 'setting_sources' => 'user', 'restricted' => true, 'min_version' => '2.1.302', 'deny_tools' => ['Edit', 'Write', 'NotebookEdit', 'Bash'], 'deny_plugin_tools' => true],
                     'prompt'     => ['mode' => 'positional'],
                 ],
                 // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys

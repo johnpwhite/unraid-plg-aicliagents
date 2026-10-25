@@ -1,0 +1,12 @@
+#!/bin/bash
+# aicli-run: start an agent run from a script (docs/specs/AGENT_RUN_ENTRY_POINT.md R2, issue #745).
+#
+# This wrapper does one thing: it calls `admin-agent.php run` with `exec`. Because of exec, the wrapper
+# adds no process of its own to the parent chain. The plugin finds the calling script from that chain.
+# All checks happen in the PHP verb. It must run as root. A script must be on the Authorised scripts
+# list in Settings, Script runs.
+#
+# Usage: aicli-run --agent=<id> --folder=<path> --prompt=<text> [--mode=read-only|may-change] [...]
+# Run `admin-agent.php help` for every option. The reply is one JSON object. The exit code is in the spec.
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec /usr/bin/php "$HERE/admin-agent.php" run "$@"

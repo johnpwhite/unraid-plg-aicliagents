@@ -100,6 +100,23 @@ class SpawnService
     /** @var int|null Replaces PANE_WAIT_SECONDS. */
     public static ?int $paneWaitSeconds = null;
 
+    /**
+     * The two seams that decide which agent and which folder a start may use. They count only under PHPUnit (the
+     * bootstrap defines AICLI_TEST_TMP). In production a stray value is ignored (security review of #745).
+     *
+     * @return callable|null
+     */
+    public static function installedProbe()
+    {
+        return defined('AICLI_TEST_TMP') ? self::$installedProbe : null;
+    }
+
+    /** @return array<int,string>|null */
+    public static function allowedBases(): ?array
+    {
+        return defined('AICLI_TEST_TMP') ? self::$allowedBases : null;
+    }
+
     // ======================================================================
     // Settings and identity
     // ======================================================================
@@ -279,7 +296,7 @@ class SpawnService
      */
     private static function resolveFolder(string $path, string $what): array
     {
-        $resolved = ValidationService::validatePath($path, self::$allowedBases);
+        $resolved = ValidationService::validatePath($path, self::allowedBases());
         if ($resolved === false || !is_dir($resolved) || !is_readable($resolved)) {
             return ['error' => "$what '$path' does not resolve to an existing, readable folder inside an allowed location."];
         }
@@ -482,16 +499,60 @@ class SpawnService
 
             $caller = self::spawnCaller();
             if (isset($caller['error'])) return $caller;
-            $callerId = (string)$caller['id'];
-            $callerName = (string)($caller['record']['name'] ?? $callerId);
+            return self::spawnCore($p, (string)$caller['id'], (string)($caller['record']['name'] ?? $caller['id']), []);
+        } catch (\Throwable $e) {
+            return ['error' => 'The helper workspace could not be started: ' . self::safeText($e->getMessage(), 300)];
+        }
+    }
 
+    /**
+     * Start the workspace of one script run (docs/specs/AGENT_RUN_ENTRY_POINT.md R28, issue #745). It skips only
+     * spawnCaller(): a run has no parent workspace. The caller is the script that AgentRunService has already
+     * checked. The run switch (`run_enabled`) replaces the helper switch. No agent tool calls this method.
+     *
+     * $p keys are the keys of spawn() (agentId, name, path, model, effort, task, taskTitle, autoClose, maxMinutes).
+     * $run keys: runId (required), label (the caller script label), readOnly (bool), unattended (bool, only for a
+     * run that a person approved), mode ('read-only' or 'may-change'), script (path), key.
+     *
+     * @param array<string,mixed> $p
+     * @param array<string,mixed> $run
+     * @return array<string,mixed>
+     */
+    public static function spawnForRun(array $p, array $run): array
+    {
+        try {
+            $runId = (string)($run['runId'] ?? '');
+            if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $runId) !== 1) return ['error' => 'A run needs a run id of 6 to 32 letters and digits.'];
+            $label = self::safeText((string)($run['label'] ?? ''), 60);
+            if ($label === '') $label = 'script';
+            // A run has no worktree and no linked box. Both are refused here, not trusted from the caller.
+            if (isset($p['worktree']) || trim((string)($p['box'] ?? '')) !== '') {
+                return ['error' => 'A run uses a named folder. It cannot use a worktree or a linked box.'];
+            }
+            return self::spawnCore($p, 'run:' . $runId, 'script ' . $label, $run + ['isRun' => true]);
+        } catch (\Throwable $e) {
+            return ['error' => 'The run could not be started: ' . self::safeText($e->getMessage(), 300)];
+        }
+    }
+
+    /**
+     * The shared part of spawn() and spawnForRun(): checks, then side effects.
+     *
+     * @param array<string,mixed> $p
+     * @param array<string,mixed> $run Empty for a helper that a workspace starts. Else the run keys of spawnForRun().
+     * @return array<string,mixed>
+     */
+    private static function spawnCore(array $p, string $callerId, string $callerName, array $run): array
+    {
+        $isRun = !empty($run['isRun']);
+        try {
             $agentId = trim((string)($p['agentId'] ?? ''));
             if ($agentId === '' || $agentId === 'terminal') {
                 return ['error' => 'Give an agentId of an installed agent. Ask aicli_list_agents for the ids.'];
             }
             $registry = AgentRegistry::getRegistry();
             if (!isset($registry[$agentId])) return ['error' => "Unknown agent '$agentId'. Ask aicli_list_agents for valid ids."];
-            $installed = self::$installedProbe !== null ? (bool)(self::$installedProbe)($agentId) : !empty($registry[$agentId]['is_installed']);
+            $installed = self::installedProbe() !== null ? (bool)(self::installedProbe())($agentId) : !empty($registry[$agentId]['is_installed']);
             if (!$installed) return ['error' => "The agent '$agentId' is not installed. Install it first, or choose an installed agent."];
 
             // The task. Its text is data: it is written to a file and never run.
@@ -517,7 +578,11 @@ class SpawnService
 
             // Launch flags. The unattended rule comes first because it depends on the worktree (decision 3).
             $unattended = !empty($p['unattended']);
-            if ($unattended) {
+            if ($unattended && $isRun) {
+                // Decision 13 of the run spec: a run that a person approved may go unattended in a named folder.
+                // AgentRunService sets this flag only after the approval. It is the named exception to the rule below.
+                if (empty($run['unattended'])) return ['error' => 'A run goes unattended only after a person approved it.'];
+            } elseif ($unattended) {
                 if (self::settings()['spawn_allow_unattended'] !== '1') {
                     return ['error' => 'Unattended flags are turned off. A person turns them on in Settings, General, Advanced, "Let helpers run without asking".'];
                 }
@@ -537,7 +602,13 @@ class SpawnService
             $model = trim((string)($p['model'] ?? ''));
             $effort = trim((string)($p['effort'] ?? ''));
             $profile = AgentLaunchProfile::profileFor($agentId);
-            $flags = AgentLaunchProfile::flags($agentId, $model, $effort, $unattended, $profile);
+            $readOnly = $isRun && !empty($run['readOnly']);
+            if ($readOnly) {
+                // An older agent stops with "unknown option" for the read-only flags. Say which flag and which version.
+                $versionError = AgentLaunchProfile::versionError($agentId, (string)($registry[$agentId]['version'] ?? ''), $profile);
+                if ($versionError !== null) return ['error' => $versionError];
+            }
+            $flags =AgentLaunchProfile::flags($agentId, $model, $effort, $unattended, $profile, $readOnly, (string)($run["mcpConfig"] ?? ""), (string)($run["dataDir"] ?? ""));
             if (isset($flags['error'])) return $flags;
             $promptMode = AgentLaunchProfile::promptMode($agentId, $profile);
 
@@ -600,6 +671,14 @@ class SpawnService
                 'spawned' => true,
                 'spawn' => self::newSpawnMeta($callerId, $callerName, $title, $autoClose, $unattended, $wtMeta, $model, $effort, $maxMinutes),
             ];
+            if ($isRun) {
+                // R28: the mark "started by script <label>" for the drawer. The label comes from the list, not from the caller.
+                $record['createdBy'] = 'run:' . self::safeText((string)($run['label'] ?? 'script'), 60);
+                $record['spawn']['run'] = [
+                    'runId' => (string)$run['runId'], 'mode' => (string)($run['mode'] ?? 'read-only'),
+                    'script' => self::safeText((string)($run['script'] ?? ''), 300), 'key' => self::safeText((string)($run['key'] ?? ''), 200),
+                ];
+            }
             if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
                 return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the helper workspace.'];
             }
@@ -637,7 +716,8 @@ class SpawnService
 
             $created = self::findRecord($id) ?? $record;
             self::emit('workspace.spawned', ['workspaceId' => $id, 'agentId' => $agentId],
-                "Helper workspace '$name' started by '$callerName'", ['parent' => $callerId, 'taskTitle' => $title, 'autoClose' => $autoClose, 'delivery' => $delivery]);
+                ($isRun ? "Run workspace '$name'" : "Helper workspace '$name'") . " started by '$callerName'",
+                ['parent' => $callerId, 'taskTitle' => $title, 'autoClose' => $autoClose, 'delivery' => $delivery]);
 
             $mine2 = self::runningHelpers($callerId, $agentId)[1];
             $result = [
@@ -746,6 +826,171 @@ class SpawnService
     }
 
     /**
+     * Write a file without following a link at its name: refuse a link, write to a new temporary name in the same
+     * folder (exclusive create, so an existing name is never opened), then rename it over the target. A rename
+     * replaces a link and never follows it.
+     */
+    public static function writeNoFollow(string $file, string $body, int $mode = 0600): bool
+    {
+        if (is_link($file)) return false;
+        $tmp = dirname($file) . '/.tmp-' . bin2hex(random_bytes(6));
+        // The mode is set when the file is made (through the umask), never afterwards by its name: a name can be
+        // swapped for a link between two calls, and a chmod by name would then change the target (fourth review, 1).
+        $old = umask(0777 & ~$mode);
+        try {
+            $h = @fopen($tmp, 'x');
+        } finally {
+            umask($old);
+        }
+        if ($h === false) return false;
+        $ok = fwrite($h, $body) === strlen($body);
+        fclose($h);
+        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('write:' . $tmp);
+        if (!$ok || !@rename($tmp, $file)) {
+            @unlink($tmp);
+            return false;
+        }
+        return true;
+    }
+
+    /** The largest exclude file that is read and written back, in bytes. A larger file is refused. */
+    private const EXCLUDE_READ_LIMIT = 1048576;
+
+    /**
+     * Read a plain file without following a link at its name. lstat first, then open, then fstat the open file: the
+     * two must name the same device and inode, the file must be regular, it must have one name only and it must not
+     * be larger than the limit. Returns '' when the file does not exist, the content, or null when the file is refused.
+     */
+    private static function readPlainFile(string $name): ?string
+    {
+        $l = @lstat($name);
+        if ($l === false) return '';
+        if (($l['mode'] & 0170000) !== 0100000 || $l['nlink'] > 1) return null;
+        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('read:' . $name);
+        $h = @fopen($name, 'rb');
+        if ($h === false) return null;
+        $f = fstat($h);
+        $data = null;
+        // A file over the limit is refused: the copy would be cut and the rename would lose lines (fifth review, F2).
+        if ($f !== false && ($f['mode'] & 0170000) === 0100000 && $f['nlink'] <= 1 && $f['size'] <= self::EXCLUDE_READ_LIMIT && $f['dev'] === $l['dev'] && $f['ino'] === $l['ino']) {
+            $c = stream_get_contents($h, self::EXCLUDE_READ_LIMIT);
+            $data = is_string($c) ? $c : null;
+        }
+        fclose($h);
+        return $data;
+    }
+
+    /** @var callable|null fn(string $what): void. A test swaps a folder for a link in the gap between a check and its use. PHPUnit only. */
+    public static $afterCheck = null;
+
+    /**
+     * Enter $dir and run $fn there, with relative names only. The folder of a run belongs to a person, so between a
+     * check and its use the person could swap it for a link. After the chdir the plugin asks the kernel where it is:
+     * getcwd() must be $expected (a path built from the resolved parent, not by following $dir), and the folder must
+     * be a real folder, and, when $rootOwned, owned by the user that runs the plugin. Anything else gives
+     * [false, null] and $fn does not run (security review of #745, finding C1).
+     *
+     * @param callable():mixed $fn
+     * @return array{0:bool,1:mixed}
+     */
+    private static function inDir(string $dir, string $expected, bool $rootOwned, callable $fn): array
+    {
+        $previous = getcwd();
+        if (!@chdir($dir)) return [false, null];
+        try {
+            if (getcwd() !== $expected) return [false, null];
+            $st = @lstat('.');
+            if ($st === false || ($st['mode'] & 0170000) !== 0040000) return [false, null];
+            if ($rootOwned && \function_exists('posix_geteuid') && $st['uid'] !== posix_geteuid()) return [false, null];
+            return [true, $fn()];
+        } finally {
+            if ($previous !== false) @chdir($previous);
+        }
+    }
+
+    /**
+     * Write files into <folder>/.aicli-task and nowhere else. Returns null on success, else one sentence.
+     *
+     * @param array<string,string> $files file name (no path) => content
+     */
+    private static function writeInTaskDir(string $folder, array $files): ?string
+    {
+        $real = @realpath($folder);
+        if ($real === false || !is_dir($real)) return "The folder '$folder' cannot be used.";
+        $dir = $real . '/' . self::TASK_DIR;
+        // The task folder may be a link that someone planted (the folder of a run belongs to a person, and root writes
+        // here). A link, a file or a folder of another owner is refused.
+        if (is_link($dir)) return "The task folder '$dir' is a link. It was not used.";
+        if (file_exists($dir) && !is_dir($dir)) return "The task folder '$dir' is not a folder.";
+        if (is_dir($dir)) {
+            $owner = @fileowner($dir);
+            if ($owner === false || (\function_exists('posix_geteuid') && $owner !== posix_geteuid())) {
+                return "The task folder '$dir' belongs to another user. It was not used.";
+            }
+        } elseif (!@mkdir($dir, 0700, true) && !is_dir($dir)) {
+            return "Could not create the task folder '$dir'.";
+        }
+        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('task');
+        // Every later step uses names relative to the folder that was entered, and chmod('.').
+        [$entered, $failed] = self::inDir($dir, $dir, true, static function () use ($files): ?string {
+            @chmod('.', 0700);
+            foreach ($files as $name => $body) {
+                if (!self::writeNoFollow($name, $body)) return "Could not write '$name' in the task folder (a link in the way, or no permission).";
+            }
+            return null;
+        });
+        if (!$entered) return "The task folder '$dir' changed while it was used (it may have been replaced by a link). Nothing was written.";
+        return is_string($failed) ? $failed : null;
+    }
+
+    /**
+     * Add ".aicli-task/" to the git exclude file of the repo. The exclude file is only written when its folder is
+     * inside the run folder and is entered by the same check as the task folder. Returns a note for the reply.
+     */
+    private static function addToGitExclude(string $folder, string $gitPath): string
+    {
+        $line = self::TASK_DIR . '/';
+        $real = @realpath($folder);
+        if ($real === false) return '';
+        $exclude = $gitPath[0] !== '/' ? $real . '/' . $gitPath : $gitPath;
+        $excludeDir = dirname($exclude);
+        // Only two places are used: a folder inside the run folder, and the folder .git/info of a repository that holds
+        // the run folder (a worktree of the tool keeps its exclude file there). Anything else is not touched.
+        $insideRun = strpos($excludeDir . '/', rtrim($real, '/') . '/') === 0;
+        $inRepoAbove = preg_match('#/\.git/info$#D', $excludeDir) === 1 && strpos($real . '/', dirname($excludeDir, 2) . '/') === 0;
+        if ((!$insideRun && !$inRepoAbove) || strpos($exclude, '..') !== false) {
+            return 'The git exclude file is outside the folder of the run, so the folder ' . self::TASK_DIR . '/ was not added to it.';
+        }
+        if (is_link($exclude) || is_link($excludeDir)) {
+            return 'The git exclude file is a link, so the folder ' . self::TASK_DIR . '/ was not added to it.';
+        }
+        // No mkdir: a missing folder is not made by root, because mkdir -p would follow a link in the path (fourth review, 3).
+        if (!is_dir($excludeDir)) {
+            return 'The git exclude folder does not exist, so the folder ' . self::TASK_DIR . '/ was not added to it.';
+        }
+        // The folder .git/info of a repository above the run folder may belong to a person. Root opens nothing there
+        // unless the folder is owned by root and no group or other user can write to it (fifth review, F1): an open
+        // of a name that a person controls follows a link, and a FIFO or a device file would hang or harm the host.
+        if (!$insideRun) {
+            $st = @lstat($excludeDir);
+            if ($st === false || ($st['mode'] & 0170000) !== 0040000 || $st['uid'] !== 0 || ($st['mode'] & 0022) !== 0) {
+                return 'The git exclude folder is not owned by root, so it was not opened. Add the line ' . self::TASK_DIR . '/ to .git/info/exclude of the repo yourself.';
+            }
+        }
+        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('exclude');
+        $name = basename($exclude);
+        [$entered, $result] = self::inDir($excludeDir, $excludeDir, false, static function () use ($line, $name): string {
+            $have = self::readPlainFile($name);
+            if ($have === null) return 'refused';
+            if (in_array($line, preg_split('/\R/', $have) ?: [], true)) return 'present';
+            return self::writeNoFollow($name, $have . ($have !== '' && substr($have, -1) !== "\n" ? "\n" : '') . $line . "\n", 0644) ? 'added' : 'failed';
+        });
+        if (!$entered) return 'The git exclude folder changed while it was used, so the folder ' . self::TASK_DIR . '/ was not added to it.';
+        if ($result === 'refused') return 'The git exclude file is not a plain file with one name, so the folder ' . self::TASK_DIR . '/ was not added to it.';
+        return $result === 'added' ? 'The folder ' . self::TASK_DIR . '/ was added to the git exclude file of the repo.' : '';
+    }
+
+    /**
      * Write the task files into the helper's folder: TASK.md (the brief) and, when the agent takes a first
      * prompt, PROMPT.once (the fixed first line). Both mode 600. When the folder is inside a git repo, the
      * folder .aicli-task/ goes into the repo's info/exclude, so git ignores it.
@@ -754,29 +999,14 @@ class SpawnService
      */
     private static function writeTaskFiles(string $folder, string $task, bool $withPrompt): array
     {
-        $dir = $folder . '/' . self::TASK_DIR;
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-            return ['error' => "Could not create the task folder '$dir'."];
-        }
-        @chmod($dir, 0700);
-        $files = [$dir . '/TASK.md' => $task . "\n"];
-        if ($withPrompt) $files[$dir . '/PROMPT.once'] = self::FIRST_LINE;
-        foreach ($files as $file => $body) {
-            if (@file_put_contents($file, $body) === false) return ['error' => "Could not write '$file'."];
-            @chmod($file, 0600);
-        }
+        $files = ['TASK.md' => $task . "\n"];
+        if ($withPrompt) $files['PROMPT.once'] = self::FIRST_LINE;
+        $err = self::writeInTaskDir($folder, $files);
+        if ($err !== null) return ['error' => $err];
         $note = '';
         $ex = self::git(['rev-parse', '--git-path', 'info/exclude'], $folder);
         if ($ex['rc'] === 0 && trim($ex['out']) !== '') {
-            $exclude = trim($ex['out']);
-            if ($exclude[0] !== '/') $exclude = $folder . '/' . $exclude;
-            $line = self::TASK_DIR . '/';
-            $have = is_file($exclude) ? (string)@file_get_contents($exclude) : '';
-            if (!in_array($line, preg_split('/\R/', $have) ?: [], true)) {
-                @mkdir(dirname($exclude), 0775, true);
-                @file_put_contents($exclude, ($have !== '' && substr($have, -1) !== "\n" ? "\n" : '') . $line . "\n", FILE_APPEND);
-                $note = 'The folder ' . self::TASK_DIR . '/ was added to the git exclude file of the repo.';
-            }
+            $note = self::addToGitExclude($folder, trim($ex['out']));
         } else {
             $note = 'The folder is not in a git repository. The folder ' . self::TASK_DIR . '/ was added to it.';
         }
@@ -937,10 +1167,9 @@ class SpawnService
             $report = ['status' => $status, 'summary' => $safe, 'at' => $at];
 
             $dir = (string)($record['path'] ?? '') . '/' . self::TASK_DIR;
-            if (is_dir($dir) || @mkdir($dir, 0700, true)) {
-                $json = json_encode($report + ['workspaceId' => $callerId, 'taskTitle' => (string)($spawn['task_title'] ?? '')], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-                if (@file_put_contents($dir . '/RESULT.json', $json . "\n") !== false) @chmod($dir . '/RESULT.json', 0600);
-            }
+            // Written with the same no-follow step as the task files: the folder belongs to a person (finding C1).
+            $json = json_encode($report + ['workspaceId' => $callerId, 'taskTitle' => (string)($spawn['task_title'] ?? '')], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            if (is_string($json)) self::writeInTaskDir((string)($record['path'] ?? ''), ['RESULT.json' => $json . "\n"]);
             self::updateRecord($callerId, static function (array $rec) use ($report, $autoClose): array {
                 $rec['spawn']['state'] = 'reported_done';
                 $rec['spawn']['report'] = $report;

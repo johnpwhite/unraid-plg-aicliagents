@@ -663,6 +663,13 @@ class AdminService {
             'spawn_max_total'        => ['group' => 'spawn', 'description' => 'The most helper workspaces that run on this server at the same time, 1 to 20 (default 6). Changes only on the Settings page.'],
             'spawn_max_per_agent'    => ['group' => 'spawn', 'description' => 'The most helper workspaces of one agent kind that run at the same time, 1 to 10 (default 2). Changes only on the Settings page.'],
             'spawn_allow_unattended' => ['group' => 'spawn', 'description' => 'Let helpers run without asking: 1 lets a spawn use the unattended flags of the agent (for example the Codex sandbox bypass), and only in a worktree that the spawn tool made. 0 is off (default). Changes only on the Settings page.'],
+            // ---- script runs (AGENT_RUN_ENTRY_POINT.md, #745) — a person changes these on Settings, Script runs; an agent cannot ----
+            'run_enabled'            => ['group' => 'run', 'description' => 'Let scripts start agent runs: 1 lets a script on the Authorised scripts list start an agent with aicli-run. 0 is off (default). Changes only on the Settings page, Script runs.'],
+            'run_max_concurrent'     => ['group' => 'run', 'description' => 'The most script runs that are open at the same time, 1 to 10 (default 2). Changes only on the Settings page.'],
+            'run_daily_budget'       => ['group' => 'run', 'description' => 'The most script runs that start in 24 hours, 1 to 500 (default 6). Changes only on the Settings page.'],
+            'run_cooldown_hours'     => ['group' => 'run', 'description' => 'Hours to wait before a run with the same key starts again, 0 to 720 (default 24). Changes only on the Settings page.'],
+            'run_approval_hours'     => ['group' => 'run', 'description' => 'Hours that a person has to approve a run that may change things, 1 to 168 (default 24). Changes only on the Settings page.'],
+            'run_notify_routine'     => ['group' => 'run', 'description' => 'Raise an Unraid notification when a run starts: 1 is on (default), 0 is off. Warnings are always sent. Changes only on the Settings page.'],
             // HUMAN_ACTOR_IDENTITY.md
             'human_display_name'     => ['group' => 'general', 'description' => 'The name shown after the Unraid login in the records of who acted, for example "root (John)". Empty shows the login only. Changes only on the Settings page, General, Advanced.'],
 
@@ -2287,7 +2294,22 @@ class AdminService {
         // Both run the same detached job; Remove deletes for good, so both need a person's Approve.
         'aicli_archive_boot_data' => 'executeApprovedBootArchive',
         'aicli_remove_boot_data'  => 'executeApprovedBootArchive',
+        // AGENT_RUN_ENTRY_POINT.md (#745). These two names are not agent tools: no MCP tool or CLI action proposes
+        // them for an agent. AgentRunService::run() writes the pending item when a script asks. Only a person's
+        // Approve runs them.
+        'aicli_run_authorise_script' => 'executeApprovedRunScript',
+        'aicli_run_start'            => 'executeApprovedRunStart',
     ];
+
+    /** R10: a person approved an unknown or changed script. Stores its hash on the Authorised scripts list. @param array<string,mixed> $params @return array<string,mixed> */
+    public static function executeApprovedRunScript(array $params): array {
+        return AgentRunService::approveScript($params);
+    }
+
+    /** R13: a person approved a run that may change things. Starts it now. @param array<string,mixed> $params @return array<string,mixed> */
+    public static function executeApprovedRunStart(array $params): array {
+        return AgentRunService::startApproved($params);
+    }
 
     /**
      * Validate a workspace deletion and describe its consequence in plain

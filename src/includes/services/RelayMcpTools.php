@@ -119,6 +119,20 @@ class RelayMcpTools {
         ];
     }
 
+    /** The tools that only read. Every other tool of names() is treated as one that changes or sends something. */
+    // relay_get_inbox is not in this list: reading the unread items moves the read position of the inbox.
+    public const READ_ONLY_TOOLS = ['relay_list_topics', 'relay_get_assignments', 'relay_list_contacts', 'relay_request_status'];
+
+    /**
+     * The tools that send, answer or change something: the catalogue minus the read-only tools. A new tool is in
+     * this list until someone puts it in READ_ONLY_TOOLS, so a read-only run never gets it by accident.
+     *
+     * @return string[]
+     */
+    public static function changingTools(): array {
+        return array_values(array_diff(self::names(), self::READ_ONLY_TOOLS));
+    }
+
     /**
      * Dispatch one tool call for an already-resolved identity.
      *

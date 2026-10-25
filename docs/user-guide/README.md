@@ -24,6 +24,8 @@ something looks wrong. You do not need to read code.
 - [The Notebook](notebook.md): the drawer where an agent puts things you must read, follow,
   compare or decide, instead of the terminal.
 - [The wiki](wiki.md): the living documentation of a workspace, built from linked pages.
+- [Run an agent from a script](script-runs.md): let a script on your server start an agent with
+  the command `aicli-run`, the list of Authorised scripts, and the approval of a run.
 
 ## Keep your data safe
 

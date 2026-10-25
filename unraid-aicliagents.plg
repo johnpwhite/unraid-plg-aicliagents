@@ -707,7 +707,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.10.25.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
-<SHA256>ca72329d0f645da263992171fb5be8e669fa3eae57c8394bdb0d9ae35d1b56ea</SHA256>
+<SHA256>864771ef1f3c31d03e3bea24d33de2b6085445dcac438be3b633020bd68676ac</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.10.25.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>

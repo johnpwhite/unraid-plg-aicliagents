@@ -1297,6 +1297,8 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
             <?=aicli_adv_close()?>
             <?=aicli_card_close()?>
 
+            <?php /* AGENT_RUN_ENTRY_POINT.md R9 (#745): the Script runs card. Its own file, like the voice setup rows. */ require __DIR__ . '/ManagerRunScriptsCard.php'; ?>
+
             <?=aicli_card_open('ssh', 'fa-key', 'SSH keys', 'Loading…', 'card-ssh',
                 '<button type="button" onclick="aicliShowSshHelp()" class="aicli-btn-slim" title="How to generate an SSH public key" style="font-size:10px;">'
                 . '<i class="fa fa-question-circle"></i> Help</button>')?>
