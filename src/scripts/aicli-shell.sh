@@ -837,11 +837,15 @@ _build_fresh_cmd() {
 # quoted prompt as a suffix for the fresh-launch command. It renames the file to PROMPT.consumed, so
 # a relaunch or a resume never sends it twice. It prints nothing when there is no prompt to send.
 # The shell does this, not the saved arguments, because the argument check refuses a "$".
+# #782: this function runs inside the generated run script, where only the exported names exist
+# (AICLI_WORKSPACE_PATH, AICLI_ARGS_ID_FILE). It read ROOT_DIR and _ARGS_ID_FILE, which are set only
+# in the outer script, so no helper and no script run ever got its first prompt.
 _aicli_task_prompt_suffix() {
-    local _file="$ROOT_DIR/.aicli-task/PROMPT.once" _mode _flag _text
-    [ -n "${_ARGS_ID_FILE:-}" ] && [ -f "$_ARGS_ID_FILE" ] && [ -f "$_file" ] || return 0
+    local _root="${ROOT_DIR:-${AICLI_WORKSPACE_PATH:-}}" _args="${_ARGS_ID_FILE:-${AICLI_ARGS_ID_FILE:-}}"
+    local _file="$_root/.aicli-task/PROMPT.once" _mode _flag _text
+    [ -n "$_root" ] && [ -n "$_args" ] && [ -f "$_args" ] && [ -f "$_file" ] || return 0
     # Same rule as AgentLaunchProfile::promptModeValid(): any other text means "no prompt".
-    _mode=$(php -r '$d=json_decode(@file_get_contents($argv[1]),true);$m=is_array($d)?(string)($d["prompt_mode"]??""):"";echo preg_match("/^(positional|flag:--[a-z][a-z-]{0,30})$/D",$m)?$m:"";' "$_ARGS_ID_FILE" 2>/dev/null)
+    _mode=$(php -r '$d=json_decode(@file_get_contents($argv[1]),true);$m=is_array($d)?(string)($d["prompt_mode"]??""):"";echo preg_match("/^(positional|flag:--[a-z][a-z-]{0,30})$/D",$m)?$m:"";' "$_args" 2>/dev/null)
     case "$_mode" in
         positional) _flag="" ;;
         flag:--[a-z]*) _flag="${_mode#flag:}" ;;
@@ -849,7 +853,7 @@ _aicli_task_prompt_suffix() {
     esac
     _text=$(cat "$_file" 2>/dev/null)
     [ -n "$_text" ] || return 0
-    mv -f "$_file" "$ROOT_DIR/.aicli-task/PROMPT.consumed" 2>/dev/null || rm -f "$_file" 2>/dev/null
+    mv -f "$_file" "$_root/.aicli-task/PROMPT.consumed" 2>/dev/null || rm -f "$_file" 2>/dev/null
     if [ -n "$_flag" ]; then
         printf ' %s %q' "$_flag" "$_text"
     else
