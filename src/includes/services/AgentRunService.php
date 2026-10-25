@@ -1540,7 +1540,11 @@ final class AgentRunService
         return @file_put_contents($file, json_encode($record, JSON_UNESCAPED_SLASHES), LOCK_EX) !== false;
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * The run record as it is on disk now. Another process can change it between two calls (#786).
+     * @phpstan-impure
+     * @return array<string,mixed>|null
+     */
     private static function loadRun(string $runId): ?array
     {
         $file = self::runsDir() . '/' . preg_replace('/[^A-Za-z0-9]/', '', $runId) . '.json';
@@ -1682,6 +1686,8 @@ final class AgentRunService
     /**
      * The id of the workspace record that belongs to this run, '' when there is none, and '?' when the records cannot
      * be read (unknown: the caller keeps the files and does not fail the run).
+     * It reads the workspace records, which another process can change between two calls (#786).
+     * @phpstan-impure
      */
     private static function workspaceOfRun(string $runId): string
     {
