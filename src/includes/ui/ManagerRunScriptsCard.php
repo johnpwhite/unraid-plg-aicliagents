@@ -110,9 +110,14 @@ $stRuns = ($runsEnabled ? 'On' : 'Off') . ' · ' . $runsCount . ($runsCount === 
                             <input type="number" name="run_approval_hours" aria-label="Hours to approve a run" data-testid="run-approval-hours" value="<?=htmlspecialchars((string)($config['run_approval_hours'] ?? '24'), ENT_QUOTES, 'UTF-8')?>" min="1" max="168" style="width:6em;" <?=$autoSave?>> hours
                             <?=aicli_help_panel('run-approval')?>
                         </dd>
-                        <dt>Notify me when a run starts <?=aicli_help_btn('run-notify', 'Notify me when a run starts')?></dt>
+                        <dt>Time limit for a run <?=aicli_help_btn('run-time-limit', 'Time limit for a run')?></dt>
                         <dd>
-                            <select name="run_notify_routine" aria-label="Notify me when a run starts" data-testid="run-notify-routine" style="width: 100%;" <?=$autoSave?>>
+                            <input type="number" name="run_max_minutes" aria-label="Minutes before a run closes" data-testid="run-max-minutes" value="<?=htmlspecialchars((string)($config['run_max_minutes'] ?? '60'), ENT_QUOTES, 'UTF-8')?>" min="1" max="1440" style="width:6em;" <?=$autoSave?>> minutes
+                            <?=aicli_help_panel('run-time-limit')?>
+                        </dd>
+                        <dt>Notify me when a run starts and ends <?=aicli_help_btn('run-notify', 'Notify me when a run starts and ends')?></dt>
+                        <dd>
+                            <select name="run_notify_routine" aria-label="Notify me when a run starts and ends" data-testid="run-notify-routine" style="width: 100%;" <?=$autoSave?>>
                                 <?=mk_option($config['run_notify_routine'] ?? '1', "1", _('Yes (default)'))?>
                                 <?=mk_option($config['run_notify_routine'] ?? '1', "0", _('No'))?>
                             </select>

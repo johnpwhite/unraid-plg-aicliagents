@@ -6,7 +6,7 @@
 
 ## In plain words
 
-A script on your server can ask the plugin to start an agent. The script says which agent, which folder and what to do. The plugin opens a workspace, gives the agent the task and shows an Unraid notice. The plugin checks which script asked. It starts only the scripts that you put on a list called **Authorised scripts**. A read-only run starts at once. A run that may change files waits until you approve it in the Activity tray.
+A script on your server can ask the plugin to start an agent. The script says which agent, which folder and what to do. The plugin checks which script asked and starts only scripts on **Authorised scripts**. A read-only run starts at once. A run that may change files waits until you approve it in the Activity tray. The agent sends its result to the Notebook and the Activity tray. A script can wait for that result and get its summary.
 
 Words used on this page:
 
@@ -18,8 +18,8 @@ Words used on this page:
 ## Where to find it
 
 - **Settings, Configuration** tab, card **Script runs**: the switch, the list of Authorised scripts and, in the part **Advanced**, the limits.
-- **Activity tray**: shows each run, each refused script and each run that started (a read-only run shows here as started) and each run that may change files and waits for your approval.
-- Unraid's own notices: a notice appears when a run starts and when a script is refused.
+- **Activity tray**: shows each run, each refused script, each result and each run that waits for your approval.
+- Unraid's own notices: a notice appears when a run starts and when it reports, unless you turn off routine notices. Warnings always appear.
 
 ## How to use it
 
@@ -42,7 +42,9 @@ aicli-run --agent=claude-code --folder=/mnt/cache/appdata/example \
   --title="Daily check" --key=daily-check --data-file=/tmp/finding.json
 ```
 
-The command prints one JSON object. The field `state` says what happened. The exit code of the command says the same in a number: 0 started, 2 bad input, 3 the feature is off, 4 not run as root, 20 waits for approval (a run that may change files), 21 refused, 22 duplicate, 23 held.
+The command prints one JSON object. The field `state` says what happened. Exit code 0 means the run started or finished. Check `state`, not only the shell exit code. Exit codes 2 and 3 mean bad input and feature off. Code 4 means the command was not run as root. Codes 10, 11 and 12 mean failed, blocked and timed out. Code 20 means the run waits for approval. Codes 21, 22 and 23 mean refused, duplicate or held.
+
+Add `--wait` when the script must wait for the result. The reply has the report. A bare `--wait` can wait up to one hour. It can stop earlier when the run time limit comes first. A number such as `--wait=30` waits for up to 30 seconds. The plugin limits every wait to 3600 seconds. If the wait ends while the run is open, the reply says `started` and the command exits with 0. The run continues. A call with `--mode=may-change` returns at once with exit 20 while it waits for approval, even with `--wait`.
 
 ### Approve an unknown or changed script
 
@@ -57,6 +59,8 @@ A script whose file changed is refused in the same way, until you approve the ne
 
 A read-only call starts at once. It needs no approval, and it still counts against the limits. The **Activity tray** shows it as **Run started**. A call with `--mode=may-change` waits in the **Activity tray** as **Approve run**. The item shows the script, the agent, the folder, the mode and the full task. Press **Approve** to start the run. A run with `--mode=may-change` then works without asking for permission, when the agent has such a mode. A read-only run keeps its permission questions and all its read-only limits. Before it starts, the plugin checks again that the script is still on the list with the same fingerprint, that the file is unchanged and that the limits still allow the run. With no answer in the time you set, the run ends and starts nothing.
 
+When the agent reports, the plugin saves its summary in one Notebook card. A key reuses the same card on later runs. The Activity tray keeps a result notice. The plugin closes the workspace after its report. It also closes a run that reaches the time limit.
+
 ## Choices and settings
 
 | Setting | What it does | Default | When to change it |
@@ -67,7 +71,8 @@ A read-only call starts at once. It needs no approval, and it still counts again
 | **Runs each day** (all scripts) | The most runs that start in 24 hours. | 6 | Raise it for a busy server. |
 | **Wait before the same problem runs again** | Hours before a call with the same key starts a new run. | 24 | Lower it for a problem that needs a quick second look. |
 | **Time to approve a run** | Hours that you have to approve a run that may change files. | 24 | Raise it if you check the tray rarely. |
-| **Notify me when a run starts** | An Unraid notice at the start of a run. Warnings always show. | Yes (default) | Turn it off for a script that runs often. |
+| **Time limit for a run** | Minutes before the plugin closes a run that has not reported. | 60 | Raise it for a long check. |
+| **Notify me when a run starts and ends** | An Unraid notice when a run starts or reports done. Warnings always show. | Yes (default) | Turn it off for a script that runs often. |
 
 ## What happens behind the scenes
 
@@ -87,7 +92,7 @@ The plugin reads the script from the file that the shell has open, and it looks 
 | Exit code 23 | A limit on runs, or the usage limit of the agent, holds the call. | Call again later. |
 | The list shows "THE FILE CHANGED" | The file differs from the stored fingerprint. | Open **Edit**, tick **Trust the file as it is now** and press **Save**, if you made the change. |
 
-This version runs every agent as root. A restricted run user, a temporary folder for a run, the final report of a run and a wait option come in later versions.
+This version runs every agent as root. A restricted run user and a temporary folder for a run are not available yet.
 
 ## Related pages
 
@@ -98,6 +103,8 @@ This version runs every agent as root. A restricted run user, a temporary folder
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The command returns a JSON state with its exit code, and its wait lasts up to one hour. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
+- **2026-10-25** — A run reports to one Notebook card and the Activity tray. A script can wait for its summary, and the plugin closes the run after its report or time limit. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — The card **Script runs** and the command `aicli-run` start an agent from a script on the Authorised scripts list. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 
 </details>

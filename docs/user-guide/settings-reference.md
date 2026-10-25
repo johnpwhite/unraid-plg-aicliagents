@@ -242,7 +242,7 @@ The card **Script runs** lets a script on the server start an agent with the com
 
 #### Advanced
 
-The **Advanced** part of the card is closed at first. Its **(i)** button says what is inside. It holds the limits on runs, the time to approve a run and the switch for the start notice.
+The **Advanced** part of the card is closed at first. Its **(i)** button says what is inside. It holds the limits on runs, the time to approve a run, the run time limit and the notice setting.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
@@ -250,7 +250,8 @@ The **Advanced** part of the card is closed at first. Its **(i)** button says wh
 | **Runs each day** | The most runs that start in 24 hours, for all scripts. | 6 | 1 to 500 | Raise it for a busy server. | Saves, nothing else. | No |
 | **Wait before the same problem runs again** | A script can name a problem with a key. The same key starts no new run for this many hours. | 24 hours | 0 to 720 | Lower it when a problem needs a quick second look. | Saves, nothing else. | No |
 | **Time to approve a run** | A run that may change files waits for your approval. With no answer in this time, it ends and starts nothing. | 24 hours | 1 to 168 | Raise it when you look at the Activity tray rarely. | Saves, nothing else. | No |
-| **Notify me when a run starts** | Raises an Unraid notice when a run starts. Warnings, for example a refused script, always show. | Yes (default) | Yes (default); No | Turn it off for a script that runs often. | Saves, nothing else. | No |
+| **Time limit for a run** | The plugin closes a run that has not reported when this time passes. It keeps the result and the Notebook card. | 60 minutes | 1 to 1440 | Raise it for a long check. | Saves, nothing else. | No |
+| **Notify me when a run starts and ends** | Raises an Unraid notice when a run starts or reports done. Warnings, for example a refused script, always show. | Yes (default) | Yes (default); No | Turn it off for a script that runs often. | Saves, nothing else. | No |
 
 ### SSH keys card
 
@@ -548,6 +549,8 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — **Notify me when a run starts and ends** covers normal notices when a run starts or reports done; warning notices always show. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
+- **2026-10-25** — The card **Script runs** has **Time limit for a run**. It controls when the plugin closes a run that has not reported. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — New card **Script runs** with the switch **Let scripts start agent runs**, the list **Authorised scripts** and five limits in the part **Advanced**. The tab has ten cards. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — The buttons **Save now** and **Merge layers** on a home card show a percent while they run, and the Activity tray shows the size and the time left. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-24** — The card **Boot disk space** has a line for large session logs of the other agents, and **Archive layer images…** on the line **Left over**. The plugin also stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.

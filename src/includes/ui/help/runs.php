@@ -53,7 +53,10 @@ HTML,
     'run-approval' => <<<'HTML'
 <p>A run that may change things waits for your approval. With no answer in this time, the run ends and starts nothing.</p>
 HTML,
+    'run-time-limit' => <<<'HTML'
+<p>The plugin closes a run when it reports, or when this time limit passes. It keeps the report and its Notebook card.</p>
+HTML,
     'run-notify' => <<<'HTML'
-<p>With On, Unraid shows a notice when a run starts. Warnings, for example a refused script or a run that waits for approval, always show.</p>
+<p>With On, Unraid shows a notice when a run starts and when it reports done. Warnings, for example a refused script, a failed run or a run that waits for approval, always show.</p>
 HTML,
 ];

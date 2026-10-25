@@ -658,7 +658,7 @@ class AdminService {
             'voicemail_max_age_days'      => ['group' => 'voice', 'description' => 'How many days to keep a voice mail message, 1 to 90. Older messages are removed whether they were heard or not.'],
 
             // ---- helper workspaces (AGENT_SPAWN_WORKSPACE.md) — a person changes these on Settings; an agent cannot raise its own limits ----
-            'spawn_enabled'          => ['group' => 'spawn', 'description' => 'Let agents start helper workspaces: 1 turns on aicli_spawn_workspace, aicli_stop_workspace and aicli_finish_task. 0 is off (default). aicli_start_workspace works with this switch off: it starts a workspace that already exists. Changes only on the Settings page, General, Advanced — an agent cannot change it.'],
+            'spawn_enabled'          => ['group' => 'spawn', 'description' => 'Let agents start helper workspaces: 1 turns on aicli_spawn_workspace. 0 is off (default). This switch affects only helper creation. Existing workspaces can still report, and aicli_start_workspace can start a closed workspace. Changes only on the Settings page, General, Advanced — an agent cannot change it.'],
             'spawn_max_children'     => ['group' => 'spawn', 'description' => 'The most helper workspaces that run for one parent workspace at the same time, 1 to 10 (default 3). Changes only on the Settings page.'],
             'spawn_max_total'        => ['group' => 'spawn', 'description' => 'The most helper workspaces that run on this server at the same time, 1 to 20 (default 6). Changes only on the Settings page.'],
             'spawn_max_per_agent'    => ['group' => 'spawn', 'description' => 'The most helper workspaces of one agent kind that run at the same time, 1 to 10 (default 2). Changes only on the Settings page.'],
@@ -669,7 +669,8 @@ class AdminService {
             'run_daily_budget'       => ['group' => 'run', 'description' => 'The most script runs that start in 24 hours, 1 to 500 (default 6). Changes only on the Settings page.'],
             'run_cooldown_hours'     => ['group' => 'run', 'description' => 'Hours to wait before a run with the same key starts again, 0 to 720 (default 24). Changes only on the Settings page.'],
             'run_approval_hours'     => ['group' => 'run', 'description' => 'Hours that a person has to approve a run that may change things, 1 to 168 (default 24). Changes only on the Settings page.'],
-            'run_notify_routine'     => ['group' => 'run', 'description' => 'Raise an Unraid notification when a run starts: 1 is on (default), 0 is off. Warnings are always sent. Changes only on the Settings page.'],
+            'run_max_minutes'        => ['group' => 'run', 'description' => 'Minutes before the plugin closes a run that has not reported, 1 to 1440 (default 60). Changes only on the Settings page.'],
+            'run_notify_routine'     => ['group' => 'run', 'description' => 'Raise an Unraid notification when a run starts and reports done: 1 is on (default), 0 is off. Warnings are always sent. Changes only on the Settings page.'],
             // HUMAN_ACTOR_IDENTITY.md
             'human_display_name'     => ['group' => 'general', 'description' => 'The name shown after the Unraid login in the records of who acted, for example "root (John)". Empty shows the login only. Changes only on the Settings page, General, Advanced.'],
 

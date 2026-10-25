@@ -5,6 +5,7 @@
  *     <description>An agent starts a helper workspace, gives it a task, watches it and closes it
  *     (docs/specs/AGENT_SPAWN_WORKSPACE.md, issue #673). This service holds every rule of the four
  *     tools aicli_spawn_workspace, aicli_start_workspace, aicli_stop_workspace and aicli_finish_task,
+ *     including reports from script-run workspaces (docs/specs/AGENT_RUN_ENTRY_POINT.md, issue #745),
  *     the parent's answer to a helper's permission prompt (R13), the close of a helper (R14, R17), the
  *     confirm text for a person who closes a helper (R16) and the supervisor sweep that closes a helper
  *     after its report. AdminService exposes thin methods that call this class; AdminMcpTools wraps their
@@ -41,7 +42,7 @@ class SpawnService
     public const ANSWER_GAP_SECONDS = 2;
     /** The longest the spawn call waits for the pane of an agent without a prompt flag to be ready. */
     public const PANE_WAIT_SECONDS = 30;
-    /** A helper that reported done is closed only after this many seconds, so its last reply can finish. */
+    /** A reported helper or script run closes only after this many seconds, so its last reply can finish. */
     public const CLOSE_AFTER_REPORT_SECONDS = 5;
     /** The longest per-spawn time limit, in minutes (one day). */
     public const MAX_MINUTES_LIMIT = 1440;
@@ -1138,19 +1139,37 @@ class SpawnService
     // ======================================================================
 
     /**
-     * A helper reports its task as finished (spec R8). Writes RESULT.json, sets the state, emits the event
-     * `workspace.task_reported`, and sends the parent a Relay message. It closes nothing itself: with
-     * autoClose the supervisor sweep closes the helper when its pane is idle (sweepAutoClose()), because
-     * this call runs inside the pane that would be closed.
+     * A helper or script-run workspace reports its task as finished. A helper writes RESULT.json, records
+     * `workspace.task_reported`, and sends its parent a Relay message. A run delegates to AgentRunService so it
+     * updates the Notebook and the run records. Neither path closes its own pane; the supervisor does that later.
      *
      * @return array<string,mixed>
      */
     public static function finishTask(string $status, string $summary): array
     {
         try {
-            if (!self::enabled()) return ['error' => self::disabledMessage()];
             $callerId = self::callerId();
             $record = self::findRecord($callerId);
+            $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
+            $runId = (string)($spawn['run']['runId'] ?? '');
+            if ($runId !== '') {
+                if ($callerId === '' || !self::isHelper($record)) {
+                    return ['error' => 'Only a run workspace can submit this report.'];
+                }
+                $status = strtolower(trim($status));
+                if (!in_array($status, ['done', 'failed', 'blocked'], true)) {
+                    return ['error' => "The status '$status' is not valid. Use done, failed or blocked."];
+                }
+                $summary = trim($summary);
+                if ($summary === '') return ['error' => 'Give a short summary of what you did, or why you could not finish.'];
+                if (self::length($summary) > self::MAX_SUMMARY_CHARS) {
+                    return ['error' => 'The summary is too long. The limit is ' . self::MAX_SUMMARY_CHARS . ' characters. Put the detail in a file and name the file.'];
+                }
+                $safe = self::safeText($summary, self::MAX_SUMMARY_CHARS);
+                if ($safe === '') return ['error' => 'The summary could not be checked for secrets, so nothing was saved. Try again.'];
+                return AgentRunService::reportFromWorkspace($callerId, $runId, $status, $safe);
+            }
+            if (!self::enabled()) return ['error' => self::disabledMessage()];
             if ($callerId === '' || !self::isHelper($record)) {
                 return ['error' => 'Only a helper workspace can report a finished task. This workspace was not started with aicli_spawn_workspace.'];
             }
@@ -1166,7 +1185,6 @@ class SpawnService
             $safe = self::safeText($summary, self::MAX_SUMMARY_CHARS);
             if ($safe === '') return ['error' => 'The summary could not be checked for secrets, so nothing was saved. Try again.'];
 
-            $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
             $parentId = (string)($spawn['parent'] ?? $record['createdBy'] ?? '');
             $autoClose = !empty($spawn['auto_close']);
             $at = self::now();
@@ -1207,9 +1225,47 @@ class SpawnService
     }
 
     /**
-     * Close a helper for good (R14, R17): stop it, remove it from the list, and remove its worktree when the
-     * worktree is merged and clean. No approval. It never deletes a branch and never touches a workspace that
-     * is not a helper. $notify true adds the tray record (the sweep); a tool call has its own record.
+     * Save a script-run result in its task folder and mark the workspace for auto-close.
+     * This method accepts the timeout state as well as the three agent report states.
+     * AgentRunService calls it while holding the run lock.
+     *
+     * @return array{resultFile:string,report:array<string,mixed>}|array{error:string}
+     */
+    public static function recordRunReport(string $workspaceId, string $runId, string $status, string $summary, int $at): array
+    {
+        if (!in_array($status, ['done', 'failed', 'blocked', 'timed_out'], true)) return ['error' => 'The run report status is not valid.'];
+        $record = self::findRecord($workspaceId);
+        if ($record === null || (string)($record['spawn']['run']['runId'] ?? '') !== $runId) {
+            return ['error' => 'The run workspace is no longer open.'];
+        }
+        $existing = $record['spawn']['report'] ?? null;
+        if (is_array($existing)) {
+            if ((string)($existing['status'] ?? '') === $status && (string)($existing['summary'] ?? '') === $summary) {
+                return ['resultFile' => rtrim((string)$record['path'], '/') . '/' . self::TASK_DIR . '/RESULT.json', 'report' => $existing];
+            }
+            return ['error' => 'This run already has a report.'];
+        }
+        $report = ['status' => $status, 'summary' => $summary, 'at' => $at];
+        $dir = rtrim((string)($record['path'] ?? ''), '/') . '/' . self::TASK_DIR;
+        $json = json_encode($report + ['workspaceId' => $workspaceId, 'taskTitle' => (string)($record['spawn']['task_title'] ?? '')], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($json)) return ['error' => 'The report could not be encoded.'];
+        $writeError = self::writeInTaskDir((string)($record['path'] ?? ''), ['RESULT.json' => $json . "\n"]);
+        if ($writeError !== null) return ['error' => $writeError];
+        $saved = self::updateRecord($workspaceId, static function (array $rec) use ($runId, $report): array {
+            if ((string)($rec['spawn']['run']['runId'] ?? '') !== $runId || is_array($rec['spawn']['report'] ?? null)) return $rec;
+            $rec['spawn']['state'] = 'reported_done';
+            $rec['spawn']['report'] = $report;
+            if (!empty($rec['spawn']['auto_close'])) $rec['spawn']['close_pending'] = true;
+            return $rec;
+        });
+        if (!$saved) return ['error' => 'The run workspace could not be updated.'];
+        return ['resultFile' => $dir . '/RESULT.json', 'report' => $report];
+    }
+
+    /**
+     * Close a helper or script run for good (R14, R17, R26): stop it and remove it from the list. Remove a
+     * helper worktree only when it is merged and clean. No approval. It never deletes a branch. $notify true
+     * adds the helper tray record (the sweep); a script run records its close through AgentRunService.
      *
      * @return array<string,mixed>
      */
@@ -1246,6 +1302,8 @@ class SpawnService
             ConfigService::clearWorkspaceDeleting($id);
             return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace removal.'];
         }
+        $runId = (string)($spawn['run']['runId'] ?? '');
+        if ($runId !== '') AgentRunService::workspaceClosed($runId, $id);
         if (class_exists('\\AICliAgents\\Services\\EventSubscriptionStore')) {
             try { EventSubscriptionStore::reapStale(array_column($remaining, 'id')); } catch (\Throwable $e) { /* best effort */ }
         }
@@ -1268,9 +1326,11 @@ class SpawnService
         } elseif ($worktree['removed']) {
             $detail .= ' · the worktree was removed';
         }
-        self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
-            "Helper workspace '$name' closed", ['parent' => (string)($spawn['parent'] ?? ''), 'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
-        if ($notify) self::notify('Helper workspace closed: ' . $name, $detail, $id);
+        if ($runId === '') {
+            self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
+                "Helper workspace '$name' closed", ['parent' => (string)($spawn['parent'] ?? ''), 'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
+            if ($notify) self::notify('Helper workspace closed: ' . $name, $detail, $id);
+        }
         return $result;
     }
 
@@ -1284,10 +1344,10 @@ class SpawnService
     }
 
     /**
-     * Gap 5: a PERSON closed a helper in the drawer (the browser saved the list without it). The browser has
-     * stopped the session and removed the row; this finishes the job with the same rules as autoClose: the flags
-     * file goes, the Codex trust goes, and the worktree is removed only when it is merged and clean. The record
-     * is gone, so the caller passes the record it read before the save. No approval. Never throws.
+     * A PERSON closed a helper or script run in the drawer (the browser saved the list without it). The browser
+     * has stopped the session and removed the row; this finishes the clean-up. A helper also loses its flags and
+     * Codex trust, and its worktree goes only when it is merged and clean. A run records its close through
+     * AgentRunService. The record is gone, so the caller passes the copy read before the save. Never throws.
      *
      * @param array<string,mixed> $record The helper's record, read before it was removed.
      * @return array<string,mixed>
@@ -1302,15 +1362,19 @@ class SpawnService
             $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
             $parentName = (string)($spawn['parent_name'] ?? '');
             ArgsService::deleteIdArgs($id);
+            $runId = (string)($spawn['run']['runId'] ?? '');
+            if ($runId !== '') AgentRunService::workspaceClosed($runId, $id);
             self::untrustWorktreeOf($spawn, $agentId);
             $worktree = self::cleanupWorktree(is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null);
-            self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
-                "Helper workspace '$name' closed by a person", ['parent' => (string)($spawn['parent'] ?? ''), 'by' => 'person',
-                    'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
-            $detail = 'closed by a person' . ($parentName !== '' ? " · started by $parentName" : '');
-            if ($worktree['kept']) $detail .= ' · the worktree is kept: ' . $worktree['reason'];
-            elseif ($worktree['removed']) $detail .= ' · the worktree was removed';
-            self::notify('Helper workspace closed: ' . $name, $detail, $id);
+            if ($runId === '') {
+                self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
+                    "Helper workspace '$name' closed by a person", ['parent' => (string)($spawn['parent'] ?? ''), 'by' => 'person',
+                        'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
+                $detail = 'closed by a person' . ($parentName !== '' ? " · started by $parentName" : '');
+                if ($worktree['kept']) $detail .= ' · the worktree is kept: ' . $worktree['reason'];
+                elseif ($worktree['removed']) $detail .= ' · the worktree was removed';
+                self::notify('Helper workspace closed: ' . $name, $detail, $id);
+            }
             return ['helper' => true, 'workspaceId' => $id, 'worktree' => $worktree];
         } catch (\Throwable $e) {
             return ['helper' => true, 'error' => 'clean-up failed'];
@@ -1502,19 +1566,22 @@ class SpawnService
     }
 
     /**
-     * The supervisor sweep (every ~30 s). Closes each helper that reported its task and whose pane is idle
-     * again, so the agent's last reply is never cut off. A helper that is closed already, or whose pane is
-     * busy or waits for an answer, is left for the next tick. Never throws.
+     * The supervisor sweep (every ~30 s). Closes each reported helper or script run whose pane is idle again,
+     * so the agent's last reply is never cut off. A workspace that is closed already, or whose pane is busy or
+     * waits for an answer, is left for the next tick. Never throws.
      *
+     * @param bool|null $runsOnly True selects script runs, false selects helpers, and null selects both.
      * @return array{closed:array<int,string>,waiting:int}
      */
-    public static function sweepAutoClose(): array
+    public static function sweepAutoClose(?bool $runsOnly = null): array
     {
         $closed = [];
         $waiting = 0;
         try {
             foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $w) {
                 if (!is_array($w) || !self::isHelper($w) || empty($w['spawn']['close_pending'])) continue;
+                $isRun = (string)($w['spawn']['run']['runId'] ?? '') !== '';
+                if ($runsOnly !== null && $isRun !== $runsOnly) continue;
                 $id = (string)($w['id'] ?? '');
                 if ($id === '') continue;
                 $reportedAt = (int)($w['spawn']['report']['at'] ?? 0);

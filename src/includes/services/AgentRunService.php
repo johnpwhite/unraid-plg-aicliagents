@@ -7,8 +7,7 @@
  *     `aicli-run`: the input rules (R3, R4), the check of the caller script against the "Authorised scripts" list
  *     (R6 to R11), the approval of an unknown script and of a run that may change things (R10, R13), the caps
  *     (R24, R25), the notifications (R21), the tray and ledger records (R23), and the start of the workspace
- *     through SpawnService::spawnForRun() (R28). Slice 1 runs the agent as root; the run user, the temporary
- *     folder, the finish report and --wait come in later slices.</description>
+ *     through SpawnService::spawnForRun() (R28). Slice 3 records reports, waits for them, and closes runs.</description>
  *     <dependencies>RunCallerIdentity, SpawnService, AgentLaunchProfile, AgentRegistry, ValidationService,
  *     ActivityService, EventLedger, ConfigService, SecretPaths, AtomicWriteService, ProcessManager,
  *     HumanIdentity</dependencies>
@@ -56,6 +55,7 @@ final class AgentRunService
         'run_daily_budget' => '6',
         'run_cooldown_hours' => '24',
         'run_approval_hours' => '24',
+        'run_max_minutes' => '60',
         'run_notify_routine' => '1',
     ];
 
@@ -83,6 +83,8 @@ final class AgentRunService
     public static $envCleaner = null;
     /** @var int|null Replaces the longest wait for the run lock, in seconds. */
     public static ?int $lockWaitSeconds = null;
+    /** @var callable|null fn(int $milliseconds): void. Replaces the wait between CLI report checks. */
+    public static $waiter = null;
 
     /**
      * The value of a test seam. A seam counts only when the PHPUnit bootstrap ran (it defines AICLI_TEST_TMP).
@@ -324,10 +326,12 @@ final class AgentRunService
         $key = (string)($flags['key'] ?? '');
         if ($key !== '' && preg_match(self::KEY_PATTERN, $key) !== 1) return ['error' => 'The key may use letters, digits and the characters . _ : / @ - only, up to 200 characters.'];
 
-        if (array_key_exists('wait', $flags)) {
+        $waitRequested = array_key_exists('wait', $flags);
+        $waitSeconds = null;
+        if ($waitRequested) {
             $wait = (string)$flags['wait'];
-            if ($wait !== '' && (preg_match('/^\d{1,4}$/D', $wait) !== 1 || (int)$wait > self::MAX_WAIT_SECONDS)) return ['error' => '--wait is a number of seconds from 1 to ' . self::MAX_WAIT_SECONDS . '.'];
-            return ['error' => 'Waiting for the report (--wait) comes in a later slice of this feature. Start the run without it.'];
+            if ($wait !== '' && (preg_match('/^\d{1,4}$/D', $wait) !== 1 || (int)$wait < 1 || (int)$wait > self::MAX_WAIT_SECONDS)) return ['error' => '--wait is a number of seconds from 1 to ' . self::MAX_WAIT_SECONDS . '.'];
+            if ($wait !== '') $waitSeconds = (int)$wait;
         }
 
         $data = '';
@@ -348,6 +352,7 @@ final class AgentRunService
         return ['request' => [
             'agent' => $agent, 'folder' => $folder, 'prompt' => $prompt, 'title' => $title, 'mode' => $mode, 'user' => $user,
             'model' => $model, 'effort' => $effort, 'key' => $key, 'data' => trim($data) === '' ? '' : $data,
+            'waitRequested' => $waitRequested, 'waitSeconds' => $waitSeconds,
         ]];
     }
 
@@ -686,15 +691,18 @@ final class AgentRunService
             if ($req['mode'] === 'read-only') return self::holdForStart($runId, $req, $who, $entry);
             return self::proposeRun($runId, $req, $who, $entry);
         });
-        if (empty($out['reply']['begin'])) return $out;
+        if (empty($out['reply']['begin'])) {
+            return !empty($req['waitRequested']) && ($out['reply']['state'] ?? '') === 'started' ? self::waitForRun($out, $req) : $out;
+        }
         // The place is held by the record in the state `starting`. The agent starts outside the lock.
         try {
-            return self::startRun($runId, $out['reply']['request'], $who, $entry, false);
+            $started = self::startRun($runId, $out['reply']['request'], $who, $entry, false);
+            return !empty($req['waitRequested']) && ($started['reply']['state'] ?? '') === 'started' ? self::waitForRun($started, $req) : $started;
         } catch (\Throwable $e) {
             // A workspace may exist already: then the run is started, not failed (it runs, and its files stay).
             $ws = self::workspaceOfRun($runId);
             if ($ws !== '' && $ws !== '?') {
-                self::updateRun($runId, ['state' => 'started', 'workspaceId' => $ws]);
+                self::updateRun($runId, ['state' => 'started', 'startedAt' => self::now(), 'workspaceId' => $ws]);
                 return self::reply('started', 'The run started in workspace ' . $ws . ' (a fault came after the start: ' . self::safeText($e->getMessage(), 200) . ').', self::EXIT_OK, $runId, $ws);
             }
             if ($ws === '?') return self::reply('failed', 'The run may have started, but its workspace record cannot be read: ' . self::safeText($e->getMessage(), 200), self::EXIT_INTERNAL, $runId);
@@ -703,6 +711,353 @@ final class AgentRunService
             self::removeRunFiles($runId);
             return self::reply('failed', 'The run could not be started: ' . self::safeText($e->getMessage(), 300), self::EXIT_INTERNAL, $runId);
         }
+    }
+
+    /**
+     * R5: wait for a run report. A numeric --wait value bounds this caller's wait. With no value,
+     * wait for the run limit, at most 3600 seconds (waitLimitSeconds). The run continues if the caller's wait ends first.
+     *
+     * @param array{reply:array<string,mixed>,exit:int} $started
+     * @param array<string,mixed> $req
+     * @return array{reply:array<string,mixed>,exit:int}
+     */
+    private static function waitForRun(array $started, array $req): array
+    {
+        $runId = (string)($started['reply']['runId'] ?? '');
+        if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $runId) !== 1) return $started;
+        if (self::loadRun($runId) === null) return $started;
+        $seconds = self::waitLimitSeconds($req);
+        $deadline = microtime(true) + max(1, $seconds);
+        do {
+            $record = self::loadRun($runId);
+            if ($record !== null) {
+                $record = self::settle($record);
+                if (($record['state'] ?? '') === 'started' && self::runExpired($record)) {
+                    self::timeoutRun($runId);
+                    $record = self::loadRun($runId) ?? $record;
+                }
+                if (in_array((string)($record['state'] ?? ''), ['done', 'failed', 'blocked', 'timed_out', 'expired', 'rejected'], true)) {
+                    return self::waitReply($record);
+                }
+            }
+            if (microtime(true) >= $deadline) break;
+            if (self::seam('waiter') !== null) (self::seam('waiter'))(250);
+            else usleep(250000);
+        } while (true);
+
+        $record = self::loadRun($runId);
+        if ($record !== null) {
+            $record = self::settle($record);
+            if (in_array((string)($record['state'] ?? ''), ['done', 'failed', 'blocked', 'timed_out', 'expired', 'rejected'], true)) {
+                return self::waitReply($record);
+            }
+            $reply = self::waitReply($record)['reply'];
+            $reply['reason'] = 'The run is still open. The command stopped waiting, and the run continues.';
+            return ['reply' => $reply, 'exit' => (int)($reply['exitCode'] ?? self::EXIT_OK)];
+        }
+        return $started;
+    }
+
+    /** The CLI wait is limited to one hour, even when the run itself has a longer limit. @param array<string,mixed> $req */
+    private static function waitLimitSeconds(array $req): int
+    {
+        if (isset($req['waitSeconds']) && is_int($req['waitSeconds'])) {
+            return max(1, min(self::MAX_WAIT_SECONDS, $req['waitSeconds']));
+        }
+        return min(self::MAX_WAIT_SECONDS, self::intSetting('run_max_minutes', 1, 1440) * 60);
+    }
+
+    /** @param array<string,mixed> $record @return array{reply:array<string,mixed>,exit:int} */
+    private static function waitReply(array $record): array
+    {
+        $state = (string)($record['state'] ?? 'started');
+        $map = ['done' => self::EXIT_OK, 'failed' => 10, 'blocked' => 11, 'timed_out' => 12,
+            'expired' => self::EXIT_REFUSED, 'rejected' => self::EXIT_REFUSED, 'started' => self::EXIT_OK,
+            'starting' => self::EXIT_OK, 'pending_approval' => self::EXIT_PENDING];
+        $exit = $map[$state] ?? self::EXIT_INTERNAL;
+        $summary = self::safeText((string)($record['summary'] ?? ''), 2000);
+        $reason = $summary !== '' ? $summary : match ($state) {
+            'done' => 'The run reported done.',
+            'failed' => 'The run failed.',
+            'blocked' => 'The run reported that it is blocked.',
+            'timed_out' => 'The run reached its time limit.',
+            'expired' => 'The time to approve the run is over.',
+            'rejected' => 'A person rejected the run.',
+            default => 'The run is still open.',
+        };
+        $extra = ['resultFile' => (string)($record['resultFile'] ?? ''), 'notebookCard' => (string)($record['notebookCard'] ?? '')];
+        if ($summary !== '') $extra['summary'] = $summary;
+        return self::reply($state === 'expired' || $state === 'rejected' ? 'refused' : $state, $reason, $exit,
+            (string)($record['runId'] ?? ''), (string)($record['workspaceId'] ?? ''), $extra);
+    }
+
+    /** True when the configured run time limit passed. @param array<string,mixed> $record */
+    private static function runExpired(array $record): bool
+    {
+        $startedAt = (int)($record['startedAt'] ?? 0);
+        if ($startedAt <= 0) $startedAt = (int)($record['startingAt'] ?? 0);
+        if ($startedAt <= 0) $startedAt = (int)($record['ts'] ?? 0);
+        return $startedAt > 0 && self::now() - $startedAt >= self::intSetting('run_max_minutes', 1, 1440) * 60;
+    }
+
+    /** Save the report made by a run workspace. */
+    public static function reportFromWorkspace(string $workspaceId, string $runId, string $status, string $summary): array
+    {
+        if (!in_array($status, ['done', 'failed', 'blocked'], true)) return ['error' => 'The run report status is not valid.'];
+        $summary = self::safeText($summary, 2000);
+        if ($summary === '') return ['error' => 'The summary could not be checked for secrets, so nothing was saved. Try again.'];
+        $out = self::withRunLock(function () use ($workspaceId, $runId, $status, $summary): array {
+            $record = self::loadRun($runId);
+            if ($record === null || (string)($record['workspaceId'] ?? '') !== $workspaceId) {
+                return self::reply('error', 'The run record does not match this workspace.', self::EXIT_INTERNAL, $runId, $workspaceId);
+            }
+            if (($record['state'] ?? '') === 'started' && self::runExpired($record)) {
+                return self::saveReportLocked($record, 'timed_out', 'The run reached its time limit.');
+            }
+            if (in_array((string)($record['state'] ?? ''), ['done', 'failed', 'blocked', 'timed_out'], true)) {
+                if (($record['state'] ?? '') === $status && (string)($record['summary'] ?? '') === $summary) {
+                    return self::waitReply($record);
+                }
+                return self::reply('error', 'This run already has a report.', self::EXIT_INTERNAL, $runId, $workspaceId);
+            }
+            if (($record['state'] ?? '') !== 'started') {
+                return self::reply('error', 'This run is no longer open.', self::EXIT_INTERNAL, $runId, $workspaceId);
+            }
+            return self::saveReportLocked($record, $status, $summary);
+        });
+        if (in_array((string)($out['reply']['state'] ?? ''), ['done', 'failed', 'blocked', 'timed_out'], true)) {
+            return $out['reply'] + ['status' => (string)$out['reply']['state']];
+        }
+        return ['error' => (string)($out['reply']['reason'] ?? 'The report could not be saved.')];
+    }
+
+    /** Store the run and workspace report while the run lock is held. @param array<string,mixed> $record */
+    private static function saveReportLocked(array $record, string $status, string $summary): array
+    {
+        $runId = (string)($record['runId'] ?? '');
+        $workspaceId = (string)($record['workspaceId'] ?? '');
+        $summary = self::safeText($summary, 2000);
+        if ($summary === '') return self::reply('error', 'The summary could not be checked for secrets, so nothing was saved.', self::EXIT_INTERNAL, $runId, $workspaceId);
+        $saved = SpawnService::recordRunReport($workspaceId, $runId, $status, $summary, self::now());
+        if (isset($saved['error'])) return self::reply('error', (string)$saved['error'], self::EXIT_INTERNAL, $runId, $workspaceId);
+
+        $record['state'] = $status;
+        $record['summary'] = $summary;
+        $record['reportedAt'] = self::now();
+        $record['resultFile'] = (string)$saved['resultFile'];
+        $record['notebookCard'] = self::upsertNotebookCard($record);
+        if (!self::storeRun($record)) return self::reply('error', 'The report file was saved, but the run record could not be updated.', self::EXIT_INTERNAL, $runId, $workspaceId);
+
+        $who = self::runActor($record);
+        self::emit('run.reported', 'script ' . (string)($record['script'] ?? ''), 'Run reported ' . $status . ': ' . $summary,
+            ['runId' => $runId, 'workspaceId' => $workspaceId, 'key' => (string)($record['key'] ?? ''), 'status' => $status,
+                'label' => (string)($record['label'] ?? ''), 'resultFile' => (string)$saved['resultFile']], $who);
+        self::reportTrayRecord($runId, $status, $summary, $workspaceId, $record);
+        $noticeSummary = preg_replace('/\s+/u', ' ', $summary);
+        if (!is_string($noticeSummary)) $noticeSummary = $summary;
+        $noticeSummary = trim($noticeSummary);
+        if ($status === 'done') {
+            if (self::settings()['run_notify_routine'] === '1') {
+                self::notifyOnce(self::noticeKey($record), 'done', 'AICliAgents: a run is done', $noticeSummary, 'normal');
+            }
+        } else {
+            $subjectState = match ($status) {
+                'failed' => 'a run failed',
+                'blocked' => 'a run is blocked',
+                'timed_out' => 'a run ran out of time',
+                default => 'a run reported an unknown result',
+            };
+            self::notifyOnce(self::noticeKey($record), $status, 'AICliAgents: ' . $subjectState, $noticeSummary, 'warning');
+        }
+        return self::waitReply($record);
+    }
+
+    /** @param array<string,mixed> $record */
+    private static function upsertNotebookCard(array $record): string
+    {
+        try {
+            if (!class_exists('AICliAgents\\Services\\NotebookService', false)) require_once __DIR__ . '/NotebookService.php';
+            $ctx = NotebookService::contextFor('global');
+            if (isset($ctx['error'])) return '';
+            $key = (string)($record['key'] ?? '');
+            $identity = $key !== '' ? 'key:' . hash('sha256', $key) : 'run:' . (string)($record['runId'] ?? '');
+            $cardKey = hash('sha256', $identity);
+            $tag = 'run-' . substr(hash('sha256', $key !== '' ? $key : (string)($record['runId'] ?? '')), 0, 32);
+            $titleText = $key !== '' ? 'Run: ' . $key : 'Run: ' . (string)($record['title'] ?? $record['label'] ?? 'script');
+            $title = self::safeText($titleText, 180);
+            if ($title === '') $title = 'Script run';
+            $state = (string)($record['state'] ?? 'done');
+            $summary = self::safeText((string)($record['summary'] ?? ''), 2000);
+            $body = "# " . $title . "\n\nState: " . $state . "\n\n" . $summary . "\n\nRun ID: " . (string)($record['runId'] ?? '') . "\n";
+            $author = NotebookService::author((string)($record['workspaceId'] ?? ''));
+            $id = self::notebookCardId($cardKey);
+            if ($id !== '') {
+                $current = NotebookService::get($ctx, $id);
+                if (!isset($current['error'])) {
+                    $saved = NotebookService::save($ctx, $id, $body, (string)($current['artefact']['version'] ?? ''), $author);
+                    return isset($saved['error']) ? '' : 'artefact:' . $id;
+                }
+            }
+            $created = NotebookService::create($ctx, ['title' => $title, 'type' => 'markdown', 'area' => 'inbox', 'tags' => ['script-run', $tag], 'content' => $body], $author);
+            $link = (string)($created['link'] ?? '');
+            if (isset($created['error']) || !preg_match('/^artefact:(a_[0-9a-f]{12})$/D', $link, $m)) return '';
+            return self::storeNotebookCardId($cardKey, $m[1]) ? $link : '';
+        } catch (\Throwable $e) {
+            return '';
+        }
+    }
+
+    private static function notebookCardId(string $cardKey): string
+    {
+        $file = self::runsDir() . '/.notebook-cards.json';
+        if (is_link($file) || !is_file($file)) return '';
+        $data = json_decode((string)@file_get_contents($file), true);
+        $id = is_array($data) && is_array($data['cards'] ?? null) ? (string)($data['cards'][$cardKey] ?? '') : '';
+        return preg_match('/^a_[0-9a-f]{12}$/D', $id) === 1 ? $id : '';
+    }
+
+    private static function storeNotebookCardId(string $cardKey, string $id): bool
+    {
+        $dir = self::runsDir();
+        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) return false;
+        $file = $dir . '/.notebook-cards.json';
+        $data = [];
+        if (!is_link($file) && is_file($file)) {
+            $loaded = json_decode((string)@file_get_contents($file), true);
+            if (is_array($loaded) && is_array($loaded['cards'] ?? null)) $data = $loaded['cards'];
+        }
+        $data[$cardKey] = $id;
+        return AtomicWriteService::writeJson($file, ['schema' => 1, 'cards' => $data]);
+    }
+
+    /** @param array<string,mixed> $record */
+    private static function reportTrayRecord(string $runId, string $status, string $summary, string $workspaceId, array $record): void
+    {
+        try {
+            $opId = 'runreport_' . $runId;
+            ActivityService::register($opId, 'admin', 'Script run ' . $status, ['actor' => 'script ' . (string)($record['script'] ?? ''), 'meta' => [
+                'tool' => 'aicli_run', 'kind' => 'record', 'workspaceId' => $workspaceId,
+                'by' => ['agentName' => 'Script run', 'workspaceName' => ''],
+            ]]);
+            ActivityService::finish($opId, self::safeText($summary, 300) ?: 'The run reported ' . $status . '.');
+        } catch (\Throwable $e) {
+            // Best effort.
+        }
+    }
+
+    /** Close a timed-out workspace. The next supervisor tick retries a failed close. */
+    private static function closeRunWorkspace(string $runId, string $workspaceId): void
+    {
+        if ($workspaceId === '' || self::workspaceOfRun($runId) !== $workspaceId) return;
+        try { SpawnService::closeHelper($workspaceId, true); } catch (\Throwable $e) { /* next tick retries */ }
+    }
+
+    /** Close runs that reached their time limit. The sweep also retries a timed-out workspace close. @return array{timedOut:list<string>,closed:list<string>} */
+    public static function sweepTimeouts(): array
+    {
+        $timedOut = [];
+        $closed = [];
+        try {
+            foreach (glob(self::runsDir() . '/*.json') ?: [] as $file) {
+                $record = json_decode((string)@file_get_contents($file), true);
+                if (!is_array($record) || !isset($record['runId'])) continue;
+                $runId = (string)$record['runId'];
+                $workspaceId = (string)($record['workspaceId'] ?? '');
+                if ($workspaceId === '') continue;
+                if (self::workspaceOfRun($runId) !== $workspaceId) {
+                    // #785: the workspace row is gone, but the close was not recorded (workspaceClosed gives up when
+                    // the run lock stays busy). Record it now, so the run gets closedAt, its notice and its clean-up.
+                    if (empty($record['closedAt'])) {
+                        self::workspaceClosed($runId, $workspaceId);
+                        $closed[] = $runId;
+                    }
+                    continue;
+                }
+                $state = (string)($record['state'] ?? '');
+                if ($state === 'started' && self::runExpired($record)) {
+                    $result = self::timeoutRun($runId);
+                    if (($result['reply']['state'] ?? '') === 'timed_out') $timedOut[] = $runId;
+                } elseif (in_array($state, ['done', 'failed', 'blocked', 'timed_out'], true) && self::runExpired($record)) {
+                    if ($state !== 'timed_out') {
+                        self::notifyOnce(self::noticeKey($record), 'time_limit_close', 'AICliAgents: a run closed at its time limit',
+                            'The run workspace reached its time limit and was closed.', 'warning');
+                    }
+                    self::closeRunWorkspace($runId, $workspaceId);
+                }
+                if (self::workspaceOfRun($runId) === '') $closed[] = $runId;
+            }
+        } catch (\Throwable $e) {
+            // The supervisor tick tries again.
+        }
+        return ['timedOut' => $timedOut, 'closed' => $closed];
+    }
+
+    private static function timeoutRun(string $runId): array
+    {
+        $out = self::withRunLock(function () use ($runId): array {
+            $record = self::loadRun($runId);
+            if ($record === null) return self::reply('failed', 'The run record could not be read.', self::EXIT_INTERNAL, $runId);
+            if (($record['state'] ?? '') !== 'started' || !self::runExpired($record)) return self::waitReply($record);
+            return self::saveReportLocked($record, 'timed_out', 'The run reached its time limit.');
+        });
+        $workspaceId = (string)($out['reply']['workspaceId'] ?? '');
+        if (($out['reply']['state'] ?? '') === 'timed_out') self::closeRunWorkspace($runId, $workspaceId);
+        return $out;
+    }
+
+    /** Mark a run closed and remove its private state after SpawnService removes its workspace row. */
+    public static function workspaceClosed(string $runId, string $workspaceId): void
+    {
+        $out = self::withRunLock(function () use ($runId, $workspaceId): array {
+            $record = self::loadRun($runId);
+            if ($record === null || (string)($record['workspaceId'] ?? '') !== $workspaceId || self::workspaceOfRun($runId) !== '') {
+                return self::reply('closed', '', self::EXIT_OK, $runId, $workspaceId, ['changed' => false]);
+            }
+            if (!empty($record['closedAt'])) {
+                return self::reply('closed', '', self::EXIT_OK, $runId, $workspaceId, ['changed' => false]);
+            }
+            $failedBeforeReport = ($record['state'] ?? '') === 'started';
+            if ($failedBeforeReport) {
+                $record['state'] = 'failed';
+                $record['summary'] = 'The run workspace closed before it reported.';
+                $record['reportedAt'] = self::now();
+            }
+            $record['closedAt'] = self::now();
+            if (!self::storeRun($record)) {
+                return self::reply('held', 'The closed run could not be saved.', self::EXIT_HELD, $runId, $workspaceId);
+            }
+            return self::reply('closed', '', self::EXIT_OK, $runId, $workspaceId,
+                ['changed' => true, 'failedBeforeReport' => $failedBeforeReport, 'record' => $record]);
+        });
+        if (empty($out['reply']['changed'])) return;
+        $record = (array)($out['reply']['record'] ?? []);
+        if (!empty($out['reply']['failedBeforeReport'])) {
+            self::notifyOnce(self::noticeKey($record), 'failed', 'AICliAgents: a run failed', (string)$record['summary'], 'warning');
+        }
+        self::emit('run.closed', 'script ' . (string)($record['script'] ?? ''), 'Run workspace closed',
+            ['runId' => $runId, 'workspaceId' => $workspaceId, 'key' => (string)($record['key'] ?? ''),
+                'label' => (string)($record['label'] ?? ''), 'state' => (string)($record['state'] ?? '')], self::runActor($record));
+        try {
+            ActivityService::register('runclosed_' . $runId, 'admin', 'Script run closed', ['actor' => 'script ' . (string)($record['script'] ?? ''), 'meta' => [
+                'tool' => 'aicli_run', 'kind' => 'record', 'workspaceId' => $workspaceId,
+                'by' => ['agentName' => 'Script run', 'workspaceName' => ''],
+            ]]);
+            ActivityService::finish('runclosed_' . $runId, 'The run workspace closed. The Notebook card and result stay available.');
+        } catch (\Throwable $e) { /* best effort */ }
+        self::removeRunFiles($runId);
+    }
+
+    /** @param array<string,mixed> $record @return array<string,mixed> */
+    private static function runActor(array $record): array
+    {
+        return ['path' => (string)($record['script'] ?? ''), 'sha256' => (string)($record['sha256'] ?? ''),
+            'uid' => (int)($record['uid'] ?? 0), 'userScript' => (string)($record['userScript'] ?? '')];
+    }
+
+    /** @param array<string,mixed> $record */
+    private static function noticeKey(array $record): string
+    {
+        return (string)($record['key'] ?? '') !== '' ? (string)$record['key'] : (string)($record['runId'] ?? '');
     }
 
     /**
@@ -786,7 +1141,7 @@ final class AgentRunService
                 if (self::isOpen($r)) {
                     return ['state' => 'duplicate', 'reason' => 'A run with this key is open already (run ' . $r['runId'] . ').', 'exit' => self::EXIT_DUPLICATE, 'openRunId' => (string)$r['runId']];
                 }
-                if (in_array($r['state'] ?? '', ['started', 'starting', 'pending_approval'], true) && $cool > 0 && ((int)($r['ts'] ?? 0) + $cool) > $now) {
+                if (in_array($r['state'] ?? '', ['started', 'starting', 'pending_approval', 'done', 'failed', 'blocked', 'timed_out'], true) && $cool > 0 && ((int)($r['ts'] ?? 0) + $cool) > $now) {
                     return ['state' => 'duplicate', 'reason' => 'A run with this key started less than ' . ($cool / 3600) . ' hours ago (run ' . $r['runId'] . ').', 'exit' => self::EXIT_DUPLICATE, 'openRunId' => (string)$r['runId']];
                 }
             }
@@ -920,6 +1275,7 @@ final class AgentRunService
         unset($req['data']);
         // No record means no count for the caps, the budget and the key. A run without a record does not start.
         $saved = self::storeRun(['runId' => $runId, 'ts' => self::now(), 'script' => $who['path'], 'sha256' => $who['sha256'], 'label' => $entry['label'],
+            'uid' => (int)$who['uid'], 'userScript' => (string)$who['userScript'], 'title' => $req['title'],
             'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'state' => 'starting', 'opId' => '', 'workspaceId' => '',
             'startingAt' => self::now(), 'startingPid' => self::myPid(), 'startingPidStart' => self::processStart(self::myPid())]);
         if (!$saved) {
@@ -961,6 +1317,7 @@ final class AgentRunService
         }
         ActivityService::update($opId, ['actor' => 'script ' . $who['path']]);
         self::storeRun(['runId' => $runId, 'ts' => self::now(), 'script' => $who['path'], 'sha256' => $who['sha256'], 'label' => $entry['label'],
+            'uid' => (int)$who['uid'], 'userScript' => (string)$who['userScript'], 'title' => $req['title'],
             'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'state' => 'pending_approval', 'opId' => $opId, 'workspaceId' => '', 'expiresAt' => $expiresAt]);
         self::emit('run.approval_needed', 'script ' . $who['path'], "Approval needed for run: {$req['title']}", ['runId' => $runId, 'opId' => $opId, 'label' => $entry['label'], 'agent' => $req['agent'], 'key' => $req['key']], $who);
         self::notifyOnce($req['key'] !== '' ? $req['key'] : $runId, 'approval', 'AICliAgents: a run needs your approval', "The script '{$entry['label']}' asks to run {$req['agent']} (" . $req['mode'] . '). Approve or reject it in the Activity tray.', 'warning');
@@ -1110,8 +1467,9 @@ final class AgentRunService
         $wsId = (string)($started['workspaceId'] ?? $started['id'] ?? '');
         $existing = self::loadRun($runId);
         self::storeRun(['runId' => $runId, 'ts' => $existing['ts'] ?? self::now(), 'script' => $who['path'], 'sha256' => $who['sha256'], 'label' => $entry['label'],
-            'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'state' => 'started',
-            'opId' => $existing['opId'] ?? '', 'workspaceId' => $wsId]);
+            'uid' => (int)($existing['uid'] ?? $who['uid']), 'userScript' => (string)($existing['userScript'] ?? $who['userScript']),
+            'title' => (string)($existing['title'] ?? $req['title']), 'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'],
+            'state' => 'started', 'startedAt' => self::now(), 'opId' => $existing['opId'] ?? '', 'workspaceId' => $wsId]);
         self::emit('run.started', 'script ' . $who['path'], "Run started: {$req['title']}", ['runId' => $runId, 'workspaceId' => $wsId, 'agent' => $req['agent'], 'mode' => $req['mode'], 'key' => $req['key'], 'label' => $entry['label'], 'sha256' => $who['sha256']], $who);
         // The title, the folder and the path can hold a secret (the title and the folder come from the caller): redact them.
         self::trayRecord($runId, 'Run started: ' . self::safeText((string)$req['title'], 120), 'Script ' . self::safeText((string)$who['path'], 300) . ' started ' . $req['agent'] . ' in ' . self::safeText((string)$req['folder'], 300) . ' (' . $req['mode'] . ').', $wsId, self::safeText((string)$who['path'], 300));
@@ -1198,8 +1556,8 @@ final class AgentRunService
     }
 
     /**
-     * The run records that started at or after $since, optionally for one script path. Runs that did not
-     * start (failed, expired) do not count.
+     * The run records requested at or after $since, optionally for one script path. Completed runs count.
+     * A run that failed before it started, or an approval that expired, does not count.
      *
      * @return list<array<string,mixed>>
      */
@@ -1210,7 +1568,10 @@ final class AgentRunService
             $r = json_decode((string)@file_get_contents($file), true);
             if (!is_array($r) || !isset($r['runId'])) continue;
             $r = self::settle($r);
-            if (!in_array($r['state'] ?? '', ['started', 'starting', 'pending_approval'], true)) continue;
+            $state = (string)($r['state'] ?? '');
+            $counted = in_array($state, ['starting', 'pending_approval', 'started'], true)
+                || (in_array($state, ['done', 'failed', 'blocked', 'timed_out'], true) && (!empty($r['startedAt']) || !empty($r['reportedAt'])));
+            if (!$counted) continue;
             if ((int)($r['ts'] ?? 0) < $since) continue;
             if ($scriptPath !== '' && ($r['script'] ?? '') !== $scriptPath) continue;
             $out[] = $r;
@@ -1251,6 +1612,7 @@ final class AgentRunService
             if ($ws !== '') {
                 $r['state'] = 'started';
                 $r['workspaceId'] = $ws;
+                if (empty($r['startedAt'])) $r['startedAt'] = self::now();
                 self::storeRun($r);
                 return $r;
             }
@@ -1296,9 +1658,25 @@ final class AgentRunService
         if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $runId) !== 1) return;
         if (self::workspaceOfRun($runId) !== '') return;
         $dir = self::runsDir() . '/' . $runId . '.d';
-        foreach (glob($dir . '/*') ?: [] as $f) @unlink($f);
-        @rmdir($dir);
+        self::removeTreeNoFollow($dir);
         @unlink(self::runsDir() . '/' . $runId . '.mcp.json');
+    }
+
+    /** Remove one run folder without following a link at any depth. */
+    private static function removeTreeNoFollow(string $path): void
+    {
+        $st = @lstat($path);
+        if ($st === false) return;
+        $kind = $st['mode'] & 0170000;
+        if ($kind !== 0040000 || is_link($path)) {
+            @unlink($path);
+            return;
+        }
+        foreach (scandir($path) ?: [] as $name) {
+            if ($name === '.' || $name === '..') continue;
+            self::removeTreeNoFollow($path . '/' . $name);
+        }
+        @rmdir($path);
     }
 
     /**

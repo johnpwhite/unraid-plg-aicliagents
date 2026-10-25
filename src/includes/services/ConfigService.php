@@ -148,16 +148,18 @@ class ConfigService {
             'spawn_max_total'                      => '6',
             'spawn_max_per_agent'                  => '2',
             'spawn_allow_unattended'               => '0',
-            // AGENT_RUN_ENTRY_POINT.md (#745, slice 1): a script on the server starts an agent run through
+            // AGENT_RUN_ENTRY_POINT.md (#745): a script on the server starts an agent run through
             // `aicli-run`. A person changes these on Settings, Script runs only: none is on the agent allow-list.
             // run_enabled is the master switch (off on a fresh install). run_max_concurrent: runs open at one time.
             // run_daily_budget: runs started in 24 hours. run_cooldown_hours: wait before one key runs again.
-            // run_approval_hours: time to approve a run. run_notify_routine: notify at the start of a run.
+            // run_approval_hours: time to approve a run. run_max_minutes: run time limit.
+            // run_notify_routine: notify at the start and end of a run.
             'run_enabled'                          => '0',
             'run_max_concurrent'                   => '2',
             'run_daily_budget'                     => '6',
             'run_cooldown_hours'                   => '24',
             'run_approval_hours'                   => '24',
+            'run_max_minutes'                      => '60',
             'run_notify_routine'                   => '1',
             // HUMAN_ACTOR_IDENTITY.md: the name shown after the Unraid login in the records of who acted,
             // for example "root (John)". Empty shows the login only. Attribution only, never a right.
@@ -535,7 +537,7 @@ class ConfigService {
                 $newConfig[$runFlag] = ((string)$newConfig[$runFlag] === '1') ? '1' : '0';
             }
         }
-        foreach (['run_max_concurrent' => [1, 10, 2], 'run_daily_budget' => [1, 500, 6], 'run_cooldown_hours' => [0, 720, 24], 'run_approval_hours' => [1, 168, 24]] as $runCap => [$runMin, $runMax, $runDefault]) {
+        foreach (['run_max_concurrent' => [1, 10, 2], 'run_daily_budget' => [1, 500, 6], 'run_cooldown_hours' => [0, 720, 24], 'run_approval_hours' => [1, 168, 24], 'run_max_minutes' => [1, 1440, 60]] as $runCap => [$runMin, $runMax, $runDefault]) {
             if (array_key_exists($runCap, $newConfig)) {
                 $runRaw = $newConfig[$runCap];
                 $runOk = is_scalar($runRaw) && preg_match('/^\d{1,4}$/D', (string)$runRaw) === 1

@@ -159,8 +159,9 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
 - `aicli_start_workspace` — start any closed workspace. It works when the
   helper switch is off. `aicli_stop_workspace` — close a workspace that YOU
   created (for example a helper). See "Start a helper workspace" below.
-- `aicli_finish_task` — from a HELPER workspace only: report that your task is
-  done, failed or blocked. See "Start a helper workspace" below.
+- `aicli_finish_task` — from a helper workspace or a script run: report that your
+  task is done, failed or blocked. A script run saves its report and updates its
+  Notebook card. See "Start a helper workspace" below for helpers.
 - `aicli_propose_autocontinue_pattern` — add one auto-continue pattern (with
   the screen lines it is for) to the operator's list. See "Auto-continue
   patterns" below before your first call.

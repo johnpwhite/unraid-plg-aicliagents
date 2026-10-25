@@ -452,7 +452,7 @@ const ADMIN_AGENT_USAGE = [
     'artefact-secret' => 'artefact-secret <id> <field> -- CHANGES state; the secret VALUE is read from stdin (never argv) and is never printed',
     'artefact-share' => 'artefact-share <id> <workspaceId> -- CHANGES state; copies into that workspace\'s notebook inbox',
     'artefact-purge' => 'artefact-purge <id> -- PROPOSES ONLY; a human must approve in the Manager UI',
-    'run' => 'run --agent=<id> (--folder=<path> | --temp) [--prompt=<text> | --prompt-file=<path> | standard input] [--title=<text>] [--mode=read-only|may-change] [--model=<m>] [--effort=<e>] [--key=<key>] [--data-file=<path>] -- STARTS an agent run for a script on the Authorised scripts list (AGENT_RUN_ENTRY_POINT.md); root only; exit codes: 0 started, 2 bad input, 3 off, 4 not root, 20 pending approval, 21 refused, 22 duplicate, 23 held',
+    'run' => 'run --agent=<id> (--folder=<path> | --temp) [--prompt=<text> | --prompt-file=<path> | standard input] [--title=<text>] [--mode=read-only|may-change] [--model=<m>] [--effort=<e>] [--key=<key>] [--data-file=<path>] [--wait[=<seconds>]] -- STARTS an agent run for an authorised script; root only; --wait waits at most 3600 seconds; check the JSON state because exit 0 means started or done; may-change returns at once with exit 20 while it waits for approval; exit codes: 0 started or done, 2 bad input, 3 off, 4 not root, 10 failed, 11 blocked, 12 timed out, 20 pending approval, 21 refused, 22 duplicate, 23 held',
     'help' => 'help',
 ];
 

@@ -16,6 +16,7 @@ $_SERVER['DOCUMENT_ROOT'] = '/usr/local/emhttp';
 require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\EventActor;
+use AICliAgents\Services\AgentRunService;
 use AICliAgents\Services\SpawnService;
 
 if (class_exists('\AICliAgents\Services\EventActor')) {
@@ -25,6 +26,10 @@ if (class_exists('\AICliAgents\Services\EventActor')) {
 try {
     // The clean-up after a person closed a helper does not depend on the switch: the helper exists already.
     SpawnService::sweepPersonClosed();
+    // An existing script run must close at its time limit, even when new helper work is turned off.
+    AgentRunService::sweepTimeouts();
+    // Script runs also close after a report when helper work is off; this sweep selects only run workspaces.
+    SpawnService::sweepAutoClose(true);
     // The switch is read like every other one: only the string "1" means on. When it is off, a helper that
     // reported stays in the list until a person closes it.
     if (!SpawnService::enabled()) {
