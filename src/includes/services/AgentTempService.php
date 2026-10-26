@@ -200,6 +200,27 @@ class AgentTempService
         return $rows;
     }
 
+    /** The folder that holds the RAM temporary folders of Codex: <mount root>/agent-tmp (#808). */
+    public static function codexRamRoot(): string
+    {
+        require_once __DIR__ . '/StoragePathResolver.php';
+        $e = getenv('AICLI_AGENT_TMP_CODEX_ROOT');
+        return ($e !== false && $e !== '') ? rtrim($e, '/') : rtrim(StoragePathResolver::mountRoot(), '/') . '/agent-tmp';
+    }
+
+    /** Bytes in <mount root>/agent-tmp/<user> (real folders only). Background only. */
+    public static function codexRamBytes(?callable $du = null): int
+    {
+        $du = $du ?? [BootSpaceService::class, 'duBytes'];
+        $total = 0;
+        try {
+            foreach (self::subdirs(self::codexRamRoot()) as $d) $total += (int)$du($d);
+        } catch (\Throwable $e) {
+            return 0;   // a test without a state root, or a folder that cannot be read
+        }
+        return $total;
+    }
+
     /** @return string[] /tmp/claude-<uid> folders (real folders, not links). */
     private static function claudeRoots(): array
     {
@@ -348,6 +369,8 @@ class AgentTempService
         $ram = 0;
         $closed = 0;
         $count = 0;
+        // #808: the RAM folder of Codex counts in the total. It has no session folders, so a clean-up never removes it.
+        $ram += (int)($seams['codex_bytes'] ?? (isset($seams['sessions']) ? 0 : self::codexRamBytes($seams['du'] ?? null)));
         foreach ($rows as $r) {
             $ram += (int)$r['bytes'];
             if (!$inUse((string)$r['path'])) { $closed += (int)$r['bytes']; $count++; }

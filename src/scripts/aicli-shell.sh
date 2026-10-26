@@ -542,6 +542,25 @@ PRIOEOF
         printf 'export TMPDIR=%q\n' "$_agent_tmp_dir" >> "$RUN_SCRIPT"
         printf 'export CLAUDE_CODE_TMPDIR=%q\n' "$_agent_tmp_dir" >> "$RUN_SCRIPT"
     fi
+    # #808: Codex refuses to make its helper commands when CODEX_HOME is under the temporary
+    # folder of the host (TMPDIR, or /tmp when TMPDIR is unset), and every agent home here is
+    # under the plugin state folder in RAM. In RAM mode Codex gets its own RAM folder next to the homes,
+    # not above them: ${MOUNT_ROOT}/agent-tmp/<user>, mode 700, owned by the user. Other agents
+    # keep /tmp. A problem logs nothing and never stops the launch (Codex only warns then).
+    if [ -z "$_agent_tmp_dir" ] && [ "$AGENT_ID" = "codex-cli" ]; then
+        _codex_tmp_user="${TARGET_USER:-root}"
+        case "$_codex_tmp_user" in ''|*[!A-Za-z0-9._-]*) _codex_tmp_user="" ;; esac
+        if [ -n "$_codex_tmp_user" ]; then
+            _codex_tmp_dir="${MOUNT_ROOT}/agent-tmp/${_codex_tmp_user}"
+            if mkdir -p "${MOUNT_ROOT}/agent-tmp" 2>/dev/null && chmod 711 "${MOUNT_ROOT}/agent-tmp" 2>/dev/null \
+               && mkdir -p -m 700 "$_codex_tmp_dir" 2>/dev/null && chmod 700 "$_codex_tmp_dir" 2>/dev/null; then
+                if [ "$(id -u)" = "0" ] && [ "$_codex_tmp_user" != "root" ]; then
+                    chown "$_codex_tmp_user" "$_codex_tmp_dir" 2>/dev/null || true
+                fi
+                [ -w "$_codex_tmp_dir" ] && printf 'export TMPDIR=%q\n' "$_codex_tmp_dir" >> "$RUN_SCRIPT"
+            fi
+        fi
+    fi
     # AGENT_TMP end
 
     printf 'export AICLI_SESSION_ID=%q\n' "$ID" >> "$RUN_SCRIPT"
