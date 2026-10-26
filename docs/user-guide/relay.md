@@ -150,6 +150,8 @@ The owner list changes as you pick. There is no Save button. Choose **No owner**
 
 If you have no workspace yet, the row offers **Create a workspace**. It opens the workspace picker.
 
+The table lists only topics that can take an owner. **agent.message** (news that every agent reads) and **platform.unraid.notification** (Unraid notices) need no owner, so they are not in it.
+
 #### An owner you closed
 
 Closing an owner's tab pauses it. The assignment stays. The list then shows the workspace name and agent with the note "closed, reopens on Start". Press **Start now**. Expect: "Topic owner reopened and started". The plugin reopens the workspace in the drawer from its saved details. If the plugin has no saved details, the list shows the session id and "not in drawer", and **Start now** fails with "Selected workspace no longer exists". Choose another owner in that case.
@@ -294,6 +296,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The Topic owners table no longer lists agent.message and the notification topic, which take no owner; a note under the table says so. Issue #803.
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-23** — A parent can answer a permission question of its helper (allow once only). You see a question before you close a helper that may lose work. A message to a stopped workspace waits and is delivered when the workspace starts. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-22** — The Agent Relay card has the same header as the other Settings tabs, with a status line and an (i) button. The intro text is behind the (i). Each check box is part of a label that is at least 44 px tall. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.

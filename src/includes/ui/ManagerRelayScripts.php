@@ -20,7 +20,7 @@ function relayLoadTopics() {
         + '<span style="font-size:12px;opacity:.75;flex:1 1 auto;min-width:0;">'+$('<span>').text(t.description || '').html()+'</span>'
         + '<span style="flex:0 0 auto">'+suffix+'</span>'
         + '<span style="flex:0 0 auto;margin-left:auto">'+buttons+'</span></div>');
-      if (t.state === 'active') { select.append($('<option>').val(t.topic).text(t.topic)); if (!t.subscription_only) relayOwnerTopics.push(t); }
+      if (t.state === 'active') { select.append($('<option>').val(t.topic).text(t.topic)); if (!t.subscription_only && !t.no_owner) relayOwnerTopics.push(t); }
     });
     $('[data-archive]').off('click').on('click', function(){ relayArchiveTopic($(this).data('archive')); });
     $('[data-remove]').off('click').on('click', function(){ relayRemoveTopic($(this).data('remove')); });

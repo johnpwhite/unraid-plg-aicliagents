@@ -891,6 +891,7 @@ class AgentRelayService {
     public static function setActor(string $topic, string $sessionId, bool $startOnBoot = true): array {
         $topicRecord=array_values(array_filter(self::topicCatalog(), fn($record) => ($record['topic'] ?? '') === $topic));
         if (!$topicRecord || !empty($topicRecord[0]['subscription_only'])) return ['status'=>'error','message'=>'Choose an active, concrete Relay topic.'];
+        if (!empty($topicRecord[0]['no_owner'])) return ['status'=>'error','message'=>'agent.message is news for all agents and takes no owner.'];
         if (trim($sessionId) === '') {
             // R-057: actors.json is read, changed and written back under the 'actors' lock.
             return self::locked('actors', function () use ($topic): array {
@@ -1139,7 +1140,9 @@ class AgentRelayService {
             // channel to curate. Flagged so the Manager hides it from the topic
             // list and the owner table instead of offering edits that would
             // break mirroring.
-            $catalog[] = ['topic'=>$topic, 'description'=>(string)($override['description'] ?? $description), 'builtin'=>true, 'state'=>$state, 'subscription_only'=>substr($topic, -2) === '.*', 'managed'=>$topic === self::NOTIFICATION_TOPIC];
+            // #803: agent.message is the news topic every workspace subscribes to. Nobody handles work on it, so it
+            // takes no owner: the owner table leaves it out and setActor() refuses it. Remotes may still send to it.
+            $catalog[] = ['topic'=>$topic, 'description'=>(string)($override['description'] ?? $description), 'builtin'=>true, 'state'=>$state, 'subscription_only'=>substr($topic, -2) === '.*', 'managed'=>$topic === self::NOTIFICATION_TOPIC, 'no_owner'=>$topic === self::DEFAULT_SUBSCRIPTION];
         }
         foreach ($records as $topic => $record) {
             if (isset(self::BUILTIN_TOPICS[$topic])) continue; // handled as an override above

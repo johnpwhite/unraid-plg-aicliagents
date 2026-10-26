@@ -214,7 +214,7 @@ require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open: the shared card 
         <p style="margin:10px 0 10px;opacity:.7;font-size:12px;">
           An owner is the one workspace responsible for a topic, for example your local LLM agent owning the
           LLM service topic; it receives work requests, is subscribed automatically, and can start on its own
-          at boot. Every topic is listed below so you can see which ones have an owner, and changes save as
+          at boot. Every topic that can take an owner is listed below, and changes save as
           you make them.
         </p>
         <!-- Every topic in one place. The previous single topic-plus-owner pair
@@ -224,6 +224,7 @@ require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open: the shared card 
         <div id="relay-owner-table" role="table" aria-label="Topic owners" style="display:grid;gap:0;font-size:13px;">
           <span style="opacity:.7">Loading topics…</span>
         </div>
+        <p data-testid="relay-owner-system-note" style="margin:8px 0 0;opacity:.7;font-size:12px;">agent.message (news to all agents) and platform.unraid.notification (Unraid notices) need no owner, so they are not listed.</p>
       </details>
 
       <details style="border:1px solid var(--border-color,#e0e0e0);border-radius:6px;padding:10px 14px;">
