@@ -158,8 +158,8 @@ class AdminMcpTools {
         'aicli_propose_autocontinue_pattern' => 'change',
         // AGENT_SPAWN_WORKSPACE.md (#673): an agent starts a helper workspace. The new workspace keeps all its
         // files; closing a helper is a Tier 2 step that only its creator or a person can take (decision 2), so
-        // none of these four needs the Tier 3 approval. Spawn, stop and finish stay off until a person turns on
-        // "Let agents start helper workspaces". Start works with the switch off (#542): it opens an existing workspace.
+        // none of these four needs the Tier 3 approval. Spawn and finish stay off until a person turns on
+        // "Let agents start helper workspaces". Start (#542) and the creator's stop (#779) work with the switch off.
         'aicli_spawn_workspace'  => 'change',
         'aicli_start_workspace'  => 'change',
         'aicli_stop_workspace'   => 'change',

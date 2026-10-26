@@ -1078,7 +1078,9 @@ class SpawnService
     public static function stopWorkspace(string $id): array
     {
         try {
-            if (!self::enabled()) return ['error' => self::disabledMessage()];
+            // #779 (John, 2026-10-26): the creator may close a workspace it made with no approval, also while
+            // "Let agents start helper workspaces" is off. The switch guards making helpers, not closing them;
+            // refuseUnlessCreator() below still refuses every other agent. A person may stop any workspace.
             $id = trim($id);
             $record = self::findRecord($id);
             if ($record === null) return ['error' => "No workspace with id '$id' was found. It may be closed already."];
