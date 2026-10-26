@@ -128,7 +128,7 @@ Every page has a **Properties** button (the "i" icon). The panel shows the type,
 
 ### The compact header
 
-An open page has a header of two lines. The first line holds the title and the action buttons. The second line holds the flag, the time of the last update and **Not committed** when the file differs from the last git commit. The rest is in **Properties**. In a header narrower than 760 pixels, **Read aloud**, **Ask the agent to refresh this note**, **History**, **Go to comments** and **Properties** move into the **More actions** menu. The title may use two lines.
+An open page has a header of two lines. The first line holds the title and the action buttons. The second line holds the flag, the time of the last update and **Not committed** when the file differs from the last git commit. The rest is in **Properties**. The button with the notebook and three small stars (**Ask the agent to refresh this note**) shows at every width. In a header narrower than 760 pixels, **Read aloud**, **History**, **Go to comments** and **Properties** move into the **More actions** menu. The title may use two lines.
 
 ### The Wiki page
 

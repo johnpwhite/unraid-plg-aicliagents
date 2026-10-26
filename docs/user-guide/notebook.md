@@ -41,7 +41,10 @@ The list shows one line for each note: a type icon, the title, who made it and w
 | **Inbox** | New things from agents, for you to look at. An agent puts a note here unless it names another area. |
 | **Working** | Work in progress, such as the scratch notes of an agent. |
 | **Notes** | Notes that you keep. |
+| **Voice mail** | The spoken messages that agents copy into the Notebook. It sits after **Notes** and before **Archive**. See below. |
 | **Archive** | Notes that are put away. The Archive never deletes by itself. |
+
+**Voice mail** is closed at first, so spoken messages do not bury your notes. Its count shows how many are new, for example "Voice mail · 3 new". With none new, it shows the total. Press the heading, or press Enter or Space on it, to open or close it. The Notebook remembers your choice in this browser. A spoken message that you move to the **Archive** shows under **Archive**. A search that finds a spoken message opens the heading.
 
 Pinned notes stay at the top of their area. The rest are sorted by the time of the last change.
 
@@ -117,7 +120,8 @@ An open note has a header with the title and a row of icon buttons. A line below
 - **Edit in the editor** opens the file of the note in the file editor.
 - The star pins the note to the top of its area. See "Pins" below.
 - **Open in new tab** opens the note on its own page.
-- **Read aloud**, **Ask the agent to refresh this note**, **History**, **Go to comments** and **Properties** show as icons when the drawer is wide (760 pixels or more). In a narrower drawer they move into the **More actions** menu.
+- The button with the notebook and three small stars (**Ask the agent to refresh this note**) shows at every drawer width.
+- **Read aloud**, **History**, **Go to comments** and **Properties** show as icons when the drawer is wide (760 pixels or more). In a narrower drawer they move into the **More actions** menu.
 - **More actions** also holds **Copy link**, **Move to**, **Share a copy to**, **Export**, **Lock** and **Archive**.
 
 Several open notes show as tabs above the note. A tab that does not fit goes into an "N more" menu. Press the cross on a tab, or press the middle mouse button, to close it. Alt+] and Alt+[ step to the next and the previous tab.
@@ -350,6 +354,7 @@ A notebook is a folder called notebook in the root of the project. It holds one 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The Notebook list has a **Voice mail** heading for spoken messages. It sits after **Notes**, is closed at first, and shows how many are new. Spec `docs/specs/NOTEBOOK_VOICE_MAIL_SECTION.md`, issue #811.
 - **2026-10-25** — On a phone, the Project / Global switch and the Inbox, Working, Notes and Archive headings are big enough for a finger. The grey help text in the Notebook is darker, so it is easy to read in all four Unraid themes. Issue #768.
 - **2026-10-24** — On a phone, the editor and the Notebook fields use 16px text. The page no longer zooms in when you tap a field, so Save and the close button stay on the screen. Issue #766.
 - **2026-10-22** — The Notebook settings have new labels: **Show the Wiki page**, **Folder name**, **Production keys on connection cards**, **Speak a notice when a page waits for me** and **Quiet hours**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
