@@ -928,4 +928,38 @@ $(function() {
         if (document.visibilityState === 'visible' && $('#tab-debug').hasClass('active')) refreshLog();
     }, 5000);
 });
+
+// Shared keyboard handling for the Home backup, Automatic continue and Script runs dialogs.
+window.aicliDialogTrapKeys = function (dialog, onClose) {
+    dialog.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof window.aicliPathPickerEscape === 'function' && window.aicliPathPickerEscape()) return;
+            var help = dialog.querySelector('.aicli-help-panel:not([hidden])');
+            if (help) {
+                var button = dialog.querySelector('[aria-controls="' + help.id + '"]');
+                if (button) button.click(); else help.hidden = true;
+                return;
+            }
+            onClose();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        var focusable = Array.prototype.filter.call(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'), function (item) {
+            return !item.disabled && item.offsetParent !== null;
+        });
+        if (!focusable.length) return;
+        var first = focusable[0];
+        var last = focusable[focusable.length - 1];
+        var title = dialog.querySelector('[tabindex="-1"]');
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === title)) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
+};
 </script>

@@ -28,8 +28,22 @@ Words used on this page:
 1. Open **Settings**, then the **Configuration** tab.
 2. Open the card **Script runs**. Set **Let scripts start agent runs** to **On**. The default is **Off (default)**.
 3. Under **Authorised scripts**, press **Add a script**.
-4. Type the full path of the script file. Type the agents it may start, for example `claude-code`, and the folders it may use, one on each line.
-5. Press **Save**. Expect: the script appears in the list with a fingerprint.
+4. Choose **A User Script** and select a script by name. Choose **Another script file** when the file is elsewhere, then type its full path or press **Browse…**.
+5. Type a short **Name** when the file name does not explain its purpose. Type a **Description** to say what the script checks. Select the agents it may start and add the folders it may use, one on each line.
+6. Press **Save**. Expect: the list shows the name and one description line.
+
+### See and change a script
+
+1. Select an entry under **Authorised scripts**.
+2. Read **What runs**, **What it may do** and **Limits**. The fingerprint section says when the file was trusted and whether it changed.
+3. Press **Edit** to change the name, description, agents, folders, mode or runs each day. The file path stays fixed.
+4. Press **Save**. Expect: the dialog returns to the facts of the script and the list shows the new description.
+
+To let the plugin run a changed file, open the entry and press **Trust the file as it is now**. The plugin stores the current fingerprint at once. A normal edit does not trust changed file content.
+
+### Fix an entry that needs attention
+
+**Needs attention** means that an old entry points at a temporary copy made by User Scripts. Open it and press **Switch to the original and trust it as it is now**. The entry then points at the original User Script. If the original file is gone, remove the old entry.
 
 ### Call the plugin from the script
 
@@ -53,7 +67,7 @@ Add `--wait` when the script must wait for the result. The reply has the report.
 3. Press **Approve** to put the script on the list as a read-only script. Each later read-only call of this script then starts the agent at once, with no further approval, up to the runs a day that the entry allows. Press **Reject** to turn it away.
 4. Expect: the next call of the script starts. The call that was refused does not start by itself.
 
-A script whose file changed is refused in the same way, until you approve the new fingerprint. The old limits stay.
+A script whose file changed is refused until you trust its new fingerprint. The old limits stay. A tray approval derives the name and description from User Scripts, so later changes stay visible.
 
 ### Runs that need approval
 
@@ -66,7 +80,7 @@ When the agent reports, the plugin saves its summary in one Notebook card. A key
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
 | **Let scripts start agent runs** | The master switch. Off refuses every call. | Off (default) | Turn it on when you add your first script. |
-| **Authorised scripts** | The scripts that may call, each with its agents, folders, highest mode and runs each day. | Empty | Add a script for each job. |
+| **Authorised scripts** | The scripts that may call. Each row shows a name and description. Select a row to see its file, fingerprint, agents, folders, mode and runs each day. | Empty | Add a script for each job. |
 | **Runs open at one time** | The most runs that are open together. | 2 | Raise it when scripts often overlap. |
 | **Runs each day** (all scripts) | The most runs that start in 24 hours. | 6 | Raise it for a busy server. |
 | **Wait before the same problem runs again** | Hours before a call with the same key starts a new run. | 24 | Lower it for a problem that needs a quick second look. |
@@ -90,7 +104,9 @@ The plugin reads the script from the file that the shell has open, and it looks 
 | Exit code 21, "No script file was found" | Someone typed the command in a shell, or used a pipe. | Put the command in a script file and add the file to the list. |
 | Exit code 22 | A run with the same key is open, or started a short time ago. | Wait, or use another key. |
 | Exit code 23 | A limit on runs, or the usage limit of the agent, holds the call. | Call again later. |
-| The list shows "THE FILE CHANGED" | The file differs from the stored fingerprint. | Open **Edit**, tick **Trust the file as it is now** and press **Save**, if you made the change. |
+| The entry shows **File changed** | The file differs from the stored fingerprint. | Open the entry and press **Trust the file as it is now**, if you made the change. |
+| The entry shows **Needs attention** | It points at a temporary User Scripts copy. | Open it and press **Switch to the original and trust it as it is now**. |
+| The entry shows **File missing** | The script file is not on the server. | Restore the file at the same path or remove the entry. |
 
 This version runs every agent as root. A restricted run user and a temporary folder for a run are not available yet.
 
@@ -104,6 +120,8 @@ This version runs every agent as root. A restricted run user and a temporary fol
 <summary>Change history</summary>
 
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
+- **2026-10-26** — The Script runs card shows short names and descriptions. Its dialog can add User Scripts by name, change an entry and fix an old temporary-copy entry. Spec `docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md`, issue #788.
+- **2026-10-26** — A tray approval keeps the User Scripts name and description linked to their source, so later changes stay visible. Spec `docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md`, issue #788.
 - **2026-10-26** — The command returns a JSON state with its exit code, and its wait lasts up to one hour. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-25** — A run reports to one Notebook card and the Activity tray. A script can wait for its summary, and the plugin closes the run after its report or time limit. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — The card **Script runs** and the command `aicli-run` start an agent from a script on the Authorised scripts list. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.

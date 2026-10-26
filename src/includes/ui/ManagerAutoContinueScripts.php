@@ -187,19 +187,6 @@
 
     // ---------------- dialogs (shared) ----------------
 
-    function acpTrapKeys(dialog, onClose) {
-        dialog.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); return; }
-            if (e.key !== 'Tab') return;
-            var f = Array.prototype.filter.call(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
-                function (x) { return !x.disabled && x.offsetParent !== null; });
-            if (!f.length) return;
-            var first = f[0], last = f[f.length - 1];
-            if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.querySelector('[tabindex="-1"]'))) { e.preventDefault(); last.focus(); }
-            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-        });
-    }
-
     function acpShell(id, titleId, title) {
         var back = el('div', 'hb-backdrop acp-backdrop', null, { id: id + '-backdrop' });
         var dlg = el('div', 'hb-dialog acp-dialog', null, { id: id, role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId });
@@ -291,7 +278,7 @@
         s.x.addEventListener('click', acpCloseEditor);
         close.addEventListener('click', acpCloseEditor);
         s.back.addEventListener('mousedown', function (e) { if (e.target === s.back) acpCloseEditor(); });
-        acpTrapKeys(s.dlg, acpCloseEditor);
+        window.aicliDialogTrapKeys(s.dlg, acpCloseEditor);
 
         testBtn.addEventListener('click', function () {
             setStatus(out, 'Reading the screen…');
@@ -374,7 +361,7 @@
         s.x.addEventListener('click', acpCloseReport);
         close.addEventListener('click', acpCloseReport);
         s.back.addEventListener('mousedown', function (e) { if (e.target === s.back) acpCloseReport(); });
-        acpTrapKeys(s.dlg, acpCloseReport);
+        window.aicliDialogTrapKeys(s.dlg, acpCloseReport);
         open.addEventListener('click', function (e) { if (open.getAttribute('aria-disabled') === 'true') e.preventDefault(); });
 
         var labels = { agent: 'Agent', agent_version: 'Agent version', provider_model: 'Provider / model', kind: 'Kind', regex: 'Regular expression', retry_group: 'Retry-time group', plugin_version: 'Plugin version' };

@@ -245,12 +245,12 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 
 ### Script runs card
 
-Let your own scripts on this server start an agent for you, while you stay in control of what each script may do. The card **Script runs** lets a script on the server start an agent with the command `aicli-run`. See [Run an agent from a script](script-runs.md). No agent can change any of these settings. The status line shows the switch and the number of authorised scripts, for example **On · 2 scripts**.
+Let your own scripts on this server start an agent for you, while you stay in control of what each script may do. The card **Script runs** lets a script on the server start an agent with the command `aicli-run`. See [Run an agent from a script](script-runs.md). No agent can change any of these settings. The status line shows the switch and the number of authorised scripts. It also shows the number that need attention, for example **On · 2 scripts · 1 needs attention**.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
 | **Let scripts start agent runs** | With On, a script on the list can start an agent. With Off, the command refuses every call and creates nothing. | Off (default) | On; Off (default) | Turn it on when you add your first script. | Saves, nothing else. | No |
-| **Authorised scripts** | The scripts that may start an agent. Each entry has a name, the full path, a fingerprint, the agents it may start, the folders it may use, the highest mode, the user and the runs each day. A script that changed is refused until you trust the file again. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray. The agent runs as root. | Empty | **Add a script**, **Edit** and **Remove** | Add a script for each job. | Saves when you press **Save**. | No |
+| **Authorised scripts** | Each entry shows its name and description. Select an entry to see its file, fingerprint, agents, folders, mode and runs each day, and to edit or remove it. A changed file is refused until you trust it again. A script path under `/tmp` is refused because it is temporary. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray. The agent runs as root. | Empty | **Add a script**; in the dialog: **Edit**, **Save**, **Cancel**, **Remove**, **Trust the file as it is now**, **Switch to the original and trust it as it is now** | Add a script for each job. | Saves when you press **Save**. | No |
 
 #### Advanced
 
@@ -564,6 +564,8 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — Each card help text (the (i) button) and the card intro here now say first what you gain from the feature. Issue #789.
 - **2026-10-26** — **Home storage**, **Agent storage** and **Where unsaved changes are kept** show the current state, and the line **Now:** is gone. A change turns the drop-down orange and lights a button **Apply** with a moving light on its edge. Only **Apply** starts the conversion or the move; **Cancel** keeps the choice. A mixed kind shows **Mixed: N plain, M compressed**. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #790.
+- **2026-10-26** — **Authorised scripts** shows a name and description in each row. Select an entry to see its facts and edit it in a dialog. The status line counts entries that need attention. Spec `docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md`, issue #788.
+- **2026-10-26** — A script path under `/tmp` is refused with a message that asks for the original script. Spec `docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md`, issue #788.
 - **2026-10-26** — **Notify me when a run starts and ends** covers normal notices when a run starts or reports done; warning notices always show. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-25** — The card **Script runs** has **Time limit for a run**. It controls when the plugin closes a run that has not reported. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — New card **Script runs** with the switch **Let scripts start agent runs**, the list **Authorised scripts** and five limits in the part **Advanced**. The tab has ten cards. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.

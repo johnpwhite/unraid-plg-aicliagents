@@ -21,18 +21,31 @@ HTML,
 <p>With On, a script on the list can start an agent. With Off, the command refuses every call and creates nothing. Off by default.</p>
 HTML,
     'run-scripts' => <<<'HTML'
-<p>The plugin finds the calling script from the process list of the server, and it compares the file with its stored fingerprint (a sha256 hash). A script that changed is refused until you approve it again.</p>
-<p>This check guards against a mistake, a stray script and a changed script. A process that runs as root can fake its name, so it is not a guard against a hostile root process.</p>
-<p>An unknown script makes one item in the Activity tray and one Unraid notification. Approve stores its fingerprint, as a read-only script that may start the agent it asked for.</p>
+<p>Each entry shows its name and what it is for. Open an entry to see and change its limits, or to remove it.</p>
+<p>The plugin finds the calling script from the server process list. It compares the file with its stored fingerprint (a sha256 hash). A changed script is refused until you trust it again.</p>
+<p>This check guards against a mistake, a stray script and a changed script. A process that runs as root can fake its name, so this is not a guard against a hostile root process.</p>
+<p>An unknown script makes one item in the Activity tray and one Unraid notice. Approve stores its fingerprint as a read-only script that may start the agent it asked for.</p>
 HTML,
-    'run-script-path' => <<<'HTML'
-<p>The full path of the script file. When you save, the plugin stores the fingerprint of the file as it is now.</p>
+    'run-script-file' => <<<'HTML'
+<p>The script that may call. For a User Script, choose it by name. The plugin checks the original file, not the copy that User Scripts runs.</p>
+HTML,
+    'run-script-name' => <<<'HTML'
+<p>A short name for the list. Leave it empty to use the User Scripts name or the file name.</p>
+HTML,
+    'run-script-description' => <<<'HTML'
+<p>What the script is for, in a few words. It shows in the list.</p>
+HTML,
+    'run-script-fingerprint' => <<<'HTML'
+<p>A code made from the content of the file (a sha256 hash). A changed file has another code, and its runs are refused until you trust it again.</p>
+HTML,
+    'run-script-stale' => <<<'HTML'
+<p>User Scripts makes a new copy of a script for each run. An entry that names a copy can never match. Switch it to the original.</p>
 HTML,
     'run-script-agents' => <<<'HTML'
-<p>The agents this script may start, as agent ids separated by commas. For example: claude-code, codex-cli. A call for another agent is refused.</p>
+<p>Tick the agents this script may start. A call for another agent is refused.</p>
 HTML,
     'run-script-folders' => <<<'HTML'
-<p>One folder on each line. The script may start an agent in these folders and in the folders inside them. No folder means a temporary folder only, which comes in a later version.</p>
+<p>One folder on each line. The script may start an agent in these folders and in the folders inside them. No folder means a temporary folder only, which comes in a later version. Use Browse to pick a folder.</p>
 HTML,
     'run-script-mode' => <<<'HTML'
 <p>A read-only run starts at once, with no approval. A run that may change files waits in the Activity tray until you approve it. For a read-only run, the agent may use only the tools Read, Grep and Glob and the read tools of the plugin. It has no shell and no file editing, and the plugin tools that change things are denied. The file tools stay in the run folder, and the agent ignores the settings files of that folder. It can still report its result.</p>

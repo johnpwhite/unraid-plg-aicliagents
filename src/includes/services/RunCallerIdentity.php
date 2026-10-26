@@ -53,15 +53,43 @@ final class RunCallerIdentity
     /** Test seam: replaces the folder of the User Scripts originals. Works only under PHPUnit. */
     public static ?string $userScriptsOriginals = null;
 
-    private static function originalsRoot(): string
+    public static function originalsRoot(): string
     {
         return rtrim(self::underTest() && self::$userScriptsOriginals !== null ? self::$userScriptsOriginals : self::USER_SCRIPTS_ORIGINALS, '/');
+    }
+
+    /** The folder of the temporary copies that User Scripts runs. */
+    public static function copiesRoot(): string
+    {
+        return rtrim(self::underTest() && self::$userScriptsRoot !== null ? self::$userScriptsRoot : self::USER_SCRIPTS_ROOT, '/');
     }
 
     /** True when $path is the original of a User Script: <originals>/<name>/script (#778). */
     public static function isUserScriptsOriginal(string $path): bool
     {
         return preg_match('#^' . preg_quote(self::originalsRoot(), '#') . '/[^/]+/script$#D', $path) === 1;
+    }
+
+    /** The User Scripts folder name for an original or temporary copy path, or an empty string. */
+    public static function userScriptNameFromPath(string $path): string
+    {
+        foreach ([self::originalsRoot(), self::copiesRoot()] as $root) {
+            if (preg_match('#^' . preg_quote($root, '#') . '/([^/]+)/script$#D', $path, $m) === 1) return $m[1];
+        }
+        return '';
+    }
+
+    /** True when a path names the temporary copy that User Scripts makes for a run. */
+    public static function isUserScriptsCopy(string $path): bool
+    {
+        return preg_match('#^' . preg_quote(self::copiesRoot(), '#') . '/[^/]+/script$#D', $path) === 1;
+    }
+
+    /** The original path for a temporary copy, or an empty string. */
+    public static function originalForUserScriptsCopy(string $path): string
+    {
+        $name = self::isUserScriptsCopy($path) ? self::userScriptNameFromPath($path) : '';
+        return $name === '' ? '' : self::originalsRoot() . '/' . $name . '/script';
     }
 
     /** The text of the copy that User Scripts makes from the text of an original (#778). */
@@ -131,7 +159,7 @@ final class RunCallerIdentity
         if ($hash === null) return $out;
         $userScript = '';
         $path = $script['path'];
-        $quoted = preg_quote(rtrim(self::underTest() && self::$userScriptsRoot !== null ? self::$userScriptsRoot : self::USER_SCRIPTS_ROOT, '/'), '#');
+        $quoted = preg_quote(self::copiesRoot(), '#');
         $copyPath = '';
         if (preg_match('#^' . $quoted . '/([^/]+)/script$#D', $script['rawPath'], $m) === 1) {
             // R7 (#778): the caller is the original that a person authorises. The copy path stays in the

@@ -1777,6 +1777,94 @@
     .acpr-open[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
     a.acpr-open { text-decoration: none !important; }
 
+    /* Script runs card and dialog (docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md, #788). */
+    .aicli-runs-list { width: 100%; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .aicli-runs-item { min-width: 0; border-bottom: 1px solid color-mix(in srgb, var(--border-color, #888) 55%, transparent); }
+    .aicli-runs-row { appearance: none; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; box-sizing: border-box; padding: 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text-color, inherit); text-align: left; cursor: pointer; }
+    .aicli-runs-row:hover, .aicli-runs-row:active { background: var(--mild-background-color, rgba(128,128,128,0.12)); }
+    .aicli-runs-row:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    .aicli-runs-info { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
+    .aicli-runs-name { display: block; font-size: 13px; line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
+    .aicli-runs-description { display: block; min-width: 0; font-size: 12px; line-height: 1.4; color: var(--text-color, inherit); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .aicli-runs-tag { display: inline-flex; align-items: center; align-self: flex-start; gap: 5px; min-height: 22px; box-sizing: border-box; padding: 1px 6px; border: 1px solid currentColor; border-radius: 4px; font-size: 12px; line-height: 1.35; font-weight: 600; }
+    .runs-tag-attention { color: color-mix(in srgb, #d97706 46%, var(--text-color, #222)); }
+    .runs-tag-danger, .runs-dialog .runs-danger { color: color-mix(in srgb, #dc2626 56%, var(--text-color, #222)); }
+    .aicli-runs-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .aicli-runs-chevron { flex: 0 0 auto; font-size: 12px; opacity: 0.75; }
+    .aicli-runs-empty { padding: 8px 0; font-size: 12px; line-height: 1.5; }
+    .aicli-runs-empty .aicli-runs-btn { margin-top: 8px; }
+    .aicli-runs-off { margin: 0 0 8px; padding: 8px; border-left: 3px solid var(--border-color, #888); background: var(--mild-background-color, rgba(128,128,128,0.08)); font-size: 12px; line-height: 1.5; }
+    .aicli-runs-btn { min-height: 44px !important; min-width: 44px; box-sizing: border-box; margin-top: 8px; }
+    .aicli-runs-msg { min-height: 1.5em; margin-top: 6px; font-size: 12px; }
+    .aicli-runs-msg.is-error { color: color-mix(in srgb, #dc2626 56%, var(--text-color, #222)); }
+    .runs-dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); animation: runs-dialog-in 180ms ease-out; }
+    .runs-backdrop.is-closing { animation: runs-backdrop-out 120ms ease-in forwards; }
+    .runs-backdrop.is-closing .runs-dialog { animation: runs-dialog-out 120ms ease-in forwards; }
+    .runs-dialog .hb-title { text-transform: none; letter-spacing: 0; }
+    .runs-dialog :focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 2px; }
+    .runs-dialog .hb-title:focus { outline: none; }
+    .runs-dialog h3 { margin: 0; font-size: 13px; }
+    .runs-dialog .hb-help, .runs-dialog .hb-muted { font-size: 12px; }
+    .runs-dialog .hb-label { font-size: 12px; }
+    .runs-body { gap: 14px; overflow-x: hidden; }
+    .runs-dialog [hidden] { display: none !important; }
+    .runs-callout { padding: 10px; border: 1px solid color-mix(in srgb, #d97706 48%, var(--text-color, #222)); border-radius: 6px; background: color-mix(in srgb, #d97706 8%, var(--background-color, #fff)); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .runs-callout p { margin: 0 0 8px; }
+    .runs-callout p:last-child { margin-bottom: 0; }
+    .runs-callout-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .runs-callout-actions .aicli-btn-slim, .runs-inline-action { min-height: 44px; box-sizing: border-box; }
+    .runs-view h3 { margin-bottom: 7px; }
+    .runs-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: 12px; }
+    .runs-facts dt { font-weight: 600; }
+    .runs-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
+    .runs-path { display: block; max-width: 100%; margin-top: 3px; font-family: monospace; font-size: 12px; overflow-wrap: anywhere; word-break: break-word; }
+    .runs-hash { margin-top: 4px; }
+    .runs-hash summary { min-height: 44px; box-sizing: border-box; display: flex; align-items: center; cursor: pointer; font-size: 12px; font-weight: 600; }
+    .runs-hash code { display: block; overflow-wrap: anywhere; word-break: break-all; font-family: monospace; font-size: 12px; }
+    .runs-edit { gap: 12px; }
+    .runs-edit legend { padding: 0; font-size: 13px; font-weight: 700; }
+    .runs-edit input:not([type="checkbox"]):not([type="radio"]), .runs-edit textarea { width: 100%; min-height: 44px; box-sizing: border-box; margin: 0; font-size: 14px; }
+    .runs-edit textarea { resize: vertical; }
+    .runs-edit .hb-field { min-width: 0; }
+    .runs-edit .hb-label-row { margin-bottom: 4px; }
+    .runs-existing-path { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .runs-add-fields { display: flex; flex-direction: column; gap: 12px; }
+    .runs-source { gap: 4px; }
+    .runs-source legend { margin-bottom: 4px; }
+    .runs-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; box-sizing: border-box; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .runs-choice input { width: 20px; height: 20px; flex: 0 0 20px; margin: 0; }
+    .runs-choice-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+    .runs-user-script-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+    .runs-user-script-choice { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .runs-user-script-choice .runs-choice { flex: 1 1 220px; }
+    .runs-on-list { font-size: 12px; font-weight: 600; }
+    .runs-open-entry { min-height: 44px; }
+    .runs-filter { margin-top: 6px !important; }
+    .runs-hidden-input { display: none !important; }
+    .runs-target-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .runs-target-row > .aicli-btn-slim { min-height: 44px; }
+    .runs-path-check { min-height: 1.4em; margin: 6px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+    .runs-path-check.is-error, .runs-error, .runs-missing { color: color-mix(in srgb, #dc2626 56%, var(--text-color, #222)); }
+    .runs-error { padding: 6px 8px; border-left: 3px solid currentColor; font-size: 12px; overflow-wrap: anywhere; }
+    .runs-agent-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+    .runs-agent-choice, .runs-dialog .hb-check-label { display: flex; align-items: center; gap: 8px; min-height: 44px; box-sizing: border-box; padding: 6px; cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
+    .runs-agent-choice input, .runs-dialog .hb-check-label input { width: 20px; height: 20px; flex: 0 0 20px; margin: 0; }
+    .runs-mode-choice { align-items: flex-start; }
+    .runs-mode-choice > span { display: flex; flex-direction: column; gap: 3px; }
+    .runs-fingerprint-edit { min-width: 0; font-size: 12px; }
+    .runs-fingerprint-edit p { margin: 4px 0; overflow-wrap: anywhere; }
+    .runs-footer-spacer { flex: 1 1 auto; }
+    .runs-footer .aicli-btn-slim { min-height: 44px; box-sizing: border-box; font-size: 12px; }
+    .runs-remove { color: color-mix(in srgb, #dc2626 56%, var(--text-color, #222)) !important; }
+    .runs-danger { border-color: color-mix(in srgb, #dc2626 56%, var(--text-color, #222)) !important; }
+    .runs-remove-confirm { font-size: 12px; }
+    .runs-discard { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px; border: 1px solid var(--border-color, #888); border-radius: 4px; font-size: 12px; }
+    @keyframes runs-dialog-in { from { opacity: 0; transform: scale(.98); } to { opacity: 1; transform: scale(1); } }
+    @keyframes runs-backdrop-out { to { opacity: 0; } }
+    @keyframes runs-dialog-out { to { opacity: 0; transform: scale(.98); } }
+    @media (prefers-reduced-motion: reduce) { .runs-dialog, .runs-backdrop.is-closing { animation: none; } }
+    @media (pointer: coarse) { .aicli-runs-row, .aicli-runs-btn, .runs-choice, .runs-agent-choice, .runs-dialog .hb-check-label, .runs-hash summary { min-height: 44px; } }
+
     /* =======================================================================
        Epic #307 — Manager overlays at phone size (docs/specs/MOBILE_RESPONSIVE.md).
        Every rule is inside max-width: 600px, so the desktop page is unchanged.
@@ -1908,6 +1996,26 @@
         .acp-row-actions .aicli-btn-slim { flex: 1 1 auto !important; }
         .acp-details summary { min-height: 44px; box-sizing: border-box; display: flex; align-items: center; }
         .acpr-fields { grid-template-columns: 1fr; }
+        .runs-backdrop {
+            padding-top: max(12px, env(safe-area-inset-top, 0px));
+            padding-right: max(12px, calc(env(safe-area-inset-right, 0px) + var(--aicli-content-right, 0px)));
+            padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+            padding-left: max(12px, calc(env(safe-area-inset-left, 0px) + var(--aicli-content-left, 0px)));
+        }
+        .runs-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+        .runs-dialog .hb-footer { flex-wrap: wrap; }
+        .runs-dialog .hb-footer .aicli-btn-slim { flex: 1 1 0 !important; }
+        .runs-dialog .runs-remove { flex: 1 1 100% !important; }
+        .runs-footer-spacer { display: none; }
+        .runs-facts { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+        .runs-facts dt { margin-top: 7px; }
+        .runs-facts dd { margin-bottom: 4px; }
+        .runs-dialog input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+        .runs-dialog select, .runs-dialog textarea { min-height: 44px; box-sizing: border-box; font-size: 16px !important; }
+        .runs-agent-list { grid-template-columns: minmax(0, 1fr); }
+        .runs-target-row { width: 100%; }
+        .runs-target-row .aicli-btn-slim { flex: 1 1 auto; }
+        .aicli-runs-description { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
         /* NATIVE_BUTTON_STYLE.md: the search box takes its own row, so the
            filter buttons and the sort button fit the phone width (the sort
            button was clipped at the right edge). */
