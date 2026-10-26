@@ -801,6 +801,9 @@
     }
 
     function optionText(el) {
+        // A control can name its own status text: the storage drop-downs name the current state, not a pending choice (#790).
+        var own = el.getAttribute && el.getAttribute('data-aicli-status-text');
+        if (own) return own;
         if (el.tagName === 'SELECT') {
             var o = el.options && el.options[el.selectedIndex];
             return o ? o.text : '';

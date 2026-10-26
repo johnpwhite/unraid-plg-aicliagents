@@ -9,6 +9,10 @@
 require_once __DIR__ . '/SettingsCard.php'; // aicli_help_btn(), aicli_help_panel(): the help is behind an (i).
 require_once __DIR__ . '/SettingsAdvanced.php'; // aicli_adv_open(), aicli_adv_close(): the Advanced part of a card.
 $autoSave = 'onchange="autoSaveConfig()"';
+// #790: the three storage drop-downs (Home storage, Agent storage, Where unsaved changes are kept) do not save or start a move
+// when they change. A change waits for the Apply button under the drop-down (docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md, "Pending change and Apply (#790)").
+$storageChange = static fn(string $ctl): string => 'autocomplete="off" onchange="aicliStorageChanged(\'' . $ctl . '\')" aria-describedby="aicli-kind-state-' . $ctl . '"';
+$storageApply = static fn(string $ctl): string => '<div class="aicli-apply-row"><button type="button" class="aicli-btn-slim aicli-apply-btn" id="aicli-apply-' . $ctl . '" data-testid="storage-apply-' . $ctl . '" data-aicli-apply="' . $ctl . '" onclick="aicliApplyStorage(\'' . $ctl . '\')" hidden>Apply</button></div>';
 
 
 // SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md Phase 3 and Phase 5: the one-line status of each card, built here
@@ -238,24 +242,26 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
             <?=aicli_card_open('storage', 'fa-hdd-o', 'Storage', $stStorage, 'card-storage', '',
                 ['format' => 'Homes: {storage_backend_homes} · Agents: {storage_backend_agents}'])?>
                     <dl>
-                        <?php // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two settings, one per kind. Each line below the select shows the REAL state. ?>
+                        <?php // GLOBAL_STORAGE_BACKEND_MIGRATION.md: two settings, one per kind. Each select shows the REAL state (#790); a change waits for the Apply button. ?>
                         <dt>Home storage <?=aicli_help_btn('storage-backend-homes', 'Home storage')?></dt>
                         <dd>
-                            <select name="storage_backend_homes" aria-label="Home storage" data-testid="storage-backend-homes" style="width: 100%;" <?=$autoSave?>>
+                            <select name="storage_backend_homes" aria-label="Home storage" data-testid="storage-backend-homes" style="width: 100%;" <?=$storageChange('homes')?>>
                                 <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'layering', _('Compressed layers'))?>
                                 <?=mk_option($config['storage_backend_homes'] ?? 'layering', 'passthrough', _('Plain folders'))?>
                             </select>
-                            <div id="aicli-kind-state-homes" data-testid="storage-kind-state-homes" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
+                            <?=$storageApply('homes')?>
+                            <div id="aicli-kind-state-homes" data-testid="storage-kind-state-homes" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;"></div>
                             <?=aicli_help_panel('storage-backend-homes')?>
                         </dd>
 
                         <dt>Agent storage <?=aicli_help_btn('storage-backend-agents', 'Agent storage')?></dt>
                         <dd>
-                            <select name="storage_backend_agents" aria-label="Agent storage" data-testid="storage-backend-agents" style="width: 100%;" <?=$autoSave?>>
+                            <select name="storage_backend_agents" aria-label="Agent storage" data-testid="storage-backend-agents" style="width: 100%;" <?=$storageChange('agents')?>>
                                 <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'layering', _('Compressed layers'))?>
                                 <?=mk_option($config['storage_backend_agents'] ?? 'layering', 'passthrough', _('Plain folders'))?>
                             </select>
-                            <div id="aicli-kind-state-agents" data-testid="storage-kind-state-agents" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;">Checking the real state…</div>
+                            <?=$storageApply('agents')?>
+                            <div id="aicli-kind-state-agents" data-testid="storage-kind-state-agents" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;"></div>
                             <div id="aicli-backend-migration-status" data-aicli-warns-card="storage" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
                             <?=aicli_help_panel('storage-backend-agents')?>
                         </dd>
@@ -336,10 +342,12 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
 
                         <dt>Where unsaved changes are kept <?=aicli_help_btn('storage-upper-mode', 'Where unsaved changes are kept')?></dt>
                         <dd>
-                            <select name="storage_upper_mode" aria-label="Where unsaved changes are kept" data-testid="storage-upper-mode" style="width: 100%;" <?=$autoSave?>>
+                            <select name="storage_upper_mode" aria-label="Where unsaved changes are kept" data-testid="storage-upper-mode" style="width: 100%;" <?=$storageChange('upper')?>>
                                 <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'zram', _('Memory (zram): fast, no disk wear, lost on a crash until saved'))?>
                                 <?=mk_option($config['storage_upper_mode'] ?? 'zram', 'disk', _('Disk: survives a crash or power cut, uses space on the persistence drive'))?>
                             </select>
+                            <?=$storageApply('upper')?>
+                            <div id="aicli-kind-state-upper" data-testid="storage-kind-state-upper" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;"></div>
                             <?=aicli_help_panel('storage-upper-mode')?>
                         </dd>
 

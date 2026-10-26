@@ -139,7 +139,7 @@ The plugin copies the home with every workspace closed. It does not save or merg
 
 The plugin never overwrites files that are already in the plain folder of the home. If that folder holds files, the conversion stops and changes nothing. The Activity tray then says, for example: "Could not finish. Refused: the plain folder /mnt/cache/aicliagents/passthrough/homes/root already has files (first: notes.txt). Move them away, then try again. Nothing was changed." Move or archive the named files, then press **Convert to plain folders** again. Small empty marker files that the plugin keeps in the hidden folder `.aicli` do not count as files.
 
-This conversion changes one home. It does not change the setting **Home storage**. After it, the line under **Home storage** on the **Configuration** tab reads, for example, **Mixed: 1 of 2 homes are plain folders**. To convert the other homes, press the button under that line, or choose **Plain folders** in **Home storage**.
+This conversion changes one home. It does not change the setting **Home storage**. After it, **Home storage** on the **Configuration** tab shows the entry **Mixed: 1 plain, 1 compressed**. To convert the other homes, choose **Plain folders** in **Home storage** and press **Apply**.
 
 The home stays on the boot disk, so the plugin works while the array is stopped. Backups work as before. A home on a USB flash drive is never offered the conversion; use **Move off USB flash drive** for that. Agents have their own conversion. See "Convert agents to plain folders" below.
 
@@ -170,7 +170,24 @@ The old layers move to a backup folder. They stay for 14 days, then the plugin r
 
 **Home storage** and **Agent storage** are two settings on the **Configuration** tab. Each setting has two choices. **Compressed layers** stores changes in compressed layers and a writable layer. **Plain folders** stores files directly in ordinary folders. **Home storage** applies to the homes. **Agent storage** applies to the program files of the agents. New homes use **Home storage**. New agent installs and updates use **Agent storage**.
 
-Under each setting, the line **Now:** shows what is true on disk, not only what the setting says. It reads **Plain folders**, **Compressed layers**, or **Mixed**. An example is **Mixed: 1 of 2 homes are plain folders**. The line changes when you convert one home with **Convert to plain folders** on its card. When a setting is mixed, a button appears: **Convert the other 1 home to plain folders**. Press it to finish the change for the items that are left.
+Each drop-down shows what is true on disk now, not only what the setting says. It shows **Plain folders** or **Compressed layers**. When some items use one form and some the other, it shows the entry **Mixed: 1 plain, 2 compressed** instead. The entry changes when you convert one home with **Convert to plain folders** on its card.
+
+### A change waits for Apply
+
+A drop-down never starts a conversion by itself. When you choose another value, the change is not applied yet:
+
+- The drop-down gets an orange border.
+- A button appears under the drop-down. It names the work, for example **Apply: convert 1 home to compressed layers**. A light moves around the edge of the button. If your system asks for less motion, the edge is a still orange line.
+- A line under the drop-down says **Not applied yet**. A screen reader reads this line when it appears.
+- Other settings on the page keep saving as you change them. They do not wait, and they do not carry your pending choice.
+
+Choose the first value again to cancel the change. The orange border, the button and the light go away. When you leave the page and come back, the drop-downs show the current state. The plugin does not keep a pending choice.
+
+Sometimes every home (or every agent) already uses one form, but the setting names the other form. This can happen after you convert homes by hand. New homes would then use the other form. The drop-down shows the form that is true now, and the button reads, for example, **Apply: make new homes plain folders too**. Press it to save the setting. The plugin converts nothing.
+
+When a kind is mixed, the drop-down shows the entry **Mixed: 1 plain, 2 compressed** in orange. You cannot choose that entry again after you leave it. Choose **Plain folders** or **Compressed layers**, then press **Apply**. The plugin converts only the items that are not on that choice yet.
+
+Use the Tab key to go from the drop-down to the button, and press Enter or Space to press it. **Where unsaved changes are kept** works in the same way.
 
 ### Change one setting
 
@@ -178,10 +195,11 @@ Under each setting, the line **Now:** shows what is true on disk, not only what 
 > This change closes open workspaces and converts saved storage. It converts only the kind you changed: homes for **Home storage**, agents for **Agent storage**. Items that are already on the new choice stay as they are. The conversion can take several minutes. Keep the server running until the status says the migration is complete.
 
 1. Open the **Configuration** tab.
-2. Change **Home storage** or **Agent storage**. Expect: the dialog **Change home storage?** or **Change agent storage?** explains the conversion.
-3. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every item it will convert. It keeps at least 2 GB or 10% of each disk free, whichever is larger. It leaves out the other kind and the items that are already on the new choice. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
-4. Press **Convert homes** or **Convert agents**. Expect: the confirmation closes when the conversion starts. A status appears under the settings. It names the kind, shows the target, the current item and the number of completed items.
-5. Wait for **Home storage migration complete** or **Agent storage migration complete**. The saved setting changes only after all items of that kind convert. Workspaces that ran before the change open again after success or a complete put-back, even when **Auto-launch workspaces** is off.
+2. Choose the new value in **Home storage** or **Agent storage**. Expect: an orange border and the button **Apply: convert 2 homes to plain folders** (or the same for agents). Nothing else happens yet.
+3. Press the button **Apply**. Expect: the dialog **Change home storage?** or **Change agent storage?** explains the conversion. **Cancel** closes the dialog. Your choice stays, and the button stays lit, so you can press **Apply** again or choose the first value again.
+4. Read the space check. It uses a complete **Boot disk space** report from the last 10 minutes and current free space. It counts the new storage and the copies needed to restore the old storage for every item it will convert. It keeps at least 2 GB or 10% of each disk free, whichever is larger. It leaves out the other kind and the items that are already on the new choice. If the report is missing, old or incomplete, refresh it on the **Boot disk space** card. If there is not enough room, the message gives the required and available space. No workspace closes and no data changes. The status keeps the refusal message.
+5. Press **Convert homes** or **Convert agents**. Expect: the confirmation closes when the conversion starts. A status appears under the settings. It names the kind, shows the target, the current item and the number of completed items.
+6. Wait for **Home storage migration complete** or **Agent storage migration complete**. The page reloads and the drop-down shows the new state. The saved setting changes only after all items of that kind convert. Workspaces that ran before the change open again after success or a complete put-back, even when **Auto-launch workspaces** is off.
 
 When every item of the kind is on the new choice already, the plugin only saves the setting. No workspace closes.
 
@@ -222,13 +240,14 @@ The setting applies when **Home storage** is **Compressed layers**. Homes in **P
 > A change moves data. The plugin closes your open workspaces, saves each home into a checked layer, and mounts the home again. This can take several minutes for a large home. Do not reload the page and do not restart the server during the move. The plugin deletes nothing. The old writable layer holds only what the checked save already contains.
 
 1. Open the **Configuration** tab.
-2. Change **Where unsaved changes are kept**. Expect: a check runs, then a warning titled **Move the writable layer to RAM?** or **Move the writable layer to disk?**
-3. Read the warning. It lists each home on its own line, for example "root: now on disk, will move (1880 MB)". A yellow box says "Your open workspaces will be closed while the data moves." when something must move.
-4. Press **Close workspaces and move**. If nothing needs to move, the button reads **Save setting**. Expect: a screen "Moving writable layers to RAM..." (or "disk...") with a bar.
-5. Wait for **Writable layer changed**. The page reloads.
-6. Open your workspaces again. The plugin saved each workspace's place, so **Resume** brings the conversation back.
+2. Choose the other value in **Where unsaved changes are kept**. Expect: an orange border and the button **Apply: move the writable layer to RAM** (or **to disk**). Nothing moves yet.
+3. Press **Apply**. Expect: a check runs, then a warning titled **Move the writable layer to RAM?** or **Move the writable layer to disk?**
+4. Read the warning. It lists each home on its own line, for example "root: now on disk, will move (1880 MB)". A yellow box says "Your open workspaces will be closed while the data moves." when something must move.
+5. Press **Close workspaces and move**. If nothing needs to move, the button reads **Save setting**. Expect: a screen "Moving writable layers to RAM..." (or "disk...") with a bar.
+6. Wait for **Writable layer changed**. The page reloads.
+7. Open your workspaces again. The plugin saved each workspace's place, so **Resume** brings the conversation back.
 
-Any other way to close the warning cancels the change. **Cancel** and the Escape key put the setting back to its saved value. A click outside the warning does not close it. The setting shows the new value while the warning is open. It goes back when you cancel.
+**Cancel** and the Escape key close the warning and move nothing. Your choice stays in the drop-down and the button **Apply** stays lit. Choose the first value again to cancel the change. A click outside the warning does not close it.
 
 If a home cannot move, the plugin puts the setting back. It shows **Not moved** with the name of the home and the reason, for example that the home is in use or that there is no room. If the old writable layer still holds changes that the save did not capture, the reason says so. A chat file that the save stored in a layer no longer blocks the move. Your data stays where it was.
 
@@ -710,6 +729,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — The card **System memory** is now called **RAM disk**, because it shows the RAM disk of Unraid and not all memory. The row is called **Used space on Unraid's RAM disk**. The help says why a full RAM disk matters. Issue #789.
+- **2026-10-26** — When every home or agent already uses one form but the setting names the other, the drop-down shows the true form and the button **Apply: make new homes plain folders too** saves the setting. Nothing is converted. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #790.
+- **2026-10-26** — The drop-downs **Home storage**, **Agent storage** and **Where unsaved changes are kept** show the current state. The line **Now:** is gone. A change turns the drop-down orange and lights the button **Apply** (a moving light on its edge). Only **Apply** starts the conversion or the move. A kind with items in both forms shows **Mixed: N plain, M compressed**. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #790.
 - **2026-10-24** — **Save now** and **Merge layers** show their progress on the home card and in the Activity tray: a percent that moves, the size ("119 MB of 340 MB") when the plugin could measure it, and "about N min left" when the home was saved or merged before. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-24** — The card **Boot disk space** has **Archive layer images…** on the line **Left over**, a line for large session logs of the other agents (Claude Code, Gemini, Qwen, Copilot, Grok, Kimi, Antigravity), and it stops a large write that would make the boot disk more than 85 % full. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-23** — The card **Boot disk space** has **Restore from an archive…**, an early warning at 80% (the Unraid notification stays at 85%), and lists old layer images that a newer merged layer replaced under **Left over**. Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #755.

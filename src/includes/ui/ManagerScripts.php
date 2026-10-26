@@ -133,6 +133,14 @@ function autoSaveConfig() {
     }, 400);
 }
 
+// The fields of the settings form that a save sends. The three storage drop-downs are left out (#790): their value
+// is a pending choice until the person presses Apply, and a plain save must not carry it.
+function aicliFormFields(form) {
+    return $(form).serializeArray().filter(function (f) {
+        return f.name !== 'storage_backend_homes' && f.name !== 'storage_backend_agents' && f.name !== 'storage_upper_mode';
+    });
+}
+
 function saveAICliAgentsManager(form, silent = false) {
     clearChanged();
     // D-405: Check if storage paths changed — if so, run preflight migration instead of normal save
@@ -140,30 +148,9 @@ function saveAICliAgentsManager(form, silent = false) {
     var newHomePath = $(form).find('[name="home_storage_path"]').val() || '';
     var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
     var curHomePath = '<?= addslashes(\AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config)) ?>';
-    var newUpperMode = $(form).find('[name="storage_upper_mode"]').val() || 'zram';
-    var curUpperMode = '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
-
-    // #456: the writable-layer placement of homes. A change is a MOVE, never a bare save:
-    // read-only preflight, a warning overlay with the facts, then the move behind a progress overlay.
-    if (newUpperMode !== curUpperMode) {
-        aicliChangeUpperMode(newUpperMode, curUpperMode, form);
-        return;
-    }
-
-    // Home storage and Agent storage are two settings. A change of one is a conversion of
-    // that kind only, never a bare save: probe the backing devices, show what will happen,
-    // then let the server convert the items before it saves the setting.
-    // A removable/USB result is an explicit warning, not a path-prefix guess.
-    var storageKinds = ['homes', 'agents'];
-    for (var ki = 0; ki < storageKinds.length; ki++) {
-        var kindName = storageKinds[ki];
-        var kindNew = $(form).find('[name="storage_backend_' + kindName + '"]').val() || 'layering';
-        var kindCur = aicliCurrentStorageMode(kindName);
-        if (kindNew !== kindCur) {
-            aicliChangeStorageKind(kindName, kindNew, kindCur, form);
-            return;
-        }
-    }
+    // #790: the three storage drop-downs (Home storage, Agent storage, Where unsaved changes are kept) never start
+    // a move here and are never sent by a save. A change waits for the Apply button (aicliApplyStorage), so every
+    // other setting keeps saving at once while a storage change is pending.
 
     if ((newAgentPath && newAgentPath !== curAgentPath) || (newHomePath && newHomePath !== curHomePath)) {
         // Storage path changed — preflight (fast, no consolidation)
@@ -222,7 +209,7 @@ function saveAICliAgentsManager(form, silent = false) {
                     if (r.status === 'queued') {
                         // F18 (#652): the copy runs in a supervisor job and goes on when this page closes.
                         // Save the settings of the form EXCEPT the two paths (the job saves those after the copy).
-                        var rest = $(form).serializeArray().filter(function (f) { return f.name !== 'agent_storage_path' && f.name !== 'home_storage_path'; });
+                        var rest = aicliFormFields(form).filter(function (f) { return f.name !== 'agent_storage_path' && f.name !== 'home_storage_path'; });
                         $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, $.param(rest));
                         hideMigrateOverlay();
                         swal({ title: "Storage move started", text: r.message || "The files are copied in the background. Watch the activity tray.", type: "info", confirmButtonText: "OK" }, function() { safeReload(); });
@@ -230,7 +217,7 @@ function saveAICliAgentsManager(form, silent = false) {
                     }
                     if (r.status === 'ok') {
                         // Now save all non-path form settings (migration already saved the paths)
-                        var params = $(form).serialize();
+                        var params = $.param(aicliFormFields(form));
                         $.post('/plugins/unraid-aicliagents/AICliAjax.php?action=save&csrf_token=' + csrf, params);
                         hideMigrateOverlay();
                         swal({ title: "Migration Complete", text: r.message || "Storage moved successfully.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });
@@ -248,7 +235,7 @@ function saveAICliAgentsManager(form, silent = false) {
     }
 
     // Normal save (no path changes)
-    let params = $(form).serialize();
+    let params = $.param(aicliFormFields(form));
     // Bug #1054 follow-up: capture user-switch intent BEFORE the POST so we can
     // force a full reload after a successful save. Args panels, workspaces, and
     // other per-user UI state are PHP-pre-rendered from the user-home that was
@@ -305,11 +292,14 @@ function aicliGuardedSwal(opts, restore, onConfirm) {
 
 function aicliChangeUpperMode(target, previous, form) {
     var esc = window.escapeHtml || function (s) { return String(s == null ? '' : s); };
-    // One check at a time: a second autosave while the first dialog is open must not
+    // One check at a time: a second click of Apply while the first dialog is open must not
     // open a second dialog over it (the first one would then count as dismissed).
     if (window._aicliUpperBusy) return;
     window._aicliUpperBusy = true;
-    var restore = function () { window._aicliUpperBusy = false; $(form).find('[name="storage_upper_mode"]').val(previous); };
+    aicliSyncStorageControls();
+    // #790: Cancel, Escape and a failed check keep the pending choice. The drop-down stays on the
+    // new value with its warning, and the Apply button stays lit, so the person can apply or change back.
+    var restore = function () { window._aicliUpperBusy = false; aicliSyncStorageControls(); };
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_upper_mode&mode=' + encodeURIComponent(target) + '&csrf_token=' + csrf, function(pf) {
         if (pf.status !== 'ok') { restore(); swal("Cannot change the writable layer", pf.message || "Check failed", "error"); return; }
         var rows = '';
@@ -331,6 +321,7 @@ function aicliChangeUpperMode(target, previous, form) {
             aicliAjax('execute_upper_mode', { mode: target }, function(r) {
                 hideMigrateOverlay();
                 if (r.status === 'ok') {
+                    window._aicliCurrentUpper = target;
                     swal({ title: "Writable layer changed", text: r.message || "Done.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });
                 } else {
                     restore();
@@ -344,21 +335,155 @@ function aicliChangeUpperMode(target, previous, form) {
     }).fail(function() { restore(); swal("Error", "Could not check the change. Try again.", "error"); });
 }
 
-// ---- Home storage and Agent storage (GLOBAL_STORAGE_BACKEND_MIGRATION.md) ----
+// ---- Home storage, Agent storage and the writable layer: a change waits for Apply (#790) ----
+// docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md "Pending change and Apply (#790)".
+// Each of the three drop-downs shows the CURRENT state. A change away from it is only a pending choice:
+// the drop-down turns the warning colour and the Apply button under it lights up with the spark border.
+// Only Apply starts the move (aicliChangeStorageKind or aicliChangeUpperMode, with their check and confirm
+// dialogs). A change back to the current state clears the warning. Nothing is kept across a page load.
+var AICLI_MIXED = '__mixed';
+var AICLI_STORAGE_CONTROLS = ['homes', 'agents', 'upper'];
 // The saved value of each kind. The page value is the start; a finished migration moves it.
 window._aicliCurrentStorage = window._aicliCurrentStorage || {
     homes: '<?= addslashes($config['storage_backend_homes'] ?? 'layering') ?>',
     agents: '<?= addslashes($config['storage_backend_agents'] ?? 'layering') ?>'
 };
+window._aicliCurrentUpper = window._aicliCurrentUpper || '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
+// The REAL state of each kind (from get_storage_kind_state), once it has been read.
+window._aicliKindReal = window._aicliKindReal || {};
+window._aicliStorageLocked = false; // true while a migration runs: the selects and the Apply buttons are off
 function aicliCurrentStorageMode(kind) { return window._aicliCurrentStorage[kind] || 'layering'; }
 function aicliStorageSelects() { return $('select[name="storage_backend_homes"], select[name="storage_backend_agents"]'); }
 function aicliKindSelect(kind) { return $('select[name="storage_backend_' + kind + '"]'); }
+function aicliStorageSelect(ctl) { return ctl === 'upper' ? $('select[name="storage_upper_mode"]') : aicliKindSelect(ctl); }
 function aicliKindWord(kind) { return kind === 'agents' ? 'agent storage' : 'home storage'; }
 function aicliKindModeLabel(mode) { return mode === 'passthrough' ? 'Plain folders' : 'Compressed layers'; }
+function aicliUpperWord(mode) { return mode === 'zram' ? 'RAM' : 'disk'; }
 
-// Show the REAL state of each kind under its select. It comes from the storage status, not
-// from the saved value, so a home that was converted by hand shows at once ("Mixed: ...").
-// When the kind is mixed, or the saved value and the real state differ, a button finishes the job.
+// The value the drop-down shows when nothing is pending: the real state, not only the saved setting.
+// A kind with some items in each form shows the read-only "Mixed" entry.
+function aicliStorageBaseline(ctl) {
+    if (ctl === 'upper') return window._aicliCurrentUpper;
+    var s = window._aicliKindReal[ctl];
+    if (s && s.state === 'mixed') return AICLI_MIXED;
+    if (s && s.state === 'plain') return 'passthrough';
+    if (s && s.state === 'layers') return 'layering';
+    return aicliCurrentStorageMode(ctl);
+}
+// The choice that waits for Apply, or '' when the drop-down shows the current state.
+// A uniform real state that differs from the SAVED setting is also pending (#790): the drop-down shows the real state,
+// and Apply only saves the setting, so new homes and agents follow it. It clears only when saved and real agree.
+function aicliSaveOnly(ctl) {
+    if (ctl === 'upper') return false;
+    var s = window._aicliKindReal[ctl];
+    if (!s || (s.state !== 'plain' && s.state !== 'layers')) return false;
+    return aicliStorageBaseline(ctl) !== aicliCurrentStorageMode(ctl);
+}
+function aicliPendingTarget(ctl) {
+    var sel = aicliStorageSelect(ctl);
+    if (!sel.length) return '';
+    var v = String(sel.val() || '');
+    if (!v || v === AICLI_MIXED) return '';
+    if (v !== aicliStorageBaseline(ctl)) return v;
+    return aicliSaveOnly(ctl) ? v : '';
+}
+// How many items of a kind are not on the target form yet. 0 when the real state is not known or there are no items.
+function aicliItemsToConvert(ctl, target) {
+    var s = window._aicliKindReal[ctl];
+    if (!s || s.state === 'none') return 0;
+    return Math.max(0, Number(s.total || 0) - Number(target === 'passthrough' ? s.plain : s.layers));
+}
+// The label of an Apply button, for example "Apply: convert 1 home to compressed layers".
+function aicliApplyLabel(ctl, target) {
+    if (ctl === 'upper') return 'Apply: move the writable layer to ' + aicliUpperWord(target);
+    var word = ctl === 'agents' ? 'agent' : 'home';
+    if (target === aicliStorageBaseline(ctl) && aicliSaveOnly(ctl)) return 'Apply: make new ' + word + 's ' + aicliKindModeLabel(target).toLowerCase() + ' too';
+    var n = aicliItemsToConvert(ctl, target);
+    var mode = aicliKindModeLabel(target).toLowerCase();
+    if (n > 0) return 'Apply: convert ' + n + ' ' + word + (n === 1 ? '' : 's') + ' to ' + mode;
+    return 'Apply: change ' + word + ' storage to ' + mode;
+}
+// The sentence under the drop-down. It sits in a polite live region, so a screen reader says it.
+function aicliPendingNote(ctl, target, base) {
+    if (!target) {
+        if (base === AICLI_MIXED) return 'Some ' + (ctl === 'agents' ? 'agents' : 'homes') + ' are plain folders and some use compressed layers. Choose one, then press Apply to convert the rest.';
+        return '';
+    }
+    if (ctl === 'upper') return 'Not applied yet. Unsaved changes will be kept in ' + aicliUpperWord(target) + ' after you press Apply.';
+    if (target === base && aicliSaveOnly(ctl)) return 'Not applied yet. All ' + (ctl === 'agents' ? 'agents' : 'homes') + ' are ' + aicliKindModeLabel(target) + ', but the setting is ' + aicliKindModeLabel(aicliCurrentStorageMode(ctl)) + ', so new ' + (ctl === 'agents' ? 'agents' : 'homes') + ' are not. Press Apply to save the setting. Nothing is converted.';
+    var n = aicliItemsToConvert(ctl, target);
+    var what = n > 0 ? n + ' ' + (ctl === 'agents' ? 'agent' : 'home') + (n === 1 ? '' : 's') : (ctl === 'agents' ? 'Agent' : 'Home') + ' storage';
+    return 'Not applied yet. ' + what + (n > 0 ? ' will be converted to ' : ' will change to ') + aicliKindModeLabel(target) + ' when you press Apply.';
+}
+
+// Draw the three controls from the current state and the pending choice. Call it after any change of either.
+function aicliSyncStorageControls() {
+    AICLI_STORAGE_CONTROLS.forEach(function (ctl) {
+        var sel = aicliStorageSelect(ctl);
+        if (!sel.length) return;
+        var base = aicliStorageBaseline(ctl);
+        var prev = sel.attr('data-aicli-base');
+        var wasPending = prev !== undefined && String(sel.val() || '') !== prev;
+        var mixedOpt = sel.find('option[data-aicli-mixed]');
+        if (base === AICLI_MIXED) {
+            var st = window._aicliKindReal[ctl] || {};
+            if (!mixedOpt.length) mixedOpt = $('<option data-aicli-mixed="1">').val(AICLI_MIXED).prependTo(sel);
+            mixedOpt.text('Mixed: ' + Number(st.plain || 0) + ' plain, ' + Number(st.layers || 0) + ' compressed');
+        } else if (mixedOpt.length) {
+            mixedOpt.remove();
+            mixedOpt = $();
+        }
+        if (!wasPending) sel.val(base);
+        sel.attr('data-aicli-base', base);
+        // The card status line (settings-cards.js) names the CURRENT state, never a pending choice.
+        if (ctl !== 'upper') sel.attr('data-aicli-status-text', base === AICLI_MIXED ? 'Mixed' : aicliKindModeLabel(base));
+        var target = aicliPendingTarget(ctl);
+        // The Mixed entry cannot be chosen again once the person has left it.
+        mixedOpt.prop('disabled', String(sel.val()) !== AICLI_MIXED);
+        sel.toggleClass('aicli-pending', !!target).toggleClass('aicli-mixed', !target && String(sel.val()) === AICLI_MIXED);
+        var busy = ctl === 'upper' ? !!window._aicliUpperBusy : !!window._aicliEngineBusy;
+        var btn = $('#aicli-apply-' + ctl);
+        btn.prop('hidden', !target).toggleClass('aicli-spark', !!target).prop('disabled', window._aicliStorageLocked || busy);
+        if (target) btn.text(aicliApplyLabel(ctl, target));
+        $('#aicli-kind-state-' + ctl).text(aicliPendingNote(ctl, target, base));
+    });
+}
+function aicliStorageChanged() { aicliSyncStorageControls(); }
+// The Apply button: start the move for the pending choice, through the check and confirm dialogs of the move.
+function aicliApplyStorage(ctl) {
+    var target = aicliPendingTarget(ctl);
+    if (!target) { aicliSyncStorageControls(); return; }
+    var form = document.getElementById('aicli-settings-form');
+    if (ctl === 'upper') aicliChangeUpperMode(target, window._aicliCurrentUpper, form);
+    else aicliChangeStorageKind(ctl, target, aicliCurrentStorageMode(ctl), form);
+}
+function aicliSetStorageLocked(on) {
+    window._aicliStorageLocked = !!on;
+    aicliStorageSelects().prop('disabled', !!on);
+    aicliSyncStorageControls();
+}
+function aicliInitStorageControls() {
+    AICLI_STORAGE_CONTROLS.forEach(function (ctl) {
+        var sel = aicliStorageSelect(ctl);
+        if (!sel.length || sel.attr('data-aicli-base') !== undefined) return;
+        // The page shows the saved value. A browser that restores form values after a reload must not bring back
+        // an old pending choice (#790): the option the server marked as selected is the start.
+        var shown = sel.find('option[selected]').val();
+        if (shown !== undefined) sel.val(shown);
+        sel.attr('data-aicli-base', String(sel.val() || ''));
+    });
+    // Coming back through the back button (a page kept in memory) also shows the current state, not a pending choice.
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        AICLI_STORAGE_CONTROLS.forEach(function (ctl) { aicliStorageSelect(ctl).val(aicliStorageBaseline(ctl)); });
+        aicliSyncStorageControls();
+    });
+    // A browser without registered custom properties cannot animate the spark: the ring stays still.
+    if (!(window.CSS && typeof CSS.registerProperty === 'function')) document.documentElement.setAttribute('data-aicli-spark', 'static');
+}
+
+// The REAL state of each kind, from the storage status and not from the saved value, so a home that was converted
+// by hand shows at once as "Mixed: ...". The state is the drop-down's current value.
 function aicliRenderKindState(r) {
     // Phase 5: "Save unsaved home changes every" (and Save now) has no use when every home is a plain folder.
     if (r && r.homes) {
@@ -367,22 +492,12 @@ function aicliRenderKindState(r) {
         $('[data-aicli-hide-plain-homes]').each(function () { this.hidden = allPlain; });
     }
     ['homes', 'agents'].forEach(function (kind) {
-        var box = $('#aicli-kind-state-' + kind);
-        var s = r && r[kind];
-        if (!box.length || !s) return;
-        var saved = s.saved || aicliCurrentStorageMode(kind);
-        box.empty();
-        $('<span>').text('Now: ' + s.label + '.').appendTo(box);
-        var missing = Number(s.total || 0) - Number(saved === 'passthrough' ? s.plain : s.layers);
-        if (s.state !== 'none' && missing > 0) {
-            var left = missing + (kind === 'agents' ? ' agent' : ' home') + (missing === 1 ? '' : 's');
-            $('<button type="button">').attr('data-testid', 'storage-kind-finish-' + kind)
-                .text('Convert the other ' + left + ' to ' + aicliKindModeLabel(saved).toLowerCase())
-                .css({ marginLeft: '8px' })
-                .on('click', function () { aicliChangeStorageKind(kind, saved, saved, document.getElementById('aicli-settings-form')); })
-                .appendTo(box);
-        }
+        if (!r || !r[kind]) return;
+        window._aicliKindReal[kind] = r[kind];
+        // The server's saved value is the truth for "saved" (another tab may have changed it).
+        if (r[kind].saved === 'layering' || r[kind].saved === 'passthrough') window._aicliCurrentStorage[kind] = r[kind].saved;
     });
+    aicliSyncStorageControls();
 }
 function aicliLoadKindState() {
     if (!$('#aicli-kind-state-homes').length) return;
@@ -390,12 +505,14 @@ function aicliLoadKindState() {
         .done(aicliRenderKindState);
 }
 
-// Convert one kind (homes or agents) to newMode. newMode may equal the saved value: then the
-// kind is mixed and only the items that are not on newMode yet convert.
+// Convert one kind (homes or agents) to newMode. Only the Apply button calls it. The kind may be mixed: then only
+// the items that are not on newMode yet convert.
 function aicliChangeStorageKind(kind, newMode, curMode, form) {
     if (window._aicliEngineBusy) return;
     window._aicliEngineBusy = true;
-    var restoreEngine = function () { window._aicliEngineBusy = false; aicliKindSelect(kind).val(aicliCurrentStorageMode(kind)); };
+    aicliSyncStorageControls();
+    // Cancel, Escape and a failed check keep the pending choice (warning and spark stay); the person can apply or change back.
+    var restoreEngine = function () { window._aicliEngineBusy = false; aicliSyncStorageControls(); };
     var word = aicliKindWord(kind);
     var q = '&mode=' + encodeURIComponent(newMode) + '&kind=' + encodeURIComponent(kind);
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend' + q + '&csrf_token=' + csrf, function(pf) {
@@ -412,7 +529,9 @@ function aicliChangeStorageKind(kind, newMode, curMode, form) {
                 } else if (r.status === 'saved') {
                     // Every item was on the new kind already: only the setting changed.
                     window._aicliCurrentStorage[kind] = newMode;
+                    delete window._aicliKindReal[kind]; // the saved value is the state until the real state is read again
                     window._aicliEngineBusy = false;
+                    aicliSyncStorageControls();
                     renderBackendMigrationStatus({ status: 'idle' });
                     if (typeof swal.close === 'function') swal.close();
                     aicliLoadKindState();
@@ -489,16 +608,16 @@ function renderBackendMigrationStatus(s) {
         var current = s.current ? 'Current item: ' + s.current + '. ' : '';
         $('<div>').text(current + Number(s.completed || 0) + ' of ' + Number(s.total) + ' complete.').appendTo(box);
         $('<progress>').attr({ max: Number(s.total), value: Number(s.completed || 0), 'aria-label': 'Storage migration progress' }).css({ width: '100%', marginTop: '6px' }).appendTo(box);
-        aicliStorageSelects().prop('disabled', true);
+        aicliSetStorageLocked(true);
     } else if (running) {
-        aicliStorageSelects().prop('disabled', true);
+        aicliSetStorageLocked(true);
         $('<div>').text(s.message || 'Workspaces cannot open until the migration finishes.').appendTo(box);
         if (interrupted) {
             $('<button type="button">').text('Continue').css({ marginTop: '6px', marginRight: '6px' }).on('click', function() { aicliRecoverBackendMigration('continue'); }).appendTo(box);
             $('<button type="button">').text('Put back').css({ marginTop: '6px' }).on('click', function() { aicliRecoverBackendMigration('rollback'); }).appendTo(box);
         }
     } else {
-        aicliStorageSelects().prop('disabled', false);
+        aicliSetStorageLocked(false);
         // Set the select(s) of the migrated kind from a finished record ONCE per record, not on
         // every poll: a later poll must not move a select back while the person picks a new
         // value and its confirmation is open.
@@ -508,19 +627,21 @@ function renderBackendMigrationStatus(s) {
         var recordKey = String(s.started_at || '') + ':' + String(s.status || '');
         var choosing = !!window._aicliEngineBusy;
         kindNames.forEach(function (k) {
-            if (aicliKindSelect(k).val() !== aicliCurrentStorageMode(k)) choosing = true;
+            if (aicliPendingTarget(k)) choosing = true; // a pending choice (#790) is never moved by a status record
         });
         var firstSeen = !choosing && window._aicliBackendStatusApplied !== recordKey;
         if (!choosing) window._aicliBackendStatusApplied = recordKey;
         kindNames.forEach(function (k) {
             if (firstSeen && s.status === 'complete' && target) aicliKindSelect(k).val(s.target);
-            if (s.status === 'complete' && s.target) window._aicliCurrentStorage[k] = s.target;
-            if ((s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliCurrentStorage[k] = s.from;
+            if (s.status === 'complete' && s.target) { window._aicliCurrentStorage[k] = s.target; delete window._aicliKindReal[k]; }
+            if ((s.status === 'error' || s.status === 'interrupted') && s.from) { window._aicliCurrentStorage[k] = s.from; delete window._aicliKindReal[k]; }
             if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) aicliKindSelect(k).val(s.from);
         });
         if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliEngineBusy = false;
         if (s.status === 'complete') window._aicliEngineBusy = false;
-        if (firstSeen && s.status !== 'queued') aicliLoadKindState();
+        aicliSyncStorageControls();
+        // Read the real state once for each finished record, also when a pending choice kept the drop-down from moving.
+        if (s.status !== 'queued' && window._aicliBackendStateLoaded !== recordKey) { window._aicliBackendStateLoaded = recordKey; aicliLoadKindState(); }
         if (s.status === 'complete' && window._aicliBackendMigrationStartedHere) {
             window._aicliBackendMigrationStartedHere = false;
             setTimeout(safeReload, 800);
@@ -793,6 +914,7 @@ $(function() {
     refreshLogContexts(); // R-07 (#1370): seed the Debug Console context filter dropdown
     refreshStats();
     resetStatsTimer();
+    aicliInitStorageControls();
     updateBackendMigrationStatus();
     aicliLoadKindState();
     setInterval(function() {

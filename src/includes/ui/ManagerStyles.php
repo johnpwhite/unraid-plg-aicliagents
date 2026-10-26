@@ -2424,6 +2424,41 @@
         white-space: normal !important; max-width: 100% !important; box-sizing: border-box;
         height: auto !important; min-height: 44px; margin-left: 0 !important; text-align: center; overflow-wrap: anywhere;
     }
+    /* #790: a storage drop-down that shows a choice not applied yet (or the read-only Mixed entry) turns the warning
+       colour, and its Apply button gets the spark: a lit arc that loops around the button edge (the same idea as the
+       Notebook "fuse"). The warning colour is a border plus text mixed from the theme text, so it reads on azure,
+       white, black and gray. Not colour only: the button, its label and the note under the drop-down say it too. */
+    @property --aicli-spark-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+    @keyframes aicli-spark { to { --aicli-spark-angle: 360deg; } }
+    .aicli-card-body select.aicli-pending, .aicli-card-body select.aicli-mixed {
+        border: 2px solid #d97706 !important;
+        color: color-mix(in srgb, #b45309 70%, var(--aicli-text, var(--text-color, #1c1b1b))) !important;
+    }
+    .aicli-apply-row { margin-top: 6px; }
+    .aicli-apply-row:has(> .aicli-apply-btn[hidden]) { display: none; }
+    .aicli-btn-slim.aicli-apply-btn[hidden] { display: none !important; }
+    .aicli-btn-slim.aicli-apply-btn {
+        position: relative; max-width: 100%; white-space: normal !important; text-align: center; overflow-wrap: anywhere;
+        height: auto !important; min-height: 44px;
+    }
+    .aicli-btn-slim.aicli-apply-btn.aicli-spark { box-shadow: 0 0 7px 0 rgba(217,119,6,0.55) !important; }
+    .aicli-apply-btn.aicli-spark::after {
+        content: ""; position: absolute; inset: 0; padding: 2px; border-radius: 4px; pointer-events: none; z-index: 2;
+        background: conic-gradient(from var(--aicli-spark-angle), transparent 0 62%, #f59e0b 88%, #fff 100%);
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+        animation: aicli-spark 1.8s linear infinite;
+    }
+    /* Without motion (the person asks for less, or the browser cannot animate the angle) the ring is a still warning border. */
+    @media (prefers-reduced-motion: reduce) {
+        .aicli-apply-btn.aicli-spark::after { animation: none; background: #d97706; }
+    }
+    html[data-aicli-spark="static"] .aicli-apply-btn.aicli-spark::after { animation: none; background: #d97706; }
+    @media (forced-colors: active) {
+        .aicli-card-body select.aicli-pending, .aicli-card-body select.aicli-mixed { border-color: Highlight !important; }
+        .aicli-apply-btn.aicli-spark::after { background: Highlight; animation: none; }
+    }
     /* The (i) of a line of the Boot disk space card sits right of the label. */
     #aicli-boot-space-card .aicli-bs-info { vertical-align: middle; }
 </style>
