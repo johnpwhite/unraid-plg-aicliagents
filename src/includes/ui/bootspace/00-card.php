@@ -73,22 +73,23 @@
 
     // Pure: the HTML of the disk bar.
     function diskHtml(disk) {
-        if (!disk || !disk.size) return '<div data-testid="boot-space-disk" style="font-size:11px; opacity:0.6;">The disk size is not known yet.</div>';
+        if (!disk || !disk.size) return '<div data-testid="boot-space-disk" class="aicli-bs-span" style="font-size:11px; opacity:0.6;">The disk size is not known yet.</div>';
         var pct = diskPct(disk);
         var level = levelOf(disk, pct);
         var color = { critical: '#e53935', warn: '#ff8c00', early: '#e6a23c', ok: '#4caf50' }[level];
         var warnText = levelText(level, pct);
         var warnHtml = warnText
-            ? '<div data-testid="boot-space-level" data-level="' + level + '" role="status" style="margin-top:8px; font-size:12px; color:' + color + ';"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> ' + esc(warnText) + '</div>'
+            ? '<div data-testid="boot-space-level" data-level="' + level + '" role="status" class="aicli-bs-span" style="font-size:12px; color:' + color + ';"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> ' + esc(warnText) + '</div>'
             : '';
         var where = [disk.mount, disk.fstype].filter(Boolean).join(', ');
-        return '<div data-testid="boot-space-disk" style="padding:10px; background:rgba(255,255,255,0.02); border-radius:4px; margin-bottom:12px;">' +
-            '<div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px; font-size:11px; margin-bottom:4px; opacity:0.85;">' +
-                '<span>Boot disk' + (where ? ' (' + esc(where) + ')' : '') + '</span>' +
-                '<span><b>' + human(disk.used) + '</b> used of ' + human(disk.size) + ' &middot; <b>' + human(disk.free) + '</b> free</span>' +
-            '</div>' +
-            '<div class="stat-bar-wrap"><div class="stat-bar-fill" style="width:' + pct + '%; background:' + color + ';"></div>' +
-            '<div class="stat-bar-text">' + pct + '%</div></div>' + warnHtml + '</div>';
+        // The disk row uses the same grid as the lines: its bar sits in the bar column, so its left and
+        // right edges are the edges of every line bar (#794). The wrapper has display:contents.
+        return '<div data-testid="boot-space-disk" class="aicli-bs-line aicli-bs-diskline">' +
+            '<div class="aicli-bs-c-name">Boot disk' + (where ? ' (' + esc(where) + ')' : '') + '</div>' +
+            '<div class="aicli-bs-c-bar"><div class="stat-bar-wrap" data-testid="boot-space-disk-bar"><div class="stat-bar-fill" style="width:' + pct + '%; background:' + color + ';"></div>' +
+            '<div class="stat-bar-text">' + pct + '%</div></div></div>' +
+            '<div class="aicli-bs-c-sum"><b>' + human(disk.used) + '</b> used of ' + human(disk.size) + ' &middot; <b>' + human(disk.free) + '</b> free</div>' +
+            warnHtml + '</div>';
     }
 
     // Pure: the button of one action. A disabled action keeps its reason in the tooltip.
@@ -124,16 +125,21 @@
     function lineHtml(part, maxBytes, migrationBusy) {
         var w = maxBytes > 0 ? Math.max(part.bytes > 0 ? 2 : 0, Math.round((part.bytes / maxBytes) * 100)) : 0;
         var color = COLORS[part.group] || '#999';
-        var acts = '';
-        if (part.action) acts += buttonHtml(part, part.action, migrationBusy);
-        (part.extra_actions || []).forEach(function (a) { acts += ' ' + buttonHtml(part, a, migrationBusy); });
+        // Two fixed action slots (#794): one button sits in the right slot, so it lines up with the right
+        // button of a pair. A third button, if a line ever has one, joins the right slot.
+        var btns = [];
+        if (part.action) btns.push(buttonHtml(part, part.action, migrationBusy));
+        (part.extra_actions || []).forEach(function (a) { btns.push(buttonHtml(part, a, migrationBusy)); });
+        var slotA = btns.length > 1 ? btns[0] : '';
+        var slotB = btns.length > 1 ? btns.slice(1).join(' ') : (btns[0] || '');
         // Phase 6: the note, the (i) text (R8, #724) and the link to a setting are behind one (i).
         var help = lineHelpHtml(part);
-        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '" style="display:grid; grid-template-columns:minmax(240px,0.7fr) minmax(180px,1.3fr) 70px minmax(120px,max-content); align-items:center; gap:8px 14px; padding:8px 0; border-top:1px solid var(--border-color, #333);">' +
-            '<div style="min-width:0; font-size:12px;"><span style="font-weight:600;">' + esc(part.label) + '</span>' + help.btn + help.panel + '</div>' +
-            '<div style="min-width:100px;"><div class="stat-bar-wrap" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
-            '<div data-testid="boot-space-size" style="text-align:right; font-size:12px; font-weight:700;">' + human(part.bytes) + '</div>' +
-            '<div style="text-align:right;">' + acts + '</div>' +
+        return '<div class="aicli-bs-line" data-testid="boot-space-line" data-key="' + esc(part.key) + '">' +
+            '<div class="aicli-bs-c-name"><span style="font-weight:600;">' + esc(part.label) + '</span>' + help.btn + help.panel + '</div>' +
+            '<div class="aicli-bs-c-bar"><div class="stat-bar-wrap" data-testid="boot-space-bar" style="height:10px;"><div class="stat-bar-fill" style="width:' + w + '%; background:' + color + ';"></div></div></div>' +
+            '<div class="aicli-bs-c-size" data-testid="boot-space-size">' + human(part.bytes) + '</div>' +
+            '<div class="aicli-bs-c-slot-a">' + slotA + '</div>' +
+            '<div class="aicli-bs-c-slot-b">' + slotB + '</div>' +
         '</div>';
     }
     // Pure: the warning about the agent temporary folders in RAM (AGENT_TEMP_FOLDER.md R4). '' when there is no warning.
@@ -142,7 +148,7 @@
         if (!t || !t.warn) return '';
         var closed = Number(t.closed_bytes) || 0;
         var canClean = closed > 0 && !migrationBusy;
-        return '<div data-testid="boot-space-tmp-warn" style="padding:10px; margin-bottom:12px; border:1px solid #ff8c00; border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">' +
+        return '<div data-testid="boot-space-tmp-warn" class="aicli-bs-span" style="padding:10px; margin:6px 0; border:1px solid #ff8c00; border-radius:4px; background:rgba(255,140,0,0.08); font-size:12px;">' +
             '<div style="font-weight:600; margin-bottom:3px;"><i class="fa fa-exclamation-triangle"></i> Temporary files of agents use ' + human(t.ram_bytes) + ' of RAM</div>' +
             '<div style="opacity:0.85; margin-bottom:6px;">The warning limit is ' + human((Number(t.warn_mb) || 0) * 1048576) + '. Sessions that no longer run hold ' + human(closed) + ' of it. A large temporary folder in memory can make typing slow. The setting Agent temporary files (Configuration tab) can move new sessions to a pool.</div>' +
             '<button type="button" class="aicli-bs-tmp-act aicli-btn-slim" data-testid="boot-space-tmp-clean"' + (canClean ? '' : ' disabled aria-disabled="true" title="' + (migrationBusy ? 'Wait for the storage migration to finish.' : 'No closed session holds temporary files.') + '"') +
@@ -163,7 +169,7 @@
         if (measuring) stamp += ' &middot; <i class="fa fa-spinner fa-spin"></i> measuring now&hellip;';
         var rows = parts.length
             ? parts.map(function (p) { return lineHtml(p, max, migrationBusy); }).join('')
-            : '<div style="font-size:12px; opacity:0.7; padding:8px 0;">' + (measuring ? 'The sizes are being measured. This takes a few seconds.' : 'No sizes yet. Press Measure now.') + '</div>';
+            : '<div class="aicli-bs-span" style="font-size:12px; opacity:0.7; padding:8px 0;">' + (measuring ? 'The sizes are being measured. This takes a few seconds.' : 'No sizes yet. Press Measure now.') + '</div>';
         var migrationBanner = '';
         if (migrationBusy) {
             var progress = Number(migration.total) > 0 ? (Number(migration.completed || 0) + ' of ' + Number(migration.total) + ' storage items complete.') : 'The migration is starting.';
@@ -171,14 +177,16 @@
             // Say which kind converts: the migration status names it (homes or agents).
             var kindWord = migration.kind === 'homes' ? 'Home storage' : (migration.kind === 'agents' ? 'Agent storage' : 'Storage');
             var recovery = stopped ? '<div style="margin-top:6px;"><button type="button" class="aicli-btn-slim" data-testid="boot-space-migration-continue" data-recovery="continue">Continue</button> <button type="button" class="aicli-btn-slim" data-testid="boot-space-migration-rollback" data-recovery="rollback">Put back</button></div>' : '';
-            migrationBanner = '<div data-testid="boot-space-migration" role="status" aria-live="polite" style="padding:10px 12px; margin:0 0 10px; border:1px solid #e6a23c; border-radius:4px; background:rgba(230,162,60,.12); font-size:12px;"><strong>' + (stopped ? kindWord + ' migration stopped' : (migration.status === 'queued' ? kindWord + ' migration starting' : kindWord + ' migration in progress')) + '</strong><div>' + esc(migration.message || 'Workspaces and storage actions are paused until this finishes.') + '</div><div>' + esc(progress) + '</div>' + (Number(migration.total) > 0 ? '<progress max="' + Number(migration.total) + '" value="' + Number(migration.completed || 0) + '" aria-label="Storage migration progress" style="width:100%; margin-top:6px;"></progress>' : '') + recovery + '</div>';
+            migrationBanner = '<div data-testid="boot-space-migration" role="status" aria-live="polite" class="aicli-bs-span" style="padding:10px 12px; margin:6px 0; border:1px solid #e6a23c; border-radius:4px; background:rgba(230,162,60,.12); font-size:12px;"><strong>' + (stopped ? kindWord + ' migration stopped' : (migration.status === 'queued' ? kindWord + ' migration starting' : kindWord + ' migration in progress')) + '</strong><div>' + esc(migration.message || 'Workspaces and storage actions are paused until this finishes.') + '</div><div>' + esc(progress) + '</div>' + (Number(migration.total) > 0 ? '<progress max="' + Number(migration.total) + '" value="' + Number(migration.completed || 0) + '" aria-label="Storage migration progress" style="width:100%; margin-top:6px;"></progress>' : '') + recovery + '</div>';
         }
         // Phase 6: the card itself (header, status, (i), menu) is in ManagerStorageTab.php. This is its body.
-        return '<style>@media(max-width:760px){#aicli-boot-space-card .aicli-bs-line{grid-template-columns:minmax(0,1fr) auto !important;}#aicli-boot-space-card .aicli-bs-line>div:first-child,#aicli-boot-space-card .aicli-bs-line>div:last-child{grid-column:1/-1;}#aicli-boot-space-card .aicli-bs-line>div:last-child{justify-self:end;}}</style>' +
+        // The disk row, the banners and every line share ONE grid (.aicli-bs-grid, ManagerStyles.php).
+        return '<div class="aicli-bs-grid" data-testid="boot-space-grid">' +
                 diskHtml(data && data.disk) +
                 migrationBanner +
                 tmpWarnHtml(data && data.agent_tmp, migrationBusy) +
                 rows +
+                '</div>' +
                 '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11px; opacity:0.85;">' +
                     '<span>' + stamp + '</span>' +
                     '<span>' +

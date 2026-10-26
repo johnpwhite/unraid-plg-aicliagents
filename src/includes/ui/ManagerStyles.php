@@ -2459,6 +2459,68 @@
         .aicli-card-body select.aicli-pending, .aicli-card-body select.aicli-mixed { border-color: Highlight !important; }
         .aicli-apply-btn.aicli-spark::after { background: Highlight; animation: none; }
     }
+    /* #794: the Boot disk space rows share ONE grid, so every bar, size and button lines up.
+       Columns: name | bar | size | action slot A | action slot B. The two slot columns and the size column
+       size to their widest content over ALL rows. One button sits in slot B (right), a pair fills A and B.
+       The rows have display:contents, so their cells are cells of the shared grid. The disk row puts its
+       bar in the bar column, so its bar has the same left and right edge as every line bar. */
+    #aicli-boot-space-card .aicli-bs-grid {
+        display: grid; align-items: center; column-gap: 14px; row-gap: 0;
+        grid-template-columns: minmax(160px, 0.7fr) minmax(100px, 2.3fr) max-content minmax(0, max-content) minmax(0, max-content);
+    }
+    #aicli-boot-space-card .aicli-bs-line { display: contents; }
+    #aicli-boot-space-card .aicli-bs-line::before {
+        content: ""; grid-column: 1 / -1; height: 0; border-top: 1px solid var(--border-color, #333);
+    }
+    #aicli-boot-space-card .aicli-bs-diskline::before { display: none; }
+    #aicli-boot-space-card .aicli-bs-line > div { padding: 8px 0; min-width: 0; font-size: 12px; }
+    #aicli-boot-space-card .aicli-bs-diskline > div { padding-top: 0; }
+    #aicli-boot-space-card .aicli-bs-c-name { overflow-wrap: anywhere; }
+    #aicli-boot-space-card .aicli-bs-diskline > .aicli-bs-c-name { opacity: 0.85; font-size: 11px; }
+    #aicli-boot-space-card .aicli-bs-c-size {
+        text-align: right; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums;
+    }
+    #aicli-boot-space-card .aicli-bs-c-sum {
+        grid-column: 3 / -1; text-align: right; font-size: 11px; opacity: 0.85; font-variant-numeric: tabular-nums;
+    }
+    #aicli-boot-space-card .aicli-bs-c-slot-a { display: flex; justify-content: flex-end; }
+    #aicli-boot-space-card .aicli-bs-c-slot-b { display: flex; justify-content: flex-end; gap: 8px; }
+    #aicli-boot-space-card .aicli-bs-c-slot-a > .aicli-bs-act,
+    #aicli-boot-space-card .aicli-bs-c-slot-b > .aicli-bs-act { width: 100%; }
+    #aicli-boot-space-card .aicli-bs-span { grid-column: 1 / -1; }
+    /* Above 900 px the slot columns can shrink (minmax(0, max-content)) and a long button label wraps, so a
+       narrow screen (about 1024 px) never makes the card wider than the page. 44 px stays the minimum height. */
+    #aicli-boot-space-card .aicli-bs-act {
+        white-space: normal !important; height: auto !important; min-height: 44px !important;
+        overflow-wrap: anywhere; max-width: 100%; text-align: center;
+    }
+    /* Phone and narrow screens: each row is its own grid. Name and size on one line, the bar full width,
+       then the buttons full width (44 px tall from .aicli-btn-slim). The page never scrolls sideways. */
+    @media (max-width: 900px) {
+        #aicli-boot-space-card .aicli-bs-grid { display: block; }
+        #aicli-boot-space-card .aicli-bs-line {
+            display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 0;
+            grid-template-areas: "name size" "bar bar" "a a" "b b"; align-items: center;
+            border-top: 1px solid var(--border-color, #333); padding: 8px 0;
+        }
+        #aicli-boot-space-card .aicli-bs-line::before { display: none; }
+        #aicli-boot-space-card .aicli-bs-line > div { padding: 3px 0; }
+        #aicli-boot-space-card .aicli-bs-c-name { grid-area: name; }
+        #aicli-boot-space-card .aicli-bs-c-bar { grid-area: bar; }
+        #aicli-boot-space-card .aicli-bs-c-size { grid-area: size; }
+        #aicli-boot-space-card .aicli-bs-c-slot-a { grid-area: a; }
+        #aicli-boot-space-card .aicli-bs-c-slot-b { grid-area: b; flex-direction: column; align-items: stretch; }
+        #aicli-boot-space-card .aicli-bs-c-slot-a:empty, #aicli-boot-space-card .aicli-bs-c-slot-b:empty { display: none; }
+        #aicli-boot-space-card .aicli-bs-c-slot-a > .aicli-bs-act, #aicli-boot-space-card .aicli-bs-c-slot-b > .aicli-bs-act { width: 100%; }
+        #aicli-boot-space-card .aicli-bs-act {
+            white-space: normal !important; height: auto !important; min-height: 44px !important; overflow-wrap: anywhere; max-width: 100%;
+        }
+        #aicli-boot-space-card .aicli-bs-diskline {
+            border-top: 0; padding-top: 0; grid-template-areas: "name name" "bar bar" "sum sum";
+        }
+        #aicli-boot-space-card .aicli-bs-c-sum { grid-area: sum; text-align: left; }
+        #aicli-boot-space-card .aicli-bs-span { margin: 6px 0; }
+    }
     /* The (i) of a line of the Boot disk space card sits right of the label. */
     #aicli-boot-space-card .aicli-bs-info { vertical-align: middle; }
 </style>
