@@ -99,6 +99,13 @@ class ActivityHandler
         foreach (TmuxService::listPendingRelayQueues() as $q) {
             $out[] = TmuxService::relayWaitingEntry((string)$q['agentId'], (string)$q['sessionId'], $q['senders']);
         }
+        // #791: a continue message that stays unsent after the automatic Enter retries.
+        // A session with a real waiting-message row already has the row that says "press Enter".
+        $have = array_column($out, 'opId');
+        foreach (TmuxService::listStuckContinues() as $c) {
+            $entry = TmuxService::stuckContinueEntry($c['agentId'], $c['sessionId']);
+            if (!in_array($entry['opId'], $have, true)) $out[] = $entry;
+        }
         return $out;
     }
 
@@ -151,6 +158,10 @@ class ActivityHandler
             case 'ok':
                 return ['status' => 'ok', 'delivered' => true, 'senders' => $r['senders'] ?? 0];
             case 'empty':
+                // #791: no queued notice, but a continue message may sit unsent: Enter only.
+                if (TmuxService::pressStuckContinue($agentId, $sessionId)) {
+                    return ['status' => 'ok', 'delivered' => true, 'senders' => 0];
+                }
                 return ['status' => 'ok', 'delivered' => false, 'message' => 'Nothing left to deliver'];
             case 'unconfirmed':
                 // #320: the notice is in the input box and Enter was pressed, but the

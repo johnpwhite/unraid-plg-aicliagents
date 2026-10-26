@@ -1256,7 +1256,7 @@ class TmuxService {
             // prompt after it.
             $enter = self::submitUnsentOwnNotice($name, $sock, $unsent);
             if (!$enter['sent']) return ['status'=>'error','message'=>'Could not submit continue'];
-            return ['status'=>'ok', 'confirmed'=>$enter['confirmed'], 'resubmitted'=>$unsent['kind']];
+            return self::continueResult($agentId, $sessionId, $enter) + ['resubmitted'=>$unsent['kind']];
         }
         $pasted = self::pasteText($agentId, $sessionId, self::CONTINUE_PROMPT);
         if (($pasted['status'] ?? '') !== 'ok') return $pasted;
@@ -1265,7 +1265,188 @@ class TmuxService {
         $enter = self::pressEnterAndConfirm($name, $sock, self::noticeMarker(self::CONTINUE_PROMPT));
         if (!$enter['sent']) return ['status'=>'error','message'=>'Could not submit continue'];
         self::logSubmitOutcome('continue nudge', $name, $enter);
-        return ['status'=>'ok', 'confirmed'=>$enter['confirmed']];
+        return self::continueResult($agentId, $sessionId, $enter) + ['pasted'=>true];
+    }
+
+    /**
+     * #791: the truthful result of a continue nudge. An Enter that did not take
+     * (confirmed === false) is NOT success: the text sits in the input box. It returns
+     * 'busy', which every caller already retries, and the retry takes the Enter-only
+     * path, so no second prompt is pasted. A stuck marker lets the supervisor tick keep
+     * trying with no caller. No evidence (null) stays 'ok'. Never arms the cooldown.
+     *
+     * @param array{sent:bool,confirmed:?bool,attempts:int,held?:string,queued?:bool} $enter
+     * @return array<string,mixed>
+     */
+    private static function continueResult(string $agentId, string $sessionId, array $enter): array {
+        if ($enter['confirmed'] !== false) {
+            self::clearStuckContinue($agentId, $sessionId);
+            return ['status'=>'ok', 'confirmed'=>$enter['confirmed']];
+        }
+        $held = ($enter['held'] ?? '') === 'foreign-text';
+        // Someone typed in the box: leave it alone, and record no marker to press on it.
+        if (!$held) self::markStuckContinue($agentId, $sessionId);
+        return ['status'=>'busy', 'reason'=>$held ? 'own-notice-with-text' : 'own-notice-unsent', 'pasted'=>true,
+            'message'=>$held
+                ? 'The continue message is in the input box, but other text is there too. Open the workspace and press Enter.'
+                : 'The continue message is in the input box, but the agent has not taken it yet. The plugin presses Enter again.'];
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* #791 — a continue message that stays unsent: server-side follow-up  */
+    /* ------------------------------------------------------------------ */
+
+    /** The marker of a stuck continue nudge, beside the session's pending queue (not *.json). */
+    private static function stuckContinueFile(string $agentId, string $sessionId): string {
+        $active = self::pendingFile($agentId, $sessionId) . '.continue';
+        $held = $active . '-held';
+        // After the retries fail the marker is renamed to ".continue-held". The supervisor's
+        // 5 s cadence looks for "*.continue" only, so a held marker drops back to 30 s.
+        return !is_file($active) && is_file($held) ? $held : $active;
+    }
+
+    /** Remember that this session's continue message sits unsent. Keeps the try count. */
+    private static function markStuckContinue(string $agentId, string $sessionId): void {
+        $f = self::stuckContinueFile($agentId, $sessionId);
+        $cur = self::stuckContinueState($agentId, $sessionId);
+        @mkdir(dirname($f), 0770, true);
+        \AICliAgents\Services\AtomicWriteService::writeJson($f, [
+            'tries' => $cur['tries'], 'since' => $cur['since'] !== '' ? $cur['since'] : gmdate('c'),
+        ]);
+    }
+
+    /** The continue message left the input box: forget the marker and clear the tray row. */
+    private static function clearStuckContinue(string $agentId, string $sessionId): void {
+        $f = self::stuckContinueFile($agentId, $sessionId);
+        if (!is_file($f)) return;
+        @unlink($f);
+        @unlink(self::pendingFile($agentId, $sessionId) . '.continue');
+        @unlink(self::pendingFile($agentId, $sessionId) . '.continue-held');
+        self::publishRelayWaitingCleared($agentId, $sessionId);
+    }
+
+    /** @return array{tries:int,since:string} */
+    private static function stuckContinueState(string $agentId, string $sessionId): array {
+        $f = self::stuckContinueFile($agentId, $sessionId);
+        $d = is_file($f) ? json_decode((string)@file_get_contents($f), true) : null;
+        return ['tries' => (int)(is_array($d) ? ($d['tries'] ?? 0) : 0), 'since' => (string)(is_array($d) ? ($d['since'] ?? '') : '')];
+    }
+
+    /**
+     * One supervisor-tick look at a stuck continue message. Presses Enter only when the
+     * pane gate says our own notice sits unsent (submitUnsentOwnNotice: never a paste,
+     * and never on foreign text). Clears the marker when the notice is gone. After
+     * UNSENT_ENTER_MAX_TRIES failed tries it stops pressing; the tray row then asks a person.
+     *
+     * @return string 'none' | 'cleared' | 'retried' | 'waiting' | 'given-up'
+     */
+    public static function retryStuckContinue(string $agentId, string $sessionId): string {
+        $f = self::stuckContinueFile($agentId, $sessionId);
+        if (!is_file($f)) return 'none';
+        $gate = self::paneAcceptsInput($agentId, $sessionId);
+        $reason = (string)($gate['reason'] ?? '');
+        // Text follows our message (a person typed it), or the box looks like typing or a
+        // menu cursor: never press, and keep the marker. A marker older than an hour goes,
+        // so a pane that stays like this does not keep the tick busy for ever.
+        if (in_array($reason, ['own-notice-with-text', 'selector-cursor', 'box-typing'], true)) {
+            $since = strtotime(self::stuckContinueState($agentId, $sessionId)['since']);
+            if ($since !== false && time() - $since > 3600) { self::clearStuckContinue($agentId, $sessionId); return 'cleared'; }
+            return 'waiting';
+        }
+        if ($reason !== 'own-notice-unsent') {
+            // The notice left the input box (taken, or cleared by a person).
+            self::clearStuckContinue($agentId, $sessionId);
+            return 'cleared';
+        }
+        $state = self::stuckContinueState($agentId, $sessionId);
+        if ($state['tries'] >= self::UNSENT_ENTER_MAX_TRIES) return 'given-up';
+        [$name, $sock] = self::resolveSession($agentId, $sessionId);
+        if ($name === '') return 'waiting';
+        $unsent = self::unsentOwnNoticeOnPane($agentId, $name, $sock);
+        if ($unsent === null) return 'waiting';
+        $enter = self::submitUnsentOwnNotice($name, $sock, $unsent);
+        if ($enter['sent'] && $enter['confirmed'] !== false) {
+            self::clearStuckContinue($agentId, $sessionId);
+            return 'cleared';
+        }
+        $tries = $state['tries'] + 1;
+        \AICliAgents\Services\AtomicWriteService::writeJson($f, ['tries' => $tries, 'since' => $state['since']]);
+        if ($tries >= self::UNSENT_ENTER_MAX_TRIES) {
+            @rename($f, $f . '-held');   // out of the 5 s cadence; the tray row and "Press Enter" still find it
+            LogService::log("Stopped pressing Enter on the unsent continue message in aicli-agent-$agentId-$sessionId after $tries tries — a person must press Enter in the workspace", LogService::LOG_ERROR, 'TmuxService');
+            self::publishStuckContinueRow($agentId, $sessionId);
+            return 'given-up';
+        }
+        return 'retried';
+    }
+
+    /**
+     * A person clicked "Press Enter" on the tray row: press Enter only, if the continue
+     * message still sits unsent. True when it left the input box.
+     */
+    public static function pressStuckContinue(string $agentId, string $sessionId): bool {
+        if (!is_file(self::stuckContinueFile($agentId, $sessionId))) return false;
+        [$name, $sock] = self::resolveSession($agentId, $sessionId);
+        if ($name === '') return false;
+        $unsent = self::unsentOwnNoticeOnPane($agentId, $name, $sock);
+        if ($unsent === null) { self::clearStuckContinue($agentId, $sessionId); return false; }
+        $enter = self::submitUnsentOwnNotice($name, $sock, $unsent);
+        if ($enter['sent'] && $enter['confirmed'] !== false) { self::clearStuckContinue($agentId, $sessionId); return true; }
+        return false;
+    }
+
+    /** Every running session whose stuck continue message used up its tries. @return list<array{agentId:string,sessionId:string}> */
+    public static function listStuckContinues(): array {
+        $out = [];
+        foreach (glob(self::relayPendingDir() . '/*.continue-held') ?: [] as $file) {
+            $parts = explode('__', basename($file, '.json.continue-held'), 2);
+            if (count($parts) !== 2 || $parts[0] === '' || $parts[1] === '') continue;
+            [$agentId, $sessionId] = $parts;
+            if (class_exists('\AICliAgents\Services\ProcessManager')
+                && !\AICliAgents\Services\ProcessManager::isRunning($sessionId)) continue;
+            if (self::stuckContinueState($agentId, $sessionId)['tries'] < self::UNSENT_ENTER_MAX_TRIES) continue;
+            $out[] = ['agentId' => $agentId, 'sessionId' => $sessionId];
+        }
+        return $out;
+    }
+
+    /**
+     * The tray row for a stuck continue message. It has the same opId and type as a
+     * relay_waiting row (the tray already offers "Press Enter" for reason own-notice-unsent),
+     * so there is one row per workspace at most.
+     * @return array<string,mixed>
+     */
+    public static function stuckContinueEntry(string $agentId, string $sessionId): array {
+        $workspace = ConfigService::workspaceName($sessionId);
+        $text = 'The continue message is waiting in ' . ($workspace !== '' ? $workspace : 'the workspace') . ': press Enter there.';
+        return [
+            'opId'        => "relay_waiting__{$agentId}__{$sessionId}",
+            'type'        => 'relay_waiting',
+            'label'       => $text,
+            'step'        => $text,
+            'progress'    => 0,
+            'status'      => 'relay_waiting',
+            'startedAt'   => time(),
+            'heartbeatAt' => time(),
+            'error'       => null,
+            'recovery'    => null,
+            'reason'      => $text,
+            'reasonCode'  => 'own-notice-unsent',
+            'count'       => 1,
+            'workspace'   => $workspace,
+            'meta'        => ['agentId' => $agentId, 'sessionId' => $sessionId, 'senders' => [], 'count' => 1, 'workspace' => $workspace],
+        ];
+    }
+
+    /** Push the stuck-continue row to open trays now. Best-effort, like the other relay_waiting publishes. */
+    private static function publishStuckContinueRow(string $agentId, string $sessionId): void {
+        try {
+            if (file_exists('/var/run/nginx.socket') && class_exists('\AICliAgents\Services\EventBus')) {
+                \AICliAgents\Services\EventBus::publish('activity', [], self::stuckContinueEntry($agentId, $sessionId));
+            }
+        } catch (\Throwable $e) {
+            // The tray's own poll still lists the row.
+        }
     }
 
     /**
@@ -1322,6 +1503,12 @@ class TmuxService {
 
     /** Time for a TUI to finish ingesting a bracketed paste before Enter arrives. */
     const PASTE_SETTLE_US = 150000;
+    /**
+     * #791: agents whose TUI may take a fast Enter as part of the paste, so the text never
+     * leaves the input box (Codex 0.162.1 did this after a restart). They get a longer
+     * pause before the first Enter. Any other agent uses PASTE_SETTLE_US.
+     */
+    const PASTE_SETTLE_BY_AGENT_US = ['codex-cli' => 700000];
     /** How long an Enter is given to take visible effect before the pane is re-read. */
     const ENTER_CONFIRM_US = 800000;
     /**
@@ -1330,6 +1517,11 @@ class TmuxService {
      * version gave up after ~1 s, and a later Enter was what worked (DMoE, 11:11).
      */
     const ENTER_LADDER_US = [self::ENTER_CONFIRM_US, 1200000, 2500000, 5000000];
+
+    /** #791: the pause between a paste and its first Enter, for this agent (null = unknown). */
+    public static function pasteSettleUs(?string $agentId): int {
+        return self::PASTE_SETTLE_BY_AGENT_US[(string)$agentId] ?? self::PASTE_SETTLE_US;
+    }
 
     /**
      * Press Enter after a paste and CONFIRM the agent took the notice.
@@ -1348,10 +1540,10 @@ class TmuxService {
      * @return array{sent:bool,confirmed:?bool,attempts:int,held?:string,queued?:bool}
      */
     private static function pressEnterAndConfirm(string $name, string $sock, string $marker = ''): array {
-        self::pause(self::PASTE_SETTLE_US);
         // 2026-09-30: read the agent's input box only (a ruled box for Claude Code), never
         // its transcript, where every sent message carries the same "❯" mark.
         $agentId = self::agentIdFromSessionName($name);
+        self::pause(self::pasteSettleUs($agentId));
         // Hard guard for the plugin's own notices: an Enter is pressed only while the
         // input box holds nothing but our notice (or cannot be read). Text that is not
         // our notice — a person typing, or words typed after our notice — is never sent.
@@ -3112,6 +3304,14 @@ class TmuxService {
      */
     public static function drainAllPendingRelay(): array {
         $drained = 0; $deferred = 0; $checked = 0;
+        // #791: a continue message that stayed unsent gets its Enter-only retries here too.
+        foreach (array_merge(glob(self::relayPendingDir() . '/*.continue') ?: [], glob(self::relayPendingDir() . '/*.continue-held') ?: []) as $cf) {
+            $p = explode('__', preg_replace('/\.json\.continue(-held)?$/D', '', basename($cf)), 2);
+            if (count($p) !== 2 || $p[0] === '' || $p[1] === '') continue;
+            if (class_exists('\AICliAgents\Services\ProcessManager')
+                && !\AICliAgents\Services\ProcessManager::isRunning($p[1])) continue;
+            try { self::retryStuckContinue($p[0], $p[1]); } catch (\Throwable $e) { /* best-effort */ }
+        }
         foreach (glob(self::relayPendingDir() . '/*.json') ?: [] as $file) {
             $parts = explode('__', basename($file, '.json'), 2);
             if (count($parts) !== 2) continue;

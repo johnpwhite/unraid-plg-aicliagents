@@ -4597,12 +4597,13 @@ _agent_generation_sweep_run() {
 _relay_pending_exists() {
     local f
     if [ -n "${AICLI_RELAY_STATE_DIR:-}" ]; then
-        for f in "${AICLI_RELAY_STATE_DIR}"/pending/*.json; do
+        for f in "${AICLI_RELAY_STATE_DIR}"/pending/*.json "${AICLI_RELAY_STATE_DIR}"/pending/*.continue; do
             [ -f "$f" ] && return 0
         done
         return 1
     fi
-    for f in "${MOUNT_ROOT}"/work/*/home/relay/pending/*.json; do
+    # #791: a *.continue marker (a continue message that stayed unsent) also needs the 5 s cadence.
+    for f in "${MOUNT_ROOT}"/work/*/home/relay/pending/*.json "${MOUNT_ROOT}"/work/*/home/relay/pending/*.continue; do
         [ -f "$f" ] && return 0
     done
     return 1
