@@ -2464,6 +2464,8 @@
        size to their widest content over ALL rows. One button sits in slot B (right), a pair fills A and B.
        The rows have display:contents, so their cells are cells of the shared grid. The disk row puts its
        bar in the bar column, so its bar has the same left and right edge as every line bar. */
+    /* #807: the bar fills its column; its 1 px border counts inside that width, so the card never scrolls sideways. */
+    #aicli-boot-space-card .stat-bar-wrap { box-sizing: border-box; }
     #aicli-boot-space-card .aicli-bs-grid {
         display: grid; align-items: center; column-gap: 14px; row-gap: 0;
         grid-template-columns: minmax(160px, 0.7fr) minmax(100px, 2.3fr) max-content minmax(0, max-content) minmax(0, max-content);
