@@ -1762,7 +1762,8 @@
     .acp-test-lines li.acp-hit { background: color-mix(in srgb, #16a34a 22%, transparent); font-weight: 700; }
     .acp-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .acp-error:empty, .acp-saved:empty { display: none; }
-    .acp-dialog .acp-x {
+    /* #809: the Script runs dialog uses the same 44 px close button. */
+    .acp-dialog .acp-x, .runs-dialog .acp-x {
         width: 44px !important; height: 44px !important; min-width: 44px !important; flex: 0 0 44px;
         margin: 0 !important; padding: 0 !important; border: none !important; border-radius: 4px !important;
         background: transparent !important; color: var(--text-color, inherit) !important;
