@@ -6,7 +6,7 @@
 
 ## In plain words
 
-A script on your server can ask the plugin to start an agent. The script says which agent, which folder and what to do. The plugin checks which script asked and starts only scripts on **Authorised scripts**. A read-only run starts at once. A run that may change files waits until you approve it in the Activity tray. The agent sends its result to the Notebook and the Activity tray. A script can wait for that result and get its summary.
+You can let your own scripts start an agent for you, while you stay in control of what each script may do. A script on your server can ask the plugin to start an agent. The script says which agent, which folder and what to do. The plugin checks which script asked and starts only scripts on **Authorised scripts**. A read-only run starts at once. A run that may change files waits until you approve it in the Activity tray. The agent sends its result to the Notebook and the Activity tray. A script can wait for that result and get its summary.
 
 Words used on this page:
 
@@ -103,6 +103,7 @@ This version runs every agent as root. A restricted run user and a temporary fol
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-26** — The command returns a JSON state with its exit code, and its wait lasts up to one hour. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-25** — A run reports to one Notebook card and the Activity tray. A script can wait for its summary, and the plugin closes the run after its report or time limit. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — The card **Script runs** and the command `aicli-run` start an agent from a script on the Authorised scripts list. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.

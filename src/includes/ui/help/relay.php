@@ -10,6 +10,6 @@
  */
 return [
     'relay-intro' => <<<'HTML'
-<p>Your agents share updates and send each other work requests through a shared mailbox. Messages are saved to each workspace's inbox. A short notice is typed into the agent's terminal so it reads the inbox. The wording of the notice is a setting on the Configuration tab.</p>
+<p>Let your agents work together, with no need for you to pass messages by hand. Your agents share updates and send each other work requests through a shared mailbox. Messages are saved to each workspace's inbox. A short notice is typed into the agent's terminal so it reads the inbox. The wording of the notice is a setting on the Configuration tab.</p>
 HTML,
 ];

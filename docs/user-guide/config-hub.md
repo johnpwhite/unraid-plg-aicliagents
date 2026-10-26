@@ -6,7 +6,7 @@
 
 ## In plain words
 
-Each AI agent keeps its settings in its own file, in its own format. Without help, you would add the same tool or the same instructions to many files by hand. The Config Hub keeps one shared copy of four things: MCP servers (tools that an agent can call), global instructions, skills and commands. You choose which agents receive each item. When you press **Apply to agents**, the Config Hub writes the item into the file of each chosen agent, in the format that the agent reads. If you edit one of those files by hand, the Config Hub notices and asks you what to do. It never overwrites your edit without asking. The Config Hub can also keep a history of your settings, so that you can look back and restore an earlier version.
+With the Config Hub, you set up your tools and instructions once, and every agent that supports them gets them. Each AI agent keeps its settings in its own file, in its own format. Without help, you would add the same tool or the same instructions to many files by hand. The Config Hub keeps one shared copy of four things: MCP servers (tools that an agent can call), global instructions, skills and commands. You choose which agents receive each item. When you press **Apply to agents**, the Config Hub writes the item into the file of each chosen agent, in the format that the agent reads. If you edit one of those files by hand, the Config Hub notices and asks you what to do. It never overwrites your edit without asking. The Config Hub can also keep a history of your settings, so that you can look back and restore an earlier version.
 
 Words used on this page:
 
@@ -343,6 +343,8 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
+- **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-23** — The Agent Store chip **Envs** is called **Variables** here. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The cards have the same header as the other Settings tabs, with a status line and an (i) button. The long card intros are behind the (i). The text box of **Global Instructions** is closed until you press **Edit**. Each agent tile is one large check box. The lists of agents per item are in the table "Which agents receive what" only. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
 

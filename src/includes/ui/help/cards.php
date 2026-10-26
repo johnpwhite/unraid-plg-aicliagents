@@ -14,22 +14,22 @@
  */
 return [
     'card-general' => <<<'HTML'
-<p>These settings apply to the whole plugin. They decide if the tab shows in Unraid's top menu, which user the terminal runs as, and where a new workspace starts.</p>
+<p>Choose where the plugin shows and which user your agents run as, so it fits your server. These settings apply to the whole plugin. They decide if the tab shows in Unraid's top menu, which user the terminal runs as, and where a new workspace starts.</p>
 HTML,
     'adv-general' => <<<'HTML'
 <p>Inside: the log detail and the version checks. It also holds the switch that lets agents manage the plugin. The last row is the name of this browser.</p>
 HTML,
     'card-storage' => <<<'HTML'
-<p>Here you choose how homes and agents are stored, and where. A home is the folder where an agent keeps its settings and history.</p>
+<p>Keep your agents' settings, logins and history safe, and keep the boot disk free. You choose how homes and agents are stored, and where. A home is the folder where an agent keeps its settings and history.</p>
 HTML,
     'adv-storage' => <<<'HTML'
 <p>Inside: how often unsaved home changes are saved, where they are kept, when layers merge, and the work folders. It also holds the caches, the temporary files and the path that a workspace runs on. Most people never change these.</p>
 HTML,
     'card-terminal' => <<<'HTML'
-<p>These settings decide how the terminal looks. They also decide if typing stays fast when the server is busy.</p>
+<p>Make the terminal easy to read, and keep typing fast when the server is busy. These settings decide how the terminal looks and if typing stays fast.</p>
 HTML,
     'card-continue' => <<<'HTML'
-<p>An agent can stop on a restart or on a temporary model error. These settings decide when the plugin types "continue" for you.</p>
+<p>Let an agent carry on by itself after a restart or a temporary error, so you do not have to type "continue". An agent can stop on a restart or on a temporary model error. These settings decide when the plugin types "continue" for you.</p>
 HTML,
     'adv-continue' => <<<'HTML'
 <p>Inside: your own auto-continue patterns and the built-in ones, and the Terminal input safety rules.</p>
@@ -37,27 +37,27 @@ HTML,
 <p>Terminal input safety rules: before the plugin types into an agent, it reads the bottom of the screen. A block rule stops the typing when the screen shows a question, a menu or a pager. An idle rule says what the empty prompt of an agent looks like. Rules are regular expressions (text patterns), written as <code>/body/flags</code>. A rule that does not compile is ignored and the built-in rule stays.</p>
 HTML,
     'card-relay-notices' => <<<'HTML'
-<p>When a message waits for an agent, the plugin types a short notice into its terminal. These settings decide the words of the notice and when it is sent again.</p>
+<p>Help an agent notice a message that waits for it. When a message waits for an agent, the plugin types a short notice into its terminal. These settings decide the words of the notice and when it is sent again.</p>
 HTML,
     'adv-relay-notices' => <<<'HTML'
 <p>Inside: the switch that keeps a screen sample each time the plugin delivers a message. The samples help to improve the Terminal input safety rules.</p>
 HTML,
     'card-voice' => <<<'HTML'
-<p>An agent can speak to get your attention. By default it uses your browser's voice. Set up a voice server for a natural voice.</p>
+<p>Hear your agent when it needs you, so you can look away from the screen. An agent can speak to get your attention. By default it uses your browser's voice. Set up a voice server for a natural voice.</p>
 HTML,
     'adv-voice' => <<<'HTML'
 <p>Inside: how many voice mail messages are kept for each workspace, and for how many days.</p>
 HTML,
     'card-dictation' => <<<'HTML'
-<p>You can dictate into a workspace from the microphone icon in the terminal drawer. Leave the server fields empty to use the speech recognition of your browser. Nothing then leaves your device.</p>
+<p>Speak to an agent instead of typing. You can dictate into a workspace from the microphone icon in the terminal drawer. Leave the server fields empty to use the speech recognition of your browser. Nothing then leaves your device.</p>
 HTML,
     'card-notebook' => <<<'HTML'
-<p>The Notebook is the drawer beside the terminal where an agent puts pages for you. These settings decide when it opens and what an agent may tell you.</p>
+<p>See the pages an agent writes for you, and answer it, in a drawer beside the terminal. The Notebook is the drawer where an agent puts pages for you. These settings decide when it opens and what an agent may tell you.</p>
 HTML,
     'adv-notebook' => <<<'HTML'
 <p>Inside: the folder name, the rule for production keys, the spoken notice, the quiet hours and the agent journal.</p>
 HTML,
     'card-ssh' => <<<'HTML'
-<p>Add your public key to open a workspace's terminal from your own computer with <code>ssh &lt;user&gt; aicli-agent-&lt;name&gt;</code>. The key can run only that command.</p>
+<p>Open an agent's terminal straight from your own computer with ssh, with no browser. Add your public key, then run <code>ssh &lt;user&gt; aicli-agent-&lt;name&gt;</code>. The key can run only that command.</p>
 HTML,
 ];

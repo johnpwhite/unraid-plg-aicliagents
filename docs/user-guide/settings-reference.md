@@ -42,6 +42,8 @@ The Configuration tab shows ten cards: **General**, **Storage**, **Terminal**, *
 
 ### General card
 
+Choose where the plugin shows and which user your agents run as, so it fits your server.
+
 The status line shows whether the tab is shown, the Terminal user and the Starting folder, for example **Tab shown: Yes · user root · /mnt/user**.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
@@ -68,6 +70,8 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 | **Device name (this browser)** | Names this browser in the Activity tray, so you can see which device did what. The name stays in this browser. For example: phone or laptop. | Empty | Text, up to 40 characters | Set it when you use the plugin from several devices and want the activity record to say which one acted. | Saves in this browser only. The name does not go into the plugin settings. | No |
 
 ### Storage card
+
+Keep your agents' settings, logins and history safe, and keep the boot disk free.
 
 The status line shows the kind of storage of the homes and of the agents, for example **Homes: Plain folders · Agents: Compressed layers**.
 
@@ -100,6 +104,8 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 
 ### Terminal card
 
+Make the terminal easy to read, and keep typing fast when the server is busy.
+
 The status line shows the colour scheme and the text size, for example **Dark · 14 px**. The card has no **Advanced** part.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
@@ -109,6 +115,8 @@ The status line shows the colour scheme and the text size, for example **Dark ·
 | **Keep typing fast when the server is busy** | Gives the Unraid web page and the terminals a higher priority than the plugin's own background work. Typing in a terminal then stays quick while the server is busy. Docker containers, virtual machines and the array are not changed, and the agents keep the normal priority. Off puts everything back. | Off (default) | On; Off (default) | Choose On when typing in a terminal lags while Plex, a virtual machine or a backup runs. | Saves and applies at once, without a restart. Off puts every changed program back at once. Unraid can restart its web server and start its programs again at the normal priority. The plugin raises them again within five minutes. | No |
 
 ### Automatic continue card
+
+Let an agent carry on by itself after a restart or a temporary error, so you do not have to type "continue".
 
 The status line shows the two switches, for example **After a restart: On · After a model error: Verified agents**.
 
@@ -153,6 +161,8 @@ This is a section inside the **Advanced** part of the Automatic continue card. B
 
 ### Relay notices card
 
+Help an agent notice a message that waits for it.
+
 The status line shows the wording of the notice and the resend time, for example **Short · resend after 10 min**.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
@@ -171,7 +181,7 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 
 ### Agent voice card
 
-An agent can speak to get your attention. By default it uses your browser's voice. Set up a voice server for a natural voice.
+Hear your agent when it needs you, so you can look away from the screen. An agent can speak to get your attention. By default it uses your browser's voice. Set up a voice server for a natural voice.
 
 The status line shows whether voice is on and the voice server, for example **On · voice server voice.example**. The main settings are a **Natural voice** row, the **Voice** switch and the text-to-speech engine fields. The **Advanced** part holds the **Voice mail** limits. The guide [Voice](voice.md) explains the whole feature. Voice fields save one at a time, when you leave the field. A short "Saved." message shows next to the field.
 
@@ -196,7 +206,7 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 
 ### Dictation card
 
-You can dictate into a workspace from the microphone icon in the terminal drawer. Leave the server fields empty to use the speech recognition of your browser. Nothing then leaves your device. The status line shows the transcription server, for example **Server at voice.example · live engine set**, or **Browser dictation**. The card has no **Advanced** part. Its fields save one at a time, like the fields of the Agent voice card.
+Speak to an agent instead of typing. You can dictate into a workspace from the microphone icon in the terminal drawer. Leave the server fields empty to use the speech recognition of your browser. Nothing then leaves your device. The status line shows the transcription server, for example **Server at voice.example · live engine set**, or **Browser dictation**. The card has no **Advanced** part. Its fields save one at a time, like the fields of the Agent voice card.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
@@ -209,6 +219,8 @@ You can dictate into a workspace from the microphone icon in the terminal drawer
 | **Test** | Records a few seconds from this device (three seconds, or eight seconds with a **Live transcription server (optional)**) and shows the words it heard. It types nothing into a workspace. | Not applicable | Not applicable | After a change to the dictation settings. | The browser may ask for microphone permission. | No |
 
 ### Notebook card
+
+See the pages an agent writes for you, and answer it, in a drawer beside the terminal.
 
 The Notebook settings are for people. No agent can change any of them. See [The Notebook](notebook.md). The status line shows the Notebook switch and the Wiki page switch, for example **On · wiki page Off**.
 
@@ -233,7 +245,7 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 
 ### Script runs card
 
-The card **Script runs** lets a script on the server start an agent with the command `aicli-run`. See [Run an agent from a script](script-runs.md). No agent can change any of these settings. The status line shows the switch and the number of authorised scripts, for example **On · 2 scripts**.
+Let your own scripts on this server start an agent for you, while you stay in control of what each script may do. The card **Script runs** lets a script on the server start an agent with the command `aicli-run`. See [Run an agent from a script](script-runs.md). No agent can change any of these settings. The status line shows the switch and the number of authorised scripts, for example **On · 2 scripts**.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
@@ -255,7 +267,7 @@ The **Advanced** part of the card is closed at first. Its **(i)** button says wh
 
 ### SSH keys card
 
-Add your public key to open a workspace's terminal from your own computer with `ssh <user> aicli-agent-<name>`. The key can run only that command.
+Open an agent's terminal straight from your own computer with ssh, with no browser. Add your public key, then run `ssh <user> aicli-agent-<name>`. The key can run only that command.
 
 | Control | What it does | Default | At once |
 | :-- | :-- | :-- | :-- |
@@ -351,9 +363,9 @@ The panel also has a section **Keep saved workspaces running**.
 
 ## Storage tab
 
-See [Home and agent storage](storage.md) and [Home backup and restore](backup-restore.md). The tab is a list of cards. Every card has the same header as the cards of the Configuration tab: a button that opens and closes the card, a one-line status, an **(i)** with help, and a menu (**Move up**, **Move down**, **Move to top**, **Collapse all**, **Expand all**, **Reset layout**). The order and the open state are saved in this browser only. The cards start in this order: the homes, **Boot disk space**, **System memory**.
+See [Home and agent storage](storage.md) and [Home backup and restore](backup-restore.md). The tab is a list of cards. Every card has the same header as the cards of the Configuration tab: a button that opens and closes the card, a one-line status, an **(i)** with help, and a menu (**Move up**, **Move down**, **Move to top**, **Collapse all**, **Expand all**, **Reset layout**). The order and the open state are saved in this browser only. The cards start in this order: the homes, **Boot disk space**, **RAM disk**.
 
-The card **System memory** shows how much of the memory of Unraid (the RAM disk) is used, for example "41 % of 7.8 GB used". It is closed while the use is under 80 %. It has no setting.
+The card **RAM disk** shows how full the RAM disk of Unraid is (if it fills up, Unraid, the plugin and the running agents can stop working), for example "41 % of 7.8 GB used". It is closed while the use is under 80 %. It has no setting.
 
 **Homes** shows one card for each home, titled **Home:** and the user name. The status line of a home reads, for example, "Plain folders on the boot disk · no saves needed" or "12 layers · 240 MB unsaved". A banner at the top of the tab shows a storage problem or a running merge. While a merge runs, storage actions pause. Workspaces of that home resume by themselves when it ends.
 
@@ -415,7 +427,7 @@ Each home has its own backup settings. The dialog shows the state of the last ba
 
 ## Config Hub tab
 
-See [Config Hub](config-hub.md). The hub keeps one copy of your MCP servers, global instructions, skills and commands. It writes them into each agent's own configuration. The hub never touches entries that you created by hand in an agent's file. When the agent home is not mounted, a banner says **Apply to agents** is unavailable.
+See [Config Hub](config-hub.md). Set up your MCP servers, instructions, skills and commands once, and every agent that supports them gets them. The hub keeps one copy of your MCP servers, global instructions, skills and commands. It writes them into each agent's own configuration. The hub never touches entries that you created by hand in an agent's file. When the agent home is not mounted, a banner says **Apply to agents** is unavailable.
 
 | Card and control | What it does | Default | At once |
 | :-- | :-- | :-- | :-- |
@@ -437,7 +449,7 @@ See [Config Hub](config-hub.md). The hub keeps one copy of your MCP servers, glo
 
 ## Agent Relay tab
 
-See [Agent Relay](relay.md). The tab is one card. The header shows a status line, and the (i) button explains: agents share updates and send each other work requests through a shared mailbox. Messages go to each workspace's inbox. The plugin types a short notice into the agent's terminal so it reads the inbox; the wording is a setting on the Configuration tab. The sections below open and close. Relay is on from the first install.
+See [Agent Relay](relay.md). Let your agents work together, with no need for you to pass messages by hand. The tab is one card. The header shows a status line, and the (i) button explains: agents share updates and send each other work requests through a shared mailbox. Messages go to each workspace's inbox. The plugin types a short notice into the agent's terminal so it reads the inbox; the wording is a setting on the Configuration tab. The sections below open and close. Relay is on from the first install.
 
 | Section and setting | What it does | Default | Allowed values | When to change it | At once |
 | :-- | :-- | :-- | :-- | :-- | :-- |
@@ -549,6 +561,8 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
+- **2026-10-26** — Each card help text (the (i) button) and the card intro here now say first what you gain from the feature. Issue #789.
 - **2026-10-26** — **Notify me when a run starts and ends** covers normal notices when a run starts or reports done; warning notices always show. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-25** — The card **Script runs** has **Time limit for a run**. It controls when the plugin closes a run that has not reported. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-24** — New card **Script runs** with the switch **Let scripts start agent runs**, the list **Authorised scripts** and five limits in the part **Advanced**. The tab has ten cards. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
@@ -560,7 +574,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 - **2026-10-23** — The card name in the Config Hub table is **History**. The two pointers to the **Home Storage** tab say **Storage**. The Health dot has an (i) button for the checks that are not fine (see [Health, Activity and troubleshooting](health-and-troubleshooting.md)). Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-23** — An agent can start a helper workspace with one tool call. Three new settings in **General**, part **Advanced**: **Let agents start helper workspaces**, **Helpers allowed at once** and **Let helpers run without asking**. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-22** — Agent Store, Config Hub and Agent Relay use the same card header as the Configuration tab. The agent chips are called **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The button is called **Check for updates**. The text box of **Global Instructions** opens with **Edit**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
-- **2026-10-22** — The tab **Home Storage** is now called **Storage** (Settings redesign, Phase 6). Its cards have the shared header, and a person can close and move them. The icons of a home are now the buttons **Save now**, **Merge layers**, **Repair** and **Delete home…**. The button **Config backup…** is now **Backup…**. **System Resources** is now the card **System memory**. The buttons of **Boot disk space** are 44 px high on a phone. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
+- **2026-10-22** — The tab **Home Storage** is now called **Storage** (Settings redesign, Phase 6). Its cards have the shared header, and a person can close and move them. The icons of a home are now the buttons **Save now**, **Merge layers**, **Repair** and **Delete home…**. The button **Config backup…** is now **Backup…**. **System Resources** is now the card **RAM disk**. The buttons of **Boot disk space** are 44 px high on a phone. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration tab has nine cards: **General**, **Storage**, **Terminal**, **Automatic continue**, **Relay notices**, **Agent voice**, **Dictation**, **Notebook** and **SSH keys**. The old cards **Global Configuration**, **Session & Environment**, **Auto-continue patterns** and **Plugin management** are gone, and their settings moved. Seldom-used settings are in a closed **Advanced** part of each card. The patterns and the Terminal input safety rules are the **Advanced** part of **Automatic continue**. **Save unsaved home changes every** is hidden when every home is a plain folder. Your browser maps a saved card layout to the new cards. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — You can move the cards of the Configuration tab: with the three-dot menu, with Alt and the arrow keys, or by dragging the three-dot button with a mouse. **Reset layout** also restores the first order. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The cards of the Configuration tab collapse and expand, remember their state in your browser, and show a one-line status. **Reset layout** puts them back. A saved change now shows a short **Saved** mark next to the control, not a pop-up. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

@@ -6,7 +6,7 @@
 
 ## In plain words
 
-The Agent Relay is a shared mailbox for the workspaces on your server. One agent can leave a message for another agent, or tell a group of agents about something that happened. Every message is saved in the inbox of the workspace that receives it, so nothing is lost if the agent is busy. The Relay is on from the moment you install the plugin. You do not need to set anything up for agents on the same server to use it. You use the settings on this page only to look at the traffic, to name a responsible workspace for a topic, or to connect another machine.
+With the Agent Relay, your agents work together and you do not pass messages by hand. The Agent Relay is a shared mailbox for the workspaces on your server. One agent can leave a message for another agent, or tell a group of agents about something that happened. Every message is saved in the inbox of the workspace that receives it, so nothing is lost if the agent is busy. The Relay is on from the moment you install the plugin. You do not need to set anything up for agents on the same server to use it. You use the settings on this page only to look at the traffic, to name a responsible workspace for a topic, or to connect another machine.
 
 Words used on this page:
 
@@ -294,6 +294,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-23** — A parent can answer a permission question of its helper (allow once only). You see a question before you close a helper that may lose work. A message to a stopped workspace waits and is delivered when the workspace starts. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.
 - **2026-10-22** — The Agent Relay card has the same header as the other Settings tabs, with a status line and an (i) button. The intro text is behind the (i). Each check box is part of a label that is at least 44 px tall. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
 

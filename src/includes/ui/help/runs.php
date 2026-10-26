@@ -11,7 +11,7 @@
  */
 return [
     'card-script-runs' => <<<'HTML'
-<p>A script on this server can start an agent with the command <code>aicli-run</code>. Only scripts on the list below may do it. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray.</p>
+<p>Let your own scripts on this server start an agent for you, while you stay in control of what each script may do. A script on this server can start an agent with the command <code>aicli-run</code>. Only scripts on the list below may do it. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray.</p>
 <p>The plugin writes the task into a folder named .aicli-task inside the folder of the run. The data of a call goes to a private file in the plugin's own state folder.</p>
 HTML,
     'adv-script-runs' => <<<'HTML'

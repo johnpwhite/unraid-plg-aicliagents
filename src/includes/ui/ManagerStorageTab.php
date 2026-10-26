@@ -5,9 +5,9 @@
  *   "Home Storage" until Phase 6 of docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md).
  *   The tab is one list of cards (data-aicli-cards="storage"): one card for each home
  *   (home-<user>, made by renderHomeStats() in ManagerStorageScripts.php), Boot disk space
- *   (boot-space, filled by bootspace/00-card.php) and System memory (system-memory).
+ *   (boot-space, filled by bootspace/00-card.php) and RAM disk (system-memory).
  *   All cards share the header of SettingsCard.php, so they collapse and move like the cards
- *   of the Configuration tab. Default order: homes, Boot disk space, System memory.
+ *   of the Configuration tab. Default order: homes, Boot disk space, RAM disk.
  * Dependencies: $csrf_token, SettingsCard.php, assets/ui/settings-cards.js.
  * Constraints: Atomic UI fragment (< 100 lines).
  * </module_context>
@@ -53,10 +53,10 @@ require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open(), aicli_help_btn
             <?=aicli_card_close()?>
 
             <!-- The memory of Unraid (the RAM disk). Closed while it is under 80 % full. -->
-            <?=aicli_card_open('system-memory', 'fa-heartbeat', 'System memory', 'Loading…', 'storage-memory', '', ['pos' => 300, 'closed' => true])?>
+            <?=aicli_card_open('system-memory', 'fa-heartbeat', 'RAM disk', 'Loading…', 'storage-memory', '', ['pos' => 300, 'closed' => true])?>
                 <div style="padding:10px; background:rgba(255,255,255,0.02); border-radius:4px;">
                     <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
-                        <span>Memory used by Unraid</span>
+                        <span>Used space on Unraid's RAM disk</span>
                         <span id="rootfs-text">...</span>
                     </div>
                     <div class="stat-bar-wrap">
