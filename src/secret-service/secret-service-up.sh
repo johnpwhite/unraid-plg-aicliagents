@@ -78,6 +78,12 @@ if [ -S "$SOCK" ] && _alive "$BUS_PID" && _alive "$DAEMON_PID"; then
     exit 0
 fi
 
+# #827: both daemons outlive the agent session that starts them, so they get a
+# clean environment. Before, they kept the session's BINARY=, NODE_PATH= and
+# AGENT_ID=, which name the agent's install tree, and the version release step
+# read them as "this agent is in use" until a reboot.
+SS_ENV=(env -i "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "HOME=$HOME_DIR" "USER=$USER_NAME" "LANG=${LANG:-C}")
+
 # Clear any stale remnants.
 _alive "$DAEMON_PID" && kill "$(cat "$DAEMON_PID" 2>/dev/null)" 2>/dev/null
 _alive "$BUS_PID" && kill "$(cat "$BUS_PID" 2>/dev/null)" 2>/dev/null
@@ -86,7 +92,7 @@ rm -f "$SOCK" "$BUS_PID" "$DAEMON_PID" 2>/dev/null
 # Private session bus at a fixed, predictable address.
 # dbus-daemon forks itself; run it with every inherited fd above 2 closed so
 # the forked bus keeps none of the caller's descriptors (#337).
-aicli_run_closed dbus-daemon --session --address="$ADDR" --nopidfile --fork --print-pid >"$BUS_PID" 2>/dev/null
+aicli_run_closed "${SS_ENV[@]}" dbus-daemon --session --address="$ADDR" --nopidfile --fork --print-pid >"$BUS_PID" 2>/dev/null
 _i=0
 while [ ! -S "$SOCK" ] && [ "$_i" -lt 25 ]; do sleep 0.2; _i=$((_i + 1)); done
 [ -S "$SOCK" ] || { echo "secret-service: session bus did not start" >&2; exit 1; }
@@ -95,7 +101,7 @@ while [ ! -S "$SOCK" ] && [ "$_i" -lt 25 ]; do sleep 0.2; _i=$((_i + 1)); done
 # reused by the user's next agent launch. It writes DAEMON_PID once it owns
 # org.freedesktop.secrets, which doubles as the readiness signal below.
 mkdir -p "$(dirname "$STORE")" 2>/dev/null
-DBUS_SESSION_BUS_ADDRESS="$ADDR" aicli_detach --log "$LOG" -- "$DAEMON" --store "$STORE" --pidfile "$DAEMON_PID" >/dev/null
+aicli_detach --log "$LOG" -- "${SS_ENV[@]}" "DBUS_SESSION_BUS_ADDRESS=$ADDR" "$DAEMON" --store "$STORE" --pidfile "$DAEMON_PID" >/dev/null
 
 _i=0
 while [ "$_i" -lt 25 ]; do

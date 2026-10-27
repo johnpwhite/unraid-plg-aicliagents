@@ -354,15 +354,38 @@ class AgentRegistry {
      * in one string. The text the generation release step scans
      * (generation.sh `_aicli_proc_text`).
      */
-    public static function procText(string $procRoot = '/proc'): string {
+    public static function procText(string $procRoot = '/proc', ?string $secretServiceDir = null): string {
+        $skip = array_flip(self::secretServicePids($procRoot, $secretServiceDir));
         $out = '';
         foreach (glob("$procRoot/[0-9]*", GLOB_ONLYDIR) ?: [] as $dir) {
+            if (isset($skip[basename($dir)])) continue;
             foreach (['cmdline', 'environ'] as $f) {
                 $s = @file_get_contents("$dir/$f");
                 if (is_string($s) && $s !== '') $out .= str_replace("\0", "\n", $s) . "\n";
             }
         }
         return $out;
+    }
+
+    /**
+     * #827: the pids of the plugin's Secret Service processes (the session bus and
+     * the keyring daemon), from <state root>/secret-service/<user>/{bus,daemon}.pid,
+     * kept only while the pid still runs that process. They are started from an
+     * agent session and can carry its environment, but never run agent code, so
+     * the scan leaves them out (generation.sh `_aicli_secret_service_pids`).
+     *
+     * @return array<int,string>
+     */
+    public static function secretServicePids(string $procRoot = '/proc', ?string $dir = null): array {
+        $dir ??= StoragePathResolver::mountRoot() . '/secret-service';
+        $pids = [];
+        foreach (array_merge(glob("$dir/*/bus.pid") ?: [], glob("$dir/*/daemon.pid") ?: []) as $f) {
+            $p = preg_replace('/\D/', '', (string)@file_get_contents($f, false, null, 0, 32));
+            if ($p === '' || $p === null) continue;
+            $cmd = str_replace("\0", ' ', (string)@file_get_contents("$procRoot/$p/cmdline"));
+            if (preg_match('#dbus-daemon.*secret-service/|secret-service-daemon#', $cmd)) $pids[] = $p;
+        }
+        return $pids;
     }
 
     /**

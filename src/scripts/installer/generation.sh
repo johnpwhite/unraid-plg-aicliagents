@@ -360,9 +360,46 @@ aicli_agent_referenced_generations() {
 # same outcome the per-file version reached with its -r check. Concatenation
 # cannot manufacture a false match across a file boundary: every entry is
 # NUL-terminated, so each file's last token ends before the next file begins.
+#
+# #827 (2026-10-28): the plugin's own Secret Service processes are left out. The
+# session bus and the keyring daemon are started from an agent session and,
+# before #827, kept its environment, which names the agent's install tree
+# (BINARY=.../agents/claude-code/...). They never run agent code, but the scan
+# read them as "this agent is in use" for as long as they lived (until a reboot),
+# so the safety floor refused to free an old version that nothing used.
 _aicli_proc_text() {
-    local scan_dir="${1:-/proc}"
-    cat "$scan_dir"/[0-9]*/cmdline "$scan_dir"/[0-9]*/environ 2>/dev/null | tr '\0' '\n'
+    local scan_dir="${1:-/proc}" skip p
+    local -a files=()
+    skip=" $(_aicli_secret_service_pids "$scan_dir" | tr '\n' ' ')"
+    if [ "$skip" = " " ]; then
+        cat "$scan_dir"/[0-9]*/cmdline "$scan_dir"/[0-9]*/environ 2>/dev/null | tr '\0' '\n'
+        return 0
+    fi
+    for p in "$scan_dir"/[0-9]*; do
+        case "$skip" in *" ${p##*/} "*) continue ;; esac
+        files+=("$p/cmdline" "$p/environ")
+    done
+    [ "${#files[@]}" -gt 0 ] || return 0
+    cat "${files[@]}" 2>/dev/null | tr '\0' '\n'
+}
+
+# _aicli_secret_service_pids [scan_dir]
+# #827: the pids of the plugin's Secret Service processes, one per line: the pids
+# in <state root>/secret-service/<user>/{bus,daemon}.pid whose command line is
+# still that process (a pid can be reused). Test seam: AICLI_SECRET_SERVICE_DIR.
+_aicli_secret_service_pids() {
+    local scan_dir="${1:-/proc}" f p cmd
+    local dir="${AICLI_SECRET_SERVICE_DIR:-${MOUNT_ROOT:-/tmp/unraid-aicliagents}/secret-service}"
+    for f in "$dir"/*/bus.pid "$dir"/*/daemon.pid; do
+        [ -f "$f" ] || continue
+        p="$(head -c 32 "$f" 2>/dev/null | tr -cd '0-9')"
+        [ -n "$p" ] || continue
+        cmd="$(tr '\0' ' ' < "$scan_dir/$p/cmdline" 2>/dev/null)"
+        case "$cmd" in
+            *dbus-daemon*secret-service/*|*secret-service-daemon*) printf '%s\n' "$p" ;;
+        esac
+    done
+    return 0
 }
 
 # aicli_agent_has_live_processes <agent_id> [scan_dir]
