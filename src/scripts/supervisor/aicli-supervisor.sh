@@ -5479,8 +5479,9 @@ _do_cleanup_phantoms() {
 
     # Also remove any halt markers for smoke entities from tmpfs
     if [ -d "$HALTS_DIR" ]; then
-        find "$HALTS_DIR" -name 'smoke*' -type f -delete 2>/dev/null || true
-        find "$HALTS_DIR" -path '*/smoke*' -type f -delete 2>/dev/null || true
+        # #765: a marker younger than a minute may be one a running smoke check still has to read.
+        find "$HALTS_DIR" -name 'smoke*' -type f -mmin +1 -delete 2>/dev/null || true
+        find "$HALTS_DIR" -path '*/smoke*' -type f -mmin +1 -delete 2>/dev/null || true
     fi
 
     # Sweep work + zram_upper trees for smoke-namespaced entries (OP #428).
