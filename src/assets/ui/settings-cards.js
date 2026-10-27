@@ -782,12 +782,15 @@
      * Mark a card as one that holds a warning. It opens itself while the warning stands.
      * label is the short warning text that leads the status line.
      */
-    function setWarning(id, on, label) {
+    function setWarning(id, on, label, opts) {
         var card = cardById(id);
         if (!card) return false;
         var was = card.classList.contains('aicli-card--warn');
         card.classList.toggle('aicli-card--warn', !!on);
-        var node = card.querySelector(':scope > .aicli-card-head [data-aicli-card-status]');
+        // #793: a card whose status slot holds its own markup (the Agent Store version line) keeps it:
+        // painting a label would flatten that markup into one line of text over the title.
+        var keepStatus = !!(opts && opts.keepStatus);
+        var node = keepStatus ? null : card.querySelector(':scope > .aicli-card-head [data-aicli-card-status]');
         if (node) {
             if (node.__aicliBase === undefined) node.__aicliBase = node.textContent;
             node.__aicliWarn = on ? (label || 'Needs attention') : '';

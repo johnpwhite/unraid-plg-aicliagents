@@ -1018,6 +1018,11 @@
     /* AGENT_STORE_CARD_HEADER.md, "Foot": two text links, "Remove old versions (frees N)" and "Uninstall (frees N)".
        They are real buttons styled as links. A touch screen gets a 44 px tall hit area and 8 px between them. */
     .av2-foot .av2-foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
+    /* #793: a flex link drops the leading space of its "(frees …)" part, so the gap is a margin. */
+    .av2-foot .av2-frees { margin-left: 0.3em; }
+    /* #793: the (i) sits next to the menu on every card; the hover-only Upgrade button shows to its left. */
+    .av2-card > .aicli-card-head > .aicli-help-btn { order: 2; }
+    .av2-card > .aicli-card-head > .aicli-card-menu-btn { order: 3; }
     .av2-foot .av2-foot-link {
         appearance: none; -webkit-appearance: none; display: inline-flex; align-items: center; box-sizing: border-box;
         min-height: 44px; min-width: 0 !important; margin: -6px 0 !important; padding: 0 4px !important;

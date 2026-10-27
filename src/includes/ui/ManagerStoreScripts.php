@@ -1572,7 +1572,8 @@ function av2AfterLayoutReset() {
 function av2OpenCard(id) {
     if (!window.aicliCards || typeof window.aicliCards.setWarning !== 'function') return;
     var cardId = ('agent-' + String(id).toLowerCase()).replace(/[^a-z0-9-]/g, '');
-    window.aicliCards.setWarning(cardId, true, 'Installing');
+    // #793: the version line already says "Installing v…"; open the card, keep that line as it is.
+    window.aicliCards.setWarning(cardId, true, 'Installing', { keepStatus: true });
 }
 
 function filterAgents() {
