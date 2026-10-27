@@ -74,6 +74,7 @@ class StorageHandler {
             case 'convert_storage':             $result = self::convertAction(); break; // #496: layered home → plain folders
             // BOOT_DISK_SPACE.md R4: old agent versions
             case 'agent_old_versions':          return self::agentOldVersions();      // read-only, no Nchan publish
+            case 'agent_footprint':             return self::agentFootprint();        // AGENT_STORE_CARD_HEADER.md R14/R16: read-only, from the last measurement
             case 'remove_old_versions':         $result = self::removeOldVersionsAction(); break;
             case 'clear_home_caches':           $result = self::clearHomeCaches(); break; // BOOT_DISK_SPACE.md R5: empty the caches of a plain home
             case 'get_home_cache_status':       return self::homeCacheStatus();    // BOOT_DISK_SPACE.md R5: read-only
@@ -134,7 +135,7 @@ class StorageHandler {
                 'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'get_storage_kind_state', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
-                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',
+                'consolidate_storage', 'convert_storage', 'agent_old_versions', 'agent_footprint', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',
                 'repair_agent_storage', 'repair_home_storage', 'delete_home_storage', 'delete_home_confirm_token',
                 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts',
                 'backup_home', 'backup_status', 'backup_validate_target',
@@ -1683,6 +1684,23 @@ class StorageHandler {
     }
 
     /**
+     * AJAX `agent_footprint` (AGENT_STORE_CARD_HEADER.md R14, R16): GET agentId=<id>. Read-only.
+     * The two figures of the Agent Store card foot, from the last background measurement: what
+     * Remove old versions frees (`old_bytes`) and what Uninstall frees (`uninstall_bytes`, null
+     * when it is not measured). It measures nothing (#552). The answer carries the file facts
+     * (`measured_at`, `age`, `stale`, `has_data`, `measuring`).
+     */
+    private static function agentFootprint(): array {
+        $agent = (string)($_REQUEST['agentId'] ?? '');
+        if ($agent === '' || !\AICliAgents\Services\AgentVersionCleanupService::isValidTarget($agent) || $agent === 'all') {
+            return ['status' => 'error', 'message' => 'invalid_agent'];
+        }
+        $data = \AICliAgents\Services\BootSpaceService::read();
+        return ['status' => 'ok', 'agent' => $agent] + \AICliAgents\Services\BootSpaceService::footSizes($agent, $data)
+            + \AICliAgents\Services\BootSpaceService::meta($data);
+    }
+
+    /**
      * AJAX `remove_old_versions` (BOOT_DISK_SPACE.md R4): POST agent=<id>|all. #552: it queues
      * a supervisor job (op `removeold`) with Activity tray steps and returns at once. The
      * request lists nothing and removes nothing.
@@ -2007,7 +2025,7 @@ class StorageHandler {
         }
 
         $config       = getAICliConfig();
-        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldAgentPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
         $oldHomePath  = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         aicli_log("AJAX Request: Move $kind storage off USB flash drive to durable target '$target'", AICLI_LOG_INFO);
@@ -2194,7 +2212,7 @@ class StorageHandler {
         $config = getAICliConfig();
         $newAgentPath = $_GET['agent_storage_path'] ?? '';
         $newHomePath = $_GET['home_storage_path'] ?? '';
-        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldAgentPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
         $oldHomePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         // #341 → S-11 (#1355): validate any new path via the capability probe
@@ -2359,7 +2377,7 @@ class StorageHandler {
             // #753: the home path is the resolved one (the shell uses the same rule).
             $live = $key === 'home_storage_path'
                 ? \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config)
-                : (string)($config[$key] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence');
+                : \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
             if (isset($_GET[$param]) && (string)$_GET[$param] !== $live) {
                 aicli_log("Storage Migration: refusing — $param from the browser differs from the live settings", AICLI_LOG_WARN);
                 return ['status' => 'error', 'message' => 'The storage settings changed since this page was loaded. Reload the page and try again.'];
@@ -2403,7 +2421,7 @@ class StorageHandler {
     public static function queuePathMove(array $config, string $newAgentPath, string $newHomePath, array $seams = []): array {
         // #652: the old paths are the live settings (the move saves the new paths only
         // after the copy). The browser's old_* values are never used, only compared.
-        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldAgentPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
         $oldHomePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         aicli_log("Storage Migration: Starting path migration...", AICLI_LOG_INFO);
@@ -2572,7 +2590,7 @@ class StorageHandler {
      */
     public static function runPathMove(string $newAgentPath, string $newHomePath): array {
         $config = getAICliConfig();
-        $oldAgentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        $oldAgentPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
         $oldHomePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
 
         // Follow-on #1: a settings path change is an EXPLICIT, crash-safe TOLD

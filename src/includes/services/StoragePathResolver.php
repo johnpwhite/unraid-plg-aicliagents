@@ -32,9 +32,25 @@ class StoragePathResolver {
      */
     public static function agentPersistPath(): string {
         $config = ConfigService::getConfig();
-        $path   = $config['agent_storage_path'] ?? '';
-        if (empty(trim($path))) {
-            $path = self::pluginBase();
+        if (trim((string)($config['agent_storage_path'] ?? '')) === '') {
+            self::pluginBase(); // keeps the test guard of the old fallback
+        }
+        return self::agentPersistPathFromConfig($config);
+    }
+
+    /**
+     * The agent persist path for a given config array (pure; the same rule as agentPersistPath).
+     * A missing or blank agent_storage_path falls back to the flash root, the same as
+     * agent_persist_path() in resolve_paths.sh. The install, Uninstall, the size on the Agent Store
+     * card and Remove old versions all use this one rule (#795). `??` alone skips only a missing key,
+     * so a blank value used to reach the code as an empty path.
+     *
+     * @param array<string,mixed> $config
+     */
+    public static function agentPersistPathFromConfig(array $config): string {
+        $path = trim((string)($config["agent_storage_path"] ?? ""));
+        if ($path === "") {
+            $path = SecretPaths::flashRoot();
         }
         return self::normalize($path);
     }

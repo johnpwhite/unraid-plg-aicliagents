@@ -83,6 +83,7 @@ require_once __DIR__ . '/services/ActorDownAlertService.php';   // HARD_STOP_RES
 require_once __DIR__ . '/services/StorageReclaimNoticeService.php';   // STORAGE_RECLAIM_NOTICE.md — tray entry for a tidy-up that waits on open workspaces
 require_once __DIR__ . '/services/VersionClassifier.php';
 require_once __DIR__ . '/services/VersionCheckService.php';
+require_once __DIR__ . '/services/ReleaseNotesService.php';  // AGENT_STORE_CARD_HEADER.md R8 — release notes in the update overlay
 require_once __DIR__ . '/services/PaneInputRules.php';
 require_once __DIR__ . '/services/TmuxService.php';
 require_once __DIR__ . '/services/ArgsService.php';

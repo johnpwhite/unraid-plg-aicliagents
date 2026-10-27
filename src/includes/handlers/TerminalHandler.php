@@ -557,7 +557,7 @@ class TerminalHandler {
             ];
         }
         $config = getAICliConfig();
-        $persistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
+        $persistPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
         // Never default the agent: starting the WRONG agent in a user's
         // workspace is worse than refusing to start at all.
         $agentId = \AICliAgents\Services\ConfigService::resolveAgentId($_GET['agentId'] ?? null, (string)$id, (string)($_GET['path'] ?? ''));
@@ -773,7 +773,7 @@ class TerminalHandler {
 
         // #614: the UI offers an Emergency Session only while home storage is down. Check it
         // here too, on the server: a direct call must not swap the home of a healthy box.
-        $persistPathEm = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
+        $persistPathEm = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
         $homePathEm = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);   // R-046: the one resolver
         $homeUp = is_callable(self::$homeAvailableProbe)
             ? (bool)call_user_func(self::$homeAvailableProbe, (string)$homePathEm)

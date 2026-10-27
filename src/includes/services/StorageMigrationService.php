@@ -182,7 +182,7 @@ class StorageMigrationService {
     public static function purgeArtifacts() {
         LogService::log("PURGE: Starting 'Analyze & Rescue' for storage artifacts.", LogService::LOG_WARN, "StorageMigrationService");
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $pluginBase = SecretPaths::flashRoot();
         $envPath = "$pluginBase/envs";
         if (!is_dir($envPath)) @mkdir($envPath, 0755, true);
@@ -312,7 +312,7 @@ class StorageMigrationService {
             LogService::log("Refusing agent migration: target storage is not mounted: $newPath", LogService::LOG_WARN, "StorageMigrationService");
             return false;
         }
-        $oldPath = $seams['old'] ?? (ConfigService::getConfig()['agent_storage_path'] ?? SecretPaths::flashRoot());
+        $oldPath = $seams['old'] ?? StoragePathResolver::agentPersistPathFromConfig(ConfigService::getConfig());
         if ($newPath === $oldPath) return true;
 
         LogService::log("Migrating agent storage from $oldPath to $newPath...", LogService::LOG_INFO, "StorageMigrationService");

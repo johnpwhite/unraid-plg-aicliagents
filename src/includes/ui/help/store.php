@@ -13,4 +13,7 @@ return [
     'store-chips' => <<<'HTML'
 <p>Version: which release to install. Variables: the environment values the agent starts with. Storage: how much space the agent uses. Terminal: the terminal settings for this agent. Start options: the command-line options the agent starts with.</p>
 HTML,
+    'store-update' => <<<'HTML'
+<p>A blue arrow and a version next to the agent's version mean a newer version is on your channel. Select it to see what is new and to update. Your open workspaces keep running.</p>
+HTML,
 ];

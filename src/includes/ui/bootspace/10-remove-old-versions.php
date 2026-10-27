@@ -22,7 +22,9 @@
         n = Math.max(0, Number(n) || 0);
         if (n < 1024) return n + ' B';
         if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
-        if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+        // The same rule as BootSpaceService::sizeText and the Agent Store card foot: one decimal below 10 MB, whole MB above.
+        if (n < 10485760) return (n / 1048576).toFixed(1) + ' MB';
+        if (n < 1073741824) return Math.round(n / 1048576) + ' MB';
         return (n / 1073741824).toFixed(2) + ' GB';
     }
     function esc(s) { return (typeof escapeHtml === 'function') ? escapeHtml(String(s)) : $('<div>').text(String(s)).html(); }
@@ -92,6 +94,8 @@
                 aicliAjax('remove_old_versions', { agent: agent }, function (res) {
                     if (res && res.status === 'queued') {
                         swal({ title: 'Removal queued', text: res.message || 'Watch the activity tray for progress.', type: 'info', timer: 3500, showConfirmButton: false });
+                        // The Agent Store cards show what each action frees: ask again until the new measurement is in.
+                        if (typeof window.av2WatchFootAfterRemoval === 'function') window.av2WatchFootAfterRemoval(agent);
                     } else {
                         swal('Not removed', (res && res.message) || 'Unknown error. Check the Debug Console.', 'error');
                     }

@@ -171,6 +171,9 @@ try {
     } else {
         aicli_log("Background Install Job Complete for: $agentId", AICLI_LOG_INFO);
         \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer', 'agent_installed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest']);
+        // AGENT_STORE_CARD_HEADER.md R16: the new layer and the now-old layer change both foot figures of the card.
+        // Start a background measurement (it never runs in a web request, #552); the card reads its file.
+        try { \AICliAgents\Services\BootSpaceService::startMeasure(); } catch (\Throwable $e) { /* the next card visit measures */ }
 
         // Bug #716: do NOT enqueue a second bake here.
         // InstallerService::installAgent already calls StorageMountService::commitChanges
@@ -185,7 +188,8 @@ try {
         // $layerLive stays true when there is no layer file to check (fresh
         // install with no persistence layer) so that normal relaunch proceeds.
         $layerLive = true;
-        $persistDir = \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+        // #795: the same agent storage path as the install itself (a hand-written fallback here looked in another folder).
+        $persistDir = \AICliAgents\Services\StoragePathResolver::agentPersistPath();
         $newest = \AICliAgents\Services\InstallerService::newestAgentLayer($agentId, $persistDir);
         if ($newest !== null) {
             $mounts = (string)@file_get_contents('/proc/mounts');

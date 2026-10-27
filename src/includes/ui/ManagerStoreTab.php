@@ -12,17 +12,18 @@ use AICliAgents\Services\ArgsService;
 use AICliAgents\Services\BootIntegrityService;
 use AICliAgents\Services\HaltService;
 
+require_once __DIR__ . '/StoreCardParts.php'; // AGENT_STORE_CARD_HEADER.md: the versions block and the foot links of an agent card.
 require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open and aicli_help_btn: the agent cards use the shared header (Phase 7).
 
 $vaultFile = \AICliAgents\Services\SecretPaths::flashRoot() . '/secrets.cfg';
 $vault = file_exists($vaultFile) ? @parse_ini_file($vaultFile) : [];
 $versionCache = \AICliAgents\Services\VersionCheckService::getCachedResults();
 
-// WP #748 J / Phase B: per-agent Flash footprint for the Store card foot.
-// Resolve the persist path once; size each agent via glob+filesize inside the
-// foreach. Negligible cost (a few filesize() calls per page render) and avoids
-// a JS round-trip / render flicker.
-$agentPersistPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
+// AGENT_STORE_CARD_HEADER.md R14: the two figures of the card foot (what Remove old versions frees and what
+// Uninstall frees) come from the last background measurement. This is one file read; the card runs no du
+// and no glob for sizes (#552).
+$footData = \AICliAgents\Services\BootSpaceService::read();
+$footMeasuring = \AICliAgents\Services\BootSpaceService::isMeasuring();
 
 // WP #748 J / Phase B follow-ups: per-agent storage-health surfacing in the
 // card head + foot. Pull the cached boot-integrity sweep once and key it by
@@ -71,6 +72,7 @@ function av2_secrets_schema(array $agent): array {
         'type'  => 'password',
     ]];
 }
+
 ?>
 <!-- TAB 2: AGENT STORE (v2 card layout) -->
 <div id="tab-store" class="aicli-tab-content aicli-layout">
@@ -204,17 +206,8 @@ function av2_secrets_schema(array $agent): array {
                             $sourceLabel = 'npm · ' . $agent['npm_package'];
                         }
 
-                        // WP #748 J / Phase B: render the per-agent Flash footprint
-                        // alongside the source label in the foot. Only for installed
-                        // agents; rounds to the nearest MB; suppresses zero-size
-                        // (uninstalled or never-baked).
-                        $agentSizeBytes = 0;
-                        if ($agent['is_installed']) {
-                            foreach (glob("$agentPersistPath/agent_{$id}_*.sqsh") ?: [] as $sqshFile) {
-                                $agentSizeBytes += (int)@filesize($sqshFile);
-                            }
-                        }
-                        $agentSizeMB = $agentSizeBytes > 0 ? (int)round($agentSizeBytes / 1024 / 1024) : 0;
+                        // The foot figures of this agent, from the last measurement (see av2_foot_links_html).
+                        $foot = \AICliAgents\Services\BootSpaceService::footSizes($id, $footData);
 
                         // WP #964: locally-retained version backups (captured by the
                         // WP #965 keep-a-copy upgrade flow). Surfaced in the version
@@ -273,12 +266,29 @@ function av2_secrets_schema(array $agent): array {
                         if ($hasUpdate) $agentStatus .= ' · update ' . $latestVer . ' available';
                         elseif ($hasDowngrade) $agentStatus .= ' · channel has ' . $latestVer;
                     }
+                    // AGENT_STORE_CARD_HEADER.md, "Header": the versions are never cut. The plain status text stays
+                    // for the screen reader (and the old tests); the visible block holds the installed version and,
+                    // when the channel offers another one, the new version as one button that opens the update overlay.
+                    $versionsHtml = av2_versions_html($id, (string)$agent['name'], (bool)$agent['is_installed'], $isInstalling, $versionKnown, (string)$installedVer, (string)$latestVer, $hasUpdate, $hasDowngrade, (string)$channel, $agentStatus);
+                    $menuItems = [];
+                    if ($agent['is_installed'] && ($hasUpdate || $hasDowngrade)) {
+                        $menuItems[] = ['update', ($hasUpdate ? 'Update to v' : 'Change to v') . $latestVer . '…', ' data-agent="' . $e8($id) . '"'];
+                    }
+                    if ($agent['changelog_url'] ?? '') $menuItems[] = ['release-notes', 'Release notes ↗', ' data-agent="' . $e8($id) . '"'];
+                    // The progress view shares one slot with the chip strip (R1): same height in every state.
+                    // One row holds the status line and the extra controls (Cancel, Retry, Dismiss, Details); the bar is under it.
+                    $av2ProgressHtml = '<div class="av2-install-panel' . ($isInstalling ? ' active' : '') . '" id="progress-' . $e8($id) . '">'
+                        . '<div class="av2-install-row">'
+                        . '<div class="av2-install-status" id="status-text-' . $e8($id) . '" role="status">' . $e8($statusData['status_text'] ?? 'Installing…') . '</div>'
+                        . '<div class="av2-install-extra" id="extra-' . $e8($id) . '"></div></div>'
+                        . '<div class="av2-install-bar"><span id="bar-' . $e8($id) . '" style="width:' . intval($statusData['progress'] ?? 0) . '%;"></span></div></div>';
                     $changelogUrl = (string)($agent['changelog_url'] ?? '');
                     $agentHelp = '<p>' . $e8($agent['description'] ?? '') . '</p>';
                     if ($changelogUrl !== '' && preg_match('#^https?://#', $changelogUrl)) {
                         // WP #963: optional release-notes link (Antigravity has no GitHub releases).
                         $agentHelp .= '<p><a class="av2-changelog-link" href="' . $e8($changelogUrl) . '" target="_blank" rel="noopener noreferrer">Release notes ↗</a></p>';
                     }
+                    if ($hasUpdate && $agent['is_installed']) $agentHelp .= aicli_help_texts()['store-update'] ?? '';
                     $pkgName = (string)($agent['source']['repo'] ?? ($agent['source']['package'] ?? ($agent['npm_package'] ?? '')));
                     if ($sourceType !== '') {
                         $agentHelp .= '<p class="av2-help-source" data-testid="agent-install-method">Install method: ' . $e8($sourceType) . '.'
@@ -325,9 +335,8 @@ function av2_secrets_schema(array $agent): array {
                                     </button>
                                 <?php endif; ?>
                                 <?php if ($hasUpdate): ?>
-                                    <button type="button" class="av2-btn primary agent-action-btn" data-agent="<?=$id?>" aria-label="Upgrade <?=$e8($agent['name'])?>" onclick="installVersionAgent('<?=$id?>', this, '<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?>')"><i class="fa fa-arrow-circle-up"></i> Upgrade</button>
+                                    <button type="button" class="av2-btn primary agent-action-btn av2-upgrade-btn" data-agent="<?=$id?>" data-testid="upgrade-<?=$id?>" aria-label="Upgrade <?=$e8($agent['name'])?> to v<?=$e8($latestVer)?>" title="See what is new in v<?=$e8($latestVer)?> and update" onclick="av2OpenUpdateOverlay('<?=$id?>', this)"><i class="fa fa-arrow-circle-up"></i> Upgrade</button>
                                 <?php endif; ?>
-                                <button type="button" class="av2-btn danger" aria-label="Uninstall <?=$e8($agent['name'])?>" onclick="uninstallAgent('<?=$id?>', this)" title="Uninstall"><i class="fa fa-trash"></i> Uninstall</button>
                             <?php else: ?>
                                 <button type="button" class="av2-btn primary agent-action-btn" data-agent="<?=$id?>" onclick="installVersionAgent('<?=$id?>', this, '<?=htmlspecialchars($latestVer, ENT_QUOTES, 'UTF-8')?>')"><i class="fa fa-download"></i> Install</button>
                             <?php endif; ?>
@@ -337,11 +346,13 @@ function av2_secrets_schema(array $agent): array {
                     $agentActions = $pillHtml . ob_get_clean();
                     echo aicli_card_open('agent-' . $id, 'fa-puzzle-piece', (string)$agent['name'], $agentStatus, 'agent-' . $id, $agentActions, [
                         'tag' => 'article',
-                        'class' => 'av2-card ' . $state,
+                        'class' => 'av2-card ' . $state . (max(strlen((string)$installedVer), strlen((string)$latestVer)) > 20 || strlen((string)$installedVer) + strlen((string)$latestVer) > 34 ? ' av2-ver-long' : ''),
                         'domId' => 'av2-card-' . $id,
                         'iconHtml' => '<span class="av2-icon"><img src="' . $e8($agent['icon_url']) . '" alt="' . $e8($agent['name']) . '"></span>',
                         'helpHtml' => $agentHelp,
-                        'attrs' => ' data-agent="' . $e8($id) . '" data-name="' . $e8(strtolower($agent['name'])) . '"'
+                        'statusHtml' => $versionsHtml,
+                        'menuItems' => $menuItems,
+                        'attrs' => ' data-agent="' . $e8($id) . '" data-name="' . $e8(strtolower($agent['name'])) . '" data-av2-state="' . ($isInstalling ? 'installing' : 'idle') . '"'
                             . ' data-installed="' . ($agent['is_installed'] ? '1' : '0') . '" data-has-update="' . ($hasUpdate ? '1' : '0') . '"',
                     ]);
                     ?>
@@ -351,7 +362,8 @@ function av2_secrets_schema(array $agent): array {
                            aria-expanded disclosure toggles (accordion vocabulary), and
                            tablist requires role="tab" children (axe aria-required-children,
                            critical). group permits button/span children as-is. */ ?>
-                        <div class="av2-strip" role="group" aria-label="<?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?> settings">
+                        <div class="av2-slot">
+                        <div class="av2-strip" role="group"<?=$isInstalling ? ' inert' : ''?> aria-label="<?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?> settings">
                             <button type="button" class="av2-chip" data-target="channel" title="Version: which release to install" onclick="av2ChipToggle(this)"><?=$av2_chip_icons['channel']?><span class="av2-label">Version</span></button>
 
                             <?php
@@ -377,9 +389,11 @@ function av2_secrets_schema(array $agent): array {
                             <button type="button" class="av2-chip <?=$argsState?>" data-target="args" title="Start options: command-line options the agent starts with" onclick="av2ChipToggle(this)"><span class="av2-label">Start options</span></button>
                             <?=aicli_help_btn('store-chips-' . $id, 'the settings of ' . $agent['name'])?>
                         </div>
+                        <?=$av2ProgressHtml?>
+                        </div>
                         <?=aicli_help_panel('store-chips-' . $id, aicli_help_texts()['store-chips'] ?? '')?>
 
-                        <div class="av2-panels" id="av2-panels-<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>">
+                        <div class="av2-panels<?=$isInstalling ? ' av2-locked' : ''?>" id="av2-panels-<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>"<?=$isInstalling ? ' inert' : ''?>>
                             <!-- Channel panel — every section stacks label-above-control to match
                                  the Release channel pattern. No Source (already at card foot).
                                  No Check-for-Updates button (already at marketplace header). -->
@@ -560,7 +574,8 @@ function av2_secrets_schema(array $agent): array {
                              card has identical visual rhythm without implying functionality that isn't
                              available pre-install. -->
                         <?php /* WP #903 a11y: role="group" — see installed-variant note above. */ ?>
-                        <div class="av2-strip" role="group" aria-label="<?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?> settings">
+                        <div class="av2-slot">
+                        <div class="av2-strip" role="group"<?=$isInstalling ? ' inert' : ''?> aria-label="<?=htmlspecialchars($agent['name'], ENT_QUOTES, 'UTF-8')?> settings">
                             <button type="button" class="av2-chip" data-target="channel" title="Version: pick a release, then install" onclick="av2ChipToggle(this)">
                                 <span class="av2-label">Version</span>
                             </button>
@@ -570,9 +585,11 @@ function av2_secrets_schema(array $agent): array {
                             <span class="av2-chip disabled" title="Start options become configurable after install" aria-disabled="true"><span class="av2-label">Start options</span></span>
                             <?=aicli_help_btn('store-chips-' . $id, 'the settings of ' . $agent['name'])?>
                         </div>
+                        <?=$av2ProgressHtml?>
+                        </div>
                         <?=aicli_help_panel('store-chips-' . $id, aicli_help_texts()['store-chips'] ?? '')?>
 
-                        <div class="av2-panels" id="av2-panels-<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>">
+                        <div class="av2-panels<?=$isInstalling ? ' av2-locked' : ''?>" id="av2-panels-<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>"<?=$isInstalling ? ' inert' : ''?>>
                             <!-- Channel panel (pre-install): same stacked layout as the installed
                                  variant — label above control, no Source (shown in card foot). -->
                             <div class="av2-panel" data-panel="channel">
@@ -614,23 +631,13 @@ function av2_secrets_schema(array $agent): array {
                         </div>
                         <?php endif; ?>
 
-                        <!-- Install progress sits in the sub-card region (where the panel content
-                             renders), full-width. Not inside the cramped footer row. When installing,
-                             the body region hides the chip strip + panels and shows this instead. -->
-                        <div class="av2-install-panel <?=$isInstalling ? 'active' : ''?>" id="progress-<?=$id?>">
-                            <div class="av2-install-status" id="status-text-<?=$id?>"><?=htmlspecialchars($statusData['status_text'] ?? 'Installing…', ENT_QUOTES, 'UTF-8')?></div>
-                            <div class="av2-install-bar"><span id="bar-<?=$id?>" style="width:<?=intval($statusData['progress'] ?? 0)?>%;"></span></div>
+                        <?php /* AGENT_STORE_CARD_HEADER.md, "Foot": two text links that say what each one frees. The numbers are
+                                 from the last background measurement. A card that is not installed has no foot. */ ?>
+                        <?php if ($agent['is_installed']): ?>
+                        <div class="av2-foot" data-agent="<?=$e8($id)?>">
+                            <span class="av2-foot-links" id="av2-foot-links-<?=$e8($id)?>" data-testid="foot-links-<?=$e8($id)?>"><?=av2_foot_links_html($foot, $id, (string)$agent['name'], $footMeasuring || $isInstalling, $isInstalling)?></span>
                         </div>
-
-                        <?php /* Phase 7: the foot keeps the size and the Remove old versions link. The install method and
-                                 the package name moved behind the (i) of the card. The buttons moved to the card header. */ ?>
-                        <div class="av2-foot">
-                            <span class="av2-meta">
-                                <?php if ($agentSizeMB > 0): ?><span class="av2-meta-size" data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>" title="On-storage footprint of this agent's SquashFS layer (WP #748 J — single layer per agent)."><?=$agentSizeMB?>&nbsp;MB</span><?php endif; ?>
-                                <?php /* BOOT_DISK_SPACE.md R4: drop the old versions of this agent. */ ?>
-                                <?php if ($agent['is_installed']): ?><?=$agentSizeMB > 0 ? '&nbsp;·&nbsp;' : ''?><a href="#" class="av2-remove-old" data-agent="<?=htmlspecialchars($id, ENT_QUOTES, 'UTF-8')?>" onclick="if (window.aicliRemoveOldVersions) { aicliRemoveOldVersions(this.getAttribute('data-agent')); } return false;" title="Remove the old versions of this agent to free space on the boot disk. A version in use stays.">Remove old versions</a><?php endif; ?>
-                            </span>
-                        </div>
+                        <?php endif; ?>
                     <?=aicli_card_close('article')?>
                     <?php endforeach; ?>
                 </div>

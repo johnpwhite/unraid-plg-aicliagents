@@ -42,6 +42,9 @@ function installVersionAgent(id, btn, explicitVersion) {
         var cmp = versionCompare(version, installed);
         label = cmp > 0 ? 'Upgrade' : (cmp < 0 ? 'Downgrade' : 'Reinstall');
     }
+    // AGENT_STORE_CARD_HEADER.md: the new-version button, the Upgrade button and the card menu already know the kind.
+    // The picker may not be loaded yet, so its data-installed can be empty.
+    if (_av2PendingKind && _av2PendingKind.id === id) label = _av2PendingKind.kind === 'change' ? 'Downgrade' : 'Upgrade';
 
     // Fetch active sessions FIRST (single async jump), then show ONE
     // consolidated confirm modal covering both the downgrade warning and
@@ -73,10 +76,13 @@ function _showInstallConfirm(id, version, btn, label, sessions, sideBySide, wait
     // An install that cannot affect the operator's sessions must not ask them
     // about their sessions. Treat them as absent for every decision below.
     var relevantSessions = sideBySide ? [] : sessions;
-    // WP #964 (slice): an upgrade gets the richer keep-a-copy overlay — it
-    // offers a rollback backup of the current version before replacing it.
-    if (label === 'Upgrade') {
-        _showUpgradeBackupOverlay(id, version, btn, relevantSessions, sideBySide, sessions.length, waitReason);
+    // AGENT_STORE_CARD_HEADER.md R8: an upgrade (and a change of version that the new-version button offers) opens the
+    // update overlay: the release notes, what happens to the open workspaces, and the keep-a-copy choice (WP #964).
+    var pend = (_av2PendingKind && _av2PendingKind.id === id) ? _av2PendingKind : null;
+    _av2PendingKind = null;
+    if (label === 'Upgrade' || (label === 'Downgrade' && pend && pend.kind === 'change')) {
+        av2RenderUpdateOverlay({ id: id, version: version, sessions: relevantSessions, sideBySide: sideBySide, openCount: sessions.length,
+                                 waitReason: waitReason, kind: label === 'Upgrade' ? 'update' : 'change', opener: pend ? pend.opener : btn });
         return;
     }
     var isInstall = !label || label === 'Install';
@@ -253,123 +259,471 @@ function _aicliBackupDestChanged() {
     }, 400);
 }
 
-function _showUpgradeBackupOverlay(id, version, btn, sessions, sideBySide, openCount, waitReason) {
-    // `sessions` is already empty for a side-by-side agent (the caller strips
-    // them), so every branch below that warns about sessions or offers to close
-    // them simply does not run. openCount is the REAL number still open, used
-    // only to reassure — never to gate anything.
-    _aicliBackupCtx.agentId = id;
-    // Initial estimate with no dest → backend defaults it to the persistence
-    // location and echoes the resolved path back.
-    _aicliFetchBackupEstimate('', function(est) {
-        var vLabel  = version ? ('v' + version) : 'latest';
-        var curVer  = (est && est.current_version) ? est.current_version : '';
-        var destVal = (est && est.dest) ? est.dest : '';
+// ---------------------------------------------------------------------------
+// AGENT_STORE_CARD_HEADER.md (#793): the update overlay and the card states.
+// The overlay replaces the swal "Upgrade to vX?" keep-a-copy dialog and keeps every control of it.
+// ---------------------------------------------------------------------------
+var _av2Dropdowns = {};          // id -> the version-check answer of the card (versions, dates, channel)
+var _av2PendingKind = null;      // {id, kind}: set by av2OpenUpdateOverlay; read by installVersionAgent
+var _av2Overlay = null;          // the open overlay: {back, opener, onKey}
+var _av2LastInstall = {};        // id -> the arguments of the last doInstall (Retry uses them)
+var _av2HeaderNodes = {};        // id -> the version nodes of the header while the card shows "Installing"
 
-        var sessionHtml = '';
-        // Side by side with workspaces open: say so, once, in one line. The old
-        // flow said nothing here and then hid every terminal, which taught the
-        // operator to expect an interruption that no longer happens.
-        if (sideBySide && openCount > 0) {
-            sessionHtml = '<div style="text-align:left;line-height:1.5;margin-bottom:10px">'
-                + 'Installs alongside the version you are running — your '
-                + openCount + ' open workspace' + (openCount === 1 ? '' : 's')
-                + ' ' + (openCount === 1 ? 'is' : 'are') + ' not interrupted, and '
-                + (openCount === 1 ? 'keeps' : 'keep') + ' the version '
-                + (openCount === 1 ? 'it has' : 'they have') + ' until you switch '
-                + (openCount === 1 ? 'it' : 'them') + ' over.'
-                + '</div>';
+function av2AgentName(id) {
+    var t = document.querySelector('.av2-card[data-agent="' + id + '"] .aicli-card-title');
+    return t ? t.textContent : id;
+}
+
+// Small DOM builder: av2h('div', 'class', 'text', {attr: value}). Text only, never markup.
+function av2h(tag, cls, text, attrs) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    if (attrs) Object.keys(attrs).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+    return e;
+}
+
+// The same size rule as BootSpaceService::sizeText and the Remove old versions dialog.
+function av2FmtBytes(n) {
+    n = Math.max(0, Number(n) || 0);
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
+    if (n < 10485760) return (n / 1048576).toFixed(1) + ' MB';
+    if (n < 1073741824) return Math.round(n / 1048576) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+// One place that sets the state of a card: idle, queued, installing, failed or done. The chip strip and the
+// progress view share one grid cell, so no state changes the height of the card (R1). The ids progress-<id>,
+// bar-<id>, status-text-<id> and buttons-<id> stay.
+function av2SetCardState(id, state, text, opts) {
+    opts = opts || {};
+    var card = document.getElementById('av2-card-' + id);
+    var panel = document.getElementById('progress-' + id);
+    if (!panel) return;
+    var strip = card ? card.querySelector('.av2-strip') : null;
+    var panels = document.getElementById('av2-panels-' + id);
+    var status = document.getElementById('status-text-' + id);
+    var bar = document.getElementById('bar-' + id);
+    var extra = document.getElementById('extra-' + id);
+    var versions = card ? card.querySelector('.av2-versions') : null;
+    var buttons = document.getElementById('buttons-' + id);
+    var busy = (state === 'queued' || state === 'installing' || state === 'done');
+
+    panel.classList.toggle('active', busy || state === 'failed');
+    panel.classList.toggle('failed', state === 'failed');
+    if (strip) { if (busy || state === 'failed') strip.setAttribute('inert', ''); else strip.removeAttribute('inert'); }
+    if (panels) {
+        if (busy) panels.setAttribute('inert', ''); else panels.removeAttribute('inert');
+        panels.classList.toggle('av2-locked', busy);
+    }
+    if (card) card.setAttribute('data-av2-state', state);
+    if (status && typeof text === 'string') { status.textContent = text; status.title = text; }
+    if (bar && typeof opts.progress === 'number') bar.style.width = opts.progress + '%';
+    if (buttons) {
+        buttons.style.visibility = busy ? 'hidden' : '';
+        buttons.style.pointerEvents = busy ? 'none' : '';
+    }
+    // The header keeps the versions in view: while the card installs it says "Installing vX…".
+    if (versions) {
+        if (busy) {
+            if (!_av2HeaderNodes[id]) {
+                _av2HeaderNodes[id] = Array.prototype.slice.call(versions.childNodes);
+                _av2HeaderNodes[id].forEach(function (n) { versions.removeChild(n); });
+            }
+            var v = opts.version || '';
+            if (!v) { var nb = _av2HeaderNodes[id].filter(function (n) { return n.getAttribute && n.getAttribute('data-version'); })[0]; v = nb ? nb.getAttribute('data-version') : ''; }
+            while (versions.firstChild) versions.removeChild(versions.firstChild);
+            versions.appendChild(av2h('span', 'av2-installing', 'Installing' + (v ? ' v' + v : '') + '…'));
+        } else if (_av2HeaderNodes[id]) {
+            while (versions.firstChild) versions.removeChild(versions.firstChild);
+            _av2HeaderNodes[id].forEach(function (n) { versions.appendChild(n); });
+            delete _av2HeaderNodes[id];
         }
-        if (!sideBySide && waitReason) {
-            sessionHtml += '<div style="text-align:left;line-height:1.5;margin-bottom:10px;color:#7a4b00">'
-                + '<b>Why this upgrade must wait:</b> ' + _escAttr(waitReason)
-                + '</div>';
+    }
+    // Both foot links are disabled while the agent installs.
+    if (card) {
+        Array.prototype.forEach.call(card.querySelectorAll('.av2-foot-link'), function (b) {
+            b.disabled = busy;
+            b.setAttribute('aria-disabled', busy ? 'true' : 'false');
+        });
+    }
+    if (extra) {
+        Array.prototype.forEach.call(extra.querySelectorAll('.av2-fail-actions'), function (n) { n.parentNode.removeChild(n); });
+        if (state === 'failed') {
+            var box = av2h('span', 'av2-fail-actions');
+            var retry = av2h('button', 'aicli-btn-slim', 'Retry', { type: 'button', 'data-testid': 'install-retry-' + id });
+            retry.onclick = function () {
+                var a = _av2LastInstall[id];
+                av2SetCardState(id, 'idle');
+                if (a) doInstall(id, a.version, null, a.sessions, null, a.force, a.sideBySide);
+            };
+            var dismiss = av2h('button', 'aicli-btn-slim', 'Dismiss', { type: 'button', 'data-testid': 'install-dismiss-' + id });
+            dismiss.onclick = function () { av2SetCardState(id, 'idle', ''); };
+            box.appendChild(retry); box.appendChild(dismiss);
+            extra.appendChild(box);
+        }
+    }
+}
+
+// --- A small, safe Markdown subset for release notes: headings, lists, bold, code, https links. Text only. ---
+function av2RenderInline(parent, text) {
+    var re = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\(https:\/\/[^)\s]+\))/g;
+    var last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+        if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+        var tok = m[0];
+        if (tok.charAt(0) === '*') parent.appendChild(av2h('strong', null, tok.slice(2, -2)));
+        else if (tok.charAt(0) === '`') parent.appendChild(av2h('code', null, tok.slice(1, -1)));
+        else {
+            var cut = tok.indexOf('](');
+            parent.appendChild(av2h('a', null, tok.slice(1, cut), { href: tok.slice(cut + 2, -1), target: '_blank', rel: 'noopener noreferrer' }));
+        }
+        last = m.index + tok.length;
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+}
+
+function av2RenderMarkdown(container, text) {
+    var lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    var list = null, code = null, para = null;
+    function flush() { list = null; para = null; }
+    lines.forEach(function (line) {
+        if (/^```/.test(line)) {
+            if (code) { container.appendChild(code); code = null; } else { flush(); code = av2h('pre', 'av2-notes-code'); }
+            return;
+        }
+        if (code) { code.textContent += (code.textContent ? '\n' : '') + line; return; }
+        var h = /^(#{1,6})\s+(.*)$/.exec(line);
+        var li = /^\s*[-*+]\s+(.*)$/.exec(line);
+        if (h) { flush(); var hd = av2h('h5', 'av2-notes-h'); av2RenderInline(hd, h[2]); container.appendChild(hd); }
+        else if (li) {
+            if (!list) { list = av2h('ul', 'av2-notes-list'); container.appendChild(list); para = null; }
+            var item = av2h('li'); av2RenderInline(item, li[1]); list.appendChild(item);
+        } else if (line.trim() === '') { flush(); }
+        else {
+            if (!para) { para = av2h('p', 'av2-notes-p'); container.appendChild(para); list = null; } else para.appendChild(document.createTextNode(' '));
+            av2RenderInline(para, line.trim());
+        }
+    });
+    if (code) container.appendChild(code);
+}
+
+// The release notes block: one <details> per version, newest first, the newest open. No notes: the link only.
+function av2RenderReleaseNotes(container, r, changelogUrl) {
+    while (container.firstChild) container.removeChild(container.firstChild);
+    var notes = (r && r.notes) || [];
+    var link = (r && r.changelog_url) || changelogUrl || '';
+    if (!notes.length) {
+        container.appendChild(av2h('p', 'av2-notes-none', 'The plugin has no release notes for this version.', { 'data-testid': 'update-notes-none' }));
+    }
+    notes.forEach(function (n, i) {
+        var d = av2h('details', 'av2-notes-ver', null, { 'data-testid': 'update-notes-' + n.version });
+        if (i === 0) d.open = true;
+        d.appendChild(av2h('summary', null, 'v' + n.version + (n.date ? ' · ' + n.date : '')));
+        var body = av2h('div', 'av2-notes-body');
+        av2RenderMarkdown(body, n.body || '');
+        if (n.truncated) body.appendChild(av2h('p', 'av2-notes-p', 'The rest is on the vendor’s site.'));
+        d.appendChild(body);
+        container.appendChild(d);
+    });
+    if (link && /^https:\/\//.test(link)) {
+        var p = av2h('p', 'av2-notes-link');
+        p.appendChild(av2h('a', null, notes.length ? 'Open all release notes on the vendor’s site ↗' : 'Open the release notes on the vendor’s site ↗', { href: link, target: '_blank', rel: 'noopener noreferrer', 'data-testid': 'update-notes-link' }));
+        container.appendChild(p);
+    }
+}
+
+function av2CloseOverlay() {
+    var o = _av2Overlay;
+    if (!o) return;
+    _av2Overlay = null;
+    document.removeEventListener('keydown', o.onKey, true);
+    if (o.back.parentNode) o.back.parentNode.removeChild(o.back);
+    if (_aicliBackupCtx.timer) { clearTimeout(_aicliBackupCtx.timer); _aicliBackupCtx.timer = null; }
+    if (o.opener && document.body.contains(o.opener) && typeof o.opener.focus === 'function') o.opener.focus();
+}
+
+// Opened by the new-version button, the hover Upgrade button and the card menu. It reads the open workspaces
+// of the agent first, so the overlay can say what happens to them.
+function av2OpenUpdateOverlay(id, opener) {
+    var badge = document.querySelector('.av2-card[data-agent="' + id + '"] .av2-newver');
+    var src = (opener && opener.getAttribute && opener.getAttribute('data-version')) ? opener : badge;
+    if (!src) return;
+    var kind = src.getAttribute('data-kind') || 'update';
+    var version = src.getAttribute('data-version') || '';
+    _av2PendingKind = { id: id, kind: kind, opener: opener || null };
+    installVersionAgent(id, opener, version);
+}
+
+function av2RenderUpdateOverlay(o) {
+    av2CloseOverlay();
+    var id = o.id, version = o.version, sessions = o.sessions || [], sideBySide = !!o.sideBySide, openCount = o.openCount || 0;
+    var kind = o.kind || 'update';
+    var name = av2AgentName(id);
+    var card = document.querySelector('.av2-card[data-agent="' + id + '"]');
+    var instEl = card ? card.querySelector('.av2-ver-installed') : null;
+    var curVer = instEl ? instEl.textContent.replace(/^v/, '') : '';
+    var dd = _av2Dropdowns[id] || {};
+    var channel = dd.channel ? String(dd.channel).replace(/^./, function (c) { return c.toUpperCase(); }) : 'Stable';
+    var released = '';
+    (dd.versions || []).forEach(function (v) { if (v && v.version === version && v.date) released = v.date; });
+
+    var back = av2h('div', 'hb-backdrop acp-backdrop', null, { id: 'av2-update-backdrop' });
+    var dlg = av2h('div', 'hb-dialog acp-dialog av2-update-dialog', null, { id: 'av2-update-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'av2-update-title', 'data-testid': 'update-overlay' });
+    var head = av2h('div', 'hb-header');
+    var title = av2h('h2', 'hb-title', kind === 'change' ? 'Change ' + name + ' to v' + version : 'Update ' + name, { id: 'av2-update-title', tabindex: '-1' });
+    var x = av2h('button', 'acp-x', '×', { type: 'button', 'aria-label': 'Close', id: 'av2-update-x' });
+    head.appendChild(title); head.appendChild(x);
+    var body = av2h('div', 'hb-body acp-dbody');
+    var foot = av2h('div', 'hb-footer acp-footer');
+    dlg.appendChild(head); dlg.appendChild(body); dlg.appendChild(foot);
+    back.appendChild(dlg);
+
+    // 2. The version line.
+    var vl = av2h('div', 'av2-update-versions', null, { 'data-testid': 'update-versions' });
+    vl.appendChild(document.createTextNode('Installed '));
+    vl.appendChild(av2h('b', null, curVer ? 'v' + curVer : 'unknown', { id: 'av2-update-cur' }));
+    vl.appendChild(document.createTextNode(' → New '));
+    vl.appendChild(av2h('b', null, 'v' + version));
+    body.appendChild(vl);
+    body.appendChild(av2h('div', 'hb-muted', channel + ' channel' + (released ? ' · released ' + released : '')));
+
+    // 3. What is new (not for a change of version: that is not an update).
+    var notes = null;
+    if (kind !== 'change') {
+        var nh = av2h('div', 'av2-update-section');
+        nh.appendChild(av2h('div', 'hb-label', 'What is new'));
+        notes = av2h('div', 'av2-notes', null, { 'data-testid': 'update-notes', 'aria-live': 'polite' });
+        notes.appendChild(av2h('p', 'hb-muted', 'Loading the release notes…'));
+        nh.appendChild(notes);
+        body.appendChild(nh);
+    }
+
+    // 4. Your open workspaces: the same rules as before, in plain words.
+    var wsHtmlNeeded = (sideBySide && openCount > 0) || o.waitReason || sessions.length > 0;
+    var force = null;
+    if (wsHtmlNeeded) {
+        var ws = av2h('div', 'av2-update-section', null, { 'data-testid': 'update-workspaces' });
+        ws.appendChild(av2h('div', 'hb-label', 'Your open workspaces'));
+        if (sideBySide && openCount > 0) {
+            var one = openCount === 1;
+            ws.appendChild(av2h('p', 'av2-notes-p', 'Installs alongside the version you are running. Your ' + openCount + ' open workspace' + (one ? ' is' : 's are')
+                + ' not interrupted. ' + (one ? 'It keeps' : 'They keep') + ' v' + (curVer || 'the version they have') + ' until you switch '
+                + (one ? 'it' : 'them') + ' over from ' + (one ? 'its' : 'their') + ' … menu (Switch to…).'));
+        }
+        if (!sideBySide && o.waitReason) {
+            var wr = av2h('p', 'av2-notes-p'); wr.appendChild(av2h('b', null, 'Why this update must wait: ')); wr.appendChild(document.createTextNode(o.waitReason));
+            ws.appendChild(wr);
         }
         if (sessions.length > 0) {
-            var lines = sessions.map(function(s) {
-                return '• ' + _escAttr(s.path || '<no workspace>')
-                     + '  (' + _escAttr((s.id || '').slice(0, 8)) + ')';
-            }).join('<br>');
-            sessionHtml +=
-                '<div style="margin-bottom:10px;">'
-              + sessions.length + ' active session' + (sessions.length === 1 ? '' : 's')
-              + ' will remain running:<br>' + lines
-              + '<br><b>The upgrade will queue safely and start after all sessions close naturally.</b>'
-              + '<label style="display:flex; gap:8px; align-items:flex-start; margin-top:10px; cursor:pointer;">'
-              + '<input type="checkbox" id="aicli-force-upgrade" style="margin-top:2px;">'
-              + '<span>Force now: terminate these sessions; background subagents, monitors, and shell tasks will stop.</span>'
-              + '</label>'
-              + '</div>';
+            ws.appendChild(av2h('p', 'av2-notes-p', sessions.length + ' active session' + (sessions.length === 1 ? '' : 's') + ' will remain running:'));
+            var ul = av2h('ul', 'av2-notes-list');
+            sessions.forEach(function (s) { ul.appendChild(av2h('li', null, (s.path || '<no workspace>') + '  (' + String(s.id || '').slice(0, 8) + ')')); });
+            ws.appendChild(ul);
+            ws.appendChild(av2h('p', 'av2-notes-p', 'The update queues and starts after these sessions close.'));
+            var fl = av2h('label', 'hb-check-label');
+            force = av2h('input', null, null, { type: 'checkbox', id: 'aicli-force-upgrade' });
+            fl.appendChild(force);
+            fl.appendChild(av2h('span', null, 'Force now: terminate these sessions; background subagents, monitors, and shell tasks will stop.'));
+            ws.appendChild(fl);
         }
+        body.appendChild(ws);
+    }
 
-        var html =
-            '<div style="text-align:left; font-size:13px; line-height:1.5;">'
-          + sessionHtml
-          + '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px; cursor:pointer;">'
-          // Default OFF: a backup is opt-in. _aicliRenderBackupEstimate's
-          // success branch only enables the toggle, never re-checks it, so an
-          // unchecked default stays unchecked unless the user ticks it.
-          +   '<input type="checkbox" id="aicli-bk-toggle" style="margin-top:2px;">'
-          +   '<span>Keep a copy of the current version'
-          +     (curVer ? ' (<b>v' + _escAttr(curVer) + '</b>)' : '')
-          +     ' so you can roll back if the upgrade goes wrong.</span>'
-          + '</label>'
-          + '<div style="margin-bottom:8px;">'
-          +   '<div style="opacity:0.7; margin-bottom:3px;">Backup destination</div>'
-          // swal-input-show: Unraid's sweet-alert CSS hides every text input
-          // in a dialog that is not a swal "input" dialog; this class is
-          // Unraid's own opt-out. Without it the field never showed (#307).
-          +   '<input type="text" id="aicli-bk-dest" class="swal-input-show" aria-label="Backup destination" value="' + _escAttr(destVal) + '"'
-          +     ' oninput="_aicliBackupDestChanged()"'
-          +     ' style="width:100%; box-sizing:border-box; padding:5px 8px;">'
-          + '</div>'
-          + '<div id="aicli-bk-readout" style="font-size:12px; opacity:0.85;"></div>'
-          + '<div id="aicli-bk-note" style="font-size:12px; margin-top:6px; font-weight:600;"></div>'
-          + '</div>';
+    // 5. Keep a copy. The ids stay: the estimate code and the tests use them.
+    var bk = av2h('div', 'av2-update-section');
+    var bl = av2h('label', 'hb-check-label');
+    var toggle = av2h('input', null, null, { type: 'checkbox', id: 'aicli-bk-toggle' });
+    bl.appendChild(toggle);
+    var bt = av2h('span'); bt.appendChild(document.createTextNode('Keep a copy of ')); bt.appendChild(av2h('b', null, curVer ? 'v' + curVer : 'the current version', { id: 'av2-bk-ver' }));
+    bt.appendChild(document.createTextNode(' so you can roll back'));
+    bl.appendChild(bt);
+    bk.appendChild(bl);
+    var det = av2h('details', 'acp-details');
+    det.appendChild(av2h('summary', null, 'Where the copy goes'));
+    var dest = av2h('input', 'swal-input-show', null, { type: 'text', id: 'aicli-bk-dest', 'aria-label': 'Backup destination' });
+    dest.style.cssText = 'width:100%; box-sizing:border-box;';
+    dest.addEventListener('input', _aicliBackupDestChanged);
+    det.appendChild(dest);
+    det.appendChild(av2h('div', 'hb-help', '', { id: 'aicli-bk-readout' }));
+    bk.appendChild(det);
+    bk.appendChild(av2h('div', 'hb-help', '', { id: 'aicli-bk-note' }));
+    body.appendChild(bk);
 
-        swal({
-            title: 'Upgrade to ' + vLabel + '?',
-            text: html,
-            html: true,
-            showCancelButton: true,
-            confirmButtonText: sessions.length > 0 ? 'Queue upgrade safely' : (sideBySide && openCount > 0 ? 'Install' : 'Upgrade'),
-            cancelButtonText: 'Cancel',
-            closeOnConfirm: false,
-        }, function(confirmed) {
-            if (!confirmed) return;
-            var toggle = document.getElementById('aicli-bk-toggle');
-            var destEl = document.getElementById('aicli-bk-dest');
-            var forceEl = document.getElementById('aicli-force-upgrade');
-            // Backup only when the toggle is both checked AND enabled — a
-            // disabled toggle means insufficient space / bad path, so the
-            // confirm means "upgrade without a backup".
-            var opts = (toggle && toggle.checked && !toggle.disabled)
-                ? { backup: true, dest: (destEl ? destEl.value.trim() : '') }
-                : null;
-            swal.close();
-            doInstall(id, version, btn, sessions.length, opts, !!(forceEl && forceEl.checked), sideBySide);
-        });
+    // 6. Channel: a read-only line, and a way to the Version chip, where the choices already are.
+    var ch = av2h('div', 'hb-muted');
+    ch.appendChild(document.createTextNode('Channel: ' + channel + ' · '));
+    var pick = av2h('a', null, 'Pick another version or channel', { href: '#', 'data-testid': 'update-pick-other' });
+    pick.addEventListener('click', function (e) {
+        e.preventDefault();
+        av2CloseOverlay();
+        av2OpenCard(id);
+        var chip = document.querySelector('.av2-card[data-agent="' + id + '"] .av2-chip[data-target="channel"]');
+        if (chip && chip.getAttribute('aria-expanded') !== 'true') chip.click();
+        if (chip) chip.focus();
+    });
+    ch.appendChild(pick);
+    body.appendChild(ch);
 
-        // Keep the primary action honest about the selected admission mode.
-        // Safe queueing remains the default; ticking the destructive opt-in
-        // immediately makes the button say what clicking it will do.
-        var forceUpgradeEl = document.getElementById('aicli-force-upgrade');
-        var confirmUpgradeEl = document.querySelector('.sweet-alert button.confirm');
-        if (forceUpgradeEl && confirmUpgradeEl) {
-            var syncUpgradeConfirmLabel = function() {
-                confirmUpgradeEl.textContent = forceUpgradeEl.checked
-                    ? 'Force upgrade now'
-                    : 'Queue upgrade safely';
-            };
-            forceUpgradeEl.addEventListener('change', syncUpgradeConfirmLabel);
-            syncUpgradeConfirmLabel();
+    // 7. Footer.
+    var closeBtn = av2h('button', 'aicli-btn-slim hb-secondary', 'Close', { type: 'button', 'data-testid': 'update-close' });
+    var go = av2h('button', 'aicli-btn-slim hb-primary', '', { type: 'button', 'data-testid': 'update-now' });
+    foot.appendChild(closeBtn); foot.appendChild(go);
+    function goLabel() {
+        var forced = !!(force && force.checked);
+        if (kind === 'change') return sessions.length > 0 && !forced ? 'Queue change' : (forced ? 'Force change now' : 'Change version');
+        return sessions.length > 0 && !forced ? 'Queue update' : (forced ? 'Force update now' : 'Update now');
+    }
+    go.textContent = goLabel();
+    if (force) force.addEventListener('change', function () { go.textContent = goLabel(); });
+    // Another browser tab started an update of this agent: the card is already in the installing state.
+    if (card && /^(queued|installing|done)$/.test(card.getAttribute('data-av2-state') || '')) {
+        body.insertBefore(av2h('p', 'av2-notes-p', 'An update of this agent is already running.', { role: 'status', 'data-testid': 'update-already-running' }), body.firstChild);
+        go.disabled = true;
+    }
+
+    closeBtn.onclick = x.onclick = av2CloseOverlay;
+    back.addEventListener('mousedown', function (e) { if (e.target === back) av2CloseOverlay(); });
+    go.onclick = function () {
+        var destEl = document.getElementById('aicli-bk-dest');
+        // Backup only when the toggle is both checked and enabled: a disabled toggle means too little space or a bad path.
+        var opts = (toggle.checked && !toggle.disabled) ? { backup: true, dest: (destEl ? destEl.value.trim() : '') } : null;
+        var forced = !!(force && force.checked);
+        av2CloseOverlay();
+        doInstall(id, version, null, sessions.length, opts, forced, sideBySide);
+    };
+
+    var onKey = function (e) {
+        if (e.key === 'Escape' || e.key === 'Esc') { e.preventDefault(); e.stopPropagation(); av2CloseOverlay(); return; }
+        if (e.key !== 'Tab') return;
+        var f = Array.prototype.filter.call(dlg.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex="0"]'), function (n) { return !n.disabled && n.offsetParent !== null; });
+        if (!f.length) return;
+        var first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && (document.activeElement === first || document.activeElement === title)) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        else if (!dlg.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    _av2Overlay = { back: back, opener: o.opener || null, onKey: onKey };
+    document.body.appendChild(back);
+    title.focus();
+
+    // The backup estimate fills the folder and the sizes; the notes are fetched without blocking the dialog.
+    _aicliBackupCtx.agentId = id;
+    _aicliFetchBackupEstimate('', function (est) {
+        if (_av2Overlay === null) return;
+        var cv = (est && est.current_version) ? est.current_version : curVer;
+        if (cv) {
+            var c1 = document.getElementById('av2-update-cur'); if (c1) c1.textContent = 'v' + cv;
+            var c2 = document.getElementById('av2-bk-ver'); if (c2) c2.textContent = 'v' + cv;
         }
-
-        // swal renders synchronously — the overlay DOM exists now, so paint
-        // the initial estimate into it.
+        if (est && est.dest) dest.value = est.dest;
         _aicliRenderBackupEstimate(est);
     });
+    if (notes) {
+        var changelogUrl = card && card.querySelector('.av2-changelog-link') ? card.querySelector('.av2-changelog-link').getAttribute('href') : '';
+        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=get_release_notes&agentId=' + encodeURIComponent(id)
+            + '&from=' + encodeURIComponent(curVer) + '&to=' + encodeURIComponent(version) + '&csrf_token=' + csrf)
+            .done(function (r) { if (_av2Overlay !== null) av2RenderReleaseNotes(notes, (r && r.status === 'ok') ? r : null, changelogUrl); })
+            .fail(function () { if (_av2Overlay !== null) av2RenderReleaseNotes(notes, null, changelogUrl); });
+    }
 }
+
+// The card menu items that the Store adds (Update to vX…, Release notes) and their close.
+document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('[data-aicli-card-extra]') : null;
+    if (!t) return;
+    var id = t.getAttribute('data-agent') || '';
+    var act = t.getAttribute('data-aicli-card-extra');
+    var menu = t.closest('.aicli-card-menu');
+    if (menu) {
+        menu.hidden = true;
+        var mb = document.querySelector('[data-aicli-card-menu][aria-controls="' + menu.id + '"]');
+        if (mb) { mb.setAttribute('aria-expanded', 'false'); }
+    }
+    if (act === 'update') {
+        var mbtn = menu ? document.querySelector('[data-aicli-card-menu][aria-controls="' + menu.id + '"]') : null;
+        av2OpenUpdateOverlay(id, mbtn);
+    } else if (act === 'release-notes') {
+        var a = document.querySelector('.av2-card[data-agent="' + id + '"] .av2-changelog-link');
+        if (a && /^https?:\/\//.test(a.getAttribute('href') || '')) window.open(a.getAttribute('href'), '_blank', 'noopener,noreferrer');
+    }
+});
+
+// --- The foot: what each link frees (R14 to R16) ---------------------------------------------------------
+// PURE: the foot as a list of parts, from the answer of agent_footprint. kind: remove | inuse | uninstall.
+function av2FootSpec(r, measuring) {
+    var out = [];
+    function bracket(bytes) { return measuring ? ' (measuring…)' : (bytes == null ? '' : ' (frees ' + av2FmtBytes(bytes) + ')'); }
+    if (r && r.old_in_use) out.push({ kind: 'inuse', text: 'Old versions in use' });
+    else if (!r || !r.measured || Number(r.old_bytes) > 0) out.push({ kind: 'remove', text: 'Remove old versions', frees: bracket(r && r.measured ? Number(r.old_bytes) : null) });
+    out.push({ kind: 'uninstall', text: 'Uninstall', frees: bracket(r && r.uninstall_bytes != null ? Number(r.uninstall_bytes) : null),
+               bytes: (r && r.uninstall_bytes != null) ? Number(r.uninstall_bytes) : null });
+    return out;
+}
+
+// Replace both brackets in place, with no page reload.
+function av2RefreshFootSizes(id, done) {
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=agent_footprint&agentId=' + encodeURIComponent(id) + '&csrf_token=' + csrf, function (r) {
+        var holder = document.getElementById('av2-foot-links-' + id);
+        if (!holder || !r || r.status !== 'ok') { if (done) done(null); return; }
+        var card = document.getElementById('av2-card-' + id);
+        var busy = !!(card && /^(queued|installing|done)$/.test(card.getAttribute('data-av2-state') || ''));
+        var name = av2AgentName(id);
+        var spec = av2FootSpec(r, !!r.measuring || busy);
+        while (holder.firstChild) holder.removeChild(holder.firstChild);
+        spec.forEach(function (p, i) {
+            if (i > 0) holder.appendChild(av2h('span', 'av2-foot-sep', ' · ', { 'aria-hidden': 'true' }));
+            if (p.kind === 'inuse') { holder.appendChild(av2h('span', 'av2-foot-note', p.text, { title: 'A workspace still runs these versions. Close it or switch it, then remove them.' })); return; }
+            var b = av2h('button', 'av2-foot-link ' + (p.kind === 'remove' ? 'av2-remove-old' : 'av2-uninstall-link'), p.text, { type: 'button', 'data-agent': id });
+            if (p.frees) b.appendChild(av2h('span', 'av2-frees' + (r.measuring || busy ? ' av2-muted' : ''), p.frees));
+            if (busy) { b.disabled = true; b.setAttribute('aria-disabled', 'true'); }
+            if (p.kind === 'remove') {
+                b.setAttribute('data-testid', 'remove-old-' + id);
+                b.title = 'Deletes the older versions of this agent that no workspace uses. The version you use stays. After this you cannot roll back to them.';
+                b.onclick = function () { if (window.aicliRemoveOldVersions) window.aicliRemoveOldVersions(id); };
+            } else {
+                b.setAttribute('data-testid', 'uninstall-' + id);
+                b.setAttribute('data-frees', p.bytes == null ? '' : String(p.bytes));
+                b.setAttribute('aria-label', 'Uninstall ' + name);
+                b.title = 'Removes this agent: the version you use, its old versions and its kept copies.';
+                b.onclick = function () { uninstallAgent(id, b); };
+            }
+            holder.appendChild(b);
+        });
+        if (done) done(r);
+    });
+}
+
+// While a measurement runs, ask again every 3 seconds (a file read each time) until it ends. With baseAt (the
+// measured_at that the page had before a removal) it also waits until a newer measurement exists.
+var _av2FootWatch = {};
+function av2WatchFootSizes(id, n, baseAt) {
+    n = n || 0;
+    if (_av2FootWatch[id]) clearTimeout(_av2FootWatch[id]);
+    _av2FootWatch[id] = setTimeout(function () {
+        av2RefreshFootSizes(id, function (r) {
+            if (!r || n >= 100) return;
+            var waitNewer = baseAt !== undefined && !(Number(r.measured_at) > baseAt);
+            if (r.measuring || waitNewer) av2WatchFootSizes(id, n + 1, baseAt);
+        });
+    }, 3000);
+}
+// After Remove old versions was queued: the job starts a new measurement when it ends. Watch for it.
+function av2WatchFootAfterRemoval(agent) {
+    var ids = (!agent || agent === 'all')
+        ? Array.prototype.map.call(document.querySelectorAll('.av2-foot[data-agent]'), function (f) { return f.getAttribute('data-agent'); })
+        : [agent];
+    ids.forEach(function (id) {
+        $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=agent_footprint&agentId=' + encodeURIComponent(id) + '&csrf_token=' + csrf, function (r) {
+            if (r && r.status === 'ok') av2WatchFootSizes(id, 0, Number(r.measured_at) || 0);
+        });
+    });
+}
+document.addEventListener('aicli:boot-space-measured', function () {
+    Array.prototype.forEach.call(document.querySelectorAll('.av2-foot[data-agent]'), function (f) { av2RefreshFootSizes(f.getAttribute('data-agent')); });
+});
 
 // Agents whose in-flight install is running beside live workspaces, and how
 // many were open when it started — so the completion notice can tell the
@@ -386,6 +740,7 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
     var bar = $('#bar-' + id);
     var status = $('#status-text-' + id);
     var buttons = $('#buttons-' + id);
+    _av2LastInstall[id] = { version: version, sessions: sessionsToClose, force: forceNow, sideBySide: sideBySide };
 
     $(btn).prop('disabled', true);
     if (!isSelect) $(btn).html('<i class="fa fa-spinner fa-spin"></i> WAIT...');
@@ -393,25 +748,25 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
     // A side-by-side install is never queued and never closes anything: it is
     // simply an install that happens to run while workspaces are open.
     var safeQueue = !!(sessionsToClose && sessionsToClose > 0 && !forceNow && !sideBySide);
-    _hideButtons(buttons);
-    bar.css('width', safeQueue ? '1%' : '5%');
+    var firstText;
     // Status text reflects what the server is actually doing in the first
     // ~1.8 s window: if sessions were listed in the confirm modal, the
     // backend is running _closeSessionsForUpgrade (Ctrl-C + sleep + sentinel);
     // otherwise it's starting install-bg directly. The real install-status
     // JSON takes over once polling kicks in.
     if (safeQueue) {
-        status.text('Queueing safely — active sessions will keep running…');
+        firstText = 'Queueing safely — active sessions will keep running…';
     } else if (sideBySide) {
-        status.text('Installing alongside your running version…');
+        firstText = 'Installing alongside your running version…';
     } else if (sessionsToClose && sessionsToClose > 0) {
-        status.text('Closing ' + sessionsToClose + ' active session' + (sessionsToClose === 1 ? '' : 's') + '…');
+        firstText = 'Closing ' + sessionsToClose + ' active session' + (sessionsToClose === 1 ? '' : 's') + '…';
     } else if (backupOpts && backupOpts.backup) {
-        status.text('Backing up current version…');
+        firstText = 'Backing up current version…';
     } else {
-        status.text('Preparing installation…');
+        firstText = 'Preparing installation…';
     }
-    progress.removeAttr('style').addClass('active');
+    // One place sets the state of the card (AGENT_STORE_CARD_HEADER.md R1): the progress view takes the slot of the chips.
+    av2SetCardState(id, safeQueue ? 'queued' : 'installing', firstText, { progress: safeQueue ? 1 : 5, version: version });
     // Nothing is announced to other tabs from here (EVENT_STREAM_MULTIPLEX.md R5).
     // A forced install writes its install marker on the server before it closes
     // any session; that marker's progress message reaches every device's
@@ -430,8 +785,7 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
             swal('Error', r.message, 'error');
             // Roll back the panel state + restore the click-source. A refused
             // install never wrote an install marker, so no other tab holds anything.
-            progress.removeClass('active');
-            _showButtons(buttons);
+            av2SetCardState(id, 'idle', '');
             $(btn).prop('disabled', false);
             if (!isSelect) $(btn).html(originalContent);
             return;
@@ -450,8 +804,7 @@ function doInstall(id, version, btn, sessionsToClose, backupOpts, forceNow, side
         startInstallPolling(id, progress, bar, status, buttons, btn, originalContent);
     }).fail(function(xhr) {
         swal('Error', 'Install request failed: ' + (xhr.statusText || 'network error'), 'error');
-        progress.removeClass('active');
-        _showButtons(buttons);
+        av2SetCardState(id, 'idle', '');
         $(btn).prop('disabled', false);
         if (!isSelect) $(btn).html(originalContent);
     });
@@ -477,17 +830,18 @@ function installAgent(id, isUpdate, btn) {
 var _aicliInstallControls = {};
 function _showCancelQueued(id) {
     if (document.getElementById('cancel-upg-' + id)) return;
-    var status = document.getElementById('status-text-' + id);
-    if (!status || !status.parentNode) return;
+    // The Cancel button sits in the fixed second line of the progress view, so the card keeps its height.
+    var host = document.getElementById('extra-' + id) || (document.getElementById('status-text-' + id) || {}).parentNode;
+    if (!host) return;
     var b = document.createElement('button');
     b.id = 'cancel-upg-' + id;
     b.type = 'button';
     b.className = 'aicli-btn-slim aicli-cancel-queued';
     b.textContent = 'Cancel';
     b.title = 'Cancel this queued upgrade — it will not start';
-    b.style.cssText = 'margin-left:8px;cursor:pointer;';
+    b.style.cssText = 'cursor:pointer;';
     b.onclick = function() { cancelQueuedUpgrade(id); };
-    status.parentNode.appendChild(b);
+    host.insertBefore(b, host.firstChild);
 }
 function _hideCancelQueued(id) {
     var b = document.getElementById('cancel-upg-' + id);
@@ -500,9 +854,7 @@ function cancelQueuedUpgrade(id) {
         if (r && r.status === 'ok') {
             if (_aicliInstallControls[id]) { try { _aicliInstallControls[id].stop(); } catch (_e) {} delete _aicliInstallControls[id]; }
             _hideCancelQueued(id);
-            $('#progress-' + id).removeClass('active').css('width', '0%');
-            $('#status-text-' + id).text('');
-            _showButtons($('#buttons-' + id));
+            av2SetCardState(id, 'idle', '', { progress: 0 });
             // Reconcile the card with the server now that both the pending
             // upgrade and its waiting activity have been cleared. Without this
             // reload a stale render can leave the primary button disabled as
@@ -529,7 +881,8 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
             delete _aicliInstallControls[id];
             _hideCancelQueued(id);
             swal("Failed", d.message, "error");
-            progress.removeClass('active'); _showButtons(buttons);
+            // The failure stays on the card, in the slot of the chips, with Retry and Dismiss (the dialog may be missed).
+            av2SetCardState(id, 'failed', (d.message || 'The install failed.'), { progress: 0 });
             if (btn) {
                 $(btn).prop('disabled', false);
                 if (!isSelectBtn) $(btn).html(originalContent);
@@ -547,17 +900,27 @@ function startInstallPolling(id, progress, bar, status, buttons, btn, originalCo
         // enumerates the blockers on every poll (pid, command, cwd, tmux, age, and
         // whether each is a plugin workspace). Show them under the status line so
         // the 99% wait is explained and refreshable, never an unexplained stall.
-        var blockersEl = status.next('.av2-install-blockers');
-        if (d.blockers) {
-            if (!blockersEl.length) blockersEl = $('<div class="av2-install-blockers" style="white-space:pre-wrap;font-size:11px;opacity:.8;margin-top:4px;"></div>').insertAfter(status);
-            blockersEl.text(d.blockers);
-        } else if (blockersEl.length) { blockersEl.remove(); }
+        // The list sits behind a Details toggle in the second line of the progress view, so a long list does not stretch the card.
+        var extraEl = document.getElementById('extra-' + id);
+        var blockersEl = extraEl ? extraEl.querySelector('.av2-install-blockers') : null;
+        if (d.blockers && extraEl) {
+            if (!blockersEl) {
+                blockersEl = document.createElement('details');
+                blockersEl.className = 'av2-install-blockers';
+                blockersEl.appendChild(document.createElement('summary')).textContent = 'Details';
+                blockersEl.appendChild(document.createElement('pre')).style.margin = '4px 0 0';
+                extraEl.appendChild(blockersEl);
+            }
+            blockersEl.querySelector('pre').textContent = d.blockers;
+        } else if (blockersEl) { blockersEl.parentNode.removeChild(blockersEl); }
         if (d.progress >= 100 || d.completed) {
             if (nchanSub) { nchanSub.stop(); nchanSub = null; }
             if (poller) clearInterval(poller);
             delete _aicliInstallControls[id];
             _hideCancelQueued(id);
-            status.text("Finalizing...");
+            av2SetCardState(id, 'done', 'Installed', { progress: 100 });
+            // The new layer changes both foot figures; a background measurement started when the install ended.
+            av2WatchFootSizes(id);
             // A side-by-side install finishes with the operator's workspaces
             // still running the OLD version, and nothing on screen would say so.
             // That is the one thing they need to know, and the only moment it is
@@ -691,6 +1054,7 @@ function loadVersionCache() {
         var allHaveData = true;
         $.each(r.dropdowns, function(id, data) {
             syncChannelControl(id, data.channel);
+            _av2Dropdowns[id] = data;
             populateVersionPicker(id, data);
             updateAgentBadge(id, data);
             // Check if this agent's select exists (installed) but has no version data
@@ -720,6 +1084,7 @@ function loadVersionCache() {
                         var nowAllHaveData = !r2.checking;
                         $.each(r2.dropdowns, function(id, data) {
                             syncChannelControl(id, data.channel);
+                            _av2Dropdowns[id] = data;
                             populateVersionPicker(id, data);
                             updateAgentBadge(id, data);
                             if (document.getElementById('version-select-' + id) && (!data.versions || data.versions.length === 0)) {
@@ -1042,6 +1407,11 @@ $(function() {
         });
     });
 
+    // A card whose foot says "(measuring…)" asks again until the background measurement ends (R16).
+    $('.av2-foot[data-agent]').each(function() {
+        if ($(this).find('.av2-frees.av2-muted').length) av2WatchFootSizes(this.getAttribute('data-agent'));
+    });
+
     // Load version cache and populate pickers
     loadVersionCache();
 });
@@ -1049,11 +1419,17 @@ $(function() {
 // --- Existing Functions ---
 
 function uninstallAgent(id, btn) {
-    swal({ title: "Uninstall " + id + "?", text: "This will remove the agent and its storage data.", type: "warning", showCancelButton: true, confirmButtonText: "Uninstall", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
+    // The confirm says what is freed: the same number as the foot link (it is the list that Uninstall deletes).
+    var name = av2AgentName(id);
+    var frees = btn && btn.getAttribute ? btn.getAttribute('data-frees') : '';
+    var text = 'This removes the agent, all its versions and its kept copies'
+        + (frees !== null && frees !== '' ? ', and frees ' + av2FmtBytes(Number(frees)) + ' on the disk' : '')
+        + '. Its workspaces close and leave the list. Your variables and secrets for it stay.';
+    swal({ title: "Uninstall " + name + "?", text: text, type: "warning", showCancelButton: true, confirmButtonText: "Uninstall", cancelButtonText: "Cancel", showLoaderOnConfirm: true, closeOnConfirm: false }, function(confirmed) {
         if (!confirmed) return;
         $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=uninstall_agent&agentId=' + id + '&csrf_token=' + csrf, function(r) {
             if (r && r.status === 'ok') {
-                swal({ title: "Uninstalled", text: id + " has been removed.", type: "success", timer: 1500, showConfirmButton: false });
+                swal({ title: "Uninstalled", text: name + " has been removed.", type: "success", timer: 1500, showConfirmButton: false });
                 setTimeout(function() { safeReload(); }, 1600);
             } else {
                 swal("Uninstall Failed", (r && r.message) || "Unknown error. Check debug.log", "error");
@@ -1063,7 +1439,6 @@ function uninstallAgent(id, btn) {
         });
     });
 }
-
 function setAgentFilter(filter, el) {
     agentFilter = filter;
     localStorage.setItem('aicli_agent_filter', filter);

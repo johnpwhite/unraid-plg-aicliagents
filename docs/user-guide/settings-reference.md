@@ -299,7 +299,7 @@ After a successful move the page reloads. If a move fails, the setting returns t
 
 ## Agent Store tab
 
-The tab shows one card per agent under the heading **AI Agent Marketplace**. Each card has a header row with the icon, the name, one line of status, an (i) button (description, release notes, install method, package name), the buttons **Install**, **Upgrade** and **Uninstall**, and a **...** menu to move or close the card. See [Agent Store](agent-store.md).
+The tab shows one card per agent under the heading **AI Agent Marketplace**. Each card has a header row with the icon, the name, one line of status, the version you run and, when the channel offers another one, the new version as a button that opens the dialog **Update <agent>**, an (i) button (description, release notes, install method, package name), the button **Install** (or **Upgrade**, which shows when you point at the card), and a **...** menu to update, open the release notes, and move or close the card. The foot of an installed card has the links **Remove old versions (frees N)** and **Uninstall (frees N)**. See [Agent Store](agent-store.md).
 
 | Control | What it does | Default | Allowed values | At once |
 | :-- | :-- | :-- | :-- | :-- |
@@ -569,6 +569,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <summary>Change history</summary>
 
 - **2026-10-27** — New card **Sub-agent workspaces**, after **Script runs**. It holds **Let agents start sub-agent workspaces**, **Sub-agents allowed at once** and **Let sub-agents run without asking**, which were in **General**, part **Advanced**. The word "helper" is now "sub-agent" on the page, in the tray and in the notices. The tab has eleven cards. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #792.
+- **2026-10-27** — The Agent Store card header shows the versions in full and opens the dialog **Update <agent>**. **Uninstall** moved to the card foot. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issue #793.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — Each card help text (the (i) button) and the card intro here now say first what you gain from the feature. Issue #789.
 - **2026-10-26** — **Home storage**, **Agent storage** and **Where unsaved changes are kept** show the current state, and the line **Now:** is gone. A change turns the drop-down orange and lights a button **Apply** with a moving light on its edge. Only **Apply** starts the conversion or the move; **Cancel** keeps the choice. A mixed kind shows **Mixed: N plain, M compressed**. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #790.

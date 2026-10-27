@@ -38,9 +38,7 @@ class AgentVersionCleanupService {
 
     /** The persistence folder where agents keep their data. */
     private static function persistPath(): string {
-        $cfg = ConfigService::getConfig();
-        $p = (string)($cfg['agent_storage_path'] ?? '');
-        return $p !== '' ? rtrim($p, '/') : SecretPaths::flashRoot() . '/persistence';
+        return StoragePathResolver::agentPersistPathFromConfig(ConfigService::getConfig());
     }
 
     /** True when $agentId is "all", empty, or a valid agent id. Cheap: it reads nothing. */

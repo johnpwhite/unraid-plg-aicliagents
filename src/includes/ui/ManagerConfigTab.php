@@ -259,7 +259,7 @@ $stSubagents = $cardOnOff($config['spawn_enabled'] ?? null, '0') . ' · up to ' 
                         <dt>Where agents are stored <?=aicli_help_btn('agent-storage-path', 'Where agents are stored')?></dt>
                         <dd>
                             <div class="input-row">
-                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence', ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
+                                <input type="text" name="agent_storage_path" id="agent_storage_path" readonly value="<?=htmlspecialchars(\AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config), ENT_QUOTES, 'UTF-8')?>" style="flex: 1; min-width: 0; opacity: 0.85;" title="Current agent storage location — use Change to move it">
                                 <button type="button" class="aicli-btn-slim" onclick="aicliToggleStoragePicker('agent')" title="Choose a storage target"><i class="fa fa-exchange"></i> Change…</button>
                             </div>
                             <?=aicli_help_panel('agent-storage-path')?>

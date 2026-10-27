@@ -180,7 +180,7 @@ class InstallerService {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
 
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $mnt = AgentRegistry::agentPath($agentId);
         
         $oldSize = 0;
@@ -592,7 +592,7 @@ class InstallerService {
         }
 
         $config = $seams['config'] ?? ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $mnt = $seams['agent_path'] ?? AgentRegistry::agentPath($agentId);
 
         $oldSize = 0;
@@ -737,6 +737,47 @@ class InstallerService {
     }
 
     /**
+     * The list of everything Uninstall deletes for one agent (docs/specs/AGENT_STORE_CARD_HEADER.md,
+     * "Where the two numbers come from"). Pure: it reads folder names and links, never file sizes.
+     * purgeAgentStorage() deletes exactly this list, and BootSpaceService measures exactly this
+     * list, so the "frees N MB" figure and the deletion cannot differ.
+     *
+     * Each entry: path, kind ('file' for a layer file or a link, 'dir' for a folder) and ram
+     * (true for the RAM folder: it frees memory, not disk, so the size figure leaves it out).
+     * Every pattern is anchored on the exact agent id.
+     *
+     * @return list<array{path:string, kind:string, ram:bool}>
+     */
+    public static function uninstallPlan(string $agentId, string $persistPath): array {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return [];
+        $persist = rtrim($persistPath, '/');
+        $q = preg_quote($agentId, '/');
+        $plan = [];
+        // The SquashFS layers (delta and consolidated).
+        foreach (glob("$persist/agent_{$agentId}_*.sqsh") ?: [] as $f) $plan[] = ['path' => $f, 'kind' => 'file', 'ram' => false];
+        // Disk and RAM writable layers and work dirs: <id> and <id>@<generation>.
+        $ramParent = StoragePathResolver::zramBase() . "/agents";
+        foreach (["$persist/_upper/agents", "$persist/_work/agents", $ramParent] as $parent) {
+            foreach (glob("$parent/" . $agentId . "*") ?: [] as $d) {
+                $name = basename($d);
+                if ($name === $agentId || preg_match('/^' . $q . '@/', $name)) {
+                    $plan[] = ['path' => $d, 'kind' => 'dir', 'ram' => $parent === $ramParent];
+                }
+            }
+        }
+        // Passthrough: the stable folder (dir or symlink) and the version folders.
+        $ptStable = "$persist/passthrough/agents/$agentId";
+        if (is_link($ptStable)) $plan[] = ['path' => $ptStable, 'kind' => 'file', 'ram' => false];
+        elseif (is_dir($ptStable)) $plan[] = ['path' => $ptStable, 'kind' => 'dir', 'ram' => false];
+        $versions = "$persist/passthrough/agents/.versions/$agentId";
+        if (is_dir($versions)) $plan[] = ['path' => $versions, 'kind' => 'dir', 'ram' => false];
+        // Rollback copies kept under the storage location.
+        $rollback = "$persist/aicli-rollback/$agentId";
+        if (is_dir($rollback)) $plan[] = ['path' => $rollback, 'kind' => 'dir', 'ram' => false];
+        return $plan;
+    }
+
+    /**
      * Forgejo #441: every item of ONE agent under the storage location and the
      * RAM writable layers, removed. Public so a test can run it against a
      * temporary storage path. Items of other agents are never touched: every
@@ -748,26 +789,12 @@ class InstallerService {
     public static function purgeAgentStorage(string $agentId, string $persistPath): array {
         $bytes = 0; $removed = []; $failed = [];
         if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return ['bytes' => 0, 'removed' => [], 'failed' => ["invalid id"]];
-        $persist = rtrim($persistPath, '/');
-        $q = preg_quote($agentId, '/');
+        // The deletion walks the same list that the Agent Store card measures (uninstallPlan).
         $files = [];
         $dirs = [];
-        // The SquashFS layers (delta and consolidated).
-        foreach (glob("$persist/agent_{$agentId}_*.sqsh") ?: [] as $f) $files[] = $f;
-        // Disk and RAM writable layers and work dirs: <id> and <id>@<generation>.
-        foreach (["$persist/_upper/agents", "$persist/_work/agents", StoragePathResolver::zramBase() . "/agents"] as $parent) {
-            foreach (glob("$parent/" . $agentId . "*") ?: [] as $d) {
-                $name = basename($d);
-                if ($name === $agentId || preg_match('/^' . $q . '@/', $name)) $dirs[] = $d;
-            }
+        foreach (self::uninstallPlan($agentId, $persistPath) as $entry) {
+            if ($entry['kind'] === 'file') $files[] = $entry['path']; else $dirs[] = $entry['path'];
         }
-        // Passthrough: the stable folder (dir or symlink) and the version folders.
-        $ptStable = "$persist/passthrough/agents/$agentId";
-        if (is_link($ptStable)) $files[] = $ptStable; elseif (is_dir($ptStable)) $dirs[] = $ptStable;
-        if (is_dir("$persist/passthrough/agents/.versions/$agentId")) $dirs[] = "$persist/passthrough/agents/.versions/$agentId";
-        // Rollback copies kept under the storage location.
-        if (is_dir("$persist/aicli-rollback/$agentId")) $dirs[] = "$persist/aicli-rollback/$agentId";
-
         foreach ($files as $f) {
             $b = is_link($f) ? 0 : (int)@filesize($f);
             if (@unlink($f)) { $bytes += $b; $removed[] = $f; } else { $failed[] = $f; }
@@ -871,7 +898,7 @@ class InstallerService {
     public static function estimateUpgradeBackup(string $agentId, string $destPath = ''): array {
         if (empty($agentId)) return ['status' => 'error', 'message' => 'No Agent ID'];
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $destPath = trim($destPath) !== '' ? trim($destPath) : $persistPath;
 
         $source = self::inspectUpgradeBackupSource($agentId, $persistPath);
@@ -914,7 +941,7 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Backup destination must be an absolute path'];
         }
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
 
         $source = self::inspectUpgradeBackupSource($agentId, $persistPath);
         $layers = $source['layers'];
@@ -1001,7 +1028,7 @@ class InstallerService {
     public static function listRetainedBackups(string $agentId): array {
         if (empty($agentId)) return [];
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $base = rtrim($persistPath, '/') . "/aicli-rollback/$agentId";
         if (!is_dir($base)) return [];
 
@@ -1153,7 +1180,7 @@ class InstallerService {
             return ['status' => 'error', 'message' => 'Not a retained backup for this agent'];
         }
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
 
         // Validate $backupDir is genuinely one of THIS agent's retained
         // backups — never restore from an arbitrary caller-supplied path.

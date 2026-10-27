@@ -573,7 +573,7 @@ class ConfigService {
         }
 
         $config = self::getConfig();
-        $oldAgentPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $oldAgentPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $newAgentPath = $newConfig['agent_storage_path'] ?? $oldAgentPath;
         
         // #753: the same rule as the shell (home path, then agent path, then the flash default).

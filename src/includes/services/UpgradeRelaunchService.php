@@ -520,7 +520,7 @@ class UpgradeRelaunchService
         if ($layerLive === null) {
             $layerLive = static function (string $agentId): bool {
                 require_once __DIR__ . '/InstallerService.php';
-                $persistDir = SecretPaths::flashRoot() . '/persistence';
+                $persistDir = StoragePathResolver::agentPersistPathFromConfig(ConfigService::getConfig());
                 $newest = InstallerService::newestAgentLayer($agentId, $persistDir);
                 // No layer file: a plain-directory agent is live once its bind
                 // shows the promoted generation (2026-09-24); any other agent

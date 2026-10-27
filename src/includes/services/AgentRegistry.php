@@ -352,7 +352,7 @@ class AgentRegistry {
         }
 
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
 
         // D-329: Pre-fetch all SquashFS files to avoid repeated expensive glob calls on Flash/Network storage
         $allSqsh = glob("$persistPath/*.sqsh");
@@ -1566,7 +1566,7 @@ class AgentRegistry {
         // Build the same sqsh-existence map getRegistry uses so we recognise
         // installed-but-unmounted agents (the whole point of this method).
         $config = ConfigService::getConfig();
-        $persistPath = $config['agent_storage_path'] ?? SecretPaths::flashRoot();
+        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $allSqsh = glob("$persistPath/*.sqsh") ?: [];
         $allSqshBasenames = array_map('basename', $allSqsh);
         $kindAlt = '(?:v\d+_vol\d+|vol\d+|delta_\d+|delta_\d{8}T\d{6}Z|delta_\d+_\d{8}T\d{6}Z|consolidated_\d{8}T\d{6}Z|consolidated_\d+_\d{8}T\d{6}Z)';

@@ -763,7 +763,7 @@ class BootSpaceService
         $insideTotal = 0;   // bytes of the parts that lie inside the plugin folder
         $history = [];      // user => agentId => figures (the Move old sessions dialog)
         $caches = [];       // user => cache status (the Clear caches dialog)
-        $agentRows = []; $oldVersions = null; $convert = null;
+        $agentRows = []; $oldVersions = null; $convert = null; $footprint = null;
         $complete = true;   // false as soon as a part is skipped because the time is gone
 
         // ---- homes ----
@@ -857,6 +857,9 @@ class BootSpaceService
             $convAction = !empty($est['offered'])
                 ? self::action('convert_agents', 'Convert to plain folders')
                 : self::action('convert_agents', 'Convert to plain folders', false, self::convertReason((string)($est['reason'] ?? '')));
+            // AGENT_STORE_CARD_HEADER.md R14: what Uninstall frees, per agent. The list is the one
+            // that Uninstall deletes (InstallerService::uninstallPlan); the RAM folder is left out.
+            $footprint = $seams['agent_footprint'] ?? self::measureFootprint($sizes, $persist, $du);
             if (self::isInside($persist, $pluginDir)) $insideTotal += $cur + $oldBytes;
             $names = [];
             foreach ($sizes as $s) $names[] = ($s['name'] ?? $s['id']) . ' (' . (($s['storage'] ?? '') === 'layers' ? 'layers' : 'plain folders') . ')';
@@ -931,7 +934,64 @@ class BootSpaceService
         }
         if ($oldVersions !== null) $out['old_versions'] = $oldVersions;
         if ($convert !== null) $out['convert'] = $convert;
+        if ($footprint !== null) $out['agent_footprint'] = $footprint;
         return $out;
+    }
+
+    /**
+     * The bytes that Uninstall frees, per agent: the `du` sum of the entries of
+     * InstallerService::uninstallPlan() that are on disk (the RAM folder is not counted).
+     * Background measurement only (#552). Stops at the shared deadline; an agent it did not
+     * reach has no entry, and the card then shows no bracket for it.
+     *
+     * @param array<int|string,array<string,mixed>> $sizes rows of AgentStorageService::agentSizes()
+     * @return array<string,array{uninstall_bytes:int}>
+     */
+    public static function measureFootprint(array $sizes, string $persist, callable $du): array
+    {
+        $out = [];
+        foreach ($sizes as $row) {
+            $id = (string)($row['id'] ?? '');
+            if ($id === '' || self::outOfTime()) continue;
+            $bytes = 0;
+            foreach (InstallerService::uninstallPlan($id, $persist) as $entry) {
+                if (!empty($entry['ram'])) continue;
+                $bytes += (int)$du($entry['path']);
+            }
+            $out[$id] = ['uninstall_bytes' => $bytes];
+        }
+        return $out;
+    }
+
+    /**
+     * What the Agent Store card foot shows for one agent, from the last measurement (a file read;
+     * never a measure, #552). `measured` is false when there is no measurement or the last one did
+     * not reach this agent: the card then shows both links with no bracket.
+     * `old_bytes` is what Remove old versions frees; `old_in_use` is true when old versions exist
+     * but every one is in use by a workspace; `uninstall_bytes` is what Uninstall frees (null when
+     * it is not measured).
+     *
+     * @return array{measured:bool,old_bytes:int,old_in_use:bool,uninstall_bytes:?int}
+     */
+    public static function footSizes(string $agent, ?array $data = null): array
+    {
+        $data = $data ?? self::read();
+        $none = ['measured' => false, 'old_bytes' => 0, 'old_in_use' => false, 'uninstall_bytes' => null];
+        if ($data === null || !AgentVersionCleanupService::isValidTarget($agent) || $agent === '' || $agent === 'all') return $none;
+        $fp = $data['agent_footprint'][$agent]['uninstall_bytes'] ?? null;
+        if (!is_array($data['old_versions'] ?? null) && $fp === null) return $none;
+        $hasOld = is_array($data['old_versions'] ?? null);
+        $bytes = 0; $skipped = 0;
+        if ($hasOld) {
+            foreach ((array)($data['old_versions']['items'] ?? []) as $it) {
+                if (($it['agent'] ?? '') === $agent) $bytes += (int)($it['bytes'] ?? 0);
+            }
+            foreach ((array)($data['old_versions']['skipped'] ?? []) as $sk) {
+                if (($sk['agent'] ?? '') === $agent) $skipped++;
+            }
+        }
+        return ['measured' => $hasOld, 'old_bytes' => $bytes, 'old_in_use' => $hasOld && $bytes === 0 && $skipped > 0,
+                'uninstall_bytes' => $fp === null ? null : (int)$fp];
     }
 
     /**
@@ -953,6 +1013,21 @@ class BootSpaceService
         }
         $est['agents'] = $agents;
         return $est;
+    }
+
+    /**
+     * The size text of the Agent Store card foot and of the Remove old versions dialog. The same rule
+     * is in the page scripts (fmtBytes), so the card and the dialog print the same text: bytes below
+     * 1 KB, whole KB below 1 MB, one decimal below 10 MB, whole MB below 1 GB, then GB with two decimals.
+     */
+    public static function sizeText(int $b): string
+    {
+        $b = max(0, $b);
+        if ($b < 1024) return $b . ' B';
+        if ($b < 1048576) return (string)(int)round($b / 1024) . ' KB';
+        if ($b < 10485760) return number_format($b / 1048576, 1, '.', '') . ' MB';
+        if ($b < 1073741824) return (string)(int)round($b / 1048576) . ' MB';
+        return number_format($b / 1073741824, 2, '.', '') . ' GB';
     }
 
     public static function human(int $b): string

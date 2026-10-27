@@ -1015,11 +1015,28 @@
         font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
         font-size: 10.5px; color: var(--text-color, #646978); opacity: 0.6;
     }
-    /* The "Remove old versions" link is a real action. Its tap area is 44 px tall like a button:
-       the box is 44 px and the negative margin keeps the layout at the text height. */
-    .av2-foot .av2-meta .av2-remove-old {
-        display: inline-flex; align-items: center; box-sizing: border-box;
-        min-height: 44px; min-width: 44px; padding: 0 4px; margin: -15px 0; vertical-align: middle;
+    /* AGENT_STORE_CARD_HEADER.md, "Foot": two text links, "Remove old versions (frees N)" and "Uninstall (frees N)".
+       They are real buttons styled as links. A touch screen gets a 44 px tall hit area and 8 px between them. */
+    .av2-foot .av2-foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
+    .av2-foot .av2-foot-link {
+        appearance: none; -webkit-appearance: none; display: inline-flex; align-items: center; box-sizing: border-box;
+        min-height: 44px; min-width: 0 !important; margin: -6px 0 !important; padding: 0 4px !important;
+        border: 0 !important; border-radius: 3px !important; background: transparent !important; box-shadow: none !important;
+        color: var(--text-color, #646978) !important; font: inherit; font-size: 11.5px !important; font-weight: normal !important;
+        letter-spacing: 0 !important; text-transform: none !important; text-decoration: none; cursor: pointer; opacity: .85;
+    }
+    .av2-foot .av2-foot-link:hover:not([disabled]), .av2-foot .av2-foot-link:focus-visible { text-decoration: underline; opacity: 1; }
+    .av2-foot .av2-foot-link:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: 1px; }
+    .av2-foot .av2-uninstall-link:hover:not([disabled]), .av2-foot .av2-uninstall-link:focus-visible {
+        color: var(--aicli-danger-text, color-mix(in srgb, #dc2626 70%, var(--text-color, #1c1b1b))) !important;
+    }
+    .av2-foot .av2-foot-link[disabled] { opacity: .45; cursor: not-allowed; }
+    .av2-foot .av2-muted { opacity: .7; }
+    .av2-foot .av2-foot-sep, .av2-foot .av2-foot-note { font-size: 11.5px; opacity: .7; }
+    /* A touch screen: no negative margin, 8 px between the links. */
+    @media (pointer: coarse) {
+        .av2-foot .av2-foot-link { margin: 0 !important; padding: 0 8px !important; }
+        .av2-foot .av2-foot-links { gap: 0 8px; }
     }
     .av2-foot .av2-actions { display: flex; gap: 8px; }
 
@@ -1087,12 +1104,12 @@
        into the footer actions row). When active, the chip strip and panels
        are hidden and this takes over the space between head and foot. */
     .av2-install-panel {
-        display: none; padding: 18px 20px;
+        display: flex; visibility: hidden; padding: 18px 20px;
         border-top: 1px solid var(--border-color, #262a33);
         background: rgba(255,140,0,0.04);
         flex-direction: column; gap: 10px;
     }
-    .av2-install-panel.active { display: flex; }
+    .av2-install-panel.active { visibility: visible; }
     .av2-install-panel .av2-install-status {
         font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
         font-size: 11.5px; color: var(--text-color, #e7e9ef);
@@ -1109,8 +1126,9 @@
     }
     /* When the install panel is active, collapse the chip strip and panels so
        the progress has the full body region. */
-    .av2-card:has(.av2-install-panel.active) .av2-strip,
-    .av2-card:has(.av2-install-panel.active) .av2-panels { display: none; }
+    /* AGENT_STORE_CARD_HEADER.md R1: the strip and the progress view share one grid cell (.av2-slot), so the
+       card keeps its height in every state. The one that is not shown is hidden with visibility, never display. */
+    .av2-card:has(.av2-install-panel.active) .av2-strip { visibility: hidden; }
     /* ------------------------------------------------------------------------
        Mobile responsive overrides (≤ 600 px viewport — phone portrait + most
        phone landscape). Targets the three surfaces that overflowed in the
@@ -1254,6 +1272,9 @@
             white-space: normal;
         }
         .av2-foot .av2-actions { width: 100%; }
+        .av2-foot .av2-foot-links { flex-direction: column; align-items: stretch; gap: 8px; }
+        .av2-foot .av2-foot-link { margin: 0 !important; }
+        .av2-foot .av2-foot-sep { display: none; }
         .av2-foot .av2-buttons {
             width: 100%; flex-wrap: wrap !important;
         }
@@ -2472,19 +2493,116 @@
     .av2-card .aicli-card-head .av2-buttons { align-items: center; }
     .av2-card .aicli-card-head .av2-btn { margin-top: 0 !important; margin-bottom: 0 !important; }
     .av2-card .aicli-card-head .av2-health-pill { flex: 0 0 auto; }
-    .av2-card > .aicli-card-body > .av2-strip { padding-top: 10px; }
+    .av2-slot > .av2-strip { padding-top: 10px; }
     .av2-strip > .aicli-help-btn { flex: 0 0 auto; align-self: center; }
-    .av2-card .av2-strip + .aicli-help-panel { margin: 0 18px 10px; width: auto; }
+    .av2-card .av2-slot + .aicli-help-panel { margin: 10px 18px 10px; width: auto; }
     .aicli-card-body.relay-card-body { padding: 0; }
     .av2-help-source { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     /* A phone: five chips share one row, so a long label ("Start options") wraps to a second line. */
     @media (max-width: 600px) {
         #tab-store .av2-strip .av2-chip .av2-label { white-space: normal; line-height: 1.15; font-size: 10px; }
-        .av2-card .av2-strip + .aicli-help-panel { margin: 0 10px 10px; }
+        .av2-card .av2-slot + .aicli-help-panel { margin: 10px 10px 10px; }
         /* The header keeps one 44 px row: the action buttons are icon-only squares (aria-label names them). */
         .av2-card .aicli-card-head .av2-btn { font-size: 0 !important; min-width: 44px; padding-left: 0 !important; padding-right: 0 !important; }
         .av2-card .aicli-card-head .av2-btn > i { font-size: 16px; margin: 0; }
         .av2-card .aicli-card-head .av2-actions { order: 0; }
+    }
+
+    /* =========================================================================
+       AGENT_STORE_CARD_HEADER.md (#793): the versions stay in view, the buttons show on hover, and the
+       card keeps its height. The card is a size container, so the header reacts to the width of the
+       card (a narrow main column in the sidebar layout), not to the window.
+       ========================================================================= */
+    .av2-card { container-type: inline-size; container-name: av2card; --av2-info: color-mix(in srgb, #2563eb 70%, var(--text-color, #1c1b1b)); }
+    /* The name is the only part that shrinks. A version is never cut. */
+    .av2-card > .aicli-card-head > .aicli-card-toggle { flex: 0 1 auto; min-width: 0; }
+    .av2-card .aicli-card-title { flex: 0 1 auto; min-width: 4ch; }
+    .av2-card > .aicli-card-head > .aicli-card-status { flex: 1 0 auto; overflow: visible; text-overflow: clip; text-align: left; padding-left: 4px; }
+    .av2-versions { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    /* Same height as the new-version button, so the header line does not shrink while the card installs. */
+    .av2-installing { font-style: italic; display: inline-flex; align-items: center; min-height: 44px; }
+    .av2-newver {
+        appearance: none; -webkit-appearance: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+        min-width: 44px !important; min-height: 44px !important; margin: 0 !important; padding: 0 2px !important;
+        border: 0 !important; background: transparent !important; box-shadow: none !important; border-radius: 4px !important;
+        color: var(--text-color, #1c1b1b) !important; font-size: 12px !important; font-weight: 600 !important;
+        letter-spacing: 0 !important; text-transform: none !important; line-height: 1.4; cursor: pointer;
+    }
+    .av2-newver-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--av2-info); border-radius: 4px; }
+    .av2-newver-pill .fa { color: var(--av2-info); }
+    .av2-newver:hover .av2-newver-pill { background: var(--mild-background-color, rgba(128,128,128,0.18)); }
+    .av2-newver:focus-visible { outline: 2px solid var(--orange, #ff8c00); outline-offset: -2px; }
+    /* A mouse: the Upgrade button keeps its space and fades in on the card or on keyboard focus in the header. */
+    @media (hover: hover) and (pointer: fine) {
+        .av2-card .av2-upgrade-btn { opacity: 0; transition: opacity 150ms ease-out; }
+        .av2-card:hover .av2-upgrade-btn, .av2-card > .aicli-card-head:focus-within .av2-upgrade-btn { opacity: 1; }
+    }
+    /* A touch screen has no hover: the new-version button does the same thing and is always shown. */
+    @media (hover: none) { .av2-card .av2-upgrade-btn { display: none; } }
+    @media (prefers-reduced-motion: reduce) {
+        .av2-card .av2-upgrade-btn { transition: none; }
+        .av2-install-bar span { transition: none; }
+    }
+    /* A narrow card: the Upgrade button is an icon (the label is in aria-label and title). */
+    @container av2card (max-width: 560px) {
+        .av2-card .av2-upgrade-btn { font-size: 0 !important; min-width: 44px; padding-left: 0 !important; padding-right: 0 !important; }
+        .av2-card .av2-upgrade-btn > i { font-size: 16px; margin: 0; }
+    }
+    /* A very narrow card, or a very long version: the versions move to a second line under the name. */
+    @container av2card (max-width: 380px) {
+        .av2-card > .aicli-card-head { flex-wrap: wrap; row-gap: 0; }
+        .av2-card > .aicli-card-head > .aicli-card-toggle { flex: 1 1 0; }
+        .av2-card > .aicli-card-head > .aicli-card-status { order: 10; flex: 1 1 100%; padding: 0 12px 8px 12px; }
+    }
+    .av2-card.av2-ver-long > .aicli-card-head { flex-wrap: wrap; row-gap: 0; }
+    .av2-card.av2-ver-long > .aicli-card-head > .aicli-card-toggle { flex: 1 1 0; }
+    .av2-card.av2-ver-long > .aicli-card-head > .aicli-card-status { order: 10; flex: 1 1 100%; padding: 0 12px 8px 12px; }
+    @media (max-width: 600px) {
+        .av2-card > .aicli-card-head > .aicli-card-status { order: 10; flex: 1 1 100%; padding: 0 12px 8px 12px; white-space: nowrap; }
+        .av2-card > .aicli-card-head { flex-wrap: wrap; row-gap: 0; }
+        .av2-card > .aicli-card-head > .aicli-card-toggle { flex: 1 1 0; }
+    }
+    /* The slot: the chip strip and the progress view share one grid cell. */
+    .av2-slot { display: grid; grid-template-areas: "slot"; }
+    .av2-slot > * { grid-area: slot; min-width: 0; }
+    .av2-slot > .av2-install-panel { align-content: center; }
+    /* The panel is compact on purpose: it must not be taller than the chip strip, or an idle card would grow. */
+    .av2-slot > .av2-install-panel { padding: 8px 20px; gap: 6px; }
+    .av2-install-row { display: flex; align-items: center; gap: 8px; min-height: 22px; min-width: 0; }
+    .av2-install-row .av2-install-status { flex: 1 1 auto; min-width: 0; min-height: 1.3em; }
+    .av2-install-extra { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; font-size: 11px; }
+    .av2-install-extra .av2-install-blockers { white-space: pre-wrap; opacity: .85; }
+    /* R1: the buttons of this line (Cancel, Retry, Dismiss) are 44 px hit boxes. The negative margins let them
+       overlap the padding of the panel, so the line stays 22 px and the card does not change height. */
+    .av2-install-extra .aicli-btn-slim { margin-top: -11px !important; margin-bottom: -11px !important; }
+    /* One status line: a long text is cut with an ellipsis and the full text is in the title. */
+    .av2-install-panel .av2-install-status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .av2-install-extra summary { cursor: pointer; }
+    .av2-install-panel.failed .av2-install-status { color: var(--aicli-danger-text, color-mix(in srgb, #dc2626 70%, var(--text-color, #1c1b1b))); font-weight: 600; }
+    /* An open settings panel stays in place during an install, dimmed and locked. */
+    .av2-panels.av2-locked { opacity: .5; pointer-events: none; }
+    /* The update overlay (it reuses the .hb-dialog shell). */
+    .av2-update-dialog .hb-body { gap: 12px; }
+    .av2-update-dialog .av2-update-versions { font-size: 13px; }
+    .av2-update-dialog .av2-update-section { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .av2-update-dialog .av2-notes { display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+    .av2-update-dialog .av2-notes-p { margin: 0; line-height: 1.5; }
+    .av2-update-dialog .av2-notes-list { margin: 2px 0 2px 18px; padding: 0; }
+    .av2-update-dialog .av2-notes-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; }
+    .av2-update-dialog .av2-notes-code { margin: 4px 0; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; background: var(--mild-background-color, rgba(128,128,128,0.12)); border-radius: 4px; }
+    .av2-update-dialog .av2-notes-ver > summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+    .av2-update-dialog .av2-notes-body { padding: 0 0 4px 14px; }
+    .av2-update-dialog .av2-notes-link, .av2-update-dialog .av2-notes-none { margin: 0; }
+    /* Links use the text colour with an underline: the theme link colour is 4.49:1 on the gray theme. */
+    .av2-update-dialog a { color: var(--text-color, inherit); text-decoration: underline; }
+    /* A touch screen or a phone: the links and summaries of the dialog are 44 px high. */
+    @media (pointer: coarse), (max-width: 600px) {
+        .av2-update-dialog .av2-notes-link a, .av2-update-dialog [data-testid="update-pick-other"],
+        .av2-update-dialog .av2-notes-ver > summary, .av2-update-dialog .acp-details > summary {
+            display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; box-sizing: border-box;
+        }
+        .av2-update-dialog .av2-notes-ver > summary, .av2-update-dialog .acp-details > summary { display: flex; }
+        .av2-update-dialog #aicli-bk-dest { min-height: 44px; }
     }
     /* Config Hub and Agent Relay: on a phone the buttons of a card share the line under the title, and a
        collapsed card is the title row only. */

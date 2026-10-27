@@ -236,6 +236,8 @@
             draw(r);
             stopPoll();
             if (r.measuring || (r.storage_migration && ['queued', 'running'].indexOf(r.storage_migration.status) !== -1)) state.pollTimer = setTimeout(load, 3000);
+            // AGENT_STORE_CARD_HEADER.md R16: tell the Agent Store cards that the figures are fresh ("Measure now" ended).
+            if (!r.measuring) { try { document.dispatchEvent(new CustomEvent('aicli:boot-space-measured', { detail: { measured_at: r.measured_at } })); } catch (e) { /* no event support */ } }
         }).fail(function (x, s, e) {
             // R-175: a failed read ends the "measuring" wait, so Measure now works again.
             state.loading = false;

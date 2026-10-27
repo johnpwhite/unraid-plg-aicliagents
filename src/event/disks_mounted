@@ -133,7 +133,7 @@ if [ -f "$EMHTTP_DEST/src/includes/AICliAgentsManager.php" ]; then
     timeout 60 /usr/bin/php -r "
         require_once '$EMHTTP_DEST/src/includes/AICliAgentsManager.php';
         \$config = getAICliConfig();
-        \$persistPath = \$config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot();
+        \$persistPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig(\$config);
         if (\AICliAgents\Services\StorageMountService::isPathAvailable(\$persistPath)) {
             aicli_log('disks_mounted: Storage path available. Notifying UI.', AICLI_LOG_INFO, 'EventDisks');
             // EVENT_STREAM_MULTIPLEX.md R4: every publisher goes through EventBus.

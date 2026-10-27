@@ -56,7 +56,7 @@ Notes on this table:
 
 ### Close, open and move the cards
 
-Each card has a header row. Press the name of the agent (or the arrow before it) to close the card to its header row. Press it again to open the card. A closed card still shows its status line and its buttons (**Install**, **Upgrade**, **Uninstall**).
+Each card has a header row. Press the name of the agent (or the arrow before it) to close the card to its header row. Press it again to open the card. A closed card still shows the versions in its header and its buttons.
 
 1. Press the **...** (more) button of a card.
 2. Choose **Move up**, **Move down**, **Move to top**, **Collapse all** or **Expand all**.
@@ -95,14 +95,23 @@ The plugin also checks on a schedule. When the check finds a newer version of an
 
 ### Upgrade an agent
 
-An agent with a newer version on its channel shows "update 2.1.307 available" in the status line of its card header. The header also shows an **Upgrade** button.
+The header of a card always shows the version you run in full, for example **v1.4.4**. An agent with a newer version on its channel also shows the new version next to it, with an up arrow, for example **v1.5.0**. A version number is never cut: the name of the agent is cut first.
 
-1. Press **Upgrade** (or pick a newer version in the version picker).
-2. Read the box called **Upgrade to vX?**.
-3. Decide on the choices in the box. They are described in the next two sections.
-4. Press the confirm button.
+On a computer with a mouse, the **Upgrade** button shows when you point at the card or move the keyboard focus into its header. On a phone or a tablet there is no pointing. There, the new version is the button, and it is at least 44 pixels high. The **...** menu of the card also has **Update to v1.5.0…** and **Release notes**.
 
-Expect: the card shows a progress bar and a status line. When the upgrade ends, the page reloads.
+1. Press the new version (or **Upgrade**, or **Update to v1.5.0…** in the **...** menu, or pick a newer version in the version picker). Expect: a dialog called **Update <agent>** opens.
+2. Read the two versions and the channel at the top. Under **What is new**, read the release notes. Each version has its own part; the newest one is open. When the plugin has no notes for the agent, the dialog says so and shows a link to the notes on the vendor's site.
+3. Read **Your open workspaces**. It says what happens to them. The next sections describe it.
+4. Decide on **Keep a copy**. The section "Keep a copy before an upgrade" describes it.
+5. Press **Update now**. Press **Close** (or Escape) to leave without a change.
+
+If another browser tab already started the update, the dialog says "An update of this agent is already running" and **Update now** is grey.
+
+The line **Channel** names the channel. **Pick another version or channel** closes the dialog and opens the **Version** panel of the card.
+
+Expect: the dialog closes. The card shows a progress bar and a status line in the place of the chips, and its height does not change. The header reads **Installing v1.5.0…**. When the upgrade ends, the page reloads.
+
+When the channel offers an older version than the one you run (for example after you move from Beta to Stable), the header shows the older version with a down arrow. The dialog is then called **Change <agent> to vX** and its button is **Change version**.
 
 The status line says what the plugin does now. When it closes workspaces, it reads "Closing workspace 2 of 3...". Then it saves your workspace data and reads, for example, "Saving workspace data (home root), 42 % done, 3 min so far...". The bar moves with the percentage. A save can take several minutes. If the percentage does not move for two minutes, the line adds "The save is slow. It is still working." The Activity tray shows the same line.
 
@@ -188,10 +197,10 @@ If the upgrade has already started, the plugin shows "Could not cancel". An upgr
 
 ### Keep a copy before an upgrade
 
-The upgrade box for an **Upgrade** has a check box: "Keep a copy of the current version so you can roll back if the upgrade goes wrong." The box is not ticked by default.
+The dialog for an update has a check box: "Keep a copy of the current version so you can roll back if the upgrade goes wrong." The box is not ticked by default.
 
 1. Tick the check box.
-2. Read the line under **Backup destination**. It shows a folder. You can change it. The path must start with `/`.
+2. Open **Where the copy goes**. Read the line under it. It shows a folder. You can change it. The path must start with `/`.
 3. Read the sizes: the current version, the space the upgrade needs, and the free space at the folder. The estimate includes 10 percent extra space.
 
 If there is not enough space, if the path is not valid, or if the agent has no saved installation to copy, the box tells you and turns the check box off. You can still upgrade without a copy.
@@ -200,7 +209,7 @@ If the copy fails while the upgrade runs, the plugin stops the upgrade. The inst
 
 ### The progress card
 
-While an agent installs or upgrades, its card shows a progress bar and a status line in place of the chips and the buttons. If you reload the page, the card shows the install again.
+While an agent installs or upgrades, its card shows a progress bar and a status line in the place of the chips. The card keeps the same height. An open settings panel stays where it is, dimmed, until the install ends. **Remove old versions** and **Uninstall** are grey until then. If you reload the page, the card shows the install again.
 
 | Status line | What it means |
 | :-- | :-- |
@@ -216,7 +225,7 @@ While an agent installs or upgrades, its card shows a progress bar and a status 
 
 Only the agent that waits shows a waiting line. Cards of other agents show nothing. The Activity tray also lists the install (see [Health, Activity and troubleshooting](health-and-troubleshooting.md)).
 
-If an install fails, a box called **Failed** shows the reason and the card returns to its normal state.
+If an install fails, a box called **Failed** shows the reason. The card also keeps the reason in the place of the chips, with the buttons **Retry** and **Dismiss**. **Retry** starts the install again. **Dismiss** puts the chips back.
 
 ## Roll back
 
@@ -232,7 +241,9 @@ The plugin does not delete kept copies by itself. They use space in your storage
 
 ## Remove old versions
 
-The storage line of an installed agent card has a link, **Remove old versions**. It frees space on the boot disk.
+The foot of an installed agent card has a link, **Remove old versions**. It frees space on the boot disk. The link says how much: **Remove old versions (frees 12 MB)**. The number counts only the older versions. The version you use stays and is not counted.
+
+The link shows only when there is something to remove. When every old version is still in use by a workspace, the foot reads **Old versions in use** instead. When the plugin has not measured the sizes yet, the link shows with no number. While a measurement runs, it reads **(measuring…)**. The numbers change by themselves after a removal, after an install and after **Measure now** on the **Storage** tab.
 
 1. Press **Remove old versions** on the card. Expect: a dialog lists the old versions, the space the removal frees, and the versions that stay because a workspace uses them.
 2. Press **Remove**. Expect: a second dialog says how much space you got back.
@@ -241,8 +252,10 @@ The action removes old version folders, old storage layers and kept rollback cop
 
 ## Uninstall
 
+**Uninstall** is a link in the foot of the card, next to **Remove old versions**. It says how much it frees: **Uninstall (frees 92 MB)**. That number counts the version you use, the old versions and the kept copies, because they all go. The link turns red when you point at it.
+
 1. Press **Uninstall** on the card.
-2. Read "This will remove the agent and its storage data."
+2. Read "This removes the agent, all its versions and its kept copies, and frees 92 MB on the disk. Its workspaces close and leave the list. Your variables and secrets for it stay."
 3. Press **Uninstall**.
 
 Expect: the card shows **Uninstalled**, the page reloads, and the agent shows as available again.
@@ -434,6 +447,7 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — The card header shows the version you run and the new version in full, with the new version as a button that opens the dialog **Update <agent>** (release notes, open workspaces, **Keep a copy**, **Update now**). **Upgrade** shows when you point at the card. **Uninstall** moved to the foot as a link, and the foot says what **Remove old versions** and **Uninstall** free. The card keeps its height during an install. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issues #793 and #795.
 - **2026-10-24** — An upgrade shows the real step: "Closing workspace 2 of 3...", then "Saving workspace data" with a percentage and the time, and it says when the save is slow. The old line "Upgrade queued — saving workspace data first" at 5 % is gone. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-22** — Each agent card has the same header as the cards of the Configuration tab, with a status line, an (i) button and the buttons **Install**, **Upgrade** and **Uninstall**. The chips are called **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The card foot shows the size and **Remove old versions**; the install method and the package name are behind the (i). The cards can be closed and moved. The button is called **Check for updates** and the status line reads "Checked 7 min ago". Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.
 

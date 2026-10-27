@@ -17,7 +17,7 @@ let statsInterval = 5000;
 let statsTimer = null;
 let agentFilter = localStorage.getItem('aicli_agent_filter') || 'all';
 <?php
-    $agentPath = $config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence';
+    $agentPath = \AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config);
     $homePath = \AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config);
     $storageAvailable = \AICliAgents\Services\StorageMountService::isPathAvailable($agentPath)
                      && \AICliAgents\Services\StorageMountService::isPathAvailable($homePath);

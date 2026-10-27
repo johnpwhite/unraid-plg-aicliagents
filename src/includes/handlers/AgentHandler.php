@@ -58,6 +58,7 @@ class AgentHandler {
                 case 'get_upgrade_backup_estimate': return self::getUpgradeBackupEstimate();
                 case 'restore_agent_backup': return self::restoreAgentBackup();
                 case 'cancel_agent_upgrade': return self::cancelAgentUpgrade();
+                case 'get_release_notes':   return self::getReleaseNotes();
                 default:                    return null;
                 // Note: get_install_status outputs raw JSON and is dispatched directly
             }
@@ -71,7 +72,19 @@ class AgentHandler {
         return ['install_agent', 'emergency_install', 'get_install_status', 'uninstall_agent',
                 'check_updates', 'check_versions', 'get_version_cache', 'set_agent_channel',
                 'list_active_installs', 'get_upgrade_backup_estimate', 'restore_agent_backup',
-                'cancel_agent_upgrade'];
+                'cancel_agent_upgrade', 'get_release_notes'];
+    }
+
+    /**
+     * AJAX `get_release_notes` (AGENT_STORE_CARD_HEADER.md R8): GET agentId, from (optional), to.
+     * Read-only. The notes of the versions after `from` up to `to`, cut to 8 KB each, cached for
+     * 24 hours. The Store page never waits on it: only the update overlay asks. A failed fetch
+     * returns an empty list and `fetch_failed`, and the overlay then shows the vendor's link.
+     */
+    private static function getReleaseNotes() {
+        $agentId = self::requireAgentId($_GET['agentId'] ?? '');
+        if ($agentId === null) return ['status' => 'error', 'message' => 'invalid_agent'];
+        return \AICliAgents\Services\ReleaseNotesService::forAgent($agentId, (string)($_GET['from'] ?? ''), (string)($_GET['to'] ?? ''));
     }
 
     /**

@@ -146,7 +146,7 @@ function saveAICliAgentsManager(form, silent = false) {
     // D-405: Check if storage paths changed — if so, run preflight migration instead of normal save
     var newAgentPath = $(form).find('[name="agent_storage_path"]').val() || '';
     var newHomePath = $(form).find('[name="home_storage_path"]').val() || '';
-    var curAgentPath = '<?= addslashes($config['agent_storage_path'] ?? \AICliAgents\Services\SecretPaths::flashRoot() . '/persistence') ?>';
+    var curAgentPath = '<?= addslashes(\AICliAgents\Services\StoragePathResolver::agentPersistPathFromConfig($config)) ?>';
     var curHomePath = '<?= addslashes(\AICliAgents\Services\StoragePathResolver::homePersistPathFromConfig($config)) ?>';
     // #790: the three storage drop-downs (Home storage, Agent storage, Where unsaved changes are kept) never start
     // a move here and are never sent by a save. A change waits for the Apply button (aicliApplyStorage), so every

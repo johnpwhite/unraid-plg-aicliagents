@@ -83,6 +83,9 @@ if (!function_exists('aicli_card_open')) {
      * (article for a list item), class (more classes), attrs (more attributes, trusted markup),
      * iconHtml (an image in place of the Font Awesome icon), helpHtml (a help text that the server
      * builds, for a card whose text is data), style (an inline style on the card).
+     * The Agent Store card (#793) adds: statusHtml (markup that the caller has escaped, printed inside the status
+     * element in place of the text; $status stays the plain text form) and menuItems (a list of
+     * [act, label, ?attrs] shown before the layout items; the page script handles data-aicli-card-extra).
      * A status that starts with "Off" makes the card start collapsed.
      */
     function aicli_card_open(string $id, string $icon, string $title, string $status, string $helpId, string $actionsHtml = '', array $opts = []): string
@@ -101,6 +104,11 @@ if (!function_exists('aicli_card_open')) {
         $tag = preg_replace('/[^a-z]/', '', strtolower((string)($opts['tag'] ?? 'div'))) ?: 'div';
         $extra = !empty($opts['class']) ? ' ' . $e((string)$opts['class']) : '';
         $style = !empty($opts['style']) ? ' style="' . $e((string)$opts['style']) . '"' : '';
+        $extraItems = '';
+        foreach ((array)($opts['menuItems'] ?? []) as $mi) {
+            $extraItems .= '<button type="button" class="aicli-btn-slim aicli-card-menu-item" data-aicli-card-extra="' . $e((string)$mi[0]) . '"'
+                . ' data-testid="card-' . $e((string)$mi[0]) . '-' . $id . '"' . (string)($mi[2] ?? '') . '>' . $e((string)$mi[1]) . '</button>';
+        }
         $iconHtml = isset($opts['iconHtml']) ? (string)$opts['iconHtml'] : '<i class="fa ' . $e($icon) . ' text-orange-500" aria-hidden="true"></i>';
         return '<' . $tag . ' class="aicli-card' . $extra . '" id="' . aicli_help_id((string)($opts['domId'] ?? ('aicli-card-' . $id))) . '"' . $attrs . $style . (string)($opts['attrs'] ?? '') . '>'
             . '<div class="aicli-card-head" data-testid="card-head-' . $id . '">'
@@ -109,14 +117,14 @@ if (!function_exists('aicli_card_open')) {
             . ' aria-describedby="aicli-card-status-' . $id . '"><i class="fa fa-chevron-down aicli-card-chevron" aria-hidden="true"></i>'
             . $iconHtml
             . '<span class="aicli-card-title">' . $e($title) . '</span></button>'
-            . '<span class="aicli-card-status" id="aicli-card-status-' . $id . '" data-aicli-card-status data-testid="card-status-' . $id . '">' . $e($status) . '</span>'
+            . '<span class="aicli-card-status" id="aicli-card-status-' . $id . '" data-aicli-card-status data-testid="card-status-' . $id . '">' . (isset($opts['statusHtml']) ? (string)$opts['statusHtml'] : $e($status)) . '</span>'
             . aicli_help_btn($helpId, $title) . $actionsHtml
             . '<button type="button" class="aicli-card-menu-btn" data-aicli-card-menu aria-haspopup="true" aria-expanded="false" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"'
             . ' aria-controls="' . $menu . '" aria-label="Menu of the card ' . $e($title) . '" data-testid="card-menu-' . $id . '">'
             . '<i class="fa fa-ellipsis-v" aria-hidden="true"></i></button></div>'
             . aicli_help_panel($helpId, isset($opts['helpHtml']) ? (string)$opts['helpHtml'] : null)
-            . '<div class="aicli-card-menu" id="' . $menu . '" role="group" aria-label="Card layout" hidden>'
-            . $btn('move-up', 'Move up') . $btn('move-down', 'Move down') . $btn('move-top', 'Move to top')
+            . '<div class="aicli-card-menu" id="' . $menu . '" role="group" aria-label="' . ($extraItems !== '' ? 'Card menu' : 'Card layout') . '" hidden>'
+            . $extraItems . $btn('move-up', 'Move up') . $btn('move-down', 'Move down') . $btn('move-top', 'Move to top')
             . $btn('collapse-all', 'Collapse all') . $btn('expand-all', 'Expand all') . $btn('reset-layout', 'Reset layout') . '</div>'
             . '<div class="aicli-card-body ' . $e((string)($opts['bodyClass'] ?? '')) . '" id="aicli-card-body-' . $id . '">';
     }
