@@ -44,6 +44,15 @@ class ActivityService {
     const DONE_TTL_SECONDS = 60;
 
     /**
+     * #830 (John, 2026-10-28): a failed entry whose only button is Dismiss is for
+     * information only. It leaves the tray this many seconds after its last change;
+     * the event list keeps its record (activity.failed). An entry with an action
+     * (Retry, Open note) or marked as a notice that needs the person stays until
+     * it is dismissed. See isInformationOnly().
+     */
+    const FYI_TTL_SECONDS = 300;
+
+    /**
      * Parked state (docs/specs/UPGRADE_ACTIVATION_WITHOUT_CLOSED_SET.md): the
      * op's own work is finished and it now waits for an EXTERNAL condition with
      * no upper bound — e.g. an installed upgrade whose storage layer activates
@@ -378,6 +387,8 @@ class ActivityService {
             self::fail($opId, self::INTERRUPTED_ERROR, self::INTERRUPTED_RECOVERY, [
                 'type'  => (string)($rec['type'] ?? 'upgrade'),
                 'label' => (string)($rec['label'] ?? $opId),
+                // #830: a notice, so it stays until the person has seen it; it is made at boot.
+                'meta'  => ['kind' => 'notice'],
             ]);
             $n++;
         }
@@ -773,6 +784,18 @@ class ActivityService {
      *   done + older than DONE_TTL_SECONDS                     -> pruned (returns null)
      * Transitions are persisted and published.
      */
+    /**
+     * #830: true when a failed entry offers the person nothing but Dismiss: no Retry
+     * (recovery `retry`), no Open note (meta artefactId), and not marked as a notice
+     * that needs the person (meta kind `notice`). Pure.
+     */
+    public static function isInformationOnly(array $entry): bool {
+        if (($entry['recovery'] ?? null) === 'retry') return false;
+        $meta = is_array($entry['meta'] ?? null) ? $entry['meta'] : [];
+        if (!empty($meta['artefactId'])) return false;
+        return ($meta['kind'] ?? '') !== 'notice';
+    }
+
     private static function evaluate(array $entry): ?array {
         $now    = time();
         $status = $entry['status'] ?? 'running';
@@ -784,7 +807,13 @@ class ActivityService {
             }
             return $entry;
         }
-        if ($status === 'failed') return $entry;
+        if ($status === 'failed') {
+            if (self::isInformationOnly($entry) && $now - (int)($entry['heartbeatAt'] ?? $now) > self::FYI_TTL_SECONDS) {
+                @unlink(self::pathFor((string)$entry['opId']));
+                return null;
+            }
+            return $entry;
+        }
         // Parked on an external condition: no worker, no deadline (see STATUS_WAITING).
         if ($status === self::STATUS_WAITING) return $entry;
         // Waiting on a HUMAN, not an external system condition — same no-deadline

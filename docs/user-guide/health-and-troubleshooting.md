@@ -78,7 +78,7 @@ Each row has three parts, and each part has one job:
 | :-- | :-- | :-- |
 | **running** | The job works now. | **Cancel**, only on a job that Cancel can stop (an install) |
 | **stalled** | The job sent no sign of life for 2 minutes. If it sends one later, it returns to running. | **Cancel**, **Dismiss** |
-| **failed** | The job stopped. The red line is one sentence; the grey line says what to do. Technical detail is in the Debug Console log. | **Dismiss**, and **Retry** for a failed start |
+| **failed** | The job stopped. The red line is one sentence; the grey line says what to do. Technical detail is in the Debug Console log. | **Dismiss**, and **Retry** for a failed start. A failed row that has only **Dismiss** disappears after 5 minutes; the event list in the Debug Console keeps it. A row that needs you stays until you dismiss it: a failed start with **Retry**, a storage move that needs attention, an upgrade stopped by a server restart. |
 | **waiting** | The job did its part and waits for something outside, with no time limit. For example a merge waits for room, or an agent upgrade waits for the last old session to close. The grey line gives the reason. | **Dismiss** |
 | **needs approval** | An agent proposed a destructive job. The title is the question; the full statement of what approval does sits under it. See [Plugin management tools for agents](agent-tools.md). | **Approve**, **Reject** |
 | **done** | The job finished. The grey line shows a result only when there is one to show ("14 agents in 6 s"). | none; the row disappears after 60 seconds. |
