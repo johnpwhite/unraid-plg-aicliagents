@@ -150,30 +150,58 @@ An agent reads its files when it starts. A workspace that is already running kee
 > [!WARNING]
 > **Reload agent** interrupts the work in progress in that workspace. Press it only when the agent is idle. The Config Hub never restarts a workspace by itself.
 
-### Drift: Adopt, Overwrite or Release
+### Drift: Compare, Adopt, Overwrite or Release
 
-When a file differs from what the Config Hub wrote, the banner **Config drift detected** shows one row for each key. The row shows the file, the key, and the kind of difference in brackets.
+When a file differs from what the Config Hub wrote, the card **Config drift detected** shows one row for each block or key. Each row has four columns of text and four buttons:
 
-| Kind | What it means |
+- **File**: the path of the file, and the name of the agent under it.
+- **Block**: what part of the file the row is about, for example **MCP servers block**, **Command environment block**, **Global instructions block**, or **MCP server "fetch"**.
+- **State**: what is different, in plain words.
+- **Actions**: the buttons **Compare**, **Adopt**, **Overwrite** and **Release**. They stay in the same place on every row.
+
+| State | What it means |
 | :-- | :-- |
-| modified | Someone changed the value in the file. |
-| deleted | Someone removed an entry that the Config Hub manages. |
-| unmanaged_conflict | The file already had an entry with the same name, which the Config Hub did not write. |
-| write_failed | The Config Hub could not write the file, so it left it alone. The row names the reason, for example that the file has comments or a trailing comma (the Config Hub cannot rewrite such a file without losing them), that a link points nowhere, or that a folder is not writable. |
+| **Changed in the file** | Someone changed the value in the file. |
+| **Changed in the file; the hub wants to remove it** | Someone changed a value that the Config Hub no longer needs. |
+| **Removed from the file** | Someone removed an entry that the Config Hub manages. |
+| **Not managed by the hub yet** | The file already had an entry with this name, and the Config Hub did not write it. |
+| **Same name outside the hub's block** | You wrote an entry with the same name outside the block of the Config Hub. The Config Hub writes nothing, because the agent would refuse a file with two entries of one name. The row names the entry. |
+| **The hub could not write the file** | The Config Hub left the file alone. The row names the reason, for example that the file has comments or a trailing comma (the Config Hub cannot rewrite such a file without losing them), that a link points nowhere, or that a folder is not writable. |
 
-Press **show values** to compare what is on disk with the value in the Config Hub.
+Point at a button, or move to it with the Tab key, to read what it will do to that file. A button that does not work on a row is grey. It stays in its place, and its text says why and what to do instead. Press a grey button to read the reason again.
+
+Press **Compare** to see both texts. A window opens with the text in the file on the left and the text of the Config Hub on the right, each with its line breaks, colours for TOML, YAML, JSON and Markdown, and the changed lines in red and green. The changed words inside a line have a darker mark.
+
+- **Side by side** and **One column** switch the view. On a phone only one column shows.
+- **Whole file** shows the whole file. The lines of the block of the Config Hub have an orange bar. If you wrote an entry with the same name outside the block, that line has a mark. **Whole file** is off at first.
+- **Hide unchanged lines** hides long runs of lines that are the same. Press the line that says how many are hidden to show them.
+- **Copy file text** and **Copy hub text** copy one of the two texts.
+- **Open the file** opens the file in the file editor on the terminal page, in a new tab. Use it to fix a row of the state **Same name outside the hub's block**.
+- The window also has **Adopt**, **Overwrite** and **Release**, with the same texts and the same questions as the row. After an action works, the window closes and the list reloads.
+
+The Config Hub hides each secret in these texts. A key whose name holds key, token, secret, password or auth shows as `[masked:…]`, and so does each value in an environment or header table. The mark changes when the secret changes, so a difference still shows.
 
 Choose one button for each row.
 
 | Button | What it does | What is kept |
 | :-- | :-- | :-- |
-| **Adopt** | Takes the value from the file into the Config Hub. The Config Hub copy now matches your edit. | Your edit. |
-| **Overwrite** | Writes the Config Hub value back over your edit. A box asks you to confirm. | The Config Hub value. Your edit is lost. |
-| **Release** | Stops managing this key. The Config Hub leaves the file as it is. It also removes the agent from the targets of that server, so that the next **Apply to agents** does not take the key back. | Your edit stays in the file. |
+| **Adopt** | Takes the value from the file into the Config Hub. The Config Hub copy now matches your edit. The file does not change. | Your edit. |
+| **Overwrite** | Writes the Config Hub value back over your edit. A box always asks you to confirm. | The Config Hub value. Your edit is lost. |
+| **Release** | Stops managing this block or key. The Config Hub leaves the file as it is. | Your edit stays in the file. |
 
-For a file that the Config Hub writes as one managed block, **Adopt** does not work. This applies to the Codex CLI and Goose files, and to the instruction files. The Config Hub cannot read your edit back into separate keys. Use **Overwrite** or **Release** for those rows.
+**Release** does more than one row in some cases. A box asks you to confirm in those cases, and it names the agents or servers that it unticks:
 
-The Codex CLI and Goose files hold the managed block beside your own entries. If you wrote an entry with the same name outside the block, the Config Hub does not write a second one, because the agent would refuse the file. The row shows the kind **unmanaged_conflict** and the text "Defined outside the managed block". **Overwrite** also refuses. Rename or remove your entry in the file, then press **Apply to agents**.
+| Row | What **Release** also does |
+| :-- | :-- |
+| **MCP server "…"** | Removes the agent from the targets of that one server. No box. |
+| **MCP servers block** (Codex CLI, Grok Build, Goose) | Removes the agent from the targets of every server, because the block holds all of them. A box asks first. |
+| **Global instructions block** | Unticks every agent that reads this file under **Global Instructions**. A box asks first. |
+| A skill or command | Unticks every agent that reads this folder under **Project skills to** (or **Project commands to**). A box asks first. |
+| **Command environment block**, **Relay guidance block**, **File links block**, a Relay or Plugin management skill, a **Claude instruction link** | Nothing more. These rows belong to the plugin. The next **Apply to agents** or check writes the block again, or reports the row again. |
+
+**Adopt** does not work for a block that the Config Hub writes as one piece of text (the Codex CLI, Grok Build and Goose files, the instruction files, and every skill or command file), and not for rows that the plugin writes. The Config Hub cannot read your edit back into separate keys. The button is grey on those rows. Copy your change into the Config Hub by hand, or use **Overwrite** or **Release**.
+
+**Overwrite** is grey on a row of the state **Same name outside the hub's block**. Press **Open the file** in the compare window, rename or remove your entry in the file, then press **Apply to agents**. On the **Command environment block** row, the row stays while your own `shell_environment_policy` table is in the file. This is true: the variables of the plugin do not reach the commands of Codex while that table is there.
 
 On a row for the Relay guidance, the Relay skill or the Plugin management skill, **Release** only stops the Config Hub from tracking that row. It never changes the agent ticks that you chose for your own instructions and skills. **Adopt** takes an edited OpenCode or Kilo entry into the Config Hub, including its arguments and variables.
 
@@ -346,6 +374,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <summary>Change history</summary>
 
 - **2026-10-27** — In **Global Instructions**, Claude Code and OpenCode show **covered** when they already read the instructions through `~/.claude`. A tick on them asks first. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #798.
+- **2026-10-27** — The card **Config drift detected** has aligned columns, plain state words and a hover text on each button. **Compare** opens both texts side by side with colours and red and green marks. A button that cannot work on a row is grey and says why. The Release on the **Command environment block** row no longer unticks Codex from every server, and a secret that you typed into a block shows masked. Spec `docs/specs/HUB_DRIFT_VIEW.md`, issues #797, #799, #800, #801.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-23** — The Agent Store chip **Envs** is called **Variables** here. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
