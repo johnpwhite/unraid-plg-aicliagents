@@ -152,6 +152,39 @@ class HubProjector {
         return $out;
     }
 
+    /** Text shown on a covered row of the Global Instructions card (#798). */
+    const INSTRUCTION_COVERED_TEXT = 'Covered: already reads these instructions through ~/.claude';
+
+    /**
+     * Agents that already read the hub instruction document through ~/.claude, so a
+     * tick would only duplicate it (#798). Claude Code reads ~/.claude/CLAUDE.md (which
+     * imports the hub document) and ~/.claude/rules/common/*.md. OpenCode loads the same
+     * files through the `instructions` list of ~/.config/opencode/opencode.json when that
+     * list names ~/.claude/CLAUDE.md. Read-only: it never writes under $home.
+     * @return array<string,string> agentId => reason text, only for covered agents
+     */
+    public static function instructionCoverage(string $home): array {
+        $home = rtrim($home, '/');
+        $out = [];
+        if ($home === '') return $out;
+        if (is_file($home . '/.claude/CLAUDE.md') || is_dir($home . '/.claude/rules/common')) {
+            $out['claude-code'] = self::INSTRUCTION_COVERED_TEXT;
+        }
+        $json = @file_get_contents($home . '/.config/opencode/opencode.json');
+        $cfg = is_string($json) ? json_decode($json, true) : null;
+        if (is_array($cfg) && is_array($cfg['instructions'] ?? null)) {
+            foreach ($cfg['instructions'] as $entry) {
+                if (!is_string($entry)) continue;
+                if ($entry === '~/.claude/CLAUDE.md' || $entry === $home . '/.claude/CLAUDE.md'
+                    || $entry === '$HOME/.claude/CLAUDE.md' || $entry === '{env:HOME}/.claude/CLAUDE.md') {
+                    $out['opencode'] = self::INSTRUCTION_COVERED_TEXT;
+                    break;
+                }
+            }
+        }
+        return $out;
+    }
+
     /** @var FilePathConventionProjector[]|null */
     private static $policyInstructionVendors = null;
 

@@ -232,8 +232,12 @@
     // a live tickable target (checked tiles accent in orange via :has(:checked)); an agent
     // wired for the surface but NOT installed is dimmed + disabled with a "not installed"
     // pill — the surface exists, the binary doesn't, and projection is install-gated.
+    // #798: an agent with a.covered set already reads the instructions through ~/.claude.
+    // Its row shows "covered" with the box off; ticking it asks first, because it would
+    // only duplicate them.
     function hubAgentRow(a, cssClass, checked, onChange) {
         var off = !a.installed;
+        var covered = !!a.covered && !checked && !off;
         var lab = document.createElement('label');
         lab.className = 'hub-agent-tile';
         if (off) lab.setAttribute('data-off', '');
@@ -241,7 +245,24 @@
         cb.type = 'checkbox'; cb.value = a.id; cb.className = cssClass;
         cb.checked = !!checked;
         if (off) { cb.disabled = true; cb.title = a.name + ' is not installed'; }
+        else if (covered) {
+            cb.addEventListener('change', function () {
+                if (!cb.checked) { if (onChange) onChange(); return; }
+                cb.checked = false;
+                swal({
+                    title: 'Duplicate instructions?',
+                    text: a.name + ' already reads these instructions through ~/.claude. A tick would load them a second time.',
+                    type: 'warning', showCancelButton: true, confirmButtonText: 'Tick anyway', cancelButtonText: 'Cancel', closeOnConfirm: true
+                }, function (confirmed) {
+                    if (!confirmed) return;
+                    cb.checked = true;
+                    lab.removeAttribute('data-covered');
+                    if (onChange) onChange();
+                });
+            });
+        }
         else if (onChange) { cb.addEventListener('change', onChange); }
+        if (covered) { lab.setAttribute('data-covered', ''); lab.title = a.covered; }
         lab.appendChild(cb);
         var body = document.createElement('span'); body.className = 'hub-agent-tile-body';
         var nm = document.createElement('span'); nm.className = 'hub-agent-tile-name'; nm.textContent = a.name;
@@ -252,6 +273,17 @@
             var badge = document.createElement('span');
             badge.className = 'hub-agent-tile-badge'; badge.textContent = 'not installed';
             lab.appendChild(badge);
+        }
+        if (covered) {
+            var note = document.createElement('span');
+            note.className = 'hub-agent-tile-badge'; note.setAttribute('data-testid', 'hub-instr-covered');
+            note.textContent = 'covered';
+            note.title = a.covered;
+            lab.appendChild(note);
+            var info = document.createElement('span');
+            info.className = 'hub-agent-tile-path'; info.style.whiteSpace = 'normal';
+            info.textContent = a.covered;
+            body.appendChild(info);
         }
         return lab;
     }

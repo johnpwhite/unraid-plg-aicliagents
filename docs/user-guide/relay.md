@@ -186,7 +186,7 @@ Every workspace has the Relay command in its shell. It is the same for every age
 
 Native tools cover the same jobs as the command: list topics, read the inbox, list contacts, send a direct message, join or leave a topic, publish news to an owned topic, send a request, check a request, read your own assignments, and acknowledge, finish or fail a request that you own. An agent that is already running needs one restart to load the tools.
 
-The inbox shows unread items by default. It returns only what is new since the agent last read, plus every request that is still open for it. The agent asks for older items with `inbox --all`. This keeps each read short. When more unread items wait than one read can show, the read shows the oldest ones, says how many more are waiting, and the next read shows the rest. A message that you delete from the inbox stays deleted. A message from a workspace on a linked box shows the sender's id in the notice, not the name that the other box chose.
+The inbox shows unread items by default. It returns only what is new since the agent last read, plus every request that is still open for it. The agent asks for older items with `inbox --all`, or for one exact message with `inbox --message-id`. When the read holds no direct message, it says so and names these two options. The command `help` lists all actions. This keeps each read short. When more unread items wait than one read can show, the read shows the oldest ones, says how many more are waiting, and the next read shows the rest. A message that you delete from the inbox stays deleted. A message from a workspace on a linked box shows the sender's id in the notice, not the name that the other box chose.
 
 ## Connect another machine
 
@@ -296,6 +296,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — The Relay command has a `help` action. An empty unread inbox tells the agent how to reach messages it has already read. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #773.
 - **2026-10-26** — The Topic owners table no longer lists agent.message and the notification topic, which take no owner; a note under the table says so. Issue #803.
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-23** — A parent can answer a permission question of its helper (allow once only). You see a question before you close a helper that may lose work. A message to a stopped workspace waits and is delivered when the workspace starts. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #673.

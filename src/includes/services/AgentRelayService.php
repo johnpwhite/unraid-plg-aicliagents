@@ -2571,6 +2571,8 @@ class AgentRelayService {
             $out['assignments']=$assignments;
             $out['older_hidden']=$hidden;
             $out['hint']='Older messages: run inbox --all';
+            // #773: an unread read with no direct message tells the agent how to reach read ones.
+            if (!$direct) $out['hint']='Already-read messages: inbox --all, or inbox --message-id ID';
             if ($cut>0) {
                 $out['more_unread']=$cut;
                 $out['hint']="$cut more unread items are waiting: read the inbox again. Older messages: run inbox --all";

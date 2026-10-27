@@ -185,6 +185,8 @@ The **Global Instructions** card holds one document. The Config Hub writes it in
 2. Under **Project to agents**, tick the agents that should receive the text. Nothing is ticked by default.
 3. Press **Apply to agents**.
 
+Claude Code and OpenCode show a **covered** label with the text "Covered: already reads these instructions through ~/.claude", and their box is off. This is on purpose. These two agents already load the same text from your `~/.claude` folder, so a tick would only load it twice. A tick on a covered tile opens the question **Duplicate instructions?**. Press **Tick anyway** to tick it, or **Cancel** to leave it off.
+
 Expect: the Config Hub saves the text and your choices, then writes the files. An Unraid notification lists the change for each agent.
 
 There is no separate **Save** button. Ticking an agent also saves the document and the choice at once.
@@ -343,6 +345,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — In **Global Instructions**, Claude Code and OpenCode show **covered** when they already read the instructions through `~/.claude`. A tick on them asks first. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #798.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-23** — The Agent Store chip **Envs** is called **Variables** here. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

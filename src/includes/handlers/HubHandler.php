@@ -125,8 +125,12 @@ class HubHandler
         // Instruction-targetable agents (H-02) — a vendor file may serve
         // several ids (~/.codex/AGENTS.md → codex-cli AND gh-copilot).
         $instructionAgents = [];
+        // #798: Claude Code and OpenCode already read the hub document through ~/.claude.
+        $homeForCoverage = HubProjector::resolveHome();
+        $covered = $homeForCoverage['ok'] ? HubProjector::instructionCoverage((string)$homeForCoverage['home']) : [];
         foreach (HubProjector::instructionAgentMeta() as $agentId => $meta) {
             $instructionAgents[] = [
+                'covered' => $covered[$agentId] ?? '',
                 'id' => $agentId,
                 'label' => $meta['label'],
                 'file' => $meta['file'],

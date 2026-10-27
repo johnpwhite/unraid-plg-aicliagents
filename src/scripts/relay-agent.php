@@ -63,7 +63,7 @@ $description = $argv[3] ?? '';
 // #664 R-145: every action but the session-agnostic maintenance ones acts AS a
 // session. With no AICLI_SESSION_ID it must stop with an error, not write
 // anything under an empty id.
-$relayAgentMaintenance = ['drain-all', 'peer-sync', 'sweep-orphans', 'purge-test-traces', 'http-listener-reconcile'];
+$relayAgentMaintenance = ['drain-all', 'peer-sync', 'sweep-orphans', 'purge-test-traces', 'http-listener-reconcile', 'help', '--help', '-h'];
 if ($session === '' && !in_array($action, $relayAgentMaintenance, true)) {
     echo json_encode(['status'=>'error', 'message'=>'AICLI_SESSION_ID is not set, so this shell is not a Relay session. Run this command from an agent workspace.'], JSON_UNESCAPED_SLASHES) . PHP_EOL;
     exit(1);
@@ -120,7 +120,19 @@ switch ($action) {
     case 'sweep-orphans': $result = ['status'=>'ok', 'swept'=>AgentRelayService::sweepOrphanedSubscriptions(600), 'pruned'=>AgentRelayService::pruneStore()]; break;
     case 'purge-test-traces': $result = ['status'=>'ok', 'purged'=>AgentRelayService::purgeTestSessionTraces()]; break;
     case 'http-listener-reconcile': $result = AgentRelayService::ensureHttpListener(); break;
-    default: $result = ['status'=>'error', 'message'=>'Unknown action. Use topics, subscriptions, inbox, contacts, direct, reply, create, update, archive, delete, join, leave, publish, request, request-status, cancel-request, ack, resolve, fail, drain-all, peer-sync, sweep-orphans, or purge-test-traces. Message shapes: "direct <recipient_session_id> <message>" and "reply <thread_id> <message> <recipient_session_id>".'];
+    // #773: list the actions, so an agent need not read the error text of a wrong one.
+    case 'help':
+    case '--help':
+    case '-h':
+        $result = ['status'=>'ok', 'text'=>"Usage: relay-agent.php <action> [arguments]\n"
+            . "Actions: topics, subscriptions, inbox, contacts, direct, reply, create, update, archive, delete, join, leave, publish, request, request-status, cancel-request, ack, resolve, fail, help.\n"
+            . "inbox: unread items only. Options: --all (older items too), --message-id ID (one exact message), --limit N, --before ID|TIME, --after ID|TIME.\n"
+            . "direct <recipient_session_id> <message>   (opens a new thread)\n"
+            . "reply <thread_id> <message> <recipient_session_id>   (keeps one thread; the recipient is LAST)\n"
+            . "request <topic> <summary> [ack_seconds] [resolve_seconds] [client_request_id]\n"
+            . "cancel-request <request_id> [note]"];
+        break;
+    default: $result = ['status'=>'error', 'message'=>'Unknown action. Use topics, subscriptions, inbox, contacts, direct, reply, create, update, archive, delete, join, leave, publish, request, request-status, cancel-request, ack, resolve, fail, help, drain-all, peer-sync, sweep-orphans, or purge-test-traces. Message shapes: "direct <recipient_session_id> <message>" and "reply <thread_id> <message> <recipient_session_id>".'];
 }
 echo json_encode($result, JSON_UNESCAPED_SLASHES) . PHP_EOL;
 exit(($result['status'] ?? 'error') === 'ok' ? 0 : 1);
