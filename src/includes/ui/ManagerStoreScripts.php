@@ -1000,16 +1000,33 @@ function _vcAge(ts) {
     if (s < 86400) return Math.round(s / 3600) + ' h ago';
     return Math.round(s / 86400) + ' d ago';
 }
+// The step of the running check, from the tray entry on the event stream. It
+// stays until the check ends, so a render without a step does not erase it.
+var _vcLive = null;
+function _vcCheckingHtml(live) {
+    if (!live || !live.step) {
+        return '<i class="fa fa-spinner fa-spin"></i> Checking online for new versions…';
+    }
+    var pct = Math.max(0, Math.min(100, live.progress || 0));
+    return '<span class="vc-live" style="display:inline-flex; flex-direction:column; gap:3px; max-width:220px; vertical-align:middle;">'
+        + '<span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"><i class="fa fa-spinner fa-spin"></i> Checking ' + _escAttr(live.step) + '</span>'
+        + '<span style="display:block; height:3px; border-radius:2px; background:rgba(128,128,128,0.25); overflow:hidden;">'
+        + '<span class="vc-live-bar" style="display:block; height:100%; width:' + pct + '%; background:var(--orange, #e68a00); transition:width .3s;"></span>'
+        + '</span></span>';
+}
 function renderVersionCheckStatus(r, note) {
     var el = document.getElementById('version-check-status');
     if (!el) return;
     var checking = !!(r && r.checking);
+    if (!checking) _vcLive = null;
     var checkedAt = r && r.checked_at ? parseInt(r.checked_at, 10) : 0;
     var errors = r && r.errors ? parseInt(r.errors, 10) : 0;
     var firstError = (r && r.first_error) ? String(r.first_error) : '';
     el.style.color = '';
     if (checking) {
-        el.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Checking online for new versions\u2026';
+        // The same step and bar as the Activity tray row: "Kimi Code (15 of 15)".
+        if (r.step) _vcLive = { step: String(r.step), progress: parseInt(r.progress, 10) || 0 };
+        el.innerHTML = _vcCheckingHtml(_vcLive);
     } else if (errors > 0) {
         el.style.color = 'var(--orange, #e68a00)';
         el.textContent = 'Check failed for ' + errors + ' agent' + (errors === 1 ? '' : 's') + (firstError ? ': ' + firstError : '') + (checkedAt ? ' \u00b7 last good check ' + _vcAge(checkedAt) : '');
@@ -1032,7 +1049,11 @@ function _vcHookLiveUpdates() {
         if (bus && typeof bus.on === 'function') {
             bus.on('activity', function (evt) {
                 var d = evt && evt.data;
-                if (d && d.opId === 'version_check' && d.status && d.status !== 'running') loadVersionCache();
+                if (!d || d.opId !== 'version_check' || !d.status) return;
+                // While the check runs, show its step beside the button (#826);
+                // when it ends, refresh the cards.
+                if (d.status === 'running') renderVersionCheckStatus({ checking: true, step: d.step, progress: d.progress });
+                else loadVersionCache();
             });
         }
     } catch (e) { /* the 30 s poll below still catches up */ }
