@@ -1286,7 +1286,9 @@ class StorageMountService {
         // nosemgrep: php.lang.security.exec-use.exec-use
         // #571: the bake can run for minutes. Keep the install's tray entry alive
         // (and show the percent) while the bake process lives.
-        [$res, $out] = ActivityService::runWatched(TraceContext::shellPrefix() . "bash " . escapeshellarg($script)
+        // #825: a person waits for this bake, so it uses the interactive CPU profile
+        // (all threads but one, nice 10) instead of the background one (1 of 4 on prod01).
+        [$res, $out] = ActivityService::runWatched(TraceContext::shellPrefix() . "AICLI_BATCH_PROFILE=interactive bash " . escapeshellarg($script)
             . " bake --type agent --id " . escapeshellarg($agentId)
             . " --persist " . escapeshellarg($persistPath)
             . " --staged 2>&1", "install_$agentId", 15, 'Baking SquashFS delta');

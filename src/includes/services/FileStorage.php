@@ -498,7 +498,11 @@ final class FileStorage
         // R-06: AICLI_TRACE_ID=<id> env prefix (TraceContext::shellPrefix —
         // empty when no request trace; id is format-validated, interpolation-safe)
         // so every storagectl verb's shell log lines join the AJAX trace.
-        $cmd = TraceContext::shellPrefix()
+        // #825: an agent layer is written only by an install that a person waits
+        // for, so it bakes with the interactive CPU profile (common.sh _batch_plan).
+        $profile = ($type === 'agent' && ($verb === 'bake' || $verb === 'consolidate'))
+            ? 'AICLI_BATCH_PROFILE=interactive ' : '';
+        $cmd = TraceContext::shellPrefix() . $profile
             . 'bash ' . escapeshellarg($script) . ' ' . escapeshellarg($verb)
             . ' --type ' . escapeshellarg($type)
             . ' --id ' . escapeshellarg($id)

@@ -40,6 +40,8 @@ source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/capture
 # GH #10 / #228: the reserved squashfs loop-unmount pass (so a long bake can't
 # starve the unmount that frees /mnt/cache for a clean reboot).
 source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/shutdown_unmount.sh" 2>/dev/null || true
+# #824: wait for (or cleanly stop and record) an agent install still writing its layer.
+source "/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/shutdown_installs.sh" 2>/dev/null || true
 
 # Budget (secs) for the pre-kill resume capture. Small slice of the shutdown
 # window — pass 1 (disk fallback) is fast + guaranteed; pass 2 (full clean
@@ -221,6 +223,17 @@ run_full_stop() {
         timeout "$reserve" bash -c "$(declare -f _reserve_unmount_squashfs_loops); _reserve_unmount_squashfs_loops" 2>/dev/null || true
     fi
 }
+
+# #824: an agent install still writing its layer gets up to a third of the
+# budget (max 30 s) to finish. If it cannot, it is recorded on flash, so the
+# next boot says the upgrade was stopped, and stopped cleanly.
+# Only when the install cannot go on: a server shutdown, or storage on the array.
+if declare -f _shutdown_settle_agent_installs >/dev/null 2>&1 \
+    && { [ "$IS_SHUTDOWN" = true ] || needs_array "$STORAGE_CLASS"; }; then
+    _SI_WAIT=$(( SHUTDOWN_BUDGET / 3 ))
+    [ "$_SI_WAIT" -gt 30 ] && _SI_WAIT=30
+    _shutdown_settle_agent_installs "$_SI_WAIT" "${MOUNT_ROOT}/activity" "${PLUGIN_BASE}/state"
+fi
 
 # R2: capture resume ids for ALL live sessions BEFORE any kill/unmount sweep
 # (covers all three scenarios below). The disk fallback is saved for every

@@ -3250,6 +3250,8 @@ _op_defer() {
 #                                                  "" set -> no pin; overrides detect)
 #   AICLI_BATCH_PROCESSORS  explicit mksquashfs -processors count
 #   AICLI_BATCH_DISABLE=1   emit nothing / inject nothing (byte-for-byte legacy)
+#   AICLI_BATCH_PROFILE     "interactive" for a bake a person waits for (#825):
+#                           all threads but one, nice 10, ionice best-effort 7
 # ===========================================================================
 
 _BATCH_CACHE_DIR="${MOUNT_ROOT}/cache"
@@ -3510,20 +3512,40 @@ _batch_plan() {
         [ "$ne" -ge 1 ] 2>/dev/null || ne=1
         [ "$ne" -gt 8 ] && ne=8
         _BATCH_PROCESSORS="$ne"
+    elif [ "${AICLI_BATCH_PROFILE:-}" = "interactive" ]; then
+        _BATCH_PROCESSORS="$(_batch_processors_interactive "$nproc_count")"
     else
         _BATCH_PROCESSORS="$(_batch_processors_for_threads "$nproc_count")"
     fi
+}
+
+# _batch_processors_interactive <T> — #825: a bake that a person waits for (an
+# agent install) uses every thread but one, capped at 8. The background formula
+# gave 1 of 4 threads on prod01, and the Codex upgrade took about 25 minutes.
+# Examples: T=1->1, T=4->3, T=8->7, T=20->8.
+_batch_processors_interactive() {
+    local t="${1:-1}" p
+    [ "$t" -ge 1 ] 2>/dev/null || t=1
+    p=$(( t - 1 ))
+    [ "$p" -lt 1 ] && p=1
+    [ "$p" -gt 8 ] && p=8
+    printf '%s' "$p"
 }
 
 # _batch_prefix — print the available subset of
 #   nice -n <N> ionice -c <class> [taskset -c <cpus>]
 # Each tool guarded by `command -v` (missing -> omitted, never a failure).
 # Emits nothing when AICLI_BATCH_DISABLE=1.
+# AICLI_BATCH_PROFILE=interactive (#825) changes the defaults to nice 10 and
+# ionice best-effort 7: the bake still yields to normal work, but a busy host
+# no longer starves it. Explicit AICLI_BATCH_NICE / AICLI_BATCH_IONICE win.
 _batch_prefix() {
     [ "${AICLI_BATCH_DISABLE:-0}" = "1" ] && { printf ''; return 0; }
     _batch_plan
-    local nice_lvl="${AICLI_BATCH_NICE:-19}"
-    local ionice_spec="${AICLI_BATCH_IONICE:-c3}"
+    local def_nice=19 def_ionice=c3
+    if [ "${AICLI_BATCH_PROFILE:-}" = "interactive" ]; then def_nice=10; def_ionice=c2n7; fi
+    local nice_lvl="${AICLI_BATCH_NICE:-$def_nice}"
+    local ionice_spec="${AICLI_BATCH_IONICE:-$def_ionice}"
     local out=""
 
     if command -v nice >/dev/null 2>&1; then

@@ -297,14 +297,14 @@ class ActivityService {
         $env = $pctFile !== '' ? 'export AICLI_BAKE_PCT_FILE=' . escapeshellarg($pctFile) . '; ' : '';
         $proc = @proc_open($env . $cmd, [1 => ['pipe', 'w']], $pipes);
         if (!is_resource($proc)) {
-            if ($pctFile !== '') @unlink($pctFile);
+            if ($pctFile !== '') { @unlink($pctFile); @unlink($pctFile . '.bytes'); }
             return [127, []];
         }
         stream_set_blocking($pipes[1], false);
         $buf = '';
         $rc = -1;
         $lastBeat = time();
-        $lastPct = -1;
+        $lastStep = '';
         while (true) {
             $r = [$pipes[1]]; $w = null; $e = null;
             @stream_select($r, $w, $e, 1);
@@ -318,13 +318,17 @@ class ActivityService {
             if ($opId !== null && (time() - $lastBeat) >= $interval) {
                 $lastBeat = time();
                 $pct = -1;
+                $bytes = -1;
                 if ($pctFile !== '') {
                     $raw = trim((string)@file_get_contents($pctFile));
                     if ($raw !== '' && ctype_digit($raw)) $pct = min(100, (int)$raw);
+                    $rawB = trim((string)@file_get_contents($pctFile . '.bytes'));
+                    if ($rawB !== '' && ctype_digit($rawB)) $bytes = (int)$rawB;
                 }
-                if ($pct >= 0 && $stepWords !== '' && $pct !== $lastPct) {
-                    $lastPct = $pct;
-                    self::update($opId, ['step' => $stepWords . ' (' . $pct . '%)']);
+                $step = $stepWords !== '' ? self::bakeStepText($stepWords, $pct, $bytes) : '';
+                if ($step !== '' && $step !== $lastStep) {
+                    $lastStep = $step;
+                    self::update($opId, ['step' => $step]);
                 } else {
                     self::heartbeat($opId);
                 }
@@ -335,9 +339,67 @@ class ActivityService {
         fclose($pipes[1]);
         $closeRc = proc_close($proc);
         if ($rc === -1) $rc = $closeRc;
-        if ($pctFile !== '') @unlink($pctFile);
+        if ($pctFile !== '') { @unlink($pctFile); @unlink($pctFile . '.bytes'); }
         $lines = $buf === '' ? [] : explode("\n", rtrim($buf, "\n"));
         return [$rc, $lines];
+    }
+
+    /** The wording of an install that a server restart stopped (#824). */
+    const INTERRUPTED_ERROR = 'The upgrade was stopped by a server restart before it finished. The previous version is still in use.';
+    const INTERRUPTED_RECOVERY = 'Start the upgrade again from the Agent Store.';
+
+    /** #824: import once per process. */
+    private static bool $interruptedImported = false;
+
+    /**
+     * #824: the shutdown handler (src/scripts/storage/shutdown_installs.sh) copies
+     * each install it had to stop to <state>/interrupted-<opId>.json on flash. The
+     * tray folder is in RAM and empty after the boot, so without this the person
+     * never learns the upgrade was lost. Each record becomes a failed tray entry
+     * once, and the record is removed. AICLI_INTERRUPTED_DIR is the test seam; a
+     * suite that redirects AICLI_ACTIVITY_DIR without it never reads the live flash.
+     */
+    public static function importInterrupted(): int {
+        if (self::$interruptedImported) return 0;
+        self::$interruptedImported = true;
+        $dir = getenv('AICLI_INTERRUPTED_DIR');
+        if ($dir === false || $dir === '') {
+            $act = getenv('AICLI_ACTIVITY_DIR');
+            if ($act !== false && $act !== '') return 0;
+            require_once __DIR__ . '/StoragePathResolver.php';
+            $dir = dirname(StoragePathResolver::degradedStatePath());
+        }
+        $n = 0;
+        foreach (glob($dir . '/interrupted-install_*.json') ?: [] as $file) {
+            $rec = @json_decode((string)@file_get_contents($file), true);
+            @unlink($file);
+            $opId = is_array($rec) ? self::safeOpId($rec['opId'] ?? '') : null;
+            if ($opId === null) continue;
+            self::fail($opId, self::INTERRUPTED_ERROR, self::INTERRUPTED_RECOVERY, [
+                'type'  => (string)($rec['type'] ?? 'upgrade'),
+                'label' => (string)($rec['label'] ?? $opId),
+            ]);
+            $n++;
+        }
+        return $n;
+    }
+
+    /** Test hook: let the next listAll() import again. */
+    public static function resetInterruptedImport(): void { self::$interruptedImported = false; }
+
+    /**
+     * #823: the step text of a running bake. mksquashfs 4.5 (prod01) redraws its
+     * percent into a file only now and then, so the percent can stand still for
+     * minutes on a healthy bake. The size of the layer written so far always grows,
+     * so it goes beside the percent: "Baking SquashFS delta (64%, 41 MB written)".
+     * Returns '' when there is nothing to show (no percent, under 1 MB). Pure.
+     */
+    public static function bakeStepText(string $stepWords, int $pct, int $bytes): string {
+        $parts = [];
+        if ($pct >= 0) $parts[] = min(100, $pct) . '%';
+        $mb = $bytes >= 1048576 ? intdiv($bytes, 1048576) : 0;
+        if ($mb > 0) $parts[] = $mb . ' MB written';
+        return $parts === [] ? '' : $stepWords . ' (' . implode(', ', $parts) . ')';
     }
 
     /**
@@ -522,6 +584,7 @@ class ActivityService {
      * than DONE_TTL_SECONDS are pruned either way.
      */
     public static function listAll(): array {
+        self::importInterrupted();
         $out = [];
         foreach (glob(self::dir() . '/*.json') ?: [] as $file) {
             $entry = @json_decode((string)@file_get_contents($file), true);

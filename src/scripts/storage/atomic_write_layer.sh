@@ -61,10 +61,25 @@ _AWL_DEFAULT_ARGS="-comp xz -Xbcj x86 -Xdict-size 100% -b 1M -no-exports -noappe
 # #490: only the bar ("] 458/458 100%") counts. The summary at the end holds
 # lines such as "100.00% of uncompressed directory table size", which the old
 # pattern read as "00" and reported as the last value.
+# #823: never fails. The bake runs under "set -euo pipefail"; with no bar in the
+# file yet (the first minutes on mksquashfs 4.5) grep found nothing, the
+# "_awl_pct=$(...)" assignment failed, and that ended the progress watcher.
 _awl_last_percent() {
     [ -f "${1:-}" ] || return 0
-    tail -c 4000 "$1" 2>/dev/null | tr '\r' '\n' \
-        | grep -Eo '[0-9]+/[0-9]+ +[0-9]{1,3}%' | tail -n 1 | grep -Eo '[0-9]{1,3}%$' | tr -d '%'
+    { tail -c 4000 "$1" 2>/dev/null | tr '\r' '\n' \
+        | grep -Eo '[0-9]+/[0-9]+ +[0-9]{1,3}%' | tail -n 1 | grep -Eo '[0-9]{1,3}%$' | tr -d '%'; } || true
+}
+
+# _awl_report_bytes <layer tmp path> — #823: write the current size of the layer
+# being written to "$AICLI_BAKE_PCT_FILE.bytes", for the tray. No-op when no
+# percent file is asked for or the layer file does not exist yet. Never fails.
+_awl_report_bytes() {
+    [ -n "${AICLI_BAKE_PCT_FILE:-}" ] && [ -f "${1:-}" ] || return 0
+    local sz
+    sz="$(stat -c %s "$1" 2>/dev/null)" || return 0
+    [[ "$sz" =~ ^[0-9]+$ ]] || return 0
+    printf '%s' "$sz" > "${AICLI_BAKE_PCT_FILE}.bytes" 2>/dev/null || true
+    return 0
 }
 
 # #490: the last lines of a mksquashfs output file, without the progress bar.
@@ -280,6 +295,10 @@ atomic_write_layer() {
                     sleep "${AICLI_BAKE_PROGRESS_INTERVAL:-5}"
                     _awl_pct="$(_awl_last_percent "$_awl_prog_file")"
                     [ -n "$_awl_pct" ] && _awl_report_pct "$_awl_pct"
+                    # #823: mksquashfs 4.5 redraws its bar into a file only now
+                    # and then (21% for minutes on prod01). The layer file grows
+                    # all the time, so its size is the progress that always moves.
+                    _awl_report_bytes "$tmp_path"
                 done
             ) > /dev/null 2>&1 &
             _awl_watch_pid=$!
