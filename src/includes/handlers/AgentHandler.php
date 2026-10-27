@@ -129,7 +129,13 @@ class AgentHandler {
         // otherwise the tray and Store card keep rendering WAIT forever after
         // the pending marker has been removed.
         \AICliAgents\Services\ActivityService::dismiss('install_' . $agentId);
-        aicli_log("Agent upgrade cancelled by user for $agentId (was_queued=" . ($wasQueued ? '1' : '0') . ")", AICLI_LOG_INFO);
+        // A cancel with nothing queued cancels nothing. The Store browser test calls
+        // this as cleanup on every run; "cancelled by user" in pairs then read as
+        // real upgrades that someone stopped (prod02, 2026-10-27).
+        aicli_log($wasQueued
+            ? "Agent upgrade cancelled by user for $agentId (a queued upgrade was removed)"
+            : "Cancel upgrade request for $agentId: no upgrade was queued, nothing changed",
+            AICLI_LOG_INFO);
         return ['status' => 'ok', 'cancelled' => $wasQueued,
                 'message' => $wasQueued ? 'Queued upgrade cancelled.' : 'No queued upgrade to cancel.'];
     }
