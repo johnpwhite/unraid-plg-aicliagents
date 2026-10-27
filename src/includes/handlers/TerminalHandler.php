@@ -509,6 +509,14 @@ class TerminalHandler {
                 . "falling back to the cautious flow: " . $e->getMessage(),
                 \AICliAgents\Services\LogService::LOG_WARN, "TerminalHandler");
         }
+        $unusedNote = null;
+        if ($waitReason === null) {
+            try {
+                $unusedNote = \AICliAgents\Handlers\AgentHandler::unusedVersionNote($agentId);
+            } catch (\Throwable $e) {
+                $unusedNote = null;
+            }
+        }
         $sessions = \AICliAgents\Services\TerminalService::listActiveSessionsForAgent($agentId, false);
         // #463: the display name of each workspace, so the restart dialog names it by
         // the name the person gave it. '' when it is not known: the page picks a plain
@@ -533,6 +541,8 @@ class TerminalHandler {
             'sessions'     => $sessions,
             'side_by_side' => ($waitReason === null),
             'wait_reason'  => $waitReason,
+            // #827: an unused older version that the update removes to make room.
+            'unused_version_note' => $unusedNote,
         ];
     }
 

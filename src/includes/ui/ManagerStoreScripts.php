@@ -65,14 +65,16 @@ function installVersionAgent(id, btn, explicitVersion) {
             var sideBySide = !!(data && data.side_by_side);
             var waitReason = (data && typeof data.wait_reason === 'string')
                 ? data.wait_reason : '';
-            _showInstallConfirm(id, version, btn, label, sessions, sideBySide, waitReason);
+            // #827: an unused older version that this update removes to make room.
+            var unusedNote = (data && typeof data.unused_version_note === 'string') ? data.unused_version_note : '';
+            _showInstallConfirm(id, version, btn, label, sessions, sideBySide, waitReason, unusedNote);
         });
 }
 
 // Single consolidated confirm modal. Shows the appropriate title + body for
 // install / upgrade / downgrade / reinstall. With active sessions the safe
 // default queues the change; destructive force-close is an explicit opt-in.
-function _showInstallConfirm(id, version, btn, label, sessions, sideBySide, waitReason) {
+function _showInstallConfirm(id, version, btn, label, sessions, sideBySide, waitReason, unusedNote) {
     // An install that cannot affect the operator's sessions must not ask them
     // about their sessions. Treat them as absent for every decision below.
     var relevantSessions = sideBySide ? [] : sessions;
@@ -82,7 +84,7 @@ function _showInstallConfirm(id, version, btn, label, sessions, sideBySide, wait
     _av2PendingKind = null;
     if (label === 'Upgrade' || (label === 'Downgrade' && pend && pend.kind === 'change')) {
         av2RenderUpdateOverlay({ id: id, version: version, sessions: relevantSessions, sideBySide: sideBySide, openCount: sessions.length,
-                                 waitReason: waitReason, kind: label === 'Upgrade' ? 'update' : 'change', opener: pend ? pend.opener : btn });
+                                 waitReason: waitReason, unusedNote: unusedNote || '', kind: label === 'Upgrade' ? 'update' : 'change', opener: pend ? pend.opener : btn });
         return;
     }
     var isInstall = !label || label === 'Install';
@@ -501,7 +503,7 @@ function av2RenderUpdateOverlay(o) {
     }
 
     // 4. Your open workspaces: the same rules as before, in plain words.
-    var wsHtmlNeeded = (sideBySide && openCount > 0) || o.waitReason || sessions.length > 0;
+    var wsHtmlNeeded = (sideBySide && openCount > 0) || o.waitReason || o.unusedNote || sessions.length > 0;
     var force = null;
     if (wsHtmlNeeded) {
         var ws = av2h('div', 'av2-update-section', null, { 'data-testid': 'update-workspaces' });
@@ -511,6 +513,10 @@ function av2RenderUpdateOverlay(o) {
             ws.appendChild(av2h('p', 'av2-notes-p', 'Installs alongside the version you are running. Your ' + openCount + ' open workspace' + (one ? ' is' : 's are')
                 + ' not interrupted. ' + (one ? 'It keeps' : 'They keep') + ' v' + (curVer || 'the version they have') + ' until you switch '
                 + (one ? 'it' : 'them') + ' over from ' + (one ? 'its' : 'their') + ' … menu (Switch to…).'));
+        }
+        if (sideBySide && o.unusedNote) {
+            // #827: say that the unused oldest version goes, instead of a wait.
+            ws.appendChild(av2h('p', 'av2-notes-p', o.unusedNote, { 'data-testid': 'update-unused-version' }));
         }
         if (!sideBySide && o.waitReason) {
             var wr = av2h('p', 'av2-notes-p'); wr.appendChild(av2h('b', null, 'Why this update must wait: ')); wr.appendChild(document.createTextNode(o.waitReason));

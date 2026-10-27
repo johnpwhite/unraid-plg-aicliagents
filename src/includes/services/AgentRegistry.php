@@ -336,6 +336,72 @@ class AgentRegistry {
     }
 
     /**
+     * #827: the generation the stable name agents/<id> points to, or '' when it
+     * is not a link into .versions/<id>/ (a legacy fixed mount, or not installed).
+     */
+    public static function activeGenerationOf(string $agentId, ?string $linkTarget = null): string {
+        if (!preg_match(self::AGENT_ID_RE, $agentId)) return '';
+        $target = $linkTarget ?? (string)@readlink(self::agentBase() . "/$agentId");
+        $prefix = ".versions/$agentId/";
+        $pos = strpos($target, $prefix);
+        if ($pos === false) return '';
+        $gen = rtrim(substr($target, $pos + strlen($prefix)), '/');
+        return ($gen === '' || strpos($gen, '/') !== false) ? '' : $gen;
+    }
+
+    /**
+     * #827: the cmdline and environ of every process, NUL turned into newline,
+     * in one string. The text the generation release step scans
+     * (generation.sh `_aicli_proc_text`).
+     */
+    public static function procText(string $procRoot = '/proc'): string {
+        $out = '';
+        foreach (glob("$procRoot/[0-9]*", GLOB_ONLYDIR) ?: [] as $dir) {
+            foreach (['cmdline', 'environ'] as $f) {
+                $s = @file_get_contents("$dir/$f");
+                if (is_string($s) && $s !== '') $out .= str_replace("\0", "\n", $s) . "\n";
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * #827: of the mounted generations, the ones still in use: the active one and
+     * every one a live process names. The same rule as the release step
+     * (generation.sh `aicli_gc_agent_generations`), so a version this counts as
+     * unused is a version the next mount releases. Its safety floor too: when a
+     * process names the agent but no generation can be read, every mounted
+     * generation counts as in use. Pure given its inputs.
+     *
+     * @param array<int,string> $mounted
+     * @return array<int,string>
+     */
+    public static function generationsInUse(string $agentId, array $mounted, string $active, string $procText): array {
+        if (!preg_match(self::AGENT_ID_RE, $agentId)) return $mounted;
+        $q = preg_quote($agentId, '#');
+        preg_match_all("#\\.versions/$q/([A-Za-z0-9._@-]+)#", $procText, $m);
+        $referenced = array_values(array_unique($m[1] ?? []));
+        if ($referenced === [] && preg_match("#agents/(\\.versions/)?$q/#", $procText)) {
+            return $mounted;
+        }
+        return array_values(array_filter($mounted, static function ($g) use ($active, $referenced) {
+            return $g === $active || in_array($g, $referenced, true);
+        }));
+    }
+
+    /**
+     * #827: the installed version inside one generation, from its npm package.json,
+     * or '' when it cannot be read (a non-npm agent, or an unreadable tree).
+     */
+    public static function generationVersion(string $agentId, string $gen, string $npmPackage): string {
+        if ($npmPackage === '' || !preg_match(self::AGENT_ID_RE, $agentId) || !preg_match('/^[A-Za-z0-9._@-]+$/D', $gen)) return '';
+        $json = @file_get_contents(self::agentBase() . "/.versions/$agentId/$gen/node_modules/$npmPackage/package.json");
+        $d = is_string($json) ? json_decode($json, true) : null;
+        $v = is_array($d) ? (string)($d['version'] ?? '') : '';
+        return self::isSafeVersionString($v) ? $v : '';
+    }
+
+    /**
      * Retrieves the unified agent registry (Default + Custom).
      */
     public static function getRegistry() {

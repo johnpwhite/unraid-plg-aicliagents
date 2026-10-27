@@ -356,7 +356,7 @@ class AgentHandler {
      * The message is written to be read by a person: it is what the Store card
      * shows underneath "Upgrade queued safely".
      */
-    public static function sideBySideInstallBlocker(string $agentId, ?array $mounted = null): ?string {
+    public static function sideBySideInstallBlocker(string $agentId, ?array $mounted = null, ?array $inUse = null): ?string {
         $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
         $agent = $registry[$agentId] ?? null;
         if (!is_array($agent)) {
@@ -378,10 +378,56 @@ class AgentHandler {
             return 'a previously installed upgrade is waiting for its active sessions to close before activation';
         }
         $mounted ??= \AICliAgents\Services\AgentRegistry::mountedGenerations($agentId);
+        // #827: a version that is mounted but that nothing uses does not count. Only
+        // the next mount releases it, and the upgrade is that mount, so counting it
+        // made the upgrade wait for ever after its workspaces closed.
         if (!\AICliAgents\Services\AgentRegistry::canAddGeneration(count($mounted))) {
-            return 'two versions of this agent are already running; close a workspace before installing a third';
+            $inUse ??= self::generationsInUseNow($agentId, $mounted);
+            if (!\AICliAgents\Services\AgentRegistry::canAddGeneration(count($inUse))) {
+                return 'two versions of this agent are in use by open workspaces; close the workspaces of the older version before installing a third';
+            }
         }
         return null;
+    }
+
+    /** #827: the mounted generations still in use, read from the live system. */
+    private static function generationsInUseNow(string $agentId, array $mounted): array {
+        return \AICliAgents\Services\AgentRegistry::generationsInUse(
+            $agentId, $mounted,
+            \AICliAgents\Services\AgentRegistry::activeGenerationOf($agentId),
+            \AICliAgents\Services\AgentRegistry::procText()
+        );
+    }
+
+    /**
+     * #827: when the version ceiling is reached only because an unused older version
+     * is still mounted, the sentence the update dialog shows: that version is removed
+     * to make room. null when no unused version stands in the way. The release step
+     * (generation.sh `aicli_gc_agent_generations`) removes it when the new version
+     * is mounted.
+     *
+     * @param array<int,string>|null $mounted seam
+     * @param array<int,string>|null $inUse   seam
+     * @param callable|null $versionOf  (string $gen): string, seam
+     */
+    public static function unusedVersionNote(string $agentId, ?array $mounted = null, ?array $inUse = null, ?callable $versionOf = null): ?string {
+        $mounted ??= \AICliAgents\Services\AgentRegistry::mountedGenerations($agentId);
+        if (\AICliAgents\Services\AgentRegistry::canAddGeneration(count($mounted))) return null;
+        $inUse ??= self::generationsInUseNow($agentId, $mounted);
+        $unused = array_values(array_diff($mounted, $inUse));
+        if ($unused === []) return null;
+        // The oldest: a generation id carries its layer sequence and UTC stamp, so
+        // the name order is the age order.
+        sort($unused, SORT_STRING);
+        $oldest = $unused[0];
+        if ($versionOf === null) {
+            $agent = \AICliAgents\Services\AgentRegistry::getDefaultAgents()[$agentId] ?? null;
+            $pkg = \AICliAgents\Services\VersionCheckService::npmPackageOf($agent);
+            $versionOf = static fn(string $g): string => \AICliAgents\Services\AgentRegistry::generationVersion($agentId, $g, $pkg);
+        }
+        $v = (string)$versionOf($oldest);
+        $which = $v !== '' ? "The oldest version, v$v," : 'The oldest version';
+        return "$which is no longer used by any workspace. It will be removed to make room for this update.";
     }
 
     /**
