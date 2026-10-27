@@ -20,7 +20,7 @@ At the top right of the page you see the button **Check for updates** and a stat
 
 ## The agents
 
-The plugin offers 14 agents. Each card has a header row with the agent icon, the agent name and one line of status, such as "v2.1.302 · update 2.1.307 available" or "Not installed". The (i) button in the header opens the short description, the **Release notes** link when the vendor publishes release notes, the install method and the package name.
+The plugin offers 15 agents. Each card has a header row with the agent icon, the agent name and one line of status, such as "v2.1.302 · update 2.1.307 available" or "Not installed". The (i) button in the header opens the short description, the **Release notes** link when the vendor publishes release notes, the install method and the package name.
 
 | Agent | Installed from | Sign-in and keys |
 | :-- | :-- | :-- |
@@ -28,6 +28,7 @@ The plugin offers 14 agents. Each card has a header row with the agent icon, the
 | Gemini CLI | npm | Run `gemini auth login` on first launch. You sign in with your Google account. |
 | Codex CLI | npm | Run `codex login` (browser sign-in), or add `OPENAI_API_KEY` in the **Variables** panel. |
 | OpenCode | npm | The **Variables** panel shows one API key field. |
+| OpenCode 2 | npm (the package `@opencode/cli`) | The **Variables** panel shows one API key field. You can also sign in inside the agent. |
 | Kilo Code | npm | The **Variables** panel shows one API key field. |
 | Pi Coder | npm | The **Variables** panel shows one API key field. |
 | GitHub Copilot | npm | The **Variables** panel shows one API key field. |
@@ -41,10 +42,28 @@ The plugin offers 14 agents. Each card has a header row with the agent icon, the
 
 Notes on this table:
 
-- The plugin does not ship a sign-in note for OpenCode, Kilo Code, Pi Coder, GitHub Copilot, Factory CLI or NanoCoder. Use the API key field, or follow the agent's own documentation for other ways to sign in.
+- The plugin does not ship a sign-in note for OpenCode, OpenCode 2, Kilo Code, Pi Coder, GitHub Copilot, Factory CLI or NanoCoder. Use the API key field, or follow the agent's own documentation for other ways to sign in.
 - Codex CLI runs without an operating-system sandbox on Unraid. The sandbox does not work on the Unraid root file system. Codex still asks you to approve its commands.
 - The first-run setup guide lists the sign-in note of each installed agent. You can read the same notes again on this page.
 - The sign-in is a one-time step for each agent. The login is kept in the home of the Unraid user, not in the agent files, so an upgrade does not remove it.
+
+### OpenCode and OpenCode 2
+
+OpenCode 2 is the new version of OpenCode. It is a second agent, not an update of the first one. You can install both and use both at the same time.
+
+- OpenCode 2 keeps its own data. Its sessions, its login, its settings and its MCP servers are separate from OpenCode. OpenCode 2 never reads or changes the data of OpenCode.
+- Each workspace of OpenCode 2 starts its own private server. The plugin adds this for you.
+- The Config Hub can project your instructions, skills, commands and MCP servers to OpenCode 2. See [Config Hub](config-hub.md).
+
+To use a folder with OpenCode 2 in place of OpenCode:
+
+1. Install **OpenCode 2** on the Agent Store.
+2. Close the OpenCode workspace of the folder. Press **New Workspace**, select the tile **OpenCode 2** in the section **Agent**, and select the same folder.
+3. Sign in inside the agent, or add the API key in the **Variables** panel of **OpenCode 2**.
+
+Expect: the workspace starts a new OpenCode 2 session. The old sessions of OpenCode stay in OpenCode and do not open in OpenCode 2. To go back, start the folder with the tile **OpenCode** again.
+
+Limits: OpenCode 2 sees only the instructions, skills and commands that the Config Hub projects. Tools that the agent starts can find their own settings files (for example `~/.config/git`) in a different place, because OpenCode 2 uses its own config folder. Git still reads `~/.gitconfig`.
 
 ## How to use it
 
@@ -407,7 +426,7 @@ The repair buttons are **Restore** (copies a safe backup layer back, with no dow
 
 Some agents try to update themselves while they run. An update that the agent does itself would bypass the Agent Store. The plugin would not know the new version, and the update would write new files into the agent layer.
 
-The plugin turns the self-update off for these agents: Claude Code, Gemini CLI, Codex CLI, OpenCode, Kilo Code, Pi Coder, GitHub Copilot, Factory CLI, Qwen Code, Antigravity CLI, Grok Build and Kimi Code. For Gemini CLI and Qwen Code, the plugin writes the off-setting into the settings file of the agent one time. It never overwrites a choice that you made there. NanoCoder has no self-update. Goose updates only when you run its own update command yourself.
+The plugin turns the self-update off for these agents: Claude Code, Gemini CLI, Codex CLI, OpenCode, OpenCode 2, Kilo Code, Pi Coder, GitHub Copilot, Factory CLI, Qwen Code, Antigravity CLI, Grok Build and Kimi Code. For Gemini CLI and Qwen Code, the plugin writes the off-setting into the settings file of the agent one time. It never overwrites a choice that you made there. NanoCoder has no self-update. Goose updates only when you run its own update command yourself.
 
 The change applies the next time the agent starts. A workspace that is already running keeps its old behaviour. You should upgrade only through the Agent Store.
 
@@ -447,6 +466,7 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — New agent **OpenCode 2**, the new version of OpenCode. It installs beside OpenCode and keeps its own data. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issue #822.
 - **2026-10-27** — The card header shows the version you run and the new version in full, with the new version as a button that opens the dialog **Update <agent>** (release notes, open workspaces, **Keep a copy**, **Update now**). **Upgrade** shows when you point at the card. **Uninstall** moved to the foot as a link, and the foot says what **Remove old versions** and **Uninstall** free. The card keeps its height during an install. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issues #793 and #795.
 - **2026-10-24** — An upgrade shows the real step: "Closing workspace 2 of 3...", then "Saving workspace data" with a percentage and the time, and it says when the save is slow. The old line "Upgrade queued — saving workspace data first" at 5 % is gone. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.
 - **2026-10-22** — Each agent card has the same header as the cards of the Configuration tab, with a status line, an (i) button and the buttons **Install**, **Upgrade** and **Uninstall**. The chips are called **Version**, **Variables**, **Storage**, **Terminal** and **Start options**. The card foot shows the size and **Remove old versions**; the install method and the package name are behind the (i). The cards can be closed and moved. The button is called **Check for updates** and the status line reads "Checked 7 min ago". Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md` (Phase 7), issue #750.

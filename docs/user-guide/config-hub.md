@@ -39,6 +39,7 @@ The table shows what each agent can receive. "Yes" means the Config Hub can writ
 | Antigravity CLI | Yes | Yes (same file as Gemini CLI) | Yes | No |
 | Qwen Code | Yes | Yes | Yes | Yes |
 | OpenCode | Yes | Yes | Yes | Yes |
+| OpenCode 2 | Yes (its own file and format) | Yes | Yes | Yes |
 | Kilo Code | Yes | Yes | Yes | No |
 | GitHub Copilot | Yes | Yes | Yes | No |
 | Codex CLI | Yes | Yes | Yes | No |
@@ -56,7 +57,7 @@ Notes on the table:
 - **Grok Build** reads the instruction file of a project, not a global one. It receives skills and commands.
 - **Codex CLI** has no commands in the Config Hub, because Codex uses skills in place of commands.
 - **Antigravity CLI** and **Gemini CLI** read the same instruction file. If you select either one, the Config Hub writes that file once.
-- **Five agents share one skills folder:** Codex CLI, Gemini CLI, OpenCode, GitHub Copilot and Goose read the same shared folder. The Config Hub writes it once. It keeps the files while any of the five is still selected.
+- **Six agents share one skills folder:** Codex CLI, Gemini CLI, OpenCode, OpenCode 2, GitHub Copilot and Goose read the same shared folder. The Config Hub writes it once. It keeps the files while any of the six is still selected.
 - The MCP file formats differ. Most agents use JSON. Codex CLI and Grok Build use TOML. Goose uses YAML. The Config Hub writes each one in the format of the agent.
 
 ## How to use it
@@ -373,6 +374,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — New row **OpenCode 2**. It has its own settings folder, so its MCP servers, instructions and commands are separate from OpenCode. It reads the shared skills folder. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issue #822.
 - **2026-10-27** — In **Global Instructions**, Claude Code and OpenCode show **covered** when they already read the instructions through `~/.claude`. A tick on them asks first. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #798.
 - **2026-10-27** — The card **Config drift detected** has aligned columns, plain state words and a hover text on each button. **Compare** opens both texts side by side with colours and red and green marks. A button that cannot work on a row is grey and says why. The Release on the **Command environment block** row no longer unticks Codex from every server, and a secret that you typed into a block shows masked. Spec `docs/specs/HUB_DRIFT_VIEW.md`, issues #797, #799, #800, #801.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
