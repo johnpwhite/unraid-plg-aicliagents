@@ -57,6 +57,9 @@ HTML,
     'adv-notebook' => <<<'HTML'
 <p>Inside: the folder name, the rule for production keys, the spoken notice, the quiet hours and the agent journal.</p>
 HTML,
+    'card-subagents' => <<<'HTML'
+<p>Let an agent hand one task to another agent in its own workspace, so work runs in parallel while you stay in control. A sub-agent workspace is a workspace that an agent starts for one task. Each start shows in the Activity tray and names the agent that asked. The limits keep too many sub-agents from running at once. Everything is off by default.</p>
+HTML,
     'card-ssh' => <<<'HTML'
 <p>Open an agent's terminal straight from your own computer with ssh, with no browser. Add your public key, then run <code>ssh &lt;user&gt; aicli-agent-&lt;name&gt;</code>. The key can run only that command.</p>
 HTML,

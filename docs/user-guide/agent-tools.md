@@ -153,35 +153,35 @@ The command `restore-home` has a second use for you. Run in your own shell, `res
 
 `aicli_speak` says one short sentence aloud, up to 500 characters, on every browser tab that has voice turned on. It obeys the switches. If the global voice switch is off, or the workspace is muted, the tool refuses and the agent hears why. Voice mail keeps what an agent said, so you can read it later. `aicli_preview_voice` lets an agent hear a voice before it picks one for itself. An agent can also choose its own spoken name and voice. The plugin warns, but does not block, when two workspaces get the same name or voice. See [Voice](voice.md).
 
-## Helper workspaces
+## Sub-agent workspaces
 
-An agent can start a second agent to do one task in a separate folder. The second agent is a **helper workspace**. The agent that starts it is its **parent**. One tool call makes the workspace, sets its model and effort, gives it the task and starts it. The task is a file in the helper's folder, so the helper needs no other message to know what to do.
+An agent can start a second agent to do one task in a separate folder. The second agent is a **sub-agent workspace**. The agent that starts it is its **parent**. One tool call makes the workspace, sets its model and effort, gives it the task and starts it. The task is a file in the sub-agent's folder, so the sub-agent needs no other message to know what to do.
 
-To allow it, open **Settings**, then the **Configuration** tab, then the card **General**, part **Advanced**.
+To allow it, open **Settings**, then the **Configuration** tab. Turn on **Let agents manage the plugin** in the card **General**, part **Advanced**. The sub-agent tools need it. Then use the card **Sub-agent workspaces**.
 
-1. Turn on **Let agents manage the plugin**. The helper tools need it.
-2. Turn on **Let agents start helper workspaces**. The default is **Off (default)**.
-3. Set **Helpers allowed at once** if you want other limits. The defaults are 3 per workspace, 2 per agent kind and 6 on the whole server.
-4. Leave **Let helpers run without asking** on **Off (default)** unless you trust the task. It lets a helper skip the permission questions of its agent. It works only in a worktree that the plugin made.
+1. Turn on **Let agents manage the plugin**.
+2. Turn on **Let agents start sub-agent workspaces**. The default is **Off (default)**.
+3. Set **Sub-agents allowed at once** if you want other limits. The defaults are 3 per workspace, 2 per agent kind and 6 on the whole server.
+4. Leave **Let sub-agents run without asking** on **Off (default)** unless you trust the task. It lets a sub-agent skip the permission questions of its agent. It works only in a worktree that the plugin made.
 
-What you see: a notice in the Activity tray, for example "Helper workspace started: docs-codex". The grey line names the parent and the helper's agent and model. The helper appears in the drawer under the workspace that started it, with an indent. A workspace that has helpers shows a small button with the number of helpers. Press it to hide or show them; the drawer remembers your choice. If the parent is closed, the helper stays in the list on its own.
+What you see: a notice in the Activity tray, for example "Sub-agent workspace started: docs-codex". The grey line names the parent and the sub-agent's agent and model. The sub-agent appears in the drawer under the workspace that started it, with an indent. A workspace that has sub-agents shows a small button with the number of sub-agents. Press it to hide or show them; the drawer remembers your choice. If the parent is closed, the sub-agent stays in the list on its own.
 
 The rules:
 
-- Only a workspace that you opened can start helpers. A helper cannot start another helper.
+- Only a workspace that you opened can start sub-agents. A sub-agent cannot start another sub-agent.
 - With a **worktree**, the plugin makes a new git branch and folder under `<repo>/.claude/worktrees`. It never pushes, merges or resets.
 - A start is refused when a limit is reached, when the agent shows a usage limit (the answer gives the time it resets), or when the folder is a plugin state folder.
 - Two workspaces of one agent in one folder are not allowed. Use a worktree.
-- Only the workspace that started a helper, or you, can close it again. Another agent is refused.
-- An agent can start any workspace that already exists and is closed. This works when **Let agents start helper workspaces** is **Off (default)**, because that switch guards only the making of helpers. The start shows in the Activity tray. It keeps the same checks as a start from the Manager: it waits for an agent upgrade or a home merge that is in progress.
-- The helper reports with one tool call when its task is over, with the result **done**, **failed** or **blocked** and a short summary. The parent gets a Relay message. The Activity tray shows one notice that names the parent. By default the plugin then closes the helper when it is idle again.
-- A helper may stop and ask for permission, for example to read a folder outside its own. The parent can answer for you, but only with a short "allow once" answer such as **1** or **yes**. The plugin refuses to let a parent answer a question about a push, a delete, the boot disk, the plugin's own state, another workspace or a remote shell. Those wait for you. Each answer is recorded with the question.
-- Text that a parent types into its helper starts with a tag, for example `[from parent main]`. The plugin writes the tag, so the helper knows the words come from its parent, and you see who typed them in the terminal.
-- When you close a helper yourself, in the drawer, a question opens first if the close may lose work. It says which agent started the helper and for what task, and it lists the reasons: the task is not reported as done, files are not committed, or commits are not merged. Choose **Close anyway** or **Cancel**. A workspace that you made never shows this question. A helper that reported done, with all its work merged, closes with no question.
-- A parent can give a helper a time limit with `maxMinutes` (1 to 1440). When the helper passes the limit without a report, the parent gets one message and the Activity tray shows one notice. The plugin does not stop the helper.
-- A Codex helper in a worktree starts with that folder already trusted, so it does not stop on the "trust this folder" question. The plugin removes the trust again when the helper closes. The plugin also makes sure the Relay command works inside a Codex helper.
-- When you close a helper yourself, in the drawer, the plugin finishes the job a little later, when the helper has stopped. It removes the helper's flags file, and it removes the worktree under the same rule as below: only when all work is merged and nothing is uncommitted.
-- When a parent closes a helper, the helper stops and leaves the list. The plugin removes its worktree only when all its work is merged and nothing is uncommitted. Otherwise the worktree stays, and the parent is told which branch holds the work. No approval is needed for this, because only the parent or you can do it.
+- Only the workspace that started a sub-agent, or you, can close it again. Another agent is refused.
+- An agent can start any workspace that already exists and is closed. This works when **Let agents start sub-agent workspaces** is **Off (default)**, because that switch guards only the making of sub-agents. The start shows in the Activity tray. It keeps the same checks as a start from the Manager: it waits for an agent upgrade or a home merge that is in progress.
+- The sub-agent reports with one tool call when its task is over, with the result **done**, **failed** or **blocked** and a short summary. The parent gets a Relay message. The Activity tray shows one notice that names the parent. By default the plugin then closes the sub-agent when it is idle again.
+- A sub-agent may stop and ask for permission, for example to read a folder outside its own. The parent can answer for you, but only with a short "allow once" answer such as **1** or **yes**. The plugin refuses to let a parent answer a question about a push, a delete, the boot disk, the plugin's own state, another workspace or a remote shell. Those wait for you. Each answer is recorded with the question.
+- Text that a parent types into its sub-agent starts with a tag, for example `[from parent main]`. The plugin writes the tag, so the sub-agent knows the words come from its parent, and you see who typed them in the terminal.
+- When you close a sub-agent yourself, in the drawer, a question opens first if the close may lose work. It says which agent started the sub-agent and for what task, and it lists the reasons: the task is not reported as done, files are not committed, or commits are not merged. Choose **Close anyway** or **Cancel**. A workspace that you made never shows this question. A sub-agent that reported done, with all its work merged, closes with no question.
+- A parent can give a sub-agent a time limit with `maxMinutes` (1 to 1440). When the sub-agent passes the limit without a report, the parent gets one message and the Activity tray shows one notice. The plugin does not stop the sub-agent.
+- A Codex sub-agent in a worktree starts with that folder already trusted, so it does not stop on the "trust this folder" question. The plugin removes the trust again when the sub-agent closes. The plugin also makes sure the Relay command works inside a Codex sub-agent.
+- When you close a sub-agent yourself, in the drawer, the plugin finishes the job a little later, when the sub-agent has stopped. It removes the sub-agent's flags file, and it removes the worktree under the same rule as below: only when all work is merged and nothing is uncommitted.
+- When a parent closes a sub-agent, the sub-agent stops and leaves the list. The plugin removes its worktree only when all its work is merged and nothing is uncommitted. Otherwise the worktree stays, and the parent is told which branch holds the work. No approval is needed for this, because only the parent or you can do it.
 
 ## The Notebook tools
 
@@ -228,6 +228,7 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — The settings for sub-agent workspaces have their own card, **Sub-agent workspaces**, after **Script runs**. They were in **General**, part **Advanced**. The word "helper" is now "sub-agent". Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #792.
 - **2026-10-24** — The tools `aicli_archive_boot_data`, `aicli_remove_boot_data` and `aicli_get_boot_space` also cover the large session logs of the other agents and the old layer images (home name `all`). Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-24** — An agent can start any existing workspace, also when the helper switch is off. A new tool sets the launch arguments of a whole agent. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #542.
 - **2026-10-24** — The Activity tray shows who acted, for example "by root (John)", and who approved or rejected a proposal. Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.

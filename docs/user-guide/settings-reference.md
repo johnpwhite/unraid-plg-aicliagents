@@ -38,7 +38,7 @@ On a phone, the tables on this page scroll sideways. The controls on the page ar
 
 ## Configuration tab
 
-The Configuration tab shows ten cards: **General**, **Storage**, **Terminal**, **Automatic continue**, **Relay notices**, **Agent voice**, **Dictation**, **Notebook**, **Script runs** and **SSH keys**. On a wide screen the page spreads the cards over several columns. On a phone it shows one column. Most cards have two parts. The main settings are always in view. The seldom-used settings are in the **Advanced** part, a section that you open when you need it. In this guide, each setting is under its card, and the rows of the **Advanced** part come after the heading **Advanced**.
+The Configuration tab shows eleven cards: **General**, **Storage**, **Terminal**, **Automatic continue**, **Relay notices**, **Agent voice**, **Dictation**, **Notebook**, **Script runs**, **Sub-agent workspaces** and **SSH keys**. On a wide screen the page spreads the cards over several columns. On a phone it shows one column. Most cards have two parts. The main settings are always in view. The seldom-used settings are in the **Advanced** part, a section that you open when you need it. In this guide, each setting is under its card, and the rows of the **Advanced** part come after the heading **Advanced**.
 
 ### General card
 
@@ -55,7 +55,7 @@ The status line shows whether the tab is shown, the Terminal user and the Starti
 
 #### Advanced
 
-The **Advanced** part of the card is closed at first. Select **Advanced** to open it. Its **(i)** button says what is inside. It holds the log detail, the version checks, the switch for agents and the name of this browser.
+The **Advanced** part of the card is closed at first. Select **Advanced** to open it. Its **(i)** button says what is inside. It holds the log detail, the version checks, the switch that lets agents manage the plugin, your name in the records and the name of this browser.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
@@ -63,10 +63,7 @@ The **Advanced** part of the card is closed at first. Select **Advanced** to ope
 | **Check for new agent versions** | How often the plugin looks online for new versions of the installed agents. "Never" turns the check off. "Check for updates" on the Agent Store still works. | Daily at 6am | Every 6 hours; Daily at 6am; Weekly (Monday 6am); Never | Choose Never on a server with no internet. Check by hand with **Check for Updates** on the Agent Store tab. | Saves. The plugin changes its schedule job at once. | No |
 | **Keep version check results for** | How long the plugin keeps old results of the version check. Older results are removed. | 3 months | 1 month; 3 months; 6 months; 12 months | Choose a longer time when you want more past versions in the version lists. | Saves. | No |
 | **Let agents manage the plugin** | Gives agents tools to read the plugin's state and make routine changes. Reads change nothing. Changes appear in the Activity tray. Delete, upgrade, back up, restore and merge only propose, and wait for your approval in the Manager. See [Plugin management tools for agents](agent-tools.md). | Off (default) | On; Off (default) | Turn it on when you want an agent to help you manage the plugin. | Saves. The plugin adds or removes the tools for the agents at once. A running agent reads its tool list when it starts, so restart a workspace to see a change. | No. An agent cannot widen or switch off its own tools. |
-| **Let agents start helper workspaces** | Lets an agent start a helper workspace with one tool call. The helper gets its own folder, task and agent. Each start shows in the Activity tray and names the agent that asked. See [Plugin management tools for agents](agent-tools.md). | Off (default) | On; Off (default) | Turn it on when you want an agent to hand a task to a second agent. It also needs **Let agents manage the plugin**. An agent can start a workspace that already exists when this switch is **Off (default)**. | Saves. The tools answer at once. | No. An agent cannot turn the switch on or raise a limit. |
 | **Your name in the records** | The name that follows your Unraid login in the Activity tray, the event list and the log. For example, "root (John)". The login always shows, so this name only adds to it. | Empty | Text, up to 40 characters | Set it when more than one person uses the same Unraid login, so the records say who acted. | Saves. New records use it at once. Old records keep their text. | No. Only a person can change it. |
-| **Helpers allowed at once** | The most helpers that run at the same time: for one workspace, for one agent kind, and on the whole server. A start above a limit is refused. | 3 per workspace, 2 per agent, 6 in total | 1 to 10 per workspace; 1 to 10 per agent; 1 to 20 in total | Lower the numbers on a small server, or when a provider has a tight usage limit. | Saves. A number outside the range becomes the default. | No |
-| **Let helpers run without asking** | Lets a helper run without asking you for permission, for example Codex without its sandbox. This works only in a worktree that the plugin made. | Off (default) | On; Off (default) | Turn it on only when you trust the task, because it lowers the protection of the agent. | Saves. Helpers that already run keep their flags. | No |
 | **Device name (this browser)** | Names this browser in the Activity tray, so you can see which device did what. The name stays in this browser. For example: phone or laptop. | Empty | Text, up to 40 characters | Set it when you use the plugin from several devices and want the activity record to say which one acted. | Saves in this browser only. The name does not go into the plugin settings. | No |
 
 ### Storage card
@@ -264,6 +261,16 @@ The **Advanced** part of the card is closed at first. Its **(i)** button says wh
 | **Time to approve a run** | A run that may change files waits for your approval. With no answer in this time, it ends and starts nothing. | 24 hours | 1 to 168 | Raise it when you look at the Activity tray rarely. | Saves, nothing else. | No |
 | **Time limit for a run** | The plugin closes a run that has not reported when this time passes. It keeps the result and the Notebook card. | 60 minutes | 1 to 1440 | Raise it for a long check. | Saves, nothing else. | No |
 | **Notify me when a run starts and ends** | Raises an Unraid notice when a run starts or reports done. Warnings, for example a refused script, always show. | Yes (default) | Yes (default); No | Turn it off for a script that runs often. | Saves, nothing else. | No |
+
+### Sub-agent workspaces card
+
+Let an agent hand one task to another agent in its own workspace, so work runs in parallel while you stay in control. A sub-agent workspace is a workspace that an agent starts for one task. Each start shows in the Activity tray and names the agent that asked. See [Plugin management tools for agents](agent-tools.md). The switches are off by default. No agent can change these settings. The card has no **Advanced** part. The status line shows, for example, **Off · up to 6 in total**, and a card that is **Off** starts closed.
+
+| Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| **Let agents start sub-agent workspaces** | Lets an agent start a sub-agent workspace with one tool call. The sub-agent gets its own folder, task and agent. Each start shows in the Activity tray and names the agent that asked. See [Plugin management tools for agents](agent-tools.md). | Off (default) | On; Off (default) | Turn it on when you want an agent to hand a task to a second agent. It also needs **Let agents manage the plugin**, in **General**, part **Advanced**. An agent can start a workspace that already exists when this switch is **Off (default)**. | Saves. The tools answer at once. | No. An agent cannot turn the switch on or raise a limit. |
+| **Sub-agents allowed at once** | The most sub-agents that run at the same time: for one workspace, for one agent kind, and on the whole server. A start above a limit is refused. | 3 per workspace, 2 per agent, 6 in total | 1 to 10 per workspace; 1 to 10 per agent; 1 to 20 in total | Lower the numbers on a small server, or when a provider has a tight usage limit. | Saves. A number outside the range becomes the default. | No |
+| **Let sub-agents run without asking** | Lets a sub-agent run without asking you for permission, for example Codex without its sandbox. This works only in a worktree that the plugin made. | Off (default) | On; Off (default) | Turn it on only when you trust the task, because it lowers the protection of the agent. | Saves. Sub-agents that already run keep their flags. | No |
 
 ### SSH keys card
 
@@ -561,6 +568,7 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-27** — New card **Sub-agent workspaces**, after **Script runs**. It holds **Let agents start sub-agent workspaces**, **Sub-agents allowed at once** and **Let sub-agents run without asking**, which were in **General**, part **Advanced**. The word "helper" is now "sub-agent" on the page, in the tray and in the notices. The tab has eleven cards. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #792.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — Each card help text (the (i) button) and the card intro here now say first what you gain from the feature. Issue #789.
 - **2026-10-26** — **Home storage**, **Agent storage** and **Where unsaved changes are kept** show the current state, and the line **Now:** is gone. A change turns the drop-down orange and lights a button **Apply** with a moving light on its edge. Only **Apply** starts the conversion or the move; **Cancel** keeps the choice. A mixed kind shows **Mixed: N plain, M compressed**. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #790.

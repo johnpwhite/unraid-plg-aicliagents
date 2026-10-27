@@ -113,7 +113,7 @@ This version runs every agent as root. A restricted run user and a temporary fol
 ## Related pages
 
 - [Settings reference](settings-reference.md): every setting of the card **Script runs**.
-- [Plugin management tools for agents](agent-tools.md): the tools that an agent uses to start its own helper workspaces.
+- [Plugin management tools for agents](agent-tools.md): the tools that an agent uses to start its own sub-agent workspaces.
 - [Health, Activity and troubleshooting](health-and-troubleshooting.md): the Activity tray.
 
 <details>

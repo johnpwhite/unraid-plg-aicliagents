@@ -2,12 +2,12 @@
 /**
  * <module_context>
  *     <name>SpawnService</name>
- *     <description>An agent starts a helper workspace, gives it a task, watches it and closes it
+ *     <description>An agent starts a sub-agent workspace, gives it a task, watches it and closes it
  *     (docs/specs/AGENT_SPAWN_WORKSPACE.md, issue #673). This service holds every rule of the four
  *     tools aicli_spawn_workspace, aicli_start_workspace, aicli_stop_workspace and aicli_finish_task,
  *     including reports from script-run workspaces (docs/specs/AGENT_RUN_ENTRY_POINT.md, issue #745),
- *     the parent's answer to a helper's permission prompt (R13), the close of a helper (R14, R17), the
- *     confirm text for a person who closes a helper (R16) and the supervisor sweep that closes a helper
+ *     the parent's answer to a sub-agent's permission prompt (R13), the close of a sub-agent (R14, R17), the
+ *     confirm text for a person who closes a sub-agent (R16) and the supervisor sweep that closes a sub-agent
  *     after its report. AdminService exposes thin methods that call this class; AdminMcpTools wraps their
  *     answers.</description>
  *     <dependencies>ConfigService, ArgsService, AgentLaunchProfile, AgentRegistry, AutoLaunchSuppression,
@@ -27,10 +27,10 @@ namespace AICliAgents\Services;
 
 class SpawnService
 {
-    /** The folder inside the helper's workspace folder that holds the task files. */
+    /** The folder inside the sub-agent's workspace folder that holds the task files. */
     public const TASK_DIR = '.aicli-task';
 
-    /** The fixed first line the plugin gives a helper. The caller never writes it (spec R22). */
+    /** The fixed first line the plugin gives a sub-agent. The caller never writes it (spec R22). */
     public const FIRST_LINE = 'Your task is in .aicli-task/TASK.md. Read it, do it, then call aicli_finish_task.';
 
     public const MAX_TASK_CHARS = 16000;
@@ -38,11 +38,11 @@ class SpawnService
     public const MAX_TITLE_CHARS = 80;
     /** One spawn for each caller in this many seconds. */
     public const SPAWN_GAP_SECONDS = 10;
-    /** One answer to a helper prompt for each helper in this many seconds. */
+    /** One answer to a sub-agent prompt for each sub-agent in this many seconds. */
     public const ANSWER_GAP_SECONDS = 2;
     /** The longest the spawn call waits for the pane of an agent without a prompt flag to be ready. */
     public const PANE_WAIT_SECONDS = 30;
-    /** A reported helper or script run closes only after this many seconds, so its last reply can finish. */
+    /** A reported sub-agent or script run closes only after this many seconds, so its last reply can finish. */
     public const CLOSE_AFTER_REPORT_SECONDS = 5;
     /** The longest per-spawn time limit, in minutes (one day). */
     public const MAX_MINUTES_LIMIT = 1440;
@@ -141,7 +141,7 @@ class SpawnService
         return $out;
     }
 
-    /** True when a person turned the four helper tools on. Compared with '1', never a truthy cast. */
+    /** True when a person turned the four sub-agent tools on. Compared with '1', never a truthy cast. */
     public static function enabled(): bool
     {
         return self::settings()['spawn_enabled'] === '1';
@@ -149,7 +149,7 @@ class SpawnService
 
     public static function disabledMessage(): string
     {
-        return 'Helper workspaces are turned off. A person turns them on in Settings, General, Advanced, "Let agents start helper workspaces".';
+        return 'Sub-agent workspaces are turned off. A person turns them on in Settings, Sub-agent workspaces, "Let agents start sub-agent workspaces".';
     }
 
     private static function cap(string $key): int
@@ -180,14 +180,14 @@ class SpawnService
         return null;
     }
 
-    /** True when the record is a helper workspace that the spawn tool made. */
+    /** True when the record is a sub-agent workspace that the spawn tool made. */
     public static function isHelper(?array $record): bool
     {
         return $record !== null && (!empty($record['spawned']) || is_array($record['spawn'] ?? null));
     }
 
     /**
-     * Who is calling, for the spawn tool. Decision 6: a helper cannot start another helper. R19 and the
+     * Who is calling, for the spawn tool. Decision 6: a sub-agent cannot start another sub-agent. R19 and the
      * spec table: a call with no workspace behind it (a remote client) is refused in this version.
      *
      * @return array{id:string,record:array<string,mixed>}|array{error:string}
@@ -196,14 +196,14 @@ class SpawnService
     {
         $id = self::callerId();
         if ($id === '') {
-            return ['error' => 'A helper workspace can be started only from inside a workspace. A call with no workspace behind it is refused.'];
+            return ['error' => 'A sub-agent workspace can be started only from inside a workspace. A call with no workspace behind it is refused.'];
         }
         $record = self::findRecord($id);
         if ($record === null) {
-            return ['error' => "This session ('$id') is not a known workspace, so it cannot start a helper. Use a workspace from aicli_list_workspaces."];
+            return ['error' => "This session ('$id') is not a known workspace, so it cannot start a sub-agent. Use a workspace from aicli_list_workspaces."];
         }
         if (self::isHelper($record)) {
-            return ['error' => 'A helper workspace cannot start another helper workspace. Only a workspace that a person opened may do that.'];
+            return ['error' => 'A sub-agent workspace cannot start another sub-agent workspace. Only a workspace that a person opened may do that.'];
         }
         return ['id' => $id, 'record' => $record];
     }
@@ -224,7 +224,7 @@ class SpawnService
     }
 
     // ======================================================================
-    // Small helpers: text, paths, gaps, git, events
+    // Small sub-agents: text, paths, gaps, git, events
     // ======================================================================
 
     /** The text with secrets replaced, cut to $max characters. '' when the redaction cannot run (fail closed). */
@@ -270,7 +270,7 @@ class SpawnService
         return true;
     }
 
-    /** @return array<int,string> Folders that a helper may never use as its workspace folder. */
+    /** @return array<int,string> Folders that a sub-agent may never use as its workspace folder. */
     private static function blockedPrefixes(): array
     {
         if (self::$blockedPrefixes !== null) return self::$blockedPrefixes;
@@ -290,7 +290,7 @@ class SpawnService
     }
 
     /**
-     * A folder for a helper: the same rule as the Manager's folder picker (ValidationService), and a folder
+     * A folder for a sub-agent: the same rule as the Manager's folder picker (ValidationService), and a folder
      * that exists, can be read, and is not a live state folder (spec section 8, path rules).
      *
      * @return array{path:string}|array{error:string}
@@ -302,7 +302,7 @@ class SpawnService
             return ['error' => "$what '$path' does not resolve to an existing, readable folder inside an allowed location."];
         }
         if (self::pathIsBlocked($resolved)) {
-            return ['error' => "$what '$path' is a plugin state folder or the boot disk. A helper workspace can never use it."];
+            return ['error' => "$what '$path' is a plugin state folder or the boot disk. A sub-agent workspace can never use it."];
         }
         return ['path' => $resolved];
     }
@@ -339,7 +339,7 @@ class SpawnService
 
     /**
      * One Activity tray record that names the parent (R15). Used by the paths that no tool call starts, for
-     * example the supervisor sweep that closes a helper. A tool call gets its tray record from
+     * example the supervisor sweep that closes a sub-agent. A tool call gets its tray record from
      * AdminMcpTools::recordChangeAudit(), so a tool path never calls this (one notice for each step).
      */
     public static function notify(string $title, string $detail, string $workspaceId = ''): void
@@ -374,7 +374,7 @@ class SpawnService
         return ConfigService::saveWorkspaces(['sessions' => [$record]], []);
     }
 
-    /** The helper marks of a new record: who started it, for what, and how it ends. @return array<string,mixed> */
+    /** The sub-agent marks of a new record: who started it, for what, and how it ends. @return array<string,mixed> */
     public static function newSpawnMeta(string $parentId, string $parentName, string $taskTitle, bool $autoClose, bool $unattended, ?array $worktree, string $model, string $effort, int $maxMinutes = 0): array
     {
         return [
@@ -393,7 +393,7 @@ class SpawnService
     }
 
     /**
-     * What aicli_list_workspaces and aicli_get_workspace show for a helper (spec section 6): the parent, the
+     * What aicli_list_workspaces and aicli_get_workspace show for a sub-agent (spec section 6): the parent, the
      * task, the state and the report. A person-made workspace has no such block (null).
      *
      * @param array<string,mixed> $record
@@ -423,7 +423,7 @@ class SpawnService
     }
 
     /**
-     * The state of a helper (spec section 6): running, closed, idle, busy, waiting_approval, quota or
+     * The state of a sub-agent (spec section 6): running, closed, idle, busy, waiting_approval, quota or
      * reported_done. `idle`, `busy` and `waiting_approval` come from the pane classifier that exists; no
      * new screen scraping. Never throws.
      *
@@ -458,7 +458,7 @@ class SpawnService
     // Slice (b): aicli_spawn_workspace
     // ======================================================================
 
-    /** Count the helpers that run now: [all, for one parent, for one agent kind]. @return array{0:int,1:int,2:int} */
+    /** Count the sub-agents that run now: [all, for one parent, for one agent kind]. @return array{0:int,1:int,2:int} */
     private static function runningHelpers(string $parentId, string $agentId): array
     {
         $all = $mine = $kind = 0;
@@ -480,7 +480,7 @@ class SpawnService
     }
 
     /**
-     * Create a helper workspace, deliver its task and start it, in one call (spec R1).
+     * Create a sub-agent workspace, deliver its task and start it, in one call (spec R1).
      *
      * $p keys: agentId, name, path OR worktree{repo,branch,base}, model, effort, task, taskTitle,
      * unattended (bool), autoClose (bool, default true), box (refused when set).
@@ -493,23 +493,23 @@ class SpawnService
         try {
             if (!self::enabled()) return ['error' => self::disabledMessage()];
 
-            // R19: a helper starts on this box only.
+            // R19: a sub-agent starts on this box only.
             if (trim((string)($p['box'] ?? '')) !== '') {
-                return ['error' => 'A helper workspace can start only on this box. Starting one on a linked box is not supported.'];
+                return ['error' => 'A sub-agent workspace can start only on this box. Starting one on a linked box is not supported.'];
             }
 
             $caller = self::spawnCaller();
             if (isset($caller['error'])) return $caller;
             return self::spawnCore($p, (string)$caller['id'], (string)($caller['record']['name'] ?? $caller['id']), []);
         } catch (\Throwable $e) {
-            return ['error' => 'The helper workspace could not be started: ' . self::safeText($e->getMessage(), 300)];
+            return ['error' => 'The sub-agent workspace could not be started: ' . self::safeText($e->getMessage(), 300)];
         }
     }
 
     /**
      * Start the workspace of one script run (docs/specs/AGENT_RUN_ENTRY_POINT.md R28, issue #745). It skips only
      * spawnCaller(): a run has no parent workspace. The caller is the script that AgentRunService has already
-     * checked. The run switch (`run_enabled`) replaces the helper switch. No agent tool calls this method.
+     * checked. The run switch (`run_enabled`) replaces the sub-agent switch. No agent tool calls this method.
      *
      * $p keys are the keys of spawn() (agentId, name, path, model, effort, task, taskTitle, autoClose, maxMinutes).
      * $run keys: runId (required), label (the caller script label), readOnly (bool), unattended (bool, only for a
@@ -540,7 +540,7 @@ class SpawnService
      * The shared part of spawn() and spawnForRun(): checks, then side effects.
      *
      * @param array<string,mixed> $p
-     * @param array<string,mixed> $run Empty for a helper that a workspace starts. Else the run keys of spawnForRun().
+     * @param array<string,mixed> $run Empty for a sub-agent that a workspace starts. Else the run keys of spawnForRun().
      * @return array<string,mixed>
      */
     private static function spawnCore(array $p, string $callerId, string $callerName, array $run): array
@@ -559,7 +559,7 @@ class SpawnService
             // The task. Its text is data: it is written to a file and never run.
             $task = (string)($p['task'] ?? '');
             $task = rtrim(str_replace("\r\n", "\n", $task));
-            if (trim($task) === '') return ['error' => 'Give the task: what the helper must do.'];
+            if (trim($task) === '') return ['error' => 'Give the task: what the sub-agent must do.'];
             if (self::length($task) > self::MAX_TASK_CHARS) {
                 return ['error' => 'The task is too long. The limit is ' . self::MAX_TASK_CHARS . ' characters. Put the long brief in a file in the folder and name the file in the task.'];
             }
@@ -585,13 +585,13 @@ class SpawnService
                 if (empty($run['unattended'])) return ['error' => 'A run goes unattended only after a person approved it.'];
             } elseif ($unattended) {
                 if (self::settings()['spawn_allow_unattended'] !== '1') {
-                    return ['error' => 'Unattended flags are turned off. A person turns them on in Settings, General, Advanced, "Let helpers run without asking".'];
+                    return ['error' => 'Unattended flags are turned off. A person turns them on in Settings, Sub-agent workspaces, "Let sub-agents run without asking".'];
                 }
                 if ($wtReq === null) {
                     return ['error' => 'Unattended flags are allowed only in a worktree that this tool makes. Give a worktree (repo and branch) instead of a folder.'];
                 }
             }
-            // The optional time limit (spec Edge Cases): a whole number of minutes, 1 to 1440. It never kills the helper.
+            // The optional time limit (spec Edge Cases): a whole number of minutes, 1 to 1440. It never kills the sub-agent.
             $maxMinutes = 0;
             $rawMax = $p['maxMinutes'] ?? null;
             if ($rawMax !== null && trim((string)$rawMax) !== '') {
@@ -634,21 +634,21 @@ class SpawnService
             // Guard rails (spec section 8).
             [$total, $mine, $kind] = self::runningHelpers($callerId, $agentId);
             if ($mine >= self::cap('spawn_max_children')) {
-                return ['error' => "You already have $mine running helper workspaces. The limit is " . self::cap('spawn_max_children') . '. Close one first.'];
+                return ['error' => "You already have $mine running sub-agent workspaces. The limit is " . self::cap('spawn_max_children') . '. Close one first.'];
             }
             if ($total >= self::cap('spawn_max_total')) {
-                return ['error' => "$total helper workspaces run on this box. The limit is " . self::cap('spawn_max_total') . '. Wait until one is closed.'];
+                return ['error' => "$total sub-agent workspaces run on this box. The limit is " . self::cap('spawn_max_total') . '. Wait until one is closed.'];
             }
             if ($kind >= self::cap('spawn_max_per_agent')) {
-                return ['error' => "$kind helper workspaces of '$agentId' already run. The limit is " . self::cap('spawn_max_per_agent') . ' for each agent kind.'];
+                return ['error' => "$kind sub-agent workspaces of '$agentId' already run. The limit is " . self::cap('spawn_max_per_agent') . ' for each agent kind.'];
             }
             $limit = self::$quotaProbe !== null ? (self::$quotaProbe)($agentId) : QuotaDetectionService::activeLimit($agentId, self::now());
             if ($limit !== null) {
                 $name = self::findRecord((string)$limit['workspaceId'])['name'] ?? (string)$limit['workspaceId'];
-                return ['error' => "The agent '$agentId' shows a usage limit (workspace $name). Its limit resets at " . self::whenText((int)$limit['reset_at']) . '. A helper would burn the same quota. Start the helper after that time.', 'resetAt' => (int)$limit['reset_at']];
+                return ['error' => "The agent '$agentId' shows a usage limit (workspace $name). Its limit resets at " . self::whenText((int)$limit['reset_at']) . '. A sub-agent would burn the same quota. Start the sub-agent after that time.', 'resetAt' => (int)$limit['reset_at']];
             }
             if (!self::gapOpen('spawn-' . $callerId, self::SPAWN_GAP_SECONDS)) {
-                return ['error' => 'You started a helper too recently. Wait ' . self::SPAWN_GAP_SECONDS . ' seconds and try again.'];
+                return ['error' => 'You started a sub-agent too recently. Wait ' . self::SPAWN_GAP_SECONDS . ' seconds and try again.'];
             }
 
             // ---- Side effects start here. ----
@@ -659,11 +659,11 @@ class SpawnService
 
             $id = 's' . bin2hex(random_bytes(4));
             if (self::findRecord($id) !== null) $id = 's' . bin2hex(random_bytes(4));
-            // R3 / friction 4: the sweep must not start the helper before its flags and task are in place.
+            // R3 / friction 4: the sweep must not start the sub-agent before its flags and task are in place.
             AutoLaunchSuppression::suppress($id);
 
             $name = trim((string)($p['name'] ?? ''));
-            if ($name === '') $name = basename($folder) ?: 'Helper';
+            if ($name === '') $name = basename($folder) ?: 'Sub-agent';
             $autoClose = !array_key_exists('autoClose', $p) || !empty($p['autoClose']);
             $wtMeta = $worktree !== null ? ['repo' => $worktree['repo'], 'branch' => $worktree['branch'], 'base' => $worktree['base'], 'path' => $worktree['path'], 'tool_made' => true] : null;
             $record = [
@@ -681,14 +681,14 @@ class SpawnService
                 ];
             }
             if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
-                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the helper workspace.'];
+                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the sub-agent workspace.'];
             }
             if (!ArgsService::saveIdArgs($id, (string)$flags['args'], $promptMode)) {
-                return ['error' => "The helper workspace '$id' was saved but its flags could not be written. It is held and not started.", 'id' => $id];
+                return ['error' => "The sub-agent workspace '$id' was saved but its flags could not be written. It is held and not started.", 'id' => $id];
             }
             $filesNote = self::writeTaskFiles($folder, $task, $promptMode !== AgentLaunchProfile::PROMPT_NONE);
             if (isset($filesNote['error'])) {
-                return ['error' => $filesNote['error'] . " The helper workspace '$id' is held and not started.", 'id' => $id];
+                return ['error' => $filesNote['error'] . " The sub-agent workspace '$id' is held and not started.", 'id' => $id];
             }
 
             // R20: no "Trust this folder?" question for a worktree that this tool made. R21: the agent's commands keep
@@ -712,12 +712,12 @@ class SpawnService
                 }
             } elseif (!$started['ok']) {
                 $delivery = 'not_started';
-                $deliveryNote = 'The helper workspace was saved but did not start (' . (string)($started['reason'] ?? 'unknown') . '). Use aicli_start_workspace to try again.';
+                $deliveryNote = 'The sub-agent workspace was saved but did not start (' . (string)($started['reason'] ?? 'unknown') . '). Use aicli_start_workspace to try again.';
             }
 
             $created = self::findRecord($id) ?? $record;
             self::emit('workspace.spawned', ['workspaceId' => $id, 'agentId' => $agentId],
-                ($isRun ? "Run workspace '$name'" : "Helper workspace '$name'") . " started by '$callerName'",
+                ($isRun ? "Run workspace '$name'" : "Sub-agent workspace '$name'") . " started by '$callerName'",
                 ['parent' => $callerId, 'taskTitle' => $title, 'autoClose' => $autoClose, 'delivery' => $delivery]);
 
             $mine2 = self::runningHelpers($callerId, $agentId)[1];
@@ -735,13 +735,13 @@ class SpawnService
             if ($deliveryNote !== '') $result['deliveryNote'] = $deliveryNote;
             return $result;
         } catch (\Throwable $e) {
-            return ['error' => 'The helper workspace could not be started: ' . self::safeText($e->getMessage(), 300)];
+            return ['error' => 'The sub-agent workspace could not be started: ' . self::safeText($e->getMessage(), 300)];
         }
     }
 
     /** @return array<string,mixed> */
     /**
-     * #783: the FIRST start of a new helper or script run is always fresh (`_fresh_`): it is a new task, and a
+     * #783: the FIRST start of a new sub-agent or script run is always fresh (`_fresh_`): it is a new task, and a
      * resume could only pick an older conversation of the folder (or, before #783, another workspace's). A later
      * start of a closed workspace (aicli_start_workspace) resumes its own conversation (`auto`).
      */
@@ -998,7 +998,7 @@ class SpawnService
     }
 
     /**
-     * Write the task files into the helper's folder: TASK.md (the brief) and, when the agent takes a first
+     * Write the task files into the sub-agent's folder: TASK.md (the brief) and, when the agent takes a first
      * prompt, PROMPT.once (the fixed first line). Both mode 600. When the folder is inside a git repo, the
      * folder .aicli-task/ goes into the repo's info/exclude, so git ignores it.
      *
@@ -1026,8 +1026,8 @@ class SpawnService
 
     /**
      * Start a closed workspace. Any caller may start any existing workspace (John, 2026-10-24, issue #542;
-     * "Start without the helper switch" in the spec). It does not need the helper switch
-     * `spawn_enabled`: that switch guards the creation of helpers. It does not need the caller to be the
+     * "Start without the sub-agent switch" in the spec). It does not need the sub-agent switch
+     * `spawn_enabled`: that switch guards the creation of sub-agents. It does not need the caller to be the
      * creator: a start only opens a closed workspace and deletes nothing. The stop rule is unchanged.
      * It clears the "closed on purpose" mark and starts the workspace once, under the normal launch lock.
      * The start path keeps every guard of the Manager start (agent upgrade, home merge, storage).
@@ -1054,7 +1054,7 @@ class SpawnService
                 return ['error' => "Workspace '$name' did not start (" . (string)($r['reason'] ?? 'unknown') . ').', 'workspaceId' => $id];
             }
             if (self::isHelper($record)) {
-                // A restarted helper is not "done" any more, and the sweep must not close it again at once.
+                // A restarted sub-agent is not "done" any more, and the sweep must not close it again at once.
                 self::updateRecord($id, static function (array $rec): array {
                     $rec['spawn']['state'] = 'starting';
                     unset($rec['spawn']['close_pending']);
@@ -1069,7 +1069,7 @@ class SpawnService
 
     /**
      * Stop a workspace that the caller created (spec R2, decision 2). A person may stop any workspace.
-     * A helper with autoClose is closed for good (R14, R17): stopped, removed from the list, and its worktree
+     * A sub-agent with autoClose is closed for good (R14, R17): stopped, removed from the list, and its worktree
      * removed when merged and clean. No approval step: only the creator or a person gets here. Any other
      * workspace is stopped and kept; its record and files stay.
      *
@@ -1079,7 +1079,7 @@ class SpawnService
     {
         try {
             // #779 (John, 2026-10-26): the creator may close a workspace it made with no approval, also while
-            // "Let agents start helper workspaces" is off. The switch guards making helpers, not closing them;
+            // "Let agents start sub-agent workspaces" is off. The switch guards making sub-agents, not closing them;
             // refuseUnlessCreator() below still refuses every other agent. A person may stop any workspace.
             $id = trim($id);
             $record = self::findRecord($id);
@@ -1137,11 +1137,11 @@ class SpawnService
     }
 
     // ======================================================================
-    // Slice (d): aicli_finish_task, the close of a helper, and autoClose
+    // Slice (d): aicli_finish_task, the close of a sub-agent, and autoClose
     // ======================================================================
 
     /**
-     * A helper or script-run workspace reports its task as finished. A helper writes RESULT.json, records
+     * A sub-agent or script-run workspace reports its task as finished. A sub-agent writes RESULT.json, records
      * `workspace.task_reported`, and sends its parent a Relay message. A run delegates to AgentRunService so it
      * updates the Notebook and the run records. Neither path closes its own pane; the supervisor does that later.
      *
@@ -1173,7 +1173,7 @@ class SpawnService
             }
             if (!self::enabled()) return ['error' => self::disabledMessage()];
             if ($callerId === '' || !self::isHelper($record)) {
-                return ['error' => 'Only a helper workspace can report a finished task. This workspace was not started with aicli_spawn_workspace.'];
+                return ['error' => 'Only a sub-agent workspace can report a finished task. This workspace was not started with aicli_spawn_workspace.'];
             }
             $status = strtolower(trim($status));
             if (!in_array($status, ['done', 'failed', 'blocked'], true)) {
@@ -1205,11 +1205,11 @@ class SpawnService
 
             $name = (string)($record['name'] ?? $callerId);
             self::emit('workspace.task_reported', ['workspaceId' => $callerId, 'agentId' => (string)($record['agentId'] ?? '')],
-                "Helper '$name' reported: $status", ['parent' => $parentId, 'status' => $status, 'autoClose' => $autoClose]);
+                "Sub-agent '$name' reported: $status", ['parent' => $parentId, 'status' => $status, 'autoClose' => $autoClose]);
 
             $notified = false;
             if ($parentId !== '') {
-                $text = "Helper '$name' reports $status: " . $safe;
+                $text = "Sub-agent '$name' reports $status: " . $safe;
                 if (strlen($text) > 1800) $text = substr($text, 0, 1800);
                 $res = self::$parentNotifier !== null
                     ? (self::$parentNotifier)($callerId, $parentId, $text)
@@ -1265,9 +1265,9 @@ class SpawnService
     }
 
     /**
-     * Close a helper or script run for good (R14, R17, R26): stop it and remove it from the list. Remove a
-     * helper worktree only when it is merged and clean. No approval. It never deletes a branch. $notify true
-     * adds the helper tray record (the sweep); a script run records its close through AgentRunService.
+     * Close a sub-agent or script run for good (R14, R17, R26): stop it and remove it from the list. Remove a
+     * sub-agent worktree only when it is merged and clean. No approval. It never deletes a branch. $notify true
+     * adds the sub-agent tray record (the sweep); a script run records its close through AgentRunService.
      *
      * @return array<string,mixed>
      */
@@ -1275,7 +1275,7 @@ class SpawnService
     {
         $record = self::findRecord($id);
         if ($record === null) return ['error' => "No workspace with id '$id' was found. It may be closed already."];
-        if (!self::isHelper($record)) return ['error' => 'Only a helper workspace that the spawn tool made is closed this way.'];
+        if (!self::isHelper($record)) return ['error' => 'Only a sub-agent workspace that the spawn tool made is closed this way.'];
         $name = (string)($record['name'] ?? $id);
         $agentId = (string)($record['agentId'] ?? '');
         $path = (string)($record['path'] ?? '');
@@ -1321,7 +1321,7 @@ class SpawnService
             $detail .= ' · the worktree is kept: ' . $worktree['reason'];
             $parentId = (string)($spawn['parent'] ?? '');
             if ($parentId !== '') {
-                $text = "Helper '$name' was closed. Its worktree '" . $worktree['branch'] . "' is kept: " . $worktree['reason'];
+                $text = "Sub-agent '$name' was closed. Its worktree '" . $worktree['branch'] . "' is kept: " . $worktree['reason'];
                 if (self::$parentNotifier !== null) (self::$parentNotifier)($id, $parentId, $text);
                 else AgentRelayService::directMessage($id, $parentId, $text);
             }
@@ -1330,13 +1330,13 @@ class SpawnService
         }
         if ($runId === '') {
             self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
-                "Helper workspace '$name' closed", ['parent' => (string)($spawn['parent'] ?? ''), 'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
-            if ($notify) self::notify('Helper workspace closed: ' . $name, $detail, $id);
+                "Sub-agent workspace '$name' closed", ['parent' => (string)($spawn['parent'] ?? ''), 'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
+            if ($notify) self::notify('Sub-agent workspace closed: ' . $name, $detail, $id);
         }
         return $result;
     }
 
-    /** R20: take the Codex trust of the helper's worktree away again. Best effort; a table the plugin did not add is not touched. */
+    /** R20: take the Codex trust of the sub-agent's worktree away again. Best effort; a table the plugin did not add is not touched. */
     private static function untrustWorktreeOf(array $spawn, string $agentId): void
     {
         $wt = is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null;
@@ -1346,12 +1346,12 @@ class SpawnService
     }
 
     /**
-     * A PERSON closed a helper or script run in the drawer (the browser saved the list without it). The browser
-     * has stopped the session and removed the row; this finishes the clean-up. A helper also loses its flags and
+     * A PERSON closed a sub-agent or script run in the drawer (the browser saved the list without it). The browser
+     * has stopped the session and removed the row; this finishes the clean-up. A sub-agent also loses its flags and
      * Codex trust, and its worktree goes only when it is merged and clean. A run records its close through
      * AgentRunService. The record is gone, so the caller passes the copy read before the save. Never throws.
      *
-     * @param array<string,mixed> $record The helper's record, read before it was removed.
+     * @param array<string,mixed> $record The sub-agent's record, read before it was removed.
      * @return array<string,mixed>
      */
     public static function afterPersonClosed(array $record): array
@@ -1370,12 +1370,12 @@ class SpawnService
             $worktree = self::cleanupWorktree(is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null);
             if ($runId === '') {
                 self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
-                    "Helper workspace '$name' closed by a person", ['parent' => (string)($spawn['parent'] ?? ''), 'by' => 'person',
+                    "Sub-agent workspace '$name' closed by a person", ['parent' => (string)($spawn['parent'] ?? ''), 'by' => 'person',
                         'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
                 $detail = 'closed by a person' . ($parentName !== '' ? " · started by $parentName" : '');
                 if ($worktree['kept']) $detail .= ' · the worktree is kept: ' . $worktree['reason'];
                 elseif ($worktree['removed']) $detail .= ' · the worktree was removed';
-                self::notify('Helper workspace closed: ' . $name, $detail, $id);
+                self::notify('Sub-agent workspace closed: ' . $name, $detail, $id);
             }
             return ['helper' => true, 'workspaceId' => $id, 'worktree' => $worktree];
         } catch (\Throwable $e) {
@@ -1383,7 +1383,7 @@ class SpawnService
         }
     }
 
-    /** @var string|null Test seam: the folder of the queued clean-ups of helpers that a person closed. */
+    /** @var string|null Test seam: the folder of the queued clean-ups of sub-agents that a person closed. */
     public static ?string $cleanupDir = null;
 
     private static function cleanupDir(): string
@@ -1392,8 +1392,8 @@ class SpawnService
     }
 
     /**
-     * Queue the clean-up of a helper that a person closed. The browser saves the list while the close is still
-     * under way, so the work waits until the session has stopped. The queue file holds the helper's record, because
+     * Queue the clean-up of a sub-agent that a person closed. The browser saves the list while the close is still
+     * under way, so the work waits until the session has stopped. The queue file holds the sub-agent's record, because
      * the record is gone from the list. Returns true when the file was written.
      *
      * @param array<string,mixed> $record
@@ -1408,8 +1408,8 @@ class SpawnService
     }
 
     /**
-     * Run the queued clean-ups of helpers that a person closed, for each helper whose session has stopped. A
-     * helper that still runs after a day is dropped from the queue and left alone. Never throws.
+     * Run the queued clean-ups of sub-agents that a person closed, for each sub-agent whose session has stopped. A
+     * sub-agent that still runs after a day is dropped from the queue and left alone. Never throws.
      *
      * @return array{done:array<int,string>,waiting:int}
      */
@@ -1438,7 +1438,7 @@ class SpawnService
     }
 
     /**
-     * The helper records among these workspace ids, read now (before a save removes them).
+     * The sub-agent records among these workspace ids, read now (before a save removes them).
      *
      * @param array<int,mixed> $ids
      * @return list<array<string,mixed>>
@@ -1455,7 +1455,7 @@ class SpawnService
     }
 
     /**
-     * Spec Edge Cases: a helper that has a time limit (`maxMinutes`) and has not reported when the limit passes gets
+     * Spec Edge Cases: a sub-agent that has a time limit (`maxMinutes`) and has not reported when the limit passes gets
      * ONE event, `workspace.task_overdue`, and one message to its parent. It is never stopped or killed. Called by the
      * supervisor tick (spawn-sweep.php). Never throws.
      *
@@ -1481,15 +1481,15 @@ class SpawnService
                     return $rec;
                 });
                 self::emit('workspace.task_overdue', ['workspaceId' => $id, 'agentId' => (string)($w['agentId'] ?? '')],
-                    "Helper '$name' passed its time limit of $max minutes", ['parent' => $parentId, 'maxMinutes' => $max, 'minutes' => intdiv($at - $startedAt, 60)]);
+                    "Sub-agent '$name' passed its time limit of $max minutes", ['parent' => $parentId, 'maxMinutes' => $max, 'minutes' => intdiv($at - $startedAt, 60)]);
                 if ($parentId !== '') {
-                    $text = "Helper '$name' passed its time limit of $max minutes and has not reported. It still runs. Look at its screen, or stop it with aicli_stop_workspace.";
+                    $text = "Sub-agent '$name' passed its time limit of $max minutes and has not reported. It still runs. Look at its screen, or stop it with aicli_stop_workspace.";
                     try {
                         if (self::$parentNotifier !== null) (self::$parentNotifier)($id, $parentId, $text);
                         else AgentRelayService::directMessage($id, $parentId, $text);
                     } catch (\Throwable $e) { /* the event is the record */ }
                 }
-                self::notify('Helper over its time limit: ' . $name, 'by ' . (string)($s['parent_name'] ?? '') . " · limit $max minutes", $id);
+                self::notify('Sub-agent over its time limit: ' . $name, 'by ' . (string)($s['parent_name'] ?? '') . " · limit $max minutes", $id);
                 $overdue[] = $id;
             }
         } catch (\Throwable $e) {
@@ -1499,11 +1499,11 @@ class SpawnService
     }
 
     /**
-     * Remove the worktree of a closed helper, but only a worktree that the tool made, and only when it is
+     * Remove the worktree of a closed sub-agent, but only a worktree that the tool made, and only when it is
      * clean and everything on its branch is merged into its base (R14). Otherwise keep it and say why.
      * The branch is never deleted. Nothing is pushed.
      *
-     * @param array<string,mixed>|null $wt The `worktree` block of the helper's `spawn` data.
+     * @param array<string,mixed>|null $wt The `worktree` block of the sub-agent's `spawn` data.
      * @return array{removed:bool,kept:bool,reason:string,branch:string}
      */
     public static function cleanupWorktree(?array $wt): array
@@ -1543,7 +1543,7 @@ class SpawnService
     }
 
     /**
-     * How far a helper's worktree is from "merged and clean": the number of changed files (the task folder
+     * How far a sub-agent's worktree is from "merged and clean": the number of changed files (the task folder
      * does not count) and the number of commits that are on the branch but not in the base.
      *
      * @param array<string,mixed> $wt
@@ -1568,11 +1568,11 @@ class SpawnService
     }
 
     /**
-     * The supervisor sweep (every ~30 s). Closes each reported helper or script run whose pane is idle again,
+     * The supervisor sweep (every ~30 s). Closes each reported sub-agent or script run whose pane is idle again,
      * so the agent's last reply is never cut off. A workspace that is closed already, or whose pane is busy or
      * waits for an answer, is left for the next tick. Never throws.
      *
-     * @param bool|null $runsOnly True selects script runs, false selects helpers, and null selects both.
+     * @param bool|null $runsOnly True selects script runs, false selects sub-agents, and null selects both.
      * @return array{closed:array<int,string>,waiting:int}
      */
     public static function sweepAutoClose(?bool $runsOnly = null): array
@@ -1600,10 +1600,10 @@ class SpawnService
     }
 
     // ======================================================================
-    // Slice (e): answer a helper's permission prompt (R13), tag a parent's input (R22), confirm text (R16)
+    // Slice (e): answer a sub-agent's permission prompt (R13), tag a parent's input (R22), confirm text (R16)
     // ======================================================================
 
-    /** The tag the plugin puts in front of every text a parent types into its own helper (R22). */
+    /** The tag the plugin puts in front of every text a parent types into its own sub-agent (R22). */
     public static function parentTag(array $record): string
     {
         $name = (string)($record['spawn']['parent_name'] ?? 'parent');
@@ -1612,7 +1612,7 @@ class SpawnService
     }
 
     /**
-     * R22: text that the CREATOR of a helper types into it gets the fixed tag in front, so the helper knows the
+     * R22: text that the CREATOR of a sub-agent types into it gets the fixed tag in front, so the sub-agent knows the
      * words come from its parent and a person reading the terminal sees who typed them. Any other text stays
      * as it is.
      *
@@ -1628,7 +1628,7 @@ class SpawnService
     }
 
     /**
-     * R13: a parent answers a permission prompt of a helper that it started. Allow-once answers only: a short
+     * R13: a parent answers a permission prompt of a sub-agent that it started. Allow-once answers only: a short
      * line of plain characters, never "always". The pane must show a question now. A prompt that mentions a
      * push, the boot disk, the plugin state, an aicli tool, a remote shell or a delete is never answered here:
      * a person decides. The prompt text and the answer are recorded in the ledger.
@@ -1643,7 +1643,7 @@ class SpawnService
             if ($record === null) return ['error' => "No workspace with id '$workspaceId' was found."];
             $caller = self::callerId();
             if ($caller === '' || !self::isHelper($record) || (string)($record['createdBy'] ?? '') !== $caller) {
-                return ['error' => 'You may answer the prompt of a helper workspace that you started yourself. This workspace is not one.'];
+                return ['error' => 'You may answer the prompt of a sub-agent workspace that you started yourself. This workspace is not one.'];
             }
             $name = (string)($record['name'] ?? $workspaceId);
             $agentId = (string)($record['agentId'] ?? '');
@@ -1654,16 +1654,16 @@ class SpawnService
             if (preg_match('/\b(always|forever|every ?time|don\'?t ask|never ask|all|session|remember)\b/i', $answer)) {
                 return ['error' => 'Answer allow-once only. An answer that allows more than this one action is for a person to give.'];
             }
-            if (!ProcessManager::isRunning($workspaceId)) return ['error' => "Helper '$name' is not running."];
+            if (!ProcessManager::isRunning($workspaceId)) return ['error' => "Sub-agent '$name' is not running."];
             if (!self::gapOpen('answer-' . $workspaceId, self::ANSWER_GAP_SECONDS)) {
-                return ['error' => "You answered helper '$name' too recently. Wait a few seconds and try again."];
+                return ['error' => "You answered sub-agent '$name' too recently. Wait a few seconds and try again."];
             }
             $gate = self::gate($agentId, $workspaceId);
             if ($gate['ready']) {
-                return ['error' => "Helper '$name' waits for no prompt. To send a message to it, use aicli_send_input without answerPrompt."];
+                return ['error' => "Sub-agent '$name' waits for no prompt. To send a message to it, use aicli_send_input without answerPrompt."];
             }
             if (!in_array($gate['reason'], self::PROMPT_REASONS, true)) {
-                return ['error' => "Helper '$name' is busy, not asking a question (" . $gate['reason'] . '). Wait and look at its screen with aicli_read_workspace_screen.'];
+                return ['error' => "Sub-agent '$name' is busy, not asking a question (" . $gate['reason'] . '). Wait and look at its screen with aicli_read_workspace_screen.'];
             }
             $screen = self::$paneCapture !== null
                 ? (string)(self::$paneCapture)($agentId, $workspaceId)
@@ -1671,7 +1671,7 @@ class SpawnService
             $tail = implode("\n", array_slice(preg_split('/\R/', $screen) ?: [], -24));
             foreach (self::PROMPT_DENY_PATTERNS as $pattern) {
                 if (preg_match($pattern, $tail)) {
-                    return ['error' => "The prompt of helper '$name' looks like it touches live state, a push, a delete or another workspace. A parent may not answer it. Ask a person."];
+                    return ['error' => "The prompt of sub-agent '$name' looks like it touches live state, a push, a delete or another workspace. A parent may not answer it. Ask a person."];
                 }
             }
             $res = self::$paneTyper !== null
@@ -1679,7 +1679,7 @@ class SpawnService
                 : TmuxService::pasteAndConfirm($agentId, $workspaceId, $answer, true);
             if (($res['status'] ?? '') !== 'ok') return ['error' => (string)($res['message'] ?? 'Could not type the answer.')];
             self::emit('workspace.prompt_answered', ['workspaceId' => $workspaceId, 'agentId' => $agentId],
-                "Parent answered a prompt of helper '$name'", ['answer' => $answer, 'prompt' => self::safeText($tail, 400)]);
+                "Parent answered a prompt of sub-agent '$name'", ['answer' => $answer, 'prompt' => self::safeText($tail, 400)]);
             return ['workspaceId' => $workspaceId, 'name' => $name, 'answered' => true, 'answer' => $answer];
         } catch (\Throwable $e) {
             return ['error' => 'The answer could not be sent: ' . self::safeText($e->getMessage(), 300)];
@@ -1688,7 +1688,7 @@ class SpawnService
 
     /**
      * R16: what the confirm overlay says when a person closes a workspace in the Manager. For a workspace a
-     * person made, or a helper that reported done and has a clean, merged worktree, no confirm is needed.
+     * person made, or a sub-agent that reported done and has a clean, merged worktree, no confirm is needed.
      * Reads only.
      *
      * @return array<string,mixed>
@@ -1700,7 +1700,7 @@ class SpawnService
         $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
         $reasons = [];
         if (($spawn['state'] ?? '') !== 'reported_done') {
-            $reasons[] = 'The task is not reported as done yet. The helper has not called aicli_finish_task.';
+            $reasons[] = 'The task is not reported as done yet. The sub-agent has not called aicli_finish_task.';
         }
         $wt = is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null;
         if ($wt !== null && !empty($wt['tool_made']) && is_dir((string)($wt['path'] ?? ''))) {

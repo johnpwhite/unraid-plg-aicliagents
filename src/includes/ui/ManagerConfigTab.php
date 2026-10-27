@@ -37,6 +37,7 @@ $cardTtsHost = $cardTtsUrl === '' ? '' : (string)(parse_url($cardTtsUrl, PHP_URL
 $stVoice = $cardOnOff($config['voice_enabled'] ?? null, '0')
     . ($cardTtsHost !== '' ? ' · voice server ' . $cardTtsHost : ((string)($config['voice_enabled'] ?? '0') === '1' ? ' · browser voice' : ''));
 $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki page ' . $cardOnOff($config['wiki_page_enabled'] ?? null, '0');
+$stSubagents = $cardOnOff($config['spawn_enabled'] ?? null, '0') . ' · up to ' . (string)($config['spawn_max_total'] ?? '6') . ' in total';
 ?>
 <!-- TAB 1: CONFIGURATION -->
 <div id="tab-config" class="aicli-tab-content active aicli-layout">
@@ -163,38 +164,6 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
                                 <?=mk_option($config['admin_tools_enabled'] ?? '0', "0", _('Off (default)'))?>
                             </select>
                             <?=aicli_help_panel('admin-tools')?>
-                        </dd>
-
-                        <?php /* AGENT_SPAWN_WORKSPACE.md: the master switch, the three caps and the unattended switch of the helper-workspace tools. A person sets them here; none is on the agent allow-list. They save through the same autoSaveConfig()/`save` path, and ConfigService::saveConfig() replaces a bad value. */ ?>
-                        <dt>Let agents start helper workspaces <?=aicli_help_btn('spawn-enabled', 'Let agents start helper workspaces')?></dt>
-                        <dd>
-                            <select name="spawn_enabled" aria-label="Let agents start helper workspaces" data-testid="spawn-enabled" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['spawn_enabled'] ?? '0', "1", _('On'))?>
-                                <?=mk_option($config['spawn_enabled'] ?? '0', "0", _('Off (default)'))?>
-                            </select>
-                            <?=aicli_help_panel('spawn-enabled')?>
-                        </dd>
-
-                        <dt>Helpers allowed at once <?=aicli_help_btn('spawn-caps', 'Helpers allowed at once')?></dt>
-                        <dd>
-                            <div class="input-row">
-                                <input type="number" name="spawn_max_children" aria-label="Helpers for each workspace" data-testid="spawn-max-children" value="<?=htmlspecialchars((string)($config['spawn_max_children'] ?? '3'), ENT_QUOTES, 'UTF-8')?>" min="1" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="opacity:0.75; font-size:11px;">per workspace ·</span>
-                                <input type="number" name="spawn_max_per_agent" aria-label="Helpers for each agent kind" data-testid="spawn-max-per-agent" value="<?=htmlspecialchars((string)($config['spawn_max_per_agent'] ?? '2'), ENT_QUOTES, 'UTF-8')?>" min="1" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="opacity:0.75; font-size:11px;">per agent ·</span>
-                                <input type="number" name="spawn_max_total" aria-label="Helpers on this server" data-testid="spawn-max-total" value="<?=htmlspecialchars((string)($config['spawn_max_total'] ?? '6'), ENT_QUOTES, 'UTF-8')?>" min="1" max="20" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
-                                <span style="opacity:0.75; font-size:11px;">in total</span>
-                            </div>
-                            <?=aicli_help_panel('spawn-caps')?>
-                        </dd>
-
-                        <dt>Let helpers run without asking <?=aicli_help_btn('spawn-unattended', 'Let helpers run without asking')?></dt>
-                        <dd>
-                            <select name="spawn_allow_unattended" aria-label="Let helpers run without asking" data-testid="spawn-allow-unattended" style="width: 100%;" <?=$autoSave?>>
-                                <?=mk_option($config['spawn_allow_unattended'] ?? '0', "1", _('On'))?>
-                                <?=mk_option($config['spawn_allow_unattended'] ?? '0', "0", _('Off (default)'))?>
-                            </select>
-                            <?=aicli_help_panel('spawn-unattended')?>
                         </dd>
 
                         <?php /* HUMAN_ACTOR_IDENTITY.md: the name that follows the Unraid login in the Activity tray, the event ledger and the log, for example "root (John)". It saves through autoSaveConfig() like every other row; ConfigService::saveConfig() cleans it. */ ?>
@@ -1306,6 +1275,43 @@ $stNotebook = $cardOnOff($config['notebook_enabled'] ?? null, '1') . ' · wiki p
             <?=aicli_card_close()?>
 
             <?php /* AGENT_RUN_ENTRY_POINT.md R9 (#745): the Script runs card. Its own file, like the voice setup rows. */ require __DIR__ . '/ManagerRunScriptsCard.php'; ?>
+
+            <?php /* AGENT_SPAWN_WORKSPACE.md and issue #792: the Sub-agent workspaces card. The switch, the three limits and the unattended switch of the sub-agent tools. A person sets them here; none is on the agent allow-list. They save through the same autoSaveConfig()/`save` path, and ConfigService::saveConfig() replaces a bad value. The names of the fields stay spawn_*. */ ?>
+            <?=aicli_card_open('subagents', 'fa-sitemap', 'Sub-agent workspaces', $stSubagents, 'card-subagents', '',
+                ['format' => '{spawn_enabled} · up to {spawn_max_total} in total', 'domId' => 'subagents-settings-card'])?>
+                    <dl>
+                        <dt>Let agents start sub-agent workspaces <?=aicli_help_btn('spawn-enabled', 'Let agents start sub-agent workspaces')?></dt>
+                        <dd>
+                            <select name="spawn_enabled" aria-label="Let agents start sub-agent workspaces" data-testid="spawn-enabled" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['spawn_enabled'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['spawn_enabled'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('spawn-enabled')?>
+                        </dd>
+
+                        <dt>Sub-agents allowed at once <?=aicli_help_btn('spawn-caps', 'Sub-agents allowed at once')?></dt>
+                        <dd>
+                            <div class="input-row">
+                                <input type="number" name="spawn_max_children" aria-label="Sub-agents for each workspace" data-testid="spawn-max-children" value="<?=htmlspecialchars((string)($config['spawn_max_children'] ?? '3'), ENT_QUOTES, 'UTF-8')?>" min="1" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">per workspace ·</span>
+                                <input type="number" name="spawn_max_per_agent" aria-label="Sub-agents for each agent kind" data-testid="spawn-max-per-agent" value="<?=htmlspecialchars((string)($config['spawn_max_per_agent'] ?? '2'), ENT_QUOTES, 'UTF-8')?>" min="1" max="10" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">per agent ·</span>
+                                <input type="number" name="spawn_max_total" aria-label="Sub-agents on this server" data-testid="spawn-max-total" value="<?=htmlspecialchars((string)($config['spawn_max_total'] ?? '6'), ENT_QUOTES, 'UTF-8')?>" min="1" max="20" style="width: 60px !important; flex-shrink: 0;" <?=$autoSave?>>
+                                <span style="opacity:0.75; font-size:11px;">in total</span>
+                            </div>
+                            <?=aicli_help_panel('spawn-caps')?>
+                        </dd>
+
+                        <dt>Let sub-agents run without asking <?=aicli_help_btn('spawn-unattended', 'Let sub-agents run without asking')?></dt>
+                        <dd>
+                            <select name="spawn_allow_unattended" aria-label="Let sub-agents run without asking" data-testid="spawn-allow-unattended" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['spawn_allow_unattended'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['spawn_allow_unattended'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('spawn-unattended')?>
+                        </dd>
+                    </dl>
+            <?=aicli_card_close()?>
 
             <?=aicli_card_open('ssh', 'fa-key', 'SSH keys', 'Loading…', 'card-ssh',
                 '<button type="button" onclick="aicliShowSshHelp()" class="aicli-btn-slim" title="How to generate an SSH public key" style="font-size:10px;">'

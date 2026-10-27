@@ -903,10 +903,10 @@ final class AgentRunService
         $path = (string)$who['path'];
         $actor = $path !== '' ? 'script ' . $path : 'interactive shell';
 
-        // R8: a call from inside an agent workspace is refused. Agents use the helper tool of #673.
+        // R8: a call from inside an agent workspace is refused. Agents use the sub-agent tool of #673.
         if (!empty($who['insideWorkspace'])) {
             self::emit('run.refused', $actor, 'Run refused: the call comes from inside an agent workspace', ['runId' => $runId, 'reason' => 'inside_workspace'], $who);
-            return self::reply('refused', 'An agent workspace cannot start a run. Use the helper tool (aicli_spawn_workspace) instead.', self::EXIT_REFUSED, $runId);
+            return self::reply('refused', 'An agent workspace cannot start a run. Use the sub-agent tool (aicli_spawn_workspace) instead.', self::EXIT_REFUSED, $runId);
         }
 
         // R8, R10: no script file behind the call is an unknown caller. A person can only approve a script file.
