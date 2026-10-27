@@ -553,7 +553,14 @@ class AgentHandler {
         $config = getAICliConfig();
         $user = $config['user'] ?? 'root';
         if (empty($user)) $user = 'root';
-        \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_agent_install', 5, null, true);
+        // #821: save only when this upgrade closed sessions of the agent and the home is
+        // layered. Otherwise nothing is in RAM to save, and install-bg.php must not wait.
+        $bakeEnqueued = \AICliAgents\Services\InstallerService::preInstallHomeBakeNeeded(
+            $preClosed, \AICliAgents\Services\InstallerService::homeBackendOf($user)
+        );
+        if ($bakeEnqueued) {
+            \AICliAgents\Services\SupervisorService::enqueue('home', $user, 'bake', 'pre_agent_install', 5, null, true);
+        }
 
         // Advance the marker now that sessions are closed and the job is about to
         // launch (the early "Upgrade starting…" marker set above remains in place
@@ -574,6 +581,8 @@ class AgentHandler {
         // unused) so install-bg.php can read argv[2]/argv[3] unambiguously.
         $versionArg = " " . escapeshellarg($version);
         $backupArg  = " " . escapeshellarg($backupDest);
+        // #821: argv[4] tells install-bg.php whether a pre-install home bake was enqueued.
+        $bakeArg    = " " . ($bakeEnqueued ? '1' : '0');
         // #176: strip AICLI_SESSION_ID so the detached install job is NEVER a
         // "session descendant" the reaper (terminateSessionDescendants, matches
         // AICLI_SESSION_ID in /proc/environ) can kill mid-install. Needed when an
@@ -584,7 +593,7 @@ class AgentHandler {
         // response below and every later read tell the same story.
         $sideBySide = (!$force && self::sideBySideInstallBlocker($agentId) === null);
         self::markSideBySideInstall($agentId, $sideBySide);
-        aicli_exec_bg("env -u AICLI_SESSION_ID /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg);
+        aicli_exec_bg("env -u AICLI_SESSION_ID /usr/bin/php /usr/local/emhttp/plugins/unraid-aicliagents/scripts/install-bg.php " . escapeshellarg($agentId) . $versionArg . $backupArg . $bakeArg);
             // Tell the caller WHAT KIND of install this is. The Store hides every
             // terminal for an agent while it installs, which is right only when
             // the install will actually interrupt those sessions. A side-by-side

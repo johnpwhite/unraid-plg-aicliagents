@@ -33,6 +33,9 @@ require_once dirname(__DIR__) . '/includes/AICliAgentsManager.php'; // #367: thi
 $agentId = $argv[1] ?? '';
 $targetVersion = (($argv[2] ?? '') !== '') ? $argv[2] : null;
 $backupDest = ($argv[3] ?? '');
+// #821: argv[4] is '1' when AgentHandler::install enqueued a pre-install home bake, '0' when not.
+// A missing value (an older caller) keeps the old behaviour: wait.
+$bakeEnqueued = ($argv[4] ?? '1') !== '0';
 
 if (empty($agentId)) {
     aicli_log("Background Install Job aborted: Missing Agent ID", AICLI_LOG_ERROR);
@@ -106,33 +109,40 @@ if (empty($user)) $user = 'root';
 // #443: show the real state of the save (waiting, running, percentage, slow), not a
 // fixed "queued" line. The callback runs every 3 seconds while the save is queued or
 // runs. $lastPct and $lastMoveAt find a percentage that does not move.
-$lastPct = null;
-$lastMoveAt = time();
-$wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user, 300, 6,
-    function (array $snap = []) use ($agentId, $user, &$lastPct, &$lastMoveAt) {
-        $pct = $snap['pct'] ?? null;
-        if ($pct !== $lastPct) {
-            $lastPct = $pct;
-            $lastMoveAt = time();
-        }
-        $st = \AICliAgents\Services\InstallerService::upgradeSaveStatus(
-            (string)($snap['state'] ?? 'waiting'), (string)$user, $pct,
-            (int)($snap['elapsed_s'] ?? 0), time() - $lastMoveAt,
-            // #443: the size of the input (when it was measured) and the time of the last save.
-            \AICliAgents\Services\StorageJobProgressService::inputBytes('home', (string)$user),
-            \AICliAgents\Services\StorageJobProgressService::previousRunSec('bake', 'home/' . $user)
-        );
-        setInstallStatus($st['text'], $st['progress'], $agentId);
-    },
-    3.0
-);
-aicli_log("Pre-install bake wait: {$wait['status']} (waited {$wait['waited_s']}s, user=$user)", AICLI_LOG_INFO);
-\AICliAgents\Services\LifecycleLogService::log(
-    \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
-    'installer',
-    'pre_install_bake_wait',
-    ['agent' => $agentId, 'user' => $user, 'status' => $wait['status'], 'waited_s' => $wait['waited_s']]
-);
+if (!$bakeEnqueued) {
+    // #821: no workspace of this agent was closed, or the home is plain folders: no save was
+    // queued, so there is nothing to wait for and no waiting line to show.
+    aicli_log("Pre-install bake wait skipped for $agentId: no home save was queued (no workspace closed or home is plain folders)", AICLI_LOG_INFO);
+} else {
+    $lastPct = null;
+    $lastMoveAt = time();
+    $wait = \AICliAgents\Services\SupervisorService::waitForOpsToDrain('home', $user, 300, 6,
+        function (array $snap = []) use ($agentId, $user, &$lastPct, &$lastMoveAt) {
+            $pct = $snap['pct'] ?? null;
+            if ($pct !== $lastPct) {
+                $lastPct = $pct;
+                $lastMoveAt = time();
+            }
+            $st = \AICliAgents\Services\InstallerService::upgradeSaveStatus(
+                (string)($snap['state'] ?? 'waiting'), (string)$user, $pct,
+                (int)($snap['elapsed_s'] ?? 0), time() - $lastMoveAt,
+                // #443: the size of the input (when it was measured) and the time of the last save.
+                \AICliAgents\Services\StorageJobProgressService::inputBytes('home', (string)$user),
+                \AICliAgents\Services\StorageJobProgressService::previousRunSec('bake', 'home/' . $user)
+            );
+            setInstallStatus($st['text'], $st['progress'], $agentId);
+        },
+        3.0
+    );
+    aicli_log("Pre-install bake wait: {$wait['status']} (waited {$wait['waited_s']}s, user=$user)", AICLI_LOG_INFO);
+    \AICliAgents\Services\LifecycleLogService::log(
+        \AICliAgents\Services\LifecycleLogService::LEVEL_INFO,
+        'installer',
+        'pre_install_bake_wait',
+        ['agent' => $agentId, 'user' => $user, 'status' => $wait['status'], 'waited_s' => $wait['waited_s']]
+    );
+
+}
 
 // WP #964 (slice): pre-upgrade backup. Runs BEFORE installAgent touches the
 // binary, so the current version is still intact. The overlay already

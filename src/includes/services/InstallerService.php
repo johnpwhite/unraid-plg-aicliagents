@@ -34,6 +34,35 @@ class InstallerService {
     }
 
     /**
+     * #821: true only when this upgrade closed sessions of the agent AND the home is
+     * layered, so a home save before the binary swap has something to save. Pure.
+     *
+     * @param list<mixed> $closedSessions sessions closed by this upgrade
+     * @param string $homeBackend "flash" (layers) or "passthrough" (plain folders)
+     */
+    public static function preInstallHomeBakeNeeded(array $closedSessions, string $homeBackend): bool {
+        // #821: a bake saves RAM state of the home. With no closed session there is
+        // nothing new to save, and a plain-folder home keeps nothing in RAM.
+        if (empty($closedSessions)) return false;
+        return StorageBackendPolicyService::engineOfBackend($homeBackend) !== StorageBackendPolicyService::PASSTHROUGH;
+    }
+
+    /**
+     * #821: the backend of one user's home ("flash" = layers, "passthrough" = plain
+     * folders), read from the storage status. When it cannot be read, answer "flash":
+     * a wrong "layers" costs one wait, a wrong "plain folders" could skip a needed save.
+     */
+    public static function homeBackendOf(string $user): string {
+        try {
+            $homes = (array)(StorageMetricsService::getStatus()['homes'] ?? []);
+            $row = $homes[$user] ?? null;
+            return is_array($row) ? (string)($row['backend'] ?? 'flash') : 'flash';
+        } catch (\Throwable $e) {
+            return 'flash';
+        }
+    }
+
+    /**
      * #443: the install-status line while the upgrade waits for the save of the home.
      * It replaces the old fixed line "Upgrade queued, saving workspace data first" at 5 %.
      * The bar goes from 6 to 9 with the percentage that mksquashfs reports. The line
