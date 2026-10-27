@@ -15,6 +15,8 @@ class VersionCheckService {
     const PER_AGENT_TIMEOUT = 15; // seconds per npm view call
     const TOTAL_TIMEOUT = 120; // seconds total for all agents
     const MAX_DROPDOWN_ENTRIES = 20;
+    /** #828: the Beta list shows at most this many builds, newest first. */
+    const MAX_BETA_ENTRIES = 8;
 
     /**
      * R-171: a version string from a registry reaches the Store page. Only the characters of a
@@ -296,8 +298,8 @@ class VersionCheckService {
      * @param string|null $channel  'stable' (default) or 'beta'. Legacy 'latest' maps to stable.
      * @param int         $monthsBack  How far back to include untagged stable releases.
      * @return array Sorted versions for the dropdown. Stable is capped at
-     * MAX_DROPDOWN_ENTRIES to keep its long history manageable; Beta returns
-     * every matching cached prerelease so the user can choose any beta build.
+     * MAX_DROPDOWN_ENTRIES to keep its long history manageable; Beta keeps the
+     * newest build of each kind of dated snapshot and at most MAX_BETA_ENTRIES (#828).
      */
     public static function getAvailableVersions(string $agentId, ?string $channel = null, int $monthsBack = 3): array {
         $cache = self::getCachedResults();
@@ -345,14 +347,38 @@ class VersionCheckService {
             return ($b['timestamp'] ?? 0) - ($a['timestamp'] ?? 0);
         });
 
-        // Stable history is intentionally bounded because many packages have
-        // hundreds of ordinary releases. Beta is the opt-in troubleshooting /
-        // preview channel, so silently dropping older matching builds makes a
-        // selected channel appear incomplete and can hide the exact build the
-        // user needs to install.
+        // Stable history is bounded because many packages have hundreds of
+        // ordinary releases. #828 (John, 2026-10-28): Beta is bounded too. It was
+        // full of dated snapshot builds (OpenCode: dozens of 0.0.0-dev-<stamp>), so
+        // each kind of snapshot keeps only its newest build, and the list keeps the
+        // MAX_BETA_ENTRIES newest entries.
         return $channel === 'beta'
-            ? $result
+            ? array_slice(self::newestSnapshotPerKind($result), 0, self::MAX_BETA_ENTRIES)
             : array_slice($result, 0, self::MAX_DROPDOWN_ENTRIES);
+    }
+
+    /**
+     * #828: of a newest-first list, keep only the newest build of each kind of
+     * dated snapshot. The kind is the version up to its date stamp (a run of 8 or
+     * more digits): 0.0.0-dev-202610260443 and 0.0.0-dev-202610250607 are one kind,
+     * 0.41.0-nightly.20260427.g42587de73 is its own. A version with no stamp is
+     * always kept. Pure.
+     *
+     * @param array<int,array<string,mixed>> $newestFirst
+     * @return array<int,array<string,mixed>>
+     */
+    public static function newestSnapshotPerKind(array $newestFirst): array {
+        $seen = [];
+        $out = [];
+        foreach ($newestFirst as $entry) {
+            $v = (string)($entry['version'] ?? '');
+            if (preg_match('/^(.*?)\d{8,}/', $v, $m)) {
+                if (isset($seen[$m[1]])) continue;
+                $seen[$m[1]] = true;
+            }
+            $out[] = $entry;
+        }
+        return $out;
     }
 
     /**
