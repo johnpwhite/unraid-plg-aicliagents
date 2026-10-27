@@ -28,23 +28,51 @@ abstract class JsonMcpProjector extends VendorProjector {
     /** Map one canonical server def → this vendor's server-entry shape. */
     abstract protected function vendorValue(array $def): array;
 
+    /**
+     * Object path (from the file root) of the map that holds the servers. Most vendors
+     * use one key. OpenCode 2 nests it: mcp.servers (https://opencode.ai/v2/docs/mcp-servers/).
+     * @return string[]
+     */
+    protected function containerPath(): array { return [$this->topKey()]; }
+
+    /** Managed-key prefix: the container path joined with dots, then a dot. */
+    private function keyPrefix(): string { return implode('.', $this->containerPath()) . '.'; }
+
+    /**
+     * Walk containerPath() below $data. Returns the server map, or null when a node is
+     * absent (and $create is false) or is not an object (such a node is never replaced).
+     */
+    private function container(\stdClass $data, bool $create): ?\stdClass {
+        $node = $data;
+        foreach ($this->containerPath() as $key) {
+            if (!isset($node->{$key})) {
+                if (!$create) return null;
+                $node->{$key} = new \stdClass();
+            }
+            if (!($node->{$key} instanceof \stdClass)) return null;
+            $node = $node->{$key};
+        }
+        return $node;
+    }
+
     public function desired(array $servers): array {
         ksort($servers);
         $out = [];
         foreach ($servers as $name => $def) {
-            $out[$this->topKey() . '.' . $name] = $this->vendorValue($def);
+            $out[$this->keyPrefix() . $name] = $this->vendorValue($def);
         }
         return $out;
     }
 
     public function current(string $file, array $keys): array {
         $data = $this->decode($file);
-        if ($data === null || !isset($data->{$this->topKey()}) || !($data->{$this->topKey()} instanceof \stdClass)) return [];
+        $map = $data === null ? null : $this->container($data, false);
+        if ($map === null) return [];
         $out = [];
         foreach ($keys as $key) {
             $name = $this->serverNameFromKey($key);
-            if ($name !== null && property_exists($data->{$this->topKey()}, $name)) {
-                $out[$key] = self::canonicalize($data->{$this->topKey()}->{$name});
+            if ($name !== null && property_exists($map, $name)) {
+                $out[$key] = self::canonicalize($map->{$name});
             }
         }
         return $out;
@@ -58,19 +86,17 @@ abstract class JsonMcpProjector extends VendorProjector {
             }
             $data = new \stdClass();
         }
-        if (!isset($data->{$this->topKey()}) || !($data->{$this->topKey()} instanceof \stdClass)) {
-            if (isset($data->{$this->topKey()})) return false; // user has a non-object mcpServers — do not fight it
-            $data->{$this->topKey()} = new \stdClass();
-        }
+        $map = $this->container($data, true);
+        if ($map === null) return false; // user has a non-object value on the path — do not fight it
         foreach ($set as $key => $value) {
             $name = $this->serverNameFromKey($key);
             if ($name === null) continue;
             // assoc array → stdClass tree so {} renders as {} (deterministic key order via canonicalize)
-            $data->{$this->topKey()}->{$name} = json_decode(json_encode(self::canonicalize($value), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            $map->{$name} = json_decode(json_encode(self::canonicalize($value), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
         }
         foreach ($remove as $key) {
             $name = $this->serverNameFromKey($key);
-            if ($name !== null) unset($data->{$this->topKey()}->{$name});
+            if ($name !== null) unset($map->{$name});
         }
         $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if ($json === false) return false;
@@ -111,7 +137,7 @@ abstract class JsonMcpProjector extends VendorProjector {
 
     /** 'mcpServers.<name>' → '<name>' (null if not a managed-key shape). */
     public function serverNameFromKey(string $key): ?string {
-        $prefix = $this->topKey() . '.';
+        $prefix = $this->keyPrefix();
         if (strncmp($key, $prefix, strlen($prefix)) !== 0) return null;
         $name = substr($key, strlen($prefix));
         return preg_match(HubStore::NAME_RE, $name) ? $name : null;

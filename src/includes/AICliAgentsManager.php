@@ -178,6 +178,7 @@ require_once __DIR__ . '/services/hub/ClaudeProjector.php';
 require_once __DIR__ . '/services/hub/GeminiProjector.php';
 require_once __DIR__ . '/services/hub/QwenProjector.php';
 require_once __DIR__ . '/services/hub/OpencodeProjector.php';
+require_once __DIR__ . '/services/hub/Opencode2Projector.php'; // OpenCode 2 (#822): mcp.servers nesting
 require_once __DIR__ . '/services/hub/KilocodeProjector.php';
 require_once __DIR__ . '/services/hub/AntigravityProjector.php'; // extends GeminiProjector — after it
 require_once __DIR__ . '/services/hub/FactoryProjector.php';

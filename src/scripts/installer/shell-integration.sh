@@ -52,6 +52,7 @@ _aicli_run() {
 # 3. Aliases for common agents
 alias claude='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/claude-code/node_modules/.bin/claude'
 alias opencode='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/opencode/node_modules/.bin/opencode'
+alias opencode2='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/opencode2/node_modules/.bin/opencode2'
 alias gemini='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/gemini-cli/node_modules/.bin/gemini'
 alias kilo='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/kilocode/node_modules/.bin/kilo'
 alias pi='_aicli_run /usr/local/emhttp/plugins/unraid-aicliagents/agents/pi-coder/node_modules/.bin/pi'

@@ -547,7 +547,8 @@ PRIOEOF
     # under the plugin state folder in RAM. In RAM mode Codex gets its own RAM folder next to the homes,
     # not above them: ${MOUNT_ROOT}/agent-tmp/<user>, mode 700, owned by the user. Other agents
     # keep /tmp. A problem logs nothing and never stops the launch (Codex only warns then).
-    if [ -z "$_agent_tmp_dir" ] && [ "$AGENT_ID" = "codex-cli" ]; then
+    # #822: OpenCode 2 keeps its temporary data in $TMPDIR/opencode (checked: it honours TMPDIR), so it gets the same RAM folder.
+    if [ -z "$_agent_tmp_dir" ] && { [ "$AGENT_ID" = "codex-cli" ] || [ "$AGENT_ID" = "opencode2" ]; }; then
         _codex_tmp_user="${TARGET_USER:-root}"
         case "$_codex_tmp_user" in ''|*[!A-Za-z0-9._-]*) _codex_tmp_user="" ;; esac
         if [ -n "$_codex_tmp_user" ]; then
@@ -562,6 +563,27 @@ PRIOEOF
         fi
     fi
     # AGENT_TMP end
+
+    # #822 OpenCode 2: v2 migrates the database of OpenCode 1 (~/.local/share/opencode) and reads
+    # mcp.servers where v1 reads mcp.<name>. So v2 gets its own XDG folders and never touches v1.
+    # v2 honours all four variables (checked with `opencode debug paths`, 2.2.0). Data, state and
+    # config sit under .local/share so the persistent home keeps them; the cache sits in .cache
+    # (not kept, as for every agent). One set for each user, shared by the v2 workspaces of that
+    # user: the login (auth.json) is in the data folder. The Config Hub writes the global
+    # config to the config folder below (Opencode2Projector::XDG_ROOT). Spec: OPENCODE_V2_AGENT.md.
+    # OPENCODE2_XDG begin
+    if [ "$AGENT_ID" = "opencode2" ]; then
+        _oc2_root="$HOME_DIR/.local/share/opencode2-xdg"
+        printf 'mkdir -p %q %q %q %q %q 2>/dev/null\n' \
+            "$_oc2_root/data" "$_oc2_root/state" "$_oc2_root/config/opencode" \
+            "$HOME_DIR/.cache/opencode2-xdg/opencode" "$HOME_DIR/.local/share/opencode2-xdg" >> "$RUN_SCRIPT"
+        printf 'export XDG_DATA_HOME=%q\n' "$_oc2_root/data" >> "$RUN_SCRIPT"
+        printf 'export XDG_STATE_HOME=%q\n' "$_oc2_root/state" >> "$RUN_SCRIPT"
+        printf 'export XDG_CONFIG_HOME=%q\n' "$_oc2_root/config" >> "$RUN_SCRIPT"
+        printf 'export XDG_CACHE_HOME=%q\n' "$HOME_DIR/.cache/opencode2-xdg" >> "$RUN_SCRIPT"
+        unset _oc2_root
+    fi
+    # OPENCODE2_XDG end
 
     printf 'export AICLI_SESSION_ID=%q\n' "$ID" >> "$RUN_SCRIPT"
     # R-005 (#583): the exit recorder reads BRIDGE_SCRIPT and ID. The run script starts under a
@@ -690,7 +712,7 @@ PRIOEOF
     printf 'export DISABLE_UPDATE_CHECK=1\n' >> "$RUN_SCRIPT"
     case "$AGENT_ID" in
         gemini-cli)  printf 'export GEMINI_CLI_DISABLE_AUTO_UPDATE=true\n' >> "$RUN_SCRIPT" ;;
-        opencode)    printf 'export OPENCODE_DISABLE_AUTOUPDATE=true\n' >> "$RUN_SCRIPT" ;;
+        opencode|opencode2) printf 'export OPENCODE_DISABLE_AUTOUPDATE=true\n' >> "$RUN_SCRIPT" ;;
         nanocoder)   printf 'export NANOCODER_DISABLE_AUTO_UPDATE=1\n' >> "$RUN_SCRIPT" ;;
         kilocode)    printf 'export KILO_DISABLE_AUTO_UPDATE=1\n' >> "$RUN_SCRIPT" ;;
         pi-coder)    printf 'export PI_CODER_DISABLE_AUTO_UPDATE=1\n' >> "$RUN_SCRIPT" ;;

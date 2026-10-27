@@ -393,6 +393,7 @@ create_proxy "copilot" "gh-copilot/node_modules/@github/copilot/index.js"
 # package.json "bin" points at if this path is ever absent). Bug #761.
 create_proxy "claude" "claude-code/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 create_proxy "opencode" "opencode/node_modules/opencode-ai/bin/opencode"
+create_proxy "opencode2" "opencode2/node_modules/@opencode/cli/bin/opencode.exe"
 create_proxy "kilo" "kilocode/node_modules/@kilocode/cli/bin/kilo"
 create_proxy "pi" "pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
 create_proxy "codex" "codex-cli/node_modules/.bin/codex"

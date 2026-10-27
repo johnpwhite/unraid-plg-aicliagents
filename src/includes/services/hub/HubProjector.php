@@ -72,7 +72,7 @@ class HubProjector {
         if (self::$vendors === null) {
             self::$vendors = [];
             foreach ([new ClaudeProjector(), new GeminiProjector(), new QwenProjector(),
-                      new OpencodeProjector(), new KilocodeProjector(), new AntigravityProjector(),
+                      new OpencodeProjector(), new Opencode2Projector(), new KilocodeProjector(), new AntigravityProjector(),
                       new FactoryProjector(), new NanocoderProjector(),
                       new CopilotProjector(), new CodexProjector(), new GooseProjector(),
                       new GrokProjector(), new KimiCodeProjector()] as $p) {
@@ -128,6 +128,8 @@ class HubProjector {
                 new InstructionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
                 new InstructionProjector('gh-copilot', '.copilot/copilot-instructions.md', 'GitHub Copilot CLI', ['gh-copilot'], false),
                 new InstructionProjector('opencode', '.config/opencode/AGENTS.md', 'OpenCode', ['opencode'], false),
+                // OpenCode 2 (#822): own XDG_CONFIG_HOME; global AGENTS.md per https://opencode.ai/v2/docs/instructions/
+                new InstructionProjector('opencode2', Opencode2Projector::CONFIG_DIR . '/AGENTS.md', 'OpenCode 2', ['opencode2'], false),
                 new InstructionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
                 new InstructionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
                 new InstructionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
@@ -208,6 +210,7 @@ class HubProjector {
                 new RelayInstructionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
                 new RelayInstructionProjector('gh-copilot', '.copilot/copilot-instructions.md', 'GitHub Copilot CLI', ['gh-copilot'], false),
                 new RelayInstructionProjector('opencode', '.config/opencode/AGENTS.md', 'OpenCode', ['opencode'], false),
+                new RelayInstructionProjector('opencode2', Opencode2Projector::CONFIG_DIR . '/AGENTS.md', 'OpenCode 2', ['opencode2'], false),
                 new RelayInstructionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
                 new RelayInstructionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
                 new RelayInstructionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
@@ -241,6 +244,7 @@ class HubProjector {
                 new FilePathConventionProjector('codex-cli', '.codex/AGENTS.md', 'Codex CLI', ['codex-cli'], false),
                 new FilePathConventionProjector('gh-copilot', '.copilot/copilot-instructions.md', 'GitHub Copilot CLI', ['gh-copilot'], false),
                 new FilePathConventionProjector('opencode', '.config/opencode/AGENTS.md', 'OpenCode', ['opencode'], false),
+                new FilePathConventionProjector('opencode2', Opencode2Projector::CONFIG_DIR . '/AGENTS.md', 'OpenCode 2', ['opencode2'], false),
                 new FilePathConventionProjector('goose', '.config/goose/.goosehints', 'Goose', ['goose'], false),
                 new FilePathConventionProjector('factory-cli', '.factory/AGENTS.md', 'Factory Droid', ['factory-cli'], false),
                 new FilePathConventionProjector('pi-coder', '.pi/agent/AGENTS.md', 'pi-coder', ['pi-coder'], false),
@@ -467,8 +471,8 @@ class HubProjector {
                 // Codex (USER scope), Gemini (alias), OpenCode, Copilot, and Goose (primary) — one
                 // projection feeds all five. Primary agentId codex-cli is for drift labelling only;
                 // the dir is reconciled ONCE and survives until ALL five are un-targeted.
-                new TreeProjector('codex-cli', '.agents/skills', 'Agent Skills (Codex · Gemini · OpenCode · Copilot · Goose)', 'skills',
-                    ['codex-cli', 'gemini-cli', 'opencode', 'gh-copilot', 'goose']),
+                new TreeProjector('codex-cli', '.agents/skills', 'Agent Skills (Codex · Gemini · OpenCode · OpenCode 2 · Copilot · Goose)', 'skills',
+                    ['codex-cli', 'gemini-cli', 'opencode', 'opencode2', 'gh-copilot', 'goose']),
                 // Factory personal skills at ~/.factory/skills/<name>/SKILL.md (official docs).
                 new TreeProjector('factory-cli', '.factory/skills', 'Factory Droid skills', 'skills'),
                 // pi-coder global skills at ~/.pi/agent/skills/<name>/SKILL.md (official pi docs) —
@@ -478,6 +482,8 @@ class HubProjector {
                 new TreeProjector('kimi-code', '.kimi-code/skills', 'Kimi Code skills', 'skills'),
                 // OpenCode commands live under the XDG config root, not ~/.opencode (corrected 2026-06).
                 new TreeProjector('opencode', '.config/opencode/commands', 'OpenCode commands', 'commands'),
+                // OpenCode 2 (#822): commands folder of its own config root (https://opencode.ai/v2/docs/commands/).
+                new TreeProjector('opencode2', Opencode2Projector::CONFIG_DIR . '/commands', 'OpenCode 2 commands', 'commands'),
                 // Factory: global flat-.md commands at ~/.factory/commands/ (verified official docs).
                 new TreeProjector('factory-cli', '.factory/commands', 'Factory Droid commands', 'commands'),
                 // Antigravity skills are folder bundles (~/.gemini/antigravity-cli/skills/<name>/SKILL.md),

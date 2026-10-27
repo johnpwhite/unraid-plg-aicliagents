@@ -105,6 +105,18 @@ class HistoryStoreService
                 'note'    => 'The history is inside SQLite databases, not one file for each session. It cannot move.',
                 'verified' => false,
             ],
+            // OpenCode 2 (#822): its own SQLite database, in the XDG data folder that the launch
+            // script gives it (aicli-shell.sh, OPENCODE2_XDG). Path from `opencode debug paths` (2.2.0).
+            'opencode2' => [
+                'label'   => 'OpenCode 2',
+                'kind'    => 'database',
+                'roots'   => ['.local/share/opencode2-xdg/data'],
+                'pattern' => '',
+                'index'   => [],
+                'source'  => 'https://opencode.ai/v2/docs/ (no page names the path; `opencode debug paths` of 2.2.0)',
+                'note'    => 'The history is inside a SQLite database, not one file for each session. It cannot move.',
+                'verified' => false,
+            ],
             // Kilo Code: a fork of OpenCode. One SQLite database, kilo.db.
             // https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/storage/db.ts
             'kilocode' => [

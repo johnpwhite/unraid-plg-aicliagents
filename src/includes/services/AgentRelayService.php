@@ -73,6 +73,7 @@ class AgentRelayService {
         'codex-cli'       => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'gh-copilot'      => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'opencode'        => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
+        'opencode2'       => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'kilocode'        => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'antigravity-cli' => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'factory-cli'     => ['paste',  'No verified facility for surfacing background command output mid-turn.'],

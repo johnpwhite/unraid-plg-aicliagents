@@ -809,6 +809,23 @@ class TerminalService {
     }
 
     /**
+     * OpenCode 2's newest resumable session FOR THIS WORKSPACE (#822).
+     *
+     * The launch script gives OpenCode 2 its own data folder (XDG_DATA_HOME =
+     * <home>/.local/share/opencode2-xdg/data), so its database is
+     * <home>/.local/share/opencode2-xdg/data/opencode/opencode.db. In 2.2.0 the sessions are in
+     * the table `session_v2` (id, parent_id, directory, time_updated: same columns that the
+     * OpenCode 1 query uses). The table `session` that a migration may leave is not read: those are
+     * the sessions of OpenCode 1. Not proven with a real session (needs a model): when the table or
+     * a column differs the query fails and this returns null, then the launch uses --continue.
+     */
+    public static function opencode2ResumeId(string $home, string $path): ?string {
+        if ($home === '') return null;
+        $db = "$home/.local/share/opencode2-xdg/data/opencode/opencode.db";
+        return is_file($db) ? self::newestOpencodeStyleSession([$db], $path, 'session_v2') : null;
+    }
+
+    /**
      * Kilo Code's newest resumable session FOR THIS WORKSPACE (#147).
      *
      * Kilo is an OpenCode fork: its `.local/share/kilo/kilo.db` has the SAME
@@ -830,7 +847,7 @@ class TerminalService {
      * session whose `directory` matches $path, across all given dbs (dedup by max
      * time). Prepared read-only SQLite3 — no shell-out, no escaping.
      */
-    private static function newestOpencodeStyleSession(array $dbs, string $path): ?string
+    private static function newestOpencodeStyleSession(array $dbs, string $path, string $table = 'session'): ?string
     {
         if ($dbs === [] || !class_exists('SQLite3')) return null;
 
@@ -848,10 +865,10 @@ class TerminalService {
         $in = [];
         foreach ($dirs as $i => $_) { $in[] = ":d$i"; $in[] = ":e$i"; }
         $sql = $dir !== ''
-            ? "SELECT id, time_updated FROM session WHERE directory IN (" . implode(',', $in) . ") AND (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5"
+            ? "SELECT id, time_updated FROM $table WHERE directory IN (" . implode(',', $in) . ") AND (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5"
             // No workspace context (older call-site): last-resort global newest,
             // matching the historical behaviour rather than returning nothing.
-            : "SELECT id, time_updated FROM session WHERE (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5";
+            : "SELECT id, time_updated FROM $table WHERE (parent_id IS NULL OR parent_id = '') ORDER BY time_updated DESC LIMIT 5";
 
         $bestId = null; $bestTime = -1;
         foreach ($dbs as $dbPath) {

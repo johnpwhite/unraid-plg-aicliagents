@@ -1517,6 +1517,11 @@ class TerminalHandler {
             return \AICliAgents\Services\TerminalService::opencodeResumeId($homeDir, $workspacePath);
         }
 
+        if ($agentId === 'opencode2') {
+            // #822: OpenCode 2 keeps its sessions in a database of its own (XDG folder of the launch script).
+            return \AICliAgents\Services\TerminalService::opencode2ResumeId($homeDir, $workspacePath);
+        }
+
         if ($agentId === 'kilocode') {
             // #147: Kilo (an OpenCode fork) had NO branch here, so resume fell back to
             // --continue with no chat id and started fresh. Same directory-filtered

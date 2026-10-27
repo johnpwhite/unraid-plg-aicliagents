@@ -96,7 +96,7 @@ class AgentRegistry {
      * @var string[]
      */
     const SELF_UPDATE_SUPPRESSED = [
-        'claude-code', 'opencode', 'kilocode', 'pi-coder', 'codex-cli',
+        'claude-code', 'opencode', 'opencode2', 'kilocode', 'pi-coder', 'codex-cli',
         'factory-cli', 'antigravity-cli', 'grok-build', 'kimi-code',
         // 2026-09-24: COPILOT_AUTO_UPDATE=false, verified in the binary itself.
         'gh-copilot',
@@ -594,6 +594,31 @@ class AgentRegistry {
                     'model'  => ['flag' => '-m {model}'],
                     'prompt' => ['mode' => 'flag:--prompt'],
                 ],
+            ],
+            // OpenCode 2 (Forgejo #822, docs/specs/OPENCODE_V2_AGENT.md): a separate npm package
+            // (@opencode/cli) that runs BESIDE OpenCode 1; it is not an upgrade of it. Facts checked in
+            // a container with 2.2.0 on 27 Oct 2026.
+            // - `--standalone` (top-level flag only) gives each workspace its own private server; without
+            //   it every process would join one shared background service. It rides in plugin_args, which
+            //   every launch path (fresh, resume, resume latest) puts BEFORE the other arguments.
+            // - `-s <id>` resumes a session, `--continue` the last one (`opencode --help`).
+            // - v2 migrates the data of v1, so aicli-shell.sh gives v2 its own XDG folders
+            //   (data, state, config, cache) and a RAM TMPDIR. v2 honours all of them.
+            'opencode2' => [
+                'id' => 'opencode2',
+                'name' => 'OpenCode 2',
+                'description' => 'The new OpenCode 2. It can run beside OpenCode and keeps its own data, settings and sessions, so you can try it without touching OpenCode. To move a workspace, change its agent.',
+                'npm_package' => '@opencode/cli',
+                'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/opencode.ico',
+                'binary' => "$agentBase/opencode2/node_modules/@opencode/cli/bin/opencode.exe",
+                'binary_fallback' => "$agentBase/opencode2/node_modules/.bin/opencode2",
+                'plugin_args' => '--standalone',
+                'resume_cmd' => "{binary} {plugin_args} {args} -s {chatId}",
+                'resume_latest' => "{binary} {plugin_args} {args} --continue",
+                'env_prefix' => 'OPENCODE',
+                'changelog_url' => 'https://github.com/anomalyco/opencode/releases',
+                // Same variable as OpenCode 1. The string is in the 2.2.0 binary (grep, 27 Oct 2026); the effect is not run.
+                'default_envs' => ['OPENCODE_DISABLE_AUTOUPDATE' => 'true'],
             ],
             'kilocode' => [
                 'id' => 'kilocode',

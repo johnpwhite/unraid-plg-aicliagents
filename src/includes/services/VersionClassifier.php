@@ -37,7 +37,7 @@ class VersionClassifier
 
         // 2. Per-agent override: opencode snapshot-*/ci/latest-N are too noisy
         // even for beta. Treated as platform_variant (never shown).
-        if ($agentId === 'opencode') {
+        if ($agentId === 'opencode' || $agentId === 'opencode2') {
             foreach ($tags as $tag) {
                 $t = (string)$tag;
                 if (strpos($t, 'snapshot-') === 0 || $t === 'ci' || preg_match('/^latest-\d+$/D', $t)) {
