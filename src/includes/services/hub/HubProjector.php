@@ -1001,19 +1001,15 @@ class HubProjector {
     }
 
     /**
-     * Resolve one reported drift.
-     *  - adopt:     accept the on-disk edit INTO the hub (JSON vendors: parse the
-     *               vendor value back to canonical; deletion → release + untarget).
-     *               Fenced vendors are not parseable → adopt is refused.
-     *  - overwrite: re-assert the hub value onto disk (or remove an undesired key).
-     *  - release:   stop managing the key; the vendor file is untouched and the
-     *               agent is removed from the server's enabledFor so it is not
-     *               re-adopted at the next projection.
+     * Find the projector that owns one drift row, and read the hub value and the file value of
+     * that row. resolveDrift() and driftDetail() both call this, so the two can never find a
+     * different owner for the same row (#797).
+     *
+     * @return array<string,mixed> an error array (status error), or status ok with: projector,
+     *   isRelay, isPolicy, isAdmin, isClaudeCompat, isInstruction, isTree, isEnvPolicy,
+     *   serverName, want, theirs, abs, home, mcp
      */
-    public static function resolveDrift(string $file, string $key, string $mode): array {
-        if (!in_array($mode, ['adopt', 'overwrite', 'release'], true)) {
-            return ['status' => 'error', 'message' => "invalid mode '$mode'"];
-        }
+    private static function locateRow(string $file, string $key): array {
         // Relay projectors FIRST: they share a ledger file with the user
         // instruction/tree projectors, and only they own the aicli-relay keys.
         // Matching the user projector for a Relay key made desired[key] null, and
@@ -1055,11 +1051,8 @@ class HubProjector {
         $homeInfo = self::resolveHome();
         if (!$homeInfo['ok']) return ['status' => 'error', 'reason' => 'home_unavailable', 'message' => 'agent home is not mounted'];
         $abs = $projector->absPath($homeInfo['home']);
-
-        $state = HubStore::getState();
-        $entry = $state['projections'][$file] ?? ['managedKeys' => [], 'lastProjectedHash' => []];
-        // NOTE: an unmanaged-conflict drift (key never projected) is resolvable
-        // too — no managed-key precondition here.
+        // An unmanaged-conflict drift (key never projected) is resolvable too: no managed-key
+        // precondition here.
 
         $mcp = HubStore::getMcp();
         if ($isClaudeCompat) {
@@ -1099,6 +1092,40 @@ class HubProjector {
         $want = $desired[$key] ?? null;
         $cur = $projector->current($abs, [$key]);
         $theirs = array_key_exists($key, $cur) ? $cur[$key] : null;
+        // The Codex command-environment block depends on no server and has no target list (#800).
+        $isEnvPolicy = $projector instanceof CodexProjector && $key === CodexProjector::POLICY_KEY;
+        return [
+            'status' => 'ok', 'projector' => $projector, 'isRelay' => $isRelay, 'isPolicy' => $isPolicy,
+            'isAdmin' => $isAdmin, 'isClaudeCompat' => $isClaudeCompat, 'isInstruction' => $isInstruction,
+            'isTree' => $isTree, 'isEnvPolicy' => $isEnvPolicy, 'serverName' => $serverName,
+            'want' => $want, 'theirs' => $theirs, 'abs' => $abs, 'home' => $homeInfo['home'], 'mcp' => $mcp,
+        ];
+    }
+
+    /**
+     * Resolve one reported drift.
+     *  - adopt:     accept the on-disk edit INTO the hub (JSON vendors: parse the
+     *               vendor value back to canonical; deletion → release + untarget).
+     *               Fenced vendors are not parseable → adopt is refused.
+     *  - overwrite: re-assert the hub value onto disk (or remove an undesired key).
+     *  - release:   stop managing the key; the vendor file is untouched and the
+     *               agent is removed from the server's enabledFor so it is not
+     *               re-adopted at the next projection.
+     */
+    public static function resolveDrift(string $file, string $key, string $mode): array {
+        if (!in_array($mode, ['adopt', 'overwrite', 'release'], true)) {
+            return ['status' => 'error', 'message' => "invalid mode '$mode'"];
+        }
+        $row = self::locateRow($file, $key);
+        if (($row['status'] ?? '') !== 'ok') return $row;
+        /** @var VendorProjector $projector */
+        $projector = $row['projector'];
+        $isRelay = $row['isRelay']; $isPolicy = $row['isPolicy']; $isAdmin = $row['isAdmin'];
+        $isClaudeCompat = $row['isClaudeCompat']; $isInstruction = $row['isInstruction']; $isTree = $row['isTree'];
+        $isEnvPolicy = $row['isEnvPolicy']; $serverName = $row['serverName'];
+        $want = $row['want']; $theirs = $row['theirs']; $abs = $row['abs']; $mcp = $row['mcp'];
+        $state = HubStore::getState();
+        $entry = $state['projections'][$file] ?? ['managedKeys' => [], 'lastProjectedHash' => []];
 
         switch ($mode) {
             case 'release':
@@ -1106,8 +1133,9 @@ class HubProjector {
                 $entry['managedKeys'] = array_values(array_diff($entry['managedKeys'] ?? [], [$key]));
                 self::putLedgerEntry($state, $file, $entry);
                 HubStore::saveLedger($state);
-                if ($isPolicy || $isClaudeCompat || $isRelay || $isAdmin) {
-                    // Relay and Admin rows are plugin-owned too: no user target list (#640).
+                if ($isPolicy || $isClaudeCompat || $isRelay || $isAdmin || $isEnvPolicy) {
+                    // Relay and Admin rows are plugin-owned too: no user target list (#640). So is the
+                    // Codex command-environment block: it depends on no server (#800).
                     // Always-on policy content has no target list to remove the
                     // agent from (it is unconditional for every installed agent,
                     // never gated by instructions_enabledFor) — falling through to
@@ -1202,6 +1230,292 @@ class HubProjector {
         }
         // No trailing return: $mode is validated to release|overwrite|adopt
         // before the switch, and every case returns (phpstan-verified).
+    }
+
+    // ---------- drift view: labels, actions, detail (#797, #801) ----------
+
+    /** Largest block text and whole-file text sent to the browser. */
+    private const DETAIL_BLOCK_MAX = 262144;
+    private const DETAIL_FILE_MAX = 1048576;
+
+    /** "A", "A and B", "A, B and C". */
+    private static function joinNames(array $names): string {
+        $names = array_values(array_unique(array_map('strval', $names)));
+        if (count($names) <= 1) return $names[0] ?? '';
+        $last = array_pop($names);
+        return implode(', ', $names) . ' and ' . $last;
+    }
+
+    /** The path as the row shows it: the ledger key without its '#surface' suffix. */
+    private static function shownFile(string $file): string {
+        return (string)preg_replace('/#.*$/', '', $file);
+    }
+
+    /** The plain name of the block a row is about. */
+    private static function blockLabelFor(array $row, string $key): string {
+        $p = $row['projector'];
+        if ($row['isClaudeCompat']) return 'Claude instruction link "' . (strncmp($key, 'instructions:', 13) === 0 ? substr($key, 13) : $key) . '"';
+        if ($row['isAdmin']) return 'Plugin management skill (' . $key . ')';
+        if ($row['isRelay']) return $p instanceof TreeProjector ? 'Relay skill (' . $key . ')' : 'Relay guidance block';
+        if ($row['isPolicy']) return 'File links block';
+        if ($row['isInstruction']) return 'Global instructions block';
+        if ($row['isTree']) {
+            if ($p->surface() === 'commands') return 'Command "' . (string)preg_replace('/\.(md|toml)$/', '', $key) . '"';
+            $slash = strpos($key, '/');
+            return $slash === false ? 'Skill "' . $key . '"' : 'Skill "' . substr($key, 0, $slash) . '" (' . substr($key, $slash + 1) . ')';
+        }
+        if ($p instanceof JsonMcpProjector) {
+            $name = $p->serverNameFromKey($key);
+            return 'MCP server "' . ($name ?? $key) . '"';
+        }
+        if ($row['isEnvPolicy']) return 'Command environment block';
+        if ($p instanceof CodexProjector || $p instanceof GooseProjector) return 'MCP servers block';
+        return $key;
+    }
+
+    /** The plain words for the state of a row. $theirs is the value that the check reported. */
+    public static function stateLabelFor(string $kind, $theirs, $ours): string {
+        switch ($kind) {
+            case 'modified':
+                return $ours === null ? 'Changed in the file; the hub wants to remove it' : 'Changed in the file';
+            case 'deleted':
+                return 'Removed from the file';
+            case 'unmanaged_conflict':
+                return (is_string($theirs) && strncmp($theirs, 'Defined outside the managed block', 33) === 0)
+                    ? "Same name outside the hub's block" : 'Not managed by the hub yet';
+            case 'write_failed':
+                return 'The hub could not write the file';
+        }
+        return $kind;
+    }
+
+    /** The block label in running text: first letter lower case, unless the word is an acronym. */
+    private static function lowerBlock(string $label): string {
+        return preg_match('/^[A-Z]{2}/', $label) === 1 ? $label : lcfirst($label);
+    }
+
+    /**
+     * The three server actions for one row, with the sentence of each and its confirm text.
+     * "available" is false where resolveDrift() would refuse (#801).
+     * @param array<string,mixed> $row locateRow() result
+     * @return array<int,array{mode:string,available:bool,help:string,confirm:?array}>
+     */
+    private static function actionsFor(array $row, string $file, string $key): array {
+        $p = $row['projector'];
+        $shown = self::shownFile($file);
+        $agent = self::agentDisplayName($p->agentId());
+        $label = self::blockLabelFor($row, $key);
+        $block = self::lowerBlock($label);
+        $isJson = $p instanceof JsonMcpProjector;
+        $name = $isJson ? $p->serverNameFromKey($key) : null;
+        $pluginOwned = $row['isRelay'] || $row['isAdmin'] || $row['isPolicy'] || $row['isClaudeCompat'] || $row['isEnvPolicy'];
+
+        // Adopt
+        if ($isJson && $name !== null && !$row['isTree'] && !$pluginOwned) {
+            $adopt = [true, $row['theirs'] === null
+                ? "Accept that server \"$name\" was removed from $shown. The hub stops sending it to $agent. The file does not change."
+                : "Keep the entry for server \"$name\" that is in $shown and make it the hub's value. The file does not change. At the next Apply to agents, the hub sends this value to the other agents that use this server."];
+        } elseif ($pluginOwned) {
+            $adopt = [false, 'Adopt does not work for this block: the plugin writes it. Use Overwrite to put it back.'];
+        } elseif ($row['isTree']) {
+            $adopt = [false, 'Adopt does not work for skill and command files. Edit the file in the hub\'s Skills & Commands card, or use Overwrite or Release.'];
+        } else {
+            $adopt = [false, 'Adopt does not work for this file: the hub cannot read the text of a block back into its own settings. Copy your change into the hub by hand, or use Overwrite or Release.'];
+        }
+
+        // Overwrite
+        $clash = [];
+        if ($row['want'] !== null) {
+            try { $clash = $p->conflictsOutside($row['abs'], $row['want']); } catch (\Throwable $e) { $clash = []; }
+        }
+        if (!empty($clash)) {
+            $overwrite = [false, 'Overwrite does not work while ' . self::joinNames($clash) . " is also in $shown outside the hub's block. Open the file, then remove or rename that entry."];
+        } elseif ($row['want'] === null) {
+            $overwrite = [true, "Remove the $block from $shown, because the hub no longer uses it. The change in the file is lost."];
+        } elseif ($isJson && $name !== null) {
+            $overwrite = [true, "Replace the entry for server \"$name\" in $shown with the hub's value. The change in the file is lost. Other entries do not change."];
+        } else {
+            $overwrite = [true, "Replace the $block in $shown with the hub's text. The change in the file is lost. Text outside the block does not change."];
+        }
+        $overwriteConfirm = $overwrite[0] ? [
+            'title' => 'Replace the change in the file?',
+            'text' => $overwrite[1] . ' To get your text back, you must type it again. If config backup is on, the History card has the old file.',
+            'button' => 'Replace',
+        ] : null;
+
+        // Release
+        $releaseConfirm = null;
+        if ($pluginOwned) {
+            $release = 'Forget the hub\'s record of this block. The file keeps its text. The next Apply to agents or check writes the block again.';
+        } elseif ($row['isInstruction']) {
+            $readers = self::joinNames(array_map([self::class, 'agentDisplayName'], $p->servedAgentIds()));
+            $release = "Stop managing the global instructions in $shown. The file keeps its text. The hub stops writing global instructions for $readers.";
+            $releaseConfirm = ['title' => 'Stop writing instructions for these agents?',
+                'text' => $release . ' To undo, tick the agents again in Global Instructions and press Apply to agents.', 'button' => 'Stop managing'];
+        } elseif ($row['isTree']) {
+            $commands = $p->surface() === 'commands';
+            $readers = self::joinNames(array_map([self::class, 'agentDisplayName'], $p->servedAgentIds()));
+            $release = "Stop managing the hub's " . ($commands ? 'commands' : 'skills') . ' in ' . $shown . '. The files keep their text. The hub stops copying any '
+                . ($commands ? 'command' : 'skill') . " to $readers.";
+            $releaseConfirm = ['title' => 'Stop copying ' . ($commands ? 'commands' : 'skills') . ' to these agents?',
+                'text' => $release . ' To undo, tick the agents again under Project ' . ($commands ? 'commands' : 'skills') . ' to and press Apply to agents.', 'button' => 'Stop managing'];
+        } elseif ($isJson && $name !== null) {
+            $release = "Stop managing server \"$name\" in $shown. The file keeps its text. The hub stops sending server \"$name\" to $agent.";
+        } else {
+            $release = "Stop managing the MCP servers block in $shown. The file keeps its text. The hub stops sending all of its MCP servers to $agent.";
+            $names = [];
+            foreach (($row['mcp']['servers'] ?? []) as $sName => $def) {
+                if (in_array($p->agentId(), (array)($def['enabledFor'] ?? []), true)) $names[] = (string)$sName;
+            }
+            $releaseConfirm = ['title' => "Stop sending MCP servers to $agent?",
+                'text' => $release . (empty($names) ? '' : ' Servers: ' . self::joinNames($names) . '.')
+                    . " To undo, tick $agent again on each server and press Apply to agents.", 'button' => 'Stop managing'];
+        }
+
+        return [
+            ['mode' => 'adopt', 'available' => $adopt[0], 'help' => $adopt[1], 'confirm' => null],
+            ['mode' => 'overwrite', 'available' => $overwrite[0], 'help' => $overwrite[1], 'confirm' => $overwriteConfirm],
+            ['mode' => 'release', 'available' => true, 'help' => $release, 'confirm' => $releaseConfirm],
+        ];
+    }
+
+    /**
+     * Plain-word fields for one drift record: state, block, agent, the clash reason and the
+     * three actions. A row that cannot be located keeps all actions on (the server then gives
+     * its own error).
+     * @return array<string,mixed>
+     */
+    private static function driftExtras(string $file, string $key, string $agentId, string $kind, $theirs, $ours): array {
+        $extra = [
+            'stateLabel' => self::stateLabelFor($kind, $theirs, $ours),
+            'agentLabel' => self::agentDisplayName($agentId),
+            'blockLabel' => $key,
+            'compareHelp' => 'Show the text in ' . self::shownFile($file) . " next to the hub's text, with the changes marked.",
+            'actions' => [],
+        ];
+        if ($kind === 'unmanaged_conflict' && is_string($theirs) && strncmp($theirs, 'Defined outside the managed block: ', 35) === 0) {
+            $extra['reason'] = 'Your file also sets ' . substr($theirs, 35) . " outside the hub's block.";
+        }
+        try {
+            $row = self::locateRow($file, $key);
+        } catch (\Throwable $e) {
+            $row = ['status' => 'error'];
+        }
+        if (($row['status'] ?? '') !== 'ok') {
+            foreach (['adopt', 'overwrite', 'release'] as $mode) {
+                $extra['actions'][] = ['mode' => $mode, 'available' => true, 'help' => '', 'confirm' => null];
+            }
+            return $extra;
+        }
+        $extra['blockLabel'] = self::blockLabelFor($row, $key);
+        $extra['actions'] = self::actionsFor($row, $file, $key);
+        return $extra;
+    }
+
+    /** Cut a text at the last full line when it is longer than $max bytes. @return array{0:string,1:bool} */
+    private static function cutText(string $text, int $max): array {
+        if (strlen($text) <= $max) return [$text, false];
+        $cut = substr($text, 0, $max);
+        $nl = strrpos($cut, "\n");
+        return [$nl === false ? '' : substr($cut, 0, $nl), true];
+    }
+
+    /** The text of a value for the compare view: a string as it is, an array as pretty JSON. Masked for the browser. */
+    private static function valueText($value, string $language): ?string {
+        if ($value === null) return null;
+        if (is_string($value)) return self::redactFileTextForBrowser($value, $language);
+        $json = json_encode(self::redactForBrowser($value), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        return $json === false ? null : $json;
+    }
+
+    /** First line number (1 based) of $needle in $haystack, and the last line it covers. @return array{0:int,1:int}|null */
+    private static function lineSpan(string $haystack, string $needle): ?array {
+        if ($needle === '') return null;
+        $pos = strpos($haystack, $needle);
+        if ($pos === false) return null;
+        $start = substr_count($haystack, "\n", 0, $pos) + 1;
+        return [$start, $start + substr_count($needle, "\n")];
+    }
+
+    /**
+     * Read-only detail of one drift row for the compare view: both texts with real line breaks,
+     * the whole file with the hub's block marked, and the file as it would be after Overwrite.
+     * Writes nothing. Every text is masked for the browser (#799, R11).
+     * @param string[]|null $installedOverride test hook, like detectDrift()
+     * @return array<string,mixed>
+     */
+    public static function driftDetail(string $file, string $key, ?array $installedOverride = null): array {
+        $row = self::locateRow($file, $key);
+        if (($row['status'] ?? '') !== 'ok') return $row;
+        $p = $row['projector'];
+        $language = self::languageForFile($file);
+        $rec = null;
+        $all = self::detectDrift($installedOverride);
+        foreach (($all['drift'] ?? []) as $d) {
+            if ($d['file'] === $file && $d['key'] === $key) { $rec = $d; break; }
+        }
+        $out = [
+            'status' => 'ok', 'file' => self::shownFile($file), 'key' => $key, 'absPath' => $row['abs'],
+            'agentLabel' => self::agentDisplayName($p->agentId()), 'language' => $language, 'kind' => $rec['kind'] ?? null,
+        ];
+        if ($rec === null) return $out + ['stateLabel' => '', 'blockLabel' => self::blockLabelFor($row, $key), 'actions' => [], 'truncated' => false];
+
+        [$theirsText, $t1] = self::cutText((string)(self::valueText($row['theirs'], $language) ?? ''), self::DETAIL_BLOCK_MAX);
+        [$oursText, $t2] = self::cutText((string)(self::valueText($row['want'], $language) ?? ''), self::DETAIL_BLOCK_MAX);
+        $truncated = $t1 || $t2;
+        $out += [
+            'stateLabel' => $rec['stateLabel'], 'blockLabel' => $rec['blockLabel'], 'compareHelp' => $rec['compareHelp'],
+            'theirsText' => $row['theirs'] === null ? null : $theirsText,
+            'oursText' => $row['want'] === null ? null : $oursText,
+            'wholeFile' => null, 'afterOverwrite' => null,
+        ];
+
+        // Whole-file view: only for a fenced text block (not a JSON entry, not a skill or command file).
+        $fenced = !($p instanceof JsonMcpProjector) && !$row['isTree'] && (is_string($row['theirs']) || is_string($row['want']));
+        if ($fenced && is_file($row['abs'])) {
+            $raw = (string)@file_get_contents($row['abs']);
+            [$rawCut, $t3] = self::cutText($raw, self::DETAIL_FILE_MAX);
+            $truncated = $truncated || $t3;
+            $blockText = is_string($row['theirs']) ? $row['theirs'] : null;
+            $span = $blockText !== null ? self::lineSpan($raw, $blockText) : null;
+            $clashLines = [];
+            $clashNames = $row['want'] !== null ? $p->conflictsOutside($row['abs'], $row['want']) : [];
+            if (!empty($clashNames)) {
+                foreach (preg_split('/\n/', $raw) ?: [] as $i => $line) {
+                    $n = $i + 1;
+                    if ($span !== null && $n >= $span[0] && $n <= $span[1]) continue;
+                    foreach ($clashNames as $nm) {
+                        if (preg_match('/(^|[\s\[.\'"])' . preg_quote($nm, '/') . '([\s\].\'"=:]|$)/', $line) === 1) { $clashLines[] = [$n, $n]; break; }
+                    }
+                }
+            }
+            $out['wholeFile'] = [
+                'text' => self::redactFileTextForBrowser($rawCut, $language),
+                'blockStart' => $span[0] ?? null, 'blockEnd' => $span[1] ?? null, 'clashLines' => $clashLines,
+            ];
+            // The file as Overwrite would leave it, computed in memory with the projector's pure helpers.
+            $markerSource = is_string($row['want']) ? $row['want'] : $blockText;
+            if (is_string($markerSource) && $markerSource !== '') {
+                $mLines = explode("\n", $markerSource);
+                $open = $mLines[0]; $close = $mLines[count($mLines) - 1];
+                if ($row['want'] === null) {
+                    $after = CodexProjector::stripFence($raw, $open, $close);
+                } elseif ($p instanceof GooseProjector) {
+                    $after = GooseProjector::placeFence($raw, (string)$row['want']);
+                } else {
+                    $after = CodexProjector::replaceOrAppendFence($raw, (string)$row['want'], $open, $close);
+                }
+                [$afterCut] = self::cutText($after, self::DETAIL_FILE_MAX);
+                $afterSpan = is_string($row['want']) ? self::lineSpan($after, (string)$row['want']) : null;
+                $out['afterOverwrite'] = [
+                    'text' => self::redactFileTextForBrowser($afterCut, $language),
+                    'blockStart' => $afterSpan[0] ?? null, 'blockEnd' => $afterSpan[1] ?? null,
+                ];
+            }
+        }
+        $out['truncated'] = $truncated;
+        $out['actions'] = $rec['actions'];
+        return $out;
     }
 
     // ---------- internals ----------
@@ -1443,12 +1757,18 @@ class HubProjector {
     private static function driftRec(string $file, string $key, string $agentId, string $kind, $theirs, $ours): array {
         // A drift record goes to the browser. "ours" is the projected value, so it
         // holds resolved vault secrets; "theirs" can hold them too (#588).
+        // A fenced block or a skill file is a string. redactForBrowser() masks only arrays, so a
+        // value that a person typed into a TOML or YAML block would pass (#799). A string goes
+        // through the line masker as well.
+        $lang = self::languageForFile($file);
+        $safe = static fn($v) => is_string($v) ? self::redactFileTextForBrowser($v, $lang) : self::redactForBrowser($v);
         return ['file' => $file, 'key' => $key, 'agentId' => $agentId, 'kind' => $kind,
-                'theirs' => self::redactForBrowser($theirs), 'ours' => self::redactForBrowser($ours)];
+                'theirs' => $safe($theirs), 'ours' => $safe($ours)]
+            + self::driftExtras($file, $key, $agentId, $kind, $theirs, $ours); // plain words and the accepted actions (#797, #801)
     }
 
     /** Map keys of a vendor MCP value whose values are secrets by nature. */
-    private const SECRET_MAP_KEYS = ['env', 'environment', 'headers', 'http_headers', 'envHttpHeaders'];
+    private const SECRET_MAP_KEYS = ['env', 'envs', 'environment', 'headers', 'http_headers', 'envHttpHeaders'];
 
     /**
      * A copy of a vendor value that is safe to send to the browser (#588).
@@ -1481,6 +1801,111 @@ class HubProjector {
         }
         // A secret in a URL query part.
         return preg_replace('/([?&][A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|auth|sig)[A-Za-z0-9_.-]*=)(?!\{[A-Z][A-Z0-9_]{1,127}\}(?:[&#\s]|$))[^&#\s]+/i', '$1[masked]', $value);
+    }
+
+    /** Words in a key name that mark its value as a secret (the #799 line masker). */
+    private const SECRET_NAME_RE = '/key|token|secret|password|passwd|auth|bearer/i';
+
+    /** A value that is only a vault placeholder, with an optional scheme word. */
+    private const PLACEHOLDER_RE = '/^(?:Bearer |Basic )?\{[A-Z][A-Z0-9_]{1,127}\}$/D';
+
+    /** The language of a config file, from its name: toml, yaml, json, markdown or text. */
+    public static function languageForFile(string $file): string {
+        $path = strtolower((string)preg_replace('/#.*$/', '', $file));
+        if (substr($path, -5) === '.toml') return 'toml';
+        if (substr($path, -5) === '.yaml' || substr($path, -4) === '.yml') return 'yaml';
+        if (substr($path, -5) === '.json') return 'json';
+        if (substr($path, -3) === '.md') return 'markdown';
+        return 'text';
+    }
+
+    /** The masked form of one secret value. The hash lets a diff show that the value changed. */
+    private static function maskedValue(string $value): string {
+        return '[masked:' . substr(hash('sha256', $value), 0, 8) . ']';
+    }
+
+    /** Mask every quoted string and every bare value that sits inside an inline table or list. */
+    private static function maskInline(string $s): string {
+        $re = '/("(?:[^"\\\\]|\\\\.)*"|\'[^\']*\')(?!\s*[=:])|([=:]\s*)([^\s,}\]"\'\[{#][^,}\]#]*[^\s,}\]#]|[^\s,}\]"\'\[{#])/';
+        return (string)preg_replace_callback($re, static function (array $m): string {
+            if ($m[1] !== '') {
+                $inner = substr($m[1], 1, -1);
+                if (preg_match(self::PLACEHOLDER_RE, $inner) === 1) return $m[1];
+                return $m[1][0] . self::maskedValue($inner) . $m[1][0];
+            }
+            if (preg_match(self::PLACEHOLDER_RE, $m[3]) === 1) return $m[0];
+            return $m[2] . self::maskedValue($m[3]);
+        }, $s);
+    }
+
+    /** Mask the value part of one `key = value` or `key: value` line (the part after the separator). */
+    private static function maskValuePart(string $rest): string {
+        if ($rest === '' || $rest[0] === '#') return $rest;
+        if ($rest[0] === '[' || $rest[0] === '{') return self::maskInline($rest);
+        if (preg_match('/^("(?:[^"\\\\]|\\\\.)*"|\'[^\']*\')(.*)$/sD', $rest, $q) === 1) {
+            $inner = substr($q[1], 1, -1);
+            if (preg_match(self::PLACEHOLDER_RE, $inner) === 1) return $rest;
+            return $q[1][0] . self::maskedValue($inner) . $q[1][0] . $q[2];
+        }
+        if (preg_match('/^[|>][-+0-9]*\s*(?:#.*)?$/D', $rest) === 1) return $rest; // YAML block scalar marker
+        if (preg_match('/^([^\s#,]+)(.*)$/sD', $rest, $b) === 1) {
+            if (preg_match(self::PLACEHOLDER_RE, $b[1]) === 1) return $rest;
+            return self::maskedValue($b[1]) . $b[2];
+        }
+        return $rest;
+    }
+
+    /**
+     * A copy of a config text (a TOML or YAML block, or a whole file) that is safe to send to
+     * the browser (#799). redactForBrowser() masks only arrays; a text has no env or header
+     * map to walk. This function reads the text line by line. It masks the value of each key
+     * whose name holds key, token, secret, password, passwd, auth or bearer (any case), and
+     * each value inside an env, environment, headers or http_headers table (a TOML table
+     * header, a YAML map, or an inline table). A value that is only a {KEY} placeholder
+     * stays. The masked form is "[masked:<8 hex>]", the same as the array masker. The number
+     * of lines does not change.
+     */
+    public static function redactTextForBrowser(string $text, string $language = 'text'): string {
+        $lines = explode("\n", $text);
+        $tomlSecretTable = false;
+        $yamlIndent = null; // indent of the YAML key (env:, headers:) whose children are secrets
+        foreach ($lines as $i => $line) {
+            $bare = rtrim($line, "\r");
+            $tail = substr($line, strlen($bare));
+            if (trim($bare) === '') continue;
+            preg_match('/^[ \t]*/', $bare, $ind);
+            $indent = strlen($ind[0]);
+            if (($language === 'toml' || $language === 'text') && preg_match('/^[ \t]*\[\[?[ \t]*([^\]]+?)[ \t]*\]\]?[ \t]*(?:#.*)?$/D', $bare, $h) === 1) {
+                $parts = preg_split('/\./', $h[1]) ?: [];
+                $last = strtolower(trim((string)end($parts), " \t\"'"));
+                $tomlSecretTable = in_array($last, array_map('strtolower', self::SECRET_MAP_KEYS), true);
+                continue;
+            }
+            if ($yamlIndent !== null && ltrim($bare)[0] !== '#' && $indent <= $yamlIndent) $yamlIndent = null;
+            if (preg_match('/^([ \t]*(?:-[ \t]+)?)(["\']?)([A-Za-z0-9_.\/-]+)\2([ \t]*[=:][ \t]*)(.*)$/D', $bare, $m) !== 1) continue;
+            [, $pre, $q, $name, $sep, $rest] = $m;
+            if ($rest === '' || $rest[0] === '#') {
+                if (in_array(strtolower($name), array_map('strtolower', self::SECRET_MAP_KEYS), true)) $yamlIndent = $indent;
+                continue;
+            }
+            $inSecretMap = $tomlSecretTable || $yamlIndent !== null;
+            if ($inSecretMap || preg_match(self::SECRET_NAME_RE, $name) === 1) {
+                $rest = self::maskValuePart($rest);
+            } elseif (in_array(strtolower($name), array_map('strtolower', self::SECRET_MAP_KEYS), true) && $rest[0] === '{') {
+                $rest = self::maskInline($rest);
+            }
+            $lines[$i] = $pre . $q . $name . $q . $sep . $rest . $tail;
+        }
+        return implode("\n", $lines);
+    }
+
+    /**
+     * A config text for the browser: vault values back to {KEY}, a URL secret masked, and the
+     * line masker above (#799). The drift record and the compare view both use this.
+     */
+    public static function redactFileTextForBrowser(string $text, string $language = 'text'): string {
+        $text = (string)self::redactForBrowser($text);
+        return self::redactTextForBrowser($text, $language);
     }
 
     /**

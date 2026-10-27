@@ -12,6 +12,8 @@
  *              Drives hub_get_state / hub_save_mcp_server / hub_delete_mcp_server /
  *              hub_get_instructions / hub_save_instructions / hub_set_instruction_targets /
  *              hub_project / hub_get_drift / hub_resolve_drift, renders the drift
+ *              grid (docs/specs/HUB_DRIFT_VIEW.md; the Compare dialog is React, loaded on
+ *              the first Compare click, and reads hub_get_drift_detail),
  *              banner, and offers per-session signal_reload after a projection
  *              (never auto-restarts sessions). env values arrive MASKED (key + set
  *              flag) and are only re-sent when the user types a new value. One
@@ -992,6 +994,90 @@
     }
 
     // ---------- drift ----------
+    // Docs: docs/specs/HUB_DRIFT_VIEW.md. One grid; every row has four fixed slots (Compare, Adopt,
+    // Overwrite, Release) so the buttons line up. The server says, for each row, which actions work
+    // and gives one plain sentence for each. A button that does not work stays in its slot, greyed.
+
+    var DRIFT_MODES = ['compare', 'adopt', 'overwrite', 'release'];
+    var DRIFT_LABELS = { compare: 'Compare', adopt: 'Adopt', overwrite: 'Overwrite', release: 'Release' };
+    var hubDriftTipKeys = false;
+
+    function hubDriftSay(text) {
+        var live = document.getElementById('hub-drift-live');
+        if (live) live.textContent = text;
+    }
+
+    /** The server's record of one action of a row, or null (an old record has no actions). */
+    function hubDriftAction(d, mode) {
+        var list = d && d.actions;
+        if (!list) return null;
+        for (var i = 0; i < list.length; i++) if (list[i].mode === mode) return list[i];
+        return null;
+    }
+
+    function hubDriftHelp(d, mode) {
+        if (mode === 'compare') return d.compareHelp || ('Show the text in ' + d.file + " next to the hub's text, with the changes marked.");
+        var a = hubDriftAction(d, mode);
+        return a ? a.help : '';
+    }
+
+    /** One slot: the button, and its hover sentence (also the accessible description). */
+    function hubDriftSlot(d, mode, rowNo) {
+        var avail = true;
+        if (mode !== 'compare') { var a = hubDriftAction(d, mode); avail = !a || a.available !== false; }
+        var help = hubDriftHelp(d, mode);
+        var slot = el('span', '');
+        slot.className = 'hub-drift-slot';
+        var b = el('button', '');
+        b.type = 'button';
+        b.className = 'aicli-btn-slim hub-drift-btn' + (mode === 'overwrite' ? ' danger' : '');
+        b.setAttribute('data-mode', mode);
+        b.textContent = DRIFT_LABELS[mode];
+        b.setAttribute('aria-label', DRIFT_LABELS[mode] + ' — ' + d.file + ', ' + (d.blockLabel || d.key));
+        if (!avail) b.setAttribute('aria-disabled', 'true');
+        slot.appendChild(b);
+        if (help) {
+            var id = 'hub-drift-help-' + rowNo + '-' + mode;
+            var tip = el('span', '', help);
+            tip.id = id;
+            tip.className = 'hub-drift-tip';
+            tip.setAttribute('role', 'tooltip');
+            b.setAttribute('aria-describedby', id);
+            slot.appendChild(tip);
+        }
+        b.addEventListener('click', function () {
+            if (!avail) { hubDriftSay(help); return; }
+            if (mode === 'compare') { hubOpenCompare(d, b); return; }
+            hubResolve(d, mode);
+        });
+        return slot;
+    }
+
+    /** Esc hides an open hover sentence; it shows again after the pointer or focus leaves. */
+    function hubDriftTipKeysOnce() {
+        if (hubDriftTipKeys) return;
+        hubDriftTipKeys = true;
+        document.addEventListener('keydown', function (e) {
+            if (e.key !== 'Escape') return;
+            document.querySelectorAll('#hub-drift-list .hub-drift-slot').forEach(function (s) {
+                if (s.matches(':hover, :focus-within')) s.classList.add('is-dismissed');
+            });
+        });
+        var reset = function (e) {
+            var s = e.target && e.target.closest ? e.target.closest('.hub-drift-slot') : null;
+            if (s) s.classList.remove('is-dismissed');
+        };
+        document.addEventListener('mouseout', reset);
+        document.addEventListener('focusout', reset);
+    }
+
+    function hubDriftStateIcon(d) {
+        var info = (d.stateLabel === 'Not managed by the hub yet' || d.stateLabel === "Same name outside the hub's block");
+        var i = document.createElement('i');
+        i.className = 'fa ' + (info ? 'fa-info-circle' : 'fa-exclamation-triangle');
+        i.setAttribute('aria-hidden', 'true');
+        return i;
+    }
 
     function hubRenderDrift(drift) {
         var banner = document.getElementById('hub-drift-banner');
@@ -999,69 +1085,134 @@
         clearNode(list);
         if (!drift || !drift.length) { banner.style.display = 'none'; hubStatus('hub-drift', 'No changes'); return; }
         banner.style.display = 'block';
+        hubDriftTipKeysOnce();
         var driftFiles = {};
         drift.forEach(function (d) { driftFiles[d.file] = true; });
         var driftN = Object.keys(driftFiles).length;
         hubStatus('hub-drift', hubPlural(driftN, 'file', 'files') + ' changed outside the hub');
-        drift.forEach(function (d) {
-            var row = el('div', 'padding:8px 0; border-top:1px solid rgba(128,128,128,0.2);');
-            var head = el('div', 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;');
-            head.className = 'hub-drift-head';
-            var file = el('span', 'font-family:monospace; font-size:11px; font-weight:700;', d.file);
+
+        var head = el('div', '');
+        head.className = 'hub-drift-colhead';
+        head.setAttribute('aria-hidden', 'true');
+        ['File', 'Block', 'State', 'Actions'].forEach(function (t) { head.appendChild(el('span', '', t)); });
+        list.appendChild(head);
+
+        drift.forEach(function (d, n) {
+            var row = el('div', '');
+            row.className = 'hub-drift-row';
+            row.setAttribute('role', 'listitem');
+            var file = el('div', '');
             file.className = 'hub-drift-file';
-            head.appendChild(file);
-            var key = el('span', 'font-family:monospace; font-size:11px;', d.key);
-            key.className = 'hub-drift-key';
-            head.appendChild(key);
-            head.appendChild(el('span', 'font-size:10px; opacity:0.6;', '(' + d.kind + ')'));
-            var acts = hubRowActions(head);
-            ['adopt', 'overwrite', 'release'].forEach(function (mode) {
-                var b = el('button', '');
-                b.type = 'button'; b.className = 'aicli-btn-slim';
-                b.textContent = mode.charAt(0).toUpperCase() + mode.slice(1);
-                b.addEventListener('click', function () { hubResolve(d, mode); });
-                acts.appendChild(b);
-            });
-            row.appendChild(head);
+            var path = el('span', '', d.file);
+            path.className = 'hub-drift-path';
+            path.title = d.file;
+            file.appendChild(path);
+            file.appendChild(el('span', '', d.agentLabel || ''));
+            file.lastChild.className = 'hub-drift-agent';
+            row.appendChild(file);
+            var block = el('div', '', d.blockLabel || d.key);
+            block.className = 'hub-drift-block';
+            row.appendChild(block);
+            var state = el('div', '');
+            state.className = 'hub-drift-state';
+            var chip = el('span', '');
+            chip.className = 'hub-drift-chip';
+            chip.appendChild(hubDriftStateIcon(d));
+            chip.appendChild(document.createTextNode(' ' + (d.stateLabel || d.kind)));
+            state.appendChild(chip);
+            row.appendChild(state);
+            var acts = el('div', '');
+            acts.className = 'hub-drift-actions';
+            DRIFT_MODES.forEach(function (mode) { acts.appendChild(hubDriftSlot(d, mode, n)); });
+            row.appendChild(acts);
             if (d.reason) {
-                var why = el('div', 'font-size:11px; opacity:0.85; padding-top:3px;', String(d.reason));
+                var why = el('div', '', String(d.reason));
                 why.className = 'hub-drift-reason';
                 row.appendChild(why);
             }
-            var det = document.createElement('details');
-            var sum = document.createElement('summary');
-            sum.style.cssText = 'font-size:10px; opacity:0.6; cursor:pointer;';
-            sum.className = 'hub-drift-values';
-            sum.textContent = 'show values';
-            det.appendChild(sum);
-            var pre = el('pre', 'font-size:10px; max-height:160px; overflow:auto; background:rgba(0,0,0,0.2); padding:6px; border-radius:3px;');
-            pre.textContent = 'on disk (theirs):\n' + JSON.stringify(d.theirs, null, 2) + '\n\nhub value (ours):\n' + JSON.stringify(d.ours, null, 2);
-            det.appendChild(pre);
-            row.appendChild(det);
             list.appendChild(row);
         });
     }
 
+    /**
+     * Run Adopt, Overwrite or Release for a row. Asks first when the server gives a confirm text
+     * (Overwrite always; Release when it changes more than this row). Resolves true when the
+     * server did it, false when the person cancelled or the server refused.
+     */
     function hubResolve(d, mode) {
-        var go = function () {
-            hubAjax('hub_resolve_drift', { file: d.file, key: d.key, mode: mode }).then(function (res) {
-                if (res.status !== 'ok') { swal('Could not ' + mode, res.message || 'unknown error', 'error'); return; }
-                window.hubLoadState();
-            });
-        };
-        if (mode === 'overwrite') {
+        return new Promise(function (resolve) {
+            var act = hubDriftAction(d, mode);
+            var go = function () {
+                hubAjax('hub_resolve_drift', { file: d.file, key: d.key, mode: mode }).then(function (res) {
+                    if (res.status !== 'ok') { swal('Could not ' + mode, res.message || 'unknown error', 'error'); resolve(false); return; }
+                    window.hubLoadState();
+                    resolve(true);
+                }).catch(function () {
+                    swal('Could not ' + mode, 'The request failed. Check the connection and try again.', 'error');
+                    resolve(false);
+                });
+            };
+            var c = act && act.confirm;
+            if (!c && mode === 'overwrite') {
+                c = { title: 'Replace the change in the file?', text: "The hub's text replaces the change in " + d.file + ' (' + d.key + ').', button: 'Replace' };
+            }
+            if (!c) { go(); return; }
             swal({
-                title: 'Overwrite the on-disk edit?',
-                text: 'The hub value replaces the manual edit in ' + d.file + ' (' + d.key + ').',
+                title: c.title,
+                text: c.text,
                 type: 'warning',
                 showCancelButton: true,
-                confirmButtonText: 'Overwrite',
+                confirmButtonText: c.button,
                 cancelButtonText: 'Cancel',
                 closeOnConfirm: true
-            }, function (c) { if (c) go(); });
-        } else {
-            go();
-        }
+            }, function (ok) { if (ok) go(); else resolve(false); });
+        });
+    }
+
+    // ---------- drift compare dialog (React, loaded on the first Compare click) ----------
+
+    var hubCompareLoading = null;
+
+    /** Add the bundle once. Resolves when the host says it is ready; fails after 15 s. */
+    function hubLoadCompareBundle() {
+        if (window.aicliHubCompare) return Promise.resolve();
+        if (hubCompareLoading) return hubCompareLoading;
+        hubCompareLoading = new Promise(function (resolve, reject) {
+            var root = document.getElementById('aicli-hub-compare-root');
+            var ver = root ? root.getAttribute('data-ver') : '';
+            var css = root ? (root.getAttribute('data-css') || '') : '';
+            var base = '/plugins/unraid-aicliagents/assets/ui/';
+            var done = false;
+            var timer = setTimeout(function () { if (!done) { done = true; hubCompareLoading = null; reject(new Error('timeout')); } }, 15000);
+            window.addEventListener('aicli:hub-compare-ready', function () {
+                if (done) return;
+                done = true; clearTimeout(timer); resolve();
+            }, { once: true });
+            css.split(',').forEach(function (f) {
+                if (!f) return;
+                var l = document.createElement('link');
+                l.rel = 'stylesheet';
+                l.href = base + f + '?v=' + encodeURIComponent(ver);
+                document.head.appendChild(l);
+            });
+            var s = document.createElement('script');
+            s.type = 'module';
+            s.src = base + 'index.js?v=' + encodeURIComponent(ver);
+            s.onerror = function () { if (!done) { done = true; clearTimeout(timer); hubCompareLoading = null; reject(new Error('load')); } };
+            document.head.appendChild(s);
+        });
+        return hubCompareLoading;
+    }
+
+    function hubOpenCompare(d, opener) {
+        hubLoadCompareBundle().then(function () {
+            window.aicliHubCompare.open(d.file, d.key, {
+                opener: opener,
+                resolve: function (mode) { return hubResolve(d, mode); }
+            });
+        }).catch(function () {
+            swal('Could not open the compare view', 'Reload the page and try again.', 'error');
+        });
     }
 
     // ---------- git history (OP #1365 / H-04) ----------

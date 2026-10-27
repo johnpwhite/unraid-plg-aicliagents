@@ -1618,6 +1618,66 @@
     .hb-ok { color: color-mix(in srgb, #16a34a 50%, var(--text-color, #1c1c1c)); }
     .storage-entity-card .se-backup-running .se-backup-status { color: color-mix(in srgb, #ff8c00 45%, var(--text-color, #1c1c1c)); }
 
+    /* CONFIG DRIFT VIEW (docs/specs/HUB_DRIFT_VIEW.md, #797). One grid: file, block, state, and four
+       fixed action slots (Compare, Adopt, Overwrite, Release). Every row has the same template and the
+       same width, so the slots line up. A slot is never removed: an action that does not work is greyed. */
+    #tab-hub #hub-drift-list { --hub-drift-cols: minmax(12ch, 2fr) minmax(10ch, 1.4fr) minmax(12ch, 1.4fr) repeat(4, 96px); }
+    /* A button that cannot work on this row (aria-disabled, so it keeps focus and shows its reason) looks disabled. */
+    .aicli-btn-slim[aria-disabled="true"] { opacity: 0.5 !important; cursor: not-allowed !important; color: var(--disabled-text-color, #808080) !important; }
+    #tab-hub .hub-drift-colhead, #tab-hub .hub-drift-row {
+        display: grid; grid-template-columns: var(--hub-drift-cols); column-gap: 12px; align-items: center; box-sizing: border-box;
+    }
+    #tab-hub .hub-drift-colhead { padding: 4px 0; font-size: 11px; font-weight: 700; opacity: 0.7; }
+    #tab-hub .hub-drift-colhead > span:nth-child(4) { grid-column: 4 / -1; text-align: right; }
+    #tab-hub .hub-drift-row { padding: 8px 0; border-top: 1px solid rgba(128,128,128,0.2); }
+    #tab-hub .hub-drift-file { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    #tab-hub .hub-drift-path { font-family: monospace; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+    #tab-hub .hub-drift-agent { font-size: 11px; opacity: 0.7; }
+    #tab-hub .hub-drift-block, #tab-hub .hub-drift-state { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+    #tab-hub .hub-drift-chip { display: inline-flex; align-items: baseline; gap: 4px; padding: 1px 8px; border-radius: 10px; background: rgba(128,128,128,0.15); }
+    #tab-hub .hub-drift-chip .fa-exclamation-triangle { color: var(--orange, #ff8c00); }
+    #tab-hub .hub-drift-chip .fa-info-circle { color: #3b82f6; }
+    #tab-hub .hub-drift-actions { display: contents; }
+    #tab-hub .hub-drift-slot { position: relative; display: block; min-width: 0; }
+    #tab-hub .hub-drift-slot .hub-drift-btn {
+        width: 100% !important; min-width: 0 !important; box-sizing: border-box; padding: 0 4px !important;
+        letter-spacing: 0.5px !important; font-size: 12px !important;
+    }
+    #tab-hub .hub-drift-reason { grid-column: 1 / 4; font-size: 11px; opacity: 0.85; }
+    #tab-hub .hub-drift-live:not(:empty) { margin-top: 8px; padding: 6px 8px; font-size: 12px; border-left: 3px solid var(--orange, #ff8c00); }
+    /* The hover sentence: a mouse opens it after 300 ms, keyboard focus opens it at once, Esc closes it. */
+    #tab-hub .hub-drift-tip {
+        position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 30; width: max-content; max-width: min(380px, 80vw);
+        padding: 8px 10px; border-radius: 6px; background: #1f2328; color: #fff; font-size: 12px; line-height: 1.4;
+        letter-spacing: 0; text-transform: none; font-weight: 400; white-space: normal; text-align: left;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.35); visibility: hidden; opacity: 0; pointer-events: none;
+        transition: opacity 120ms, visibility 0s linear 120ms;
+    }
+    #tab-hub .hub-drift-slot:focus-within .hub-drift-tip { visibility: visible; opacity: 1; transition-delay: 0s; }
+    @media (hover: hover) and (pointer: fine) {
+        #tab-hub .hub-drift-slot:hover .hub-drift-tip { visibility: visible; opacity: 1; transition: opacity 120ms 300ms, visibility 0s linear 300ms; }
+    }
+    #tab-hub .hub-drift-slot.is-dismissed .hub-drift-tip { visibility: hidden !important; opacity: 0 !important; }
+    @media (prefers-reduced-motion: reduce) { #tab-hub .hub-drift-tip { transition: none !important; } }
+    /* Tablet: file, block and state on line 1, the four buttons on line 2, right aligned. */
+    @media (max-width: 1023px) {
+        #tab-hub #hub-drift-list { --hub-drift-cols: minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1.4fr); }
+        #tab-hub .hub-drift-colhead { display: none; }
+        #tab-hub .hub-drift-row { row-gap: 8px; }
+        #tab-hub .hub-drift-actions { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, 96px); column-gap: 8px; justify-content: end; }
+        #tab-hub .hub-drift-reason { grid-column: 1 / -1; }
+    }
+    /* Phone: each row stacks; the four buttons share one line, 44 px high. */
+    @media (max-width: 640px) {
+        #tab-hub #hub-drift-list { --hub-drift-cols: minmax(0, 1fr); }
+        #tab-hub .hub-drift-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 8px; justify-content: stretch; }
+        #tab-hub .hub-drift-slot .hub-drift-btn { min-height: 44px; padding: 0 2px !important; letter-spacing: 0 !important; font-size: 11px !important; }
+        #tab-hub .hub-drift-tip { display: none; right: auto; left: 0; max-width: calc(100vw - 32px); }
+        #tab-hub .hub-drift-slot:focus-within .hub-drift-tip, #tab-hub .hub-drift-slot:hover .hub-drift-tip { display: block; }
+        #tab-hub .hub-drift-slot.is-dismissed .hub-drift-tip { display: none !important; }
+        #tab-hub .hub-drift-slot:nth-child(n+3) .hub-drift-tip { right: 0; left: auto; }
+    }
+
     /* SIDEBAR_THEME_LAYOUT.md (#560): on the sidebar themes Unraid's fixed menu
        covers the left of the window. The dim layer still covers the whole
        window, but its padding keeps the dialog right of the menu
@@ -2075,7 +2135,6 @@
         #tab-hub .hub-row-actions { display: flex !important; flex: 1 1 100%; gap: 8px; min-width: 0; }
         #tab-hub .hub-row-actions > .aicli-btn-slim { flex: 1 1 0 !important; min-width: 0 !important; }
         #tab-hub .hub-row-cmd { white-space: normal !important; word-break: break-all; }
-        #tab-hub .hub-drift-file, #tab-hub .hub-drift-key { flex: 1 1 100%; min-width: 0; word-break: break-all; }
         #tab-hub .hub-git-file-path { flex: 1 1 100% !important; white-space: normal !important; word-break: break-all; }
         #tab-hub .hub-apply-session-id { flex: 1 1 100%; min-width: 0; word-break: break-all; }
         #tab-hub .hub-apply-session > .aicli-btn-slim { flex: 1 1 100% !important; }
@@ -2100,7 +2159,7 @@
         /* Summaries (details) are 44 px tap targets. A text-only summary
            stays a list item (display:flex would drop its open/closed
            triangle) and gets a 44 px line; the git commit rows are flex. */
-        #tab-hub .hub-drift-values, #tab-relay details > summary {
+        #tab-relay details > summary {
             display: list-item !important; min-height: 44px; line-height: 22px; padding: 11px 0; box-sizing: border-box;
         }
 

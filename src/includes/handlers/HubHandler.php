@@ -79,6 +79,7 @@ class HubHandler
             case 'hub_move_server_secrets':     return self::moveServerSecrets();
             case 'hub_get_drift':               return HubProjector::detectDrift();
             case 'hub_resolve_drift':           return self::resolveDrift();
+            case 'hub_get_drift_detail':        return self::driftDetail();
             default:                            return null;
         }
     }
@@ -91,7 +92,7 @@ class HubHandler
                 'hub_set_instruction_targets', 'hub_list_skills', 'hub_save_skill_file',
                 'hub_delete_skill', 'hub_list_commands', 'hub_save_command',
                 'hub_delete_command', 'hub_set_skills_targets', 'hub_set_commands_targets',
-                'hub_project', 'hub_get_drift', 'hub_resolve_drift'];
+                'hub_project', 'hub_get_drift', 'hub_get_drift_detail', 'hub_resolve_drift'];
     }
 
     // ---------- reads ----------
@@ -578,11 +579,12 @@ class HubHandler
         return $result;
     }
 
-    private static function resolveDrift(): array
+    /**
+     * Check the file and key of a drift request. Returns an error array, or null when both are
+     * valid. The resolve action and the read-only detail action use the same two checks.
+     */
+    private static function driftTargetProblem(string $file, string $key): ?array
     {
-        $file = (string)($_REQUEST['file'] ?? '');
-        $key  = (string)($_REQUEST['key'] ?? '');
-        $mode = (string)($_REQUEST['mode'] ?? '');
         if ($file === '' || $key === '') return ['status' => 'error', 'message' => 'file and key required'];
         // Relay ledger keys carry a '#<surface>' suffix (e.g.
         // ~/.claude/CLAUDE.md#aicli-relay-guidance). Without '#' in the class this
@@ -599,7 +601,27 @@ class HubHandler
         if (!self::driftKeyIsValid($key)) {
             return ['status' => 'error', 'message' => 'invalid key'];
         }
+        return null;
+    }
+
+    private static function resolveDrift(): array
+    {
+        $file = (string)($_REQUEST['file'] ?? '');
+        $key  = (string)($_REQUEST['key'] ?? '');
+        $mode = (string)($_REQUEST['mode'] ?? '');
+        $problem = self::driftTargetProblem($file, $key);
+        if ($problem !== null) return $problem;
         return HubProjector::resolveDrift($file, $key, $mode);
+    }
+
+    /** Read-only: both texts of one drift row for the compare view (#797). Writes nothing. */
+    private static function driftDetail(): array
+    {
+        $file = (string)($_REQUEST['file'] ?? '');
+        $key  = (string)($_REQUEST['key'] ?? '');
+        $problem = self::driftTargetProblem($file, $key);
+        if ($problem !== null) return $problem;
+        return HubProjector::driftDetail($file, $key);
     }
 
     // ---------- validation ----------

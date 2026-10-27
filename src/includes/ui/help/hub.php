@@ -11,7 +11,7 @@
  */
 return [
     'hub-drift' => <<<'HTML'
-<p>Keep your own edit or put the hub's value back, so nothing is lost without your word. An agent's config file was changed outside the hub. The hub never overwrites such a change by itself. For each key choose: Adopt (take the change into the hub), Overwrite (put the hub's value back), or Release (stop managing the key).</p>
+<p>Keep your own edit or put the hub's value back, so nothing is lost without your word. An agent's config file was changed outside the hub. The hub never overwrites such a change by itself. Press Compare to see both texts. Point at a button to see what it will do.</p>
 HTML,
     'hub-mcp' => <<<'HTML'
 <p>Set up an MCP server (a tool server that agents can call) once, and every agent that supports it gets it. The hub writes it into each agent's own config file, in that agent's format. Keys you wrote by hand are never touched.</p>

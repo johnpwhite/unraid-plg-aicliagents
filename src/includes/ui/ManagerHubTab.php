@@ -22,8 +22,20 @@
 <?php
 require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open and aicli_help_btn: the cards use the shared header (Phase 7).
 ?>
+<?php
+// The drift compare dialog is a React part of the shared UI bundle. It loads on the first Compare click
+// (docs/specs/HUB_DRIFT_VIEW.md). The page only names the files and their version here.
+$hubCmpDir = '/usr/local/emhttp/plugins/unraid-aicliagents/assets/ui';
+$hubCmpCss = glob("$hubCmpDir/index*.css") ?: [];
+sort($hubCmpCss);
+$hubCmpVer = (string) max(array_merge([@filemtime("$hubCmpDir/index.js") ?: 0], array_map(static fn($f) => @filemtime($f) ?: 0, $hubCmpCss)));
+if ($hubCmpVer === '0') { $hubCmpVer = (string) \AICliAgents\Services\ConfigService::getVersion(); }
+?>
 <!-- TAB: CONFIG HUB -->
 <div id="tab-hub" class="aicli-tab-content aicli-layout">
+    <div id="aicli-hub-compare-root" data-ver="<?= htmlspecialchars($hubCmpVer) ?>" data-css="<?= htmlspecialchars(implode(',', array_map('basename', $hubCmpCss))) ?>"></div>
+    <?php // Same import map as AICliAgents.page: the lazy chunks import "./index.js" without ?v=, and must get the one module. It does nothing until the bundle loads. ?>
+    <script type="importmap">{"imports":{"/plugins/unraid-aicliagents/assets/ui/index.js":"/plugins/unraid-aicliagents/assets/ui/index.js?v=<?= htmlspecialchars($hubCmpVer) ?>"}}</script>
     <div style="width:100%;">
 
         <?php /* Phase 7: the cards can be collapsed and moved. Reset layout forgets the saved order and the open state. */ ?>
@@ -44,7 +56,8 @@ require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open and aicli_help_bt
         <!-- Drift card (populated when hub_get_drift / hub_project report conflicts). It is hidden until a drift shows, and then it opens itself. -->
         <?=aicli_card_open('hub-drift', 'fa-code-fork', 'Config drift detected', 'Loading…', 'hub-drift', '',
             ['domId' => 'hub-drift-banner', 'style' => 'display:none; border-color:rgba(255,140,0,0.6);', 'class' => 'aicli-card--warn'])?>
-                <div id="hub-drift-list"></div>
+                <div id="hub-drift-list" role="list" aria-label="Files changed outside the hub"></div>
+                <div id="hub-drift-live" class="hub-drift-live" role="status" aria-live="polite"></div>
         <?=aicli_card_close()?>
 
         <!-- Canonical MCP server list -->
