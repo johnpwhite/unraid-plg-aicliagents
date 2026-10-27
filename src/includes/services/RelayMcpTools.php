@@ -56,6 +56,13 @@ class RelayMcpTools {
         return '';
     }
 
+    /** Resolve the launcher identity without trusting the event-append process environment. */
+    public static function inheritedSessionFromParent(?int $pid = null, string $procRoot = '/proc'): string {
+        $pid = $pid ?? (int)getmypid();
+        $parent = self::parentPid($pid, $procRoot);
+        return $parent > 1 ? self::inheritedSession($parent, $procRoot) : '';
+    }
+
     /**
      * PPid from /proc/<pid>/stat. The comm field is parenthesised and may itself
      * contain spaces or parentheses, so the fields are read after the LAST ')'.
@@ -123,6 +130,15 @@ class RelayMcpTools {
     // relay_get_inbox is not in this list: reading the unread items moves the read position of the inbox.
     public const READ_ONLY_TOOLS = ['relay_list_topics', 'relay_get_assignments', 'relay_list_contacts', 'relay_request_status'];
 
+    /** Relay CLI-only topic verbs. They have no MCP twin but use the same audit exit. */
+    public const CLI_ONLY_TOOLS = [
+        'relay_cli_subscriptions', 'relay_cli_create_topic', 'relay_cli_update_topic',
+        'relay_cli_archive_topic', 'relay_cli_delete_topic',
+    ];
+
+    /** Successful Relay inbox reads advance a cursor and stay outside the action audit. */
+    public const AUDIT_EXEMPT_TOOLS = ['relay_get_inbox'];
+
     /**
      * The tools that send, answer or change something: the catalogue minus the read-only tools. A new tool is in
      * this list until someone puts it in READ_ONLY_TOOLS, so a read-only run never gets it by accident.
@@ -149,7 +165,23 @@ class RelayMcpTools {
      * @param array<string,mixed>|null $principal
      * @return array<string,mixed>
      */
-    public static function call(string $name, array $args, string $session, ?array $allowed = null, ?array $principal = null): array {
+    public static function call(string $name, array $args, string $session, ?array $allowed = null, ?array $principal = null, string $surface = 'relay-mcp'): array {
+        $tier = in_array($name, self::READ_ONLY_TOOLS, true) || $name === 'relay_cli_subscriptions' ? 'read' : 'relay';
+        try {
+            $result = self::dispatch($name, $args, $session, $allowed, $principal, $surface);
+        } catch (\Throwable $e) {
+            $result = ['status' => 'error', 'message' => 'The Relay tool failed while it ran.'];
+        }
+        $status = (string)($result['status'] ?? 'error');
+        $successfulCursorRead = in_array($name, self::AUDIT_EXEMPT_TOOLS, true) && $status === 'ok';
+        if (!$successfulCursorRead && ($tier !== 'read' || $status !== 'ok')) {
+            $outcome = $status === 'ok' ? 'ok' : (strpos((string)($result['message'] ?? ''), 'failed while it ran') !== false ? 'error' : 'refused');
+            AgentActionAudit::record($surface, $name, $tier, $args, $outcome, (string)($result['message'] ?? ''), $result, $session);
+        }
+        return $result;
+    }
+
+    private static function dispatch(string $name, array $args, string $session, ?array $allowed, ?array $principal, string $surface): array {
         if ($principal !== null) {
             $allowed = $allowed ?? RelayGrants::toolsFor($principal);
             if ((string)($principal['id'] ?? '') !== $session) return ['status'=>'error','message'=>'This Relay identity may not use that tool.'];
@@ -159,7 +191,9 @@ class RelayMcpTools {
         // recognised" and sent a reporter hunting their own launch identity, when
         // the actual condition is that no session id ever reached this process.
         if ($session === '') return ['status'=>'error','message'=>'Relay MCP could not determine its workspace session: AICLI_SESSION_ID was not set for this process and no parent process supplied one. The MCP host may not forward environment to the servers it spawns.'];
-        if (!in_array($name, self::names(), true)) return ['status'=>'error','message'=>'Unknown Relay tool.'];
+        $dispatchable = self::names();
+        if ($surface === 'relay-cli') $dispatchable = array_merge($dispatchable, self::CLI_ONLY_TOOLS);
+        if (!in_array($name, $dispatchable, true)) return ['status'=>'error','message'=>'Unknown Relay tool.'];
         if ($allowed !== null && !in_array($name, $allowed, true)) return ['status'=>'error','message'=>'This Relay identity may not use that tool.'];
 
         if ($principal !== null) {
@@ -180,6 +214,11 @@ class RelayMcpTools {
         }
 
         switch ($name) {
+            case 'relay_cli_subscriptions': return ['status'=>'ok','relay'=>AgentRelayService::subscriptions($session)];
+            case 'relay_cli_create_topic':
+            case 'relay_cli_update_topic': return AgentRelayService::agentSaveTopic($session,(string)($args['topic'] ?? ''),(string)($args['description'] ?? ''));
+            case 'relay_cli_archive_topic': return AgentRelayService::agentArchiveTopic($session,(string)($args['topic'] ?? ''));
+            case 'relay_cli_delete_topic': return AgentRelayService::agentRemoveTopic($session,(string)($args['topic'] ?? ''));
             case 'relay_list_topics': return ['status'=>'ok','topics'=>AgentRelayService::agentTopics($session)];
             case 'relay_get_inbox':
                 if (($one = self::inboxLookup($session, $args)) !== null) return $one;

@@ -11,13 +11,13 @@
  * ledger miss must never fail the caller's shutdown/deploy sequence.
  *
  * Usage:
- *   php event-append.php --kind=<kind> [--actor=system] [--summary=<text>]
+ *   php event-append.php --kind=<kind> [--summary=<text>]
  *       [--subject=<json>] [--data=<json>]
  *
- *   --kind     required. One of the vocabulary kinds
- *              (docs/specs/PLUGIN_EVENT_LEDGER_AND_SUBSCRIPTIONS.md).
- *   --actor    optional, defaults to "system" (this script has no
- *              AICLI_SESSION_ID and is never called from a browser).
+ *   --kind     required. One of the six storage backup/restore kinds used by
+ *              the plugin's shell helpers. Every other kind is refused.
+ *   --actor    ignored. The actor comes from the parent process tree, not an
+ *              argument or this process's environment.
  *   --summary  optional short text, plain (not JSON).
  *   --subject  optional JSON object, e.g. '{"workspaceId":"abc"}'.
  *   --data     optional JSON object or array, the same payload the shell
@@ -30,6 +30,13 @@ require_once __DIR__ . '/../includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\EventActor;
 use AICliAgents\Services\EventLedger;
+use AICliAgents\Services\RelayMcpTools;
+
+/** Event kinds used by the plugin-owned backup and restore shell helpers. */
+const AICLI_EVENT_APPEND_SHELL_KINDS = [
+    'storage.backup.started', 'storage.backup.finished', 'storage.backup.failed',
+    'storage.restore.started', 'storage.restore.finished', 'storage.restore.failed',
+];
 
 /** @return array<string,string> */
 function aicliEventAppendParseArgs(array $argv): array {
@@ -60,7 +67,16 @@ try {
         exit(0); // best-effort: no kind, nothing to record, never fail the caller
     }
 
-    EventActor::$override = ['type' => (string)($args['actor'] ?? 'system')];
+    // Only the plugin-owned backup helpers use this CLI tee. A workspace must
+    // not forge action or Activity rows by choosing an arbitrary event kind.
+    if (!in_array($kind, AICLI_EVENT_APPEND_SHELL_KINDS, true)) exit(0);
+
+    // The event-append process environment can be changed by its caller. Start
+    // at the parent process and use its launcher identity when one exists.
+    $sessionId = RelayMcpTools::inheritedSessionFromParent();
+    EventActor::$override = $sessionId !== ''
+        ? ['type' => 'agent', 'sessionId' => $sessionId]
+        : ['type' => 'system'];
 
     $summary = (string)($args['summary'] ?? '');
     $subject = aicliEventAppendJsonArg((string)($args['subject'] ?? ''));

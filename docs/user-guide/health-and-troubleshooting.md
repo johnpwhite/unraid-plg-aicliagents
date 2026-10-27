@@ -6,7 +6,7 @@
 
 ## In plain words
 
-The plugin watches itself and tells you when something needs a look. The **Health** dot at the top of the Settings page shows if the plugin is well. The **Activity tray** at the bottom right of the page lists what the plugin is doing now: installs, storage jobs, workspace starts and jobs that wait for you. The **Debug Console** holds the plugin log and the tools that help you report a problem. When you install a new plugin version, a banner offers to reload your open pages and reconnect your terminals. Your agents and their conversations keep running through all of this.
+The plugin watches itself and tells you when something needs a look. The **Health** dot at the top of the Settings page shows if the plugin is well. The **Activity tray** at the bottom right of the page lists what the plugin is doing now: installs, storage jobs, workspace starts and jobs that wait for you. It also groups repeated refused agent actions into a short-lived record. The **Debug Console** holds the plugin log and the tools that help you report a problem. When you install a new plugin version, a banner offers to reload your open pages and reconnect your terminals. Your agents and their conversations keep running through all of this.
 
 ## Where to find it
 
@@ -92,6 +92,8 @@ A Relay notice that waits shows as "Message waiting for <workspace>", with "from
 - A workspace start, but only when nobody watched it or it went wrong. A start that you began by a click shows a row only if it runs for more than 10 seconds. A reconnect to an agent that still runs shows no row.
 - A failed auto-launch, with **Retry**.
 - Changes that an agent made through the plugin management tools, for example "Setting changed: Voice speed to 1.2" with "by Claude Code in my-project" under it.
+- Refused agent actions appear together in one record row for each workspace and 10-minute period. The title gives the count, agent and workspace, for example "3 refused calls by Claude Code in Builder". The row disappears after 60 seconds.
+- Calls from one workspace after the first 20 calls to the same tool in one minute stay allowed and appear in one counted row. The count describes grouped records, not refused calls.
 - Proposals that wait for your approval.
 - Relay notices that were held back.
 - A notice that the storage needs a tidy-up while workspaces are open.
@@ -243,6 +245,7 @@ If the problem is not here, build a support bundle and ask on the forum thread f
 <details>
 <summary>Change history</summary>
 
+- **2026-10-26** — The Activity tray groups refused agent actions in a short-lived row and groups calls after the first 20 per tool each minute. Spec `docs/specs/PLUGIN_MANAGEMENT_TOOLS.md`, issue #804.
 - **2026-10-24** — A row in the Activity tray shows who did it, for example "by root (John)", and who approved or rejected a proposal. Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 - **2026-10-23** — The Health dot has an (i) button. Its panel lists the checks that are not fine and has a button to the Debug Console. Two pointers to the **Home Storage** tab now say **Storage**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The setting **Plugin management tools** is now called **Let agents manage the plugin** on the Configuration tab. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

@@ -123,7 +123,7 @@ class AutoContinueHandler
         $re = AutoContinueRules::normaliseRegex(self::req('re'));
         $err = $re === '' ? 'Enter a regular expression.' : AutoContinueRules::regexError($re, $kind);
         if ($err !== null) return ['status' => 'error', 'message' => 'The expression is refused: ' . $err . '.'];
-        $screen = WorkspaceScreenService::read(self::req('workspaceId'), self::req('lines') !== '' ? self::req('lines') : 60, 'Manager UI (pattern test)');
+        $screen = WorkspaceScreenService::read(self::req('workspaceId'), self::req('lines') !== '' ? self::req('lines') : 60, 'Manager UI (pattern test)', false);
         if (isset($screen['error'])) return ['status' => 'error', 'message' => (string)$screen['error']];
         $m = AutoContinueRules::matchLines($re, $kind, (string)$screen['text']);
         return [

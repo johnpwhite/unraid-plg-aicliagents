@@ -40,25 +40,34 @@ final class WorkspaceScreenService
      *   workspaceId, name, agentId, agentVersion, model, provider, lines, text,
      *   lineCount, bytes, truncated
      */
-    public static function read(string $workspaceId, $lines = null, string $caller = ''): array
+    public static function read(string $workspaceId, $lines = null, string $caller = '', bool $auditRefusal = true): array
     {
         $workspaceId = trim($workspaceId);
+        $refuse = static function (string $message) use ($workspaceId, $auditRefusal): array {
+            if ($auditRefusal) {
+                AgentActionAudit::record(
+                    (string)(getenv('AICLI_ACTION_SURFACE') ?: 'mcp'),
+                    'aicli_read_workspace_screen', 'read', ['workspaceId' => $workspaceId], 'refused', $message
+                );
+            }
+            return ['error' => $message];
+        };
         if (!preg_match(self::ID_RE, $workspaceId)) {
-            return ['error' => 'workspaceId must be a workspace id (letters, digits, - and _ only).'];
+            return $refuse('workspaceId must be a workspace id (letters, digits, - and _ only).');
         }
         $n = self::clampLines($lines);
         $record = null;
         foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $w) {
             if (is_array($w) && (string)($w['id'] ?? '') === $workspaceId) { $record = $w; break; }
         }
-        if ($record === null) return ['error' => "No workspace with id '$workspaceId' was found."];
+        if ($record === null) return $refuse("No workspace with id '$workspaceId' was found.");
         $name = (string)($record['name'] ?? $workspaceId);
         $agentId = (string)($record['agentId'] ?? '');
-        if ($agentId === '') return ['error' => "Workspace '$name' has no agent on record."];
+        if ($agentId === '') return $refuse("Workspace '$name' has no agent on record.");
 
         $raw = TmuxService::capturePaneTail($agentId, $workspaceId, $n);
         if ($raw === null) {
-            return ['error' => "Workspace '$name' has no terminal pane (it is not running)."];
+            return $refuse("Workspace '$name' has no terminal pane (it is not running).");
         }
 
         $plain = TmuxService::plainPaneText($raw);
@@ -91,7 +100,9 @@ final class WorkspaceScreenService
         try { $version = AgentRegistry::getInstalledVersion($agentId); } catch (\Throwable $e) { $version = ''; }
         if ($version === '0.0.0') $version = '';
 
-        self::audit($workspaceId, $agentId, $caller, count($outLines), strlen($text));
+        $agentName = $agentId;
+        try { $agentName = (string)(AgentRegistry::getRegistry()[$agentId]['name'] ?? $agentId); } catch (\Throwable $e) { }
+        self::audit($name, $agentName, $caller, count($outLines), strlen($text));
 
         return [
             'workspaceId' => $workspaceId,
@@ -118,11 +129,11 @@ final class WorkspaceScreenService
      * Spec §Security "Read-tool logging": one WARN line per read, so it survives
      * the "Warnings" log level. Never the screen text.
      */
-    private static function audit(string $workspaceId, string $agentId, string $caller, int $lines, int $bytes): void
+    private static function audit(string $workspaceName, string $agentName, string $caller, int $lines, int $bytes): void
     {
         $who = $caller !== '' ? $caller : self::callerLabel();
         $who = (string)preg_replace('/[^A-Za-z0-9 _.:()\/-]/', '', $who);
-        LogService::log("Screen read: workspace $workspaceId ($agentId) by $who — $lines lines, $bytes bytes", LogService::LOG_WARN, 'WorkspaceScreen');
+        LogService::log("Screen read: workspace $workspaceName ($agentName) by $who — $lines lines, $bytes bytes", LogService::LOG_WARN, 'WorkspaceScreen');
     }
 
     /**

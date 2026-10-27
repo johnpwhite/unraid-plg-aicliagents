@@ -165,7 +165,7 @@ while (true) {
         // every other workspace sharing this generation's adapter.
         try {
             $args = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
-            $result = AdminMcpTools::toolResult(AdminMcpTools::call((string)($params['name'] ?? ''), $args));
+            $result = AdminMcpTools::toolResult(AdminMcpTools::call((string)($params['name'] ?? ''), $args, 'mcp'));
         } catch (\Throwable $e) {
             $result = ['content'=>[['type'=>'text','text'=>'Admin tool error: ' . $e->getMessage()]],'isError'=>true];
         }

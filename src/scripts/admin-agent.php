@@ -383,6 +383,12 @@
  * positional command line maps onto a tool name and its arguments.
  */
 require_once __DIR__ . '/../includes/AICliAgentsManager.php';
+// Prefer the launcher's identity. A caller can change its own environment
+// before it starts this process, so the child's variable is only a fallback.
+$inheritedSession = \AICliAgents\Services\RelayMcpTools::inheritedSessionFromParent();
+$cliSession = $inheritedSession !== '' ? $inheritedSession : (string)(getenv('AICLI_SESSION_ID') ?: '');
+if ($cliSession !== '') putenv('AICLI_SESSION_ID=' . $cliSession);
+putenv('AICLI_ACTION_SURFACE=cli');
 
 use AICliAgents\Services\AdminMcpTools;
 use AICliAgents\Services\AgentRunService;
@@ -955,6 +961,7 @@ try {
             }
             if ($bhScheduled && runningInsideAgentWorkspace()) {
                 $result = ['status' => 'error', 'message' => "backup-home --scheduled is the plugin's own cron calling in, not an agent tool — it refuses from inside an agent workspace. Use aicli_backup_home instead, or run this from the Manager's own scheduled job."];
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'backup-home', 'destructive', ['user' => $bhUser], 'refused', (string)$result['message'], [], '', 'operator_inside_workspace');
                 break;
             }
             $bhOpts = [];
@@ -963,7 +970,10 @@ try {
             if ($bhScheduled) {
                 // The CLI bootstrap loads services, not the AJAX handlers: load the one we call.
                 if (!class_exists('\AICliAgents\Handlers\StorageHandler')) { require_once __DIR__ . '/../includes/handlers/StorageHandler.php'; }
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'backup-home', 'destructive', ['user' => $bhUser], 'attempt');
                 $result = \AICliAgents\Handlers\StorageHandler::backupHome($bhUser, $bhOpts);
+                $outcome = (($result['status'] ?? '') === 'ok') ? 'ok' : 'error';
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'backup-home', 'destructive', ['user' => $bhUser], $outcome, (string)($result['message'] ?? ''), $result);
                 // The cron line sends stdout to /dev/null, so a failed scheduled
                 // run must leave its own record (#489).
                 if (($result['status'] ?? '') === 'error') {
@@ -998,14 +1008,17 @@ try {
             }
             if ($rhYes && runningInsideAgentWorkspace()) {
                 $result = ['status' => 'error', 'message' => "restore-home --yes is the operator's own shell command; it refuses from inside an agent workspace. Use aicli_restore_home instead — the Manager's Tier 3 propose-only tool a human then approves."];
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'restore-home', 'destructive', ['user' => $rhUser], 'refused', (string)$result['message'], [], '', 'operator_inside_workspace');
                 break;
             }
             if ($rhUser === '' || $rhSnapshot === null || $rhSnapshot === '') {
                 $result = ['status' => 'error', 'message' => 'restore-home requires a user and --snapshot=<path|latest>.'];
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'restore-home', 'destructive', ['user' => $rhUser], 'refused', (string)$result['message']);
                 break;
             }
             if (!in_array($rhMode, ['replace', 'merge'], true)) {
                 $result = ['status' => 'error', 'message' => "'$rhMode' is not a valid restore mode. Use 'replace' or 'merge'."];
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'restore-home', 'destructive', ['user' => $rhUser, 'mode' => $rhMode], 'refused', (string)$result['message']);
                 break;
             }
             if (!$rhYes) {
@@ -1019,6 +1032,7 @@ try {
                         . "restore the home from '$rhSnapshot' in $rhModeText mode, then relaunch every session. "
                         . 'Nothing has happened yet. Re-run with --yes to proceed.',
                 ], JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                \AICliAgents\Services\AgentActionAudit::record('cli', 'restore-home', 'destructive', ['user' => $rhUser, 'mode' => $rhMode], 'pending');
                 exit(2);
             }
             // The operator's own confirmed run: call StorageHandler directly,
@@ -1026,9 +1040,12 @@ try {
             // backup-home --scheduled uses above — never AdminMcpTools/
             // aicli_restore_home, which only ever proposes.
             if (!class_exists('\AICliAgents\Handlers\StorageHandler')) { require_once __DIR__ . '/../includes/handlers/StorageHandler.php'; }
+            \AICliAgents\Services\AgentActionAudit::record('cli', 'restore-home', 'destructive', ['user' => $rhUser, 'mode' => $rhMode], 'attempt');
             $result = \AICliAgents\Handlers\StorageHandler::restoreHome($rhUser, [
                 'snapshot' => $rhSnapshot, 'mode' => $rhMode, 'safety_snapshot' => $rhSafety,
             ]);
+            $outcome = (($result['status'] ?? '') === 'ok') ? 'ok' : 'error';
+            \AICliAgents\Services\AgentActionAudit::record('cli', 'restore-home', 'destructive', ['user' => $rhUser, 'mode' => $rhMode], $outcome, (string)($result['message'] ?? ''), $result);
             break;
 
         // ---- Notebook / artefacts (ARTEFACTS.md, 2026-10-04). Same tools the

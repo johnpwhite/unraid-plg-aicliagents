@@ -70,8 +70,8 @@ if ($session === '' && !in_array($action, $relayAgentMaintenance, true)) {
 }
 
 switch ($action) {
-    case 'topics':        $result = ['status'=>'ok', 'topics'=>AgentRelayService::agentTopics($session)]; break;
-    case 'subscriptions': $result = ['status'=>'ok', 'relay'=>AgentRelayService::subscriptions($session)]; break;
+    case 'topics':        $result = \AICliAgents\Services\RelayMcpTools::call('relay_list_topics', [], $session, null, null, 'relay-cli'); break;
+    case 'subscriptions': $result = \AICliAgents\Services\RelayMcpTools::call('relay_cli_subscriptions', [], $session, null, null, 'relay-cli'); break;
     // inbox [--all] [--limit N] [--before ID|TIME] [--after ID|TIME] [--message-id ID]
     // No option: only UNREAD items. Any option (or --all): the old newest-20 view. Same rules as relay_get_inbox.
     case 'inbox':
@@ -81,24 +81,24 @@ switch ($action) {
             $key = ltrim((string)$argv[$i], '-'); $key = $key === 'message-id' ? 'message_id' : $key;
             if (in_array($key, ['limit','before','after','message_id'], true) && isset($argv[$i + 1])) $inboxArgs[$key] = (string)$argv[$i + 1];
         }
-        $result = \AICliAgents\Services\RelayMcpTools::call('relay_get_inbox', $inboxArgs, $session);
+        $result = \AICliAgents\Services\RelayMcpTools::call('relay_get_inbox', $inboxArgs, $session, null, null, 'relay-cli');
         break;
-    case 'contacts':      $result = ['status'=>'ok', 'contacts'=>AgentRelayService::agentContacts($session)]; break;
-    case 'direct':        $result = AgentRelayService::directMessage($session, $topic, $description); break;
-    case 'reply':         $result = AgentRelayService::directMessage($session, (string)($argv[4] ?? ''), $description, $topic); break;
-    case 'create':
-    case 'update':        $result = AgentRelayService::agentSaveTopic($session, $topic, $description); break;
-    case 'archive':       $result = AgentRelayService::agentArchiveTopic($session, $topic); break;
-    case 'delete':        $result = AgentRelayService::agentRemoveTopic($session, $topic); break;
-    case 'join':          $result = AgentRelayService::agentJoinTopic($session, $topic); break;
-    case 'leave':         $result = AgentRelayService::agentLeaveTopic($session, $topic); break;
-    case 'publish':       $result = AgentRelayService::agentPublish($session, $topic, (string)($argv[3] ?? ''), (string)($argv[4] ?? '')); break;
-    case 'request':       $result = AgentRelayService::request($session, $topic, $description, (int)($argv[4] ?? 300), (int)($argv[5] ?? 1800), (string)($argv[6] ?? '')); break;
-    case 'request-status':$result = AgentRelayService::requestStatus($session, $topic); break;
-    case 'cancel-request':$result = AgentRelayService::cancelRequest($session, $topic, $description); break;
-    case 'ack':           $result = AgentRelayService::respondRequest($session, $topic, 'acknowledged', $description); break;
-    case 'resolve':       $result = AgentRelayService::respondRequest($session, $topic, 'resolved', $description); break;
-    case 'fail':          $result = AgentRelayService::respondRequest($session, $topic, 'failed', $description); break;
+    case 'contacts':      $result = \AICliAgents\Services\RelayMcpTools::call('relay_list_contacts', [], $session, null, null, 'relay-cli'); break;
+    case 'direct':        $result = \AICliAgents\Services\RelayMcpTools::call('relay_send_direct_message', ['recipient_session_id' => $topic, 'summary' => $description], $session, null, null, 'relay-cli'); break;
+    case 'reply':         $result = \AICliAgents\Services\RelayMcpTools::call('relay_send_direct_message', ['recipient_session_id' => (string)($argv[4] ?? ''), 'summary' => $description, 'thread_id' => $topic], $session, null, null, 'relay-cli'); break;
+    case 'create':        $result = \AICliAgents\Services\RelayMcpTools::call('relay_cli_create_topic', ['topic' => $topic, 'description' => $description], $session, null, null, 'relay-cli'); break;
+    case 'update':        $result = \AICliAgents\Services\RelayMcpTools::call('relay_cli_update_topic', ['topic' => $topic, 'description' => $description], $session, null, null, 'relay-cli'); break;
+    case 'archive':       $result = \AICliAgents\Services\RelayMcpTools::call('relay_cli_archive_topic', ['topic' => $topic], $session, null, null, 'relay-cli'); break;
+    case 'delete':        $result = \AICliAgents\Services\RelayMcpTools::call('relay_cli_delete_topic', ['topic' => $topic], $session, null, null, 'relay-cli'); break;
+    case 'join':          $result = \AICliAgents\Services\RelayMcpTools::call('relay_join_topic', ['topic' => $topic], $session, null, null, 'relay-cli'); break;
+    case 'leave':         $result = \AICliAgents\Services\RelayMcpTools::call('relay_leave_topic', ['topic' => $topic], $session, null, null, 'relay-cli'); break;
+    case 'publish':       $result = \AICliAgents\Services\RelayMcpTools::call('relay_publish_event', ['topic' => $topic, 'severity' => (string)($argv[3] ?? ''), 'summary' => (string)($argv[4] ?? '')], $session, null, null, 'relay-cli'); break;
+    case 'request':       $result = \AICliAgents\Services\RelayMcpTools::call('relay_request', ['topic' => $topic, 'summary' => $description, 'ack_seconds' => (int)($argv[4] ?? 300), 'resolve_seconds' => (int)($argv[5] ?? 1800), 'client_request_id' => (string)($argv[6] ?? '')], $session, null, null, 'relay-cli'); break;
+    case 'request-status':$result = \AICliAgents\Services\RelayMcpTools::call('relay_request_status', ['request_id' => $topic], $session, null, null, 'relay-cli'); break;
+    case 'cancel-request':$result = \AICliAgents\Services\RelayMcpTools::call('relay_cancel_request', ['request_id' => $topic, 'note' => $description], $session, null, null, 'relay-cli'); break;
+    case 'ack':           $result = \AICliAgents\Services\RelayMcpTools::call('relay_acknowledge_request', ['request_id' => $topic, 'note' => $description], $session, null, null, 'relay-cli'); break;
+    case 'resolve':       $result = \AICliAgents\Services\RelayMcpTools::call('relay_resolve_request', ['request_id' => $topic, 'note' => $description], $session, null, null, 'relay-cli'); break;
+    case 'fail':          $result = \AICliAgents\Services\RelayMcpTools::call('relay_fail_request', ['request_id' => $topic, 'note' => $description], $session, null, null, 'relay-cli'); break;
     // Session-agnostic: re-attempt delivery of every deferred DM notice across all
     // live sessions. Driven by the supervisor tick so a queued notice surfaces even
     // when no Manager browser tab is open to run the drawer poll.

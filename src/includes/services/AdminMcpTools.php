@@ -442,7 +442,59 @@ class AdminMcpTools {
      *
      * @return array<string,mixed>
      */
-    public static function call(string $name, array $args): array {
+    public static function call(string $name, array $args, ?string $surface = null): array {
+        $surface = $surface ?? ((string)(getenv('AICLI_ACTION_SURFACE') ?: 'mcp'));
+        $tier = self::tier($name) ?: 'unknown';
+        $attemptFirst = $tier === 'destructive' || $name === 'aicli_spawn_workspace';
+        if ($attemptFirst) {
+            AgentActionAudit::record($surface, $name, $tier, $args, 'attempt');
+        }
+
+        try {
+            $result = self::dispatch($name, $args);
+        } catch (\Throwable $e) {
+            $result = ['status' => 'error', 'message' => 'The tool failed while it ran.'];
+        }
+        $status = (string)($result['status'] ?? 'error');
+        $message = (string)($result['message'] ?? $result['error'] ?? '');
+        if (in_array($status, ['pending', 'pending_approval', 'waiting'], true)
+            || ($status === 'ok' && $tier === 'destructive')) {
+            $outcome = 'pending';
+        } elseif ($status === 'ok') {
+            $outcome = 'ok';
+        } elseif (strpos($message, ' failed: ') !== false) {
+            $outcome = 'error';
+        } else {
+            $outcome = 'refused';
+        }
+        $reasonCode = self::auditReasonCode($name, $args, $outcome, $message);
+        $audit = AgentActionAudit::record($surface, $name, $tier, $args, $outcome, $message, $result, '', $reasonCode);
+        if ($status === 'ok' && $tier === 'change' && empty($audit['folded'])) {
+            self::recordChangeAudit($name, $result, $args);
+        }
+        return $result;
+    }
+
+    /** Give security refusals an explicit code at the dispatch boundary. */
+    private static function auditReasonCode(string $name, array $args, string $outcome, string $message): string
+    {
+        if ($outcome !== 'refused') return '';
+        if ($name === 'aicli_set_setting') {
+            $key = (string)($args['key'] ?? '');
+            $locked = in_array($key, ['tts_url', 'stt_url', 'stt_stream_url'], true)
+                || ($key === 'voice_enabled' && in_array($args['value'] ?? null, [1, '1', true], true));
+            if ($locked && (strpos($message, 'Settings page') !== false || strpos($message, 'settings page') !== false)) {
+                return 'locked_setting';
+            }
+        }
+        if ($name === 'aicli_stop_workspace' && strpos($message, 'Only the workspace that created') === 0) {
+            return 'not_creator';
+        }
+        return '';
+    }
+
+    /** Dispatch one tool call. The public call() wrapper records every outcome. */
+    private static function dispatch(string $name, array $args): array {
         if (!in_array($name, self::names(), true)) return ['status'=>'error','message'=>'Unknown Plugin Management tool.'];
         // A Notebook tool is refused by the Notebook switch alone (same sentence as
         // AdminService::notebookGate()); every other tool by the Plugin management switch.
@@ -730,7 +782,8 @@ class AdminMcpTools {
                     $screen = WorkspaceScreenService::read(
                         (string)($args['workspaceId'] ?? ''),
                         $args['lines'] ?? null,
-                        WorkspaceScreenService::callerLabel('an MCP client with no session')
+                        WorkspaceScreenService::callerLabel('an MCP client with no session'),
+                        false
                     );
                     $result = array_key_exists('error', $screen)
                         ? ['status' => 'error', 'message' => (string)$screen['error']]
@@ -837,9 +890,6 @@ class AdminMcpTools {
                     $result = ['status'=>'error','message'=>'Unknown Plugin Management tool.'];
             }
 
-            if (($result['status'] ?? '') === 'ok' && self::tier($name) === 'change') {
-                self::recordChangeAudit($name, $result, is_array($args) ? $args : []);
-            }
             return $result;
         } catch (\Throwable $e) {
             // Never let a backend fault propagate as an exception up through the
@@ -1263,12 +1313,8 @@ class AdminMcpTools {
      * The row is a RECORD (meta.kind = 'record', ACTIVITY_TRAY_PLAIN_NOTICES.md R3):
      * the title names the object, the grey line says "by <Agent name> in <workspace name>".
      *
-     * Called ONLY when the mutation actually succeeded: a refusal (bad id,
-     * disabled feature, failed allow-list check) changed nothing, so there is
-     * nothing to show as "done" — and ActivityService's watchdog never expires a
-     * 'failed' entry the way it prunes a 'done' one after DONE_TTL_SECONDS, so
-     * auditing every refusal would leave a PERMANENT tray entry for something as
-     * routine as a mistyped workspace id.
+     * Called only when the mutation succeeds. Refusals use AgentActionAudit's
+     * grouped, done row so they expire with other finished Activity tray rows.
      *
      * Best-effort and MUST NOT be able to fail the tool call it is recording — a
      * broken tray write must never turn an already-successful mutation into a

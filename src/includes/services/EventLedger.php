@@ -12,11 +12,12 @@
  *     on. Reads never delete; only rotation and reboot remove a line.</description>
  *     <dependencies>RedactionService (secret scrub before write); EventActor
  *     (actor resolution when the caller does not supply one); NchanService
- *     (the server clock, `nowMs()`).</dependencies>
+ *     (the server clock, `nowMs()`). Agent-action records use append-only
+ *     summary events after their fold window closes; ledger rows are immutable.</dependencies>
  *     <constraints>Never throws to its caller — a broken ledger must not break
  *     a publish. The seq counter takes a non-blocking flock with a short bounded
- *     retry (tmpfs, never FUSE); every other write is a single append with no
- *     lock. A line is capped at 4 KB: summary is trimmed to 512 chars first,
+ *     retry (tmpfs, never FUSE); all event writes append with `LOCK_EX`. A
+ *     line is capped at 4 KB: summary is trimmed to 512 chars first,
  *     then `data` is dropped to {"truncated":true} if the line still does not
  *     fit.</constraints>
  * </module_context>
@@ -180,6 +181,9 @@ final class EventLedger {
      */
     public static function kindForChannel(string $channel, array $payload): ?string {
         if ($channel === 'activity') {
+            // Agent-action roll-up rows publish each count update to the live
+            // tray. Their single `agent.action` event is the ledger record.
+            if (($payload['meta']['agentActionRollup'] ?? false) === true) return null;
             if (($payload['dismissed'] ?? false) === true) {
                 return 'activity.dismissed';
             }
@@ -318,6 +322,10 @@ final class EventLedger {
                     $where = (string)($payload['name'] ?? $payload['workspaceId'] ?? 'a workspace');
                     $chars = (int)($payload['chars'] ?? 0);
                     return trim("$agentId typed $chars chars into $where");
+                case $kind === 'agent.action':
+                    $tool = (string)($payload['tool'] ?? 'an agent tool');
+                    $outcome = (string)($payload['outcome'] ?? 'ran');
+                    return trim("Agent action $outcome: $tool");
                 case strncmp($kind, 'workspace.', 10) === 0:
                     return trim('workspace ' . substr($kind, 10) . ($label !== '' ? ": $label" : ''));
                 case strncmp($kind, 'activity.', 9) === 0:

@@ -156,6 +156,7 @@ require_once __DIR__ . '/services/RelayNoticeLedger.php'; // RELAY_TOKEN_SAVINGS
 require_once __DIR__ . '/services/TransientErrorService.php'; // #312 — auto-continue after a temporary model error
 require_once __DIR__ . '/services/AutoContinueRules.php'; // AUTO_CONTINUE_PATTERNS.md — the operator's own auto-continue patterns
 require_once __DIR__ . '/services/WorkspaceScreenService.php'; // AUTO_CONTINUE_PATTERNS.md — masked, logged screen read
+require_once __DIR__ . '/services/AgentActionAudit.php'; // #804 — durable agent action and refusal records
 require_once __DIR__ . '/services/AdminMcpTools.php';
 require_once __DIR__ . '/services/HomeBackupSettingsService.php'; // HOME_BACKUP.md #287 — per-home backup settings
 require_once __DIR__ . '/services/BackupCronService.php'; // HOME_BACKUP.md R1 — owns the backup cron file
