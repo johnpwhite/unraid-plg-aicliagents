@@ -1014,6 +1014,16 @@ class TerminalHandler {
         return $base . '/close-' . $safeId . '.flag';
     }
 
+    /**
+     * #814: the "closing" sentinel. captureResumeForClose() sets it BEFORE the exit keys,
+     * and aicli-shell.sh holds its relaunch loop while it exists (the close sentinel
+     * comes about 3 seconds later, after the resume scrape). Same folder and seam as closeFlagPath().
+     */
+    public static function closingFlagPath(string $safeId): string {
+        $base = rtrim((string)(getenv('AICLI_TMP_BASE') ?: \AICliAgents\Services\SecretPaths::stateRoot()), '/');
+        return $base . '/closing-' . $safeId . '.flag';
+    }
+
     /** Test seam: fn(string $homePath): bool. Null = StorageMountService::isPathAvailable. */
     public static $homeAvailableProbe = null;
 
@@ -1040,7 +1050,9 @@ class TerminalHandler {
         aicli_log("gracefulClose: START $ctx", AICLI_LOG_INFO, "TerminalHandler");
         // #661: a sentinel left by an earlier close that died half way must not leak into this one.
         $closeFlag = self::closeFlagPath($safeId);
+        $closingFlag = self::closingFlagPath($safeId);
         @unlink($closeFlag);
+        @unlink($closingFlag);
         try {
             // Non-root audit: shared multi-user lookup helper. Stays in lock-step
             // with every other tmux call-site (agentSignalReload, AgentHandler,
@@ -1157,6 +1169,7 @@ class TerminalHandler {
             // well or threw half way. A flag left behind makes the next start of this workspace
             // exit its relaunch loop at once (aicli-shell.sh reads it).
             @unlink($closeFlag);
+            @unlink($closingFlag);
             \AICliAgents\Services\TerminalService::clearClosing((string)$id);
         }
 
@@ -1334,6 +1347,15 @@ class TerminalHandler {
         // this workspace's own; a disk id is the folder's newest (RESUME_IDENTITY_PER_WORKSPACE.md V3).
         $fromDisk = false;
         $escSess = escapeshellarg($sessName);
+
+        // #814: tell the agent shell a close has started BEFORE any exit key. The close sentinel
+        // is set only after the scrape below; without this mark a Ctrl-D that ends the shell's
+        // "Press ENTER" read sends the loop round again and the agent starts a second time.
+        $closingId = self::sessionIdFromSessionName($sessName, $agentId);
+        if ($closingId !== '') {
+            @mkdir(dirname(self::closingFlagPath($closingId)), 0755, true);
+            @touch(self::closingFlagPath($closingId));
+        }
 
         // #91: capture the agent's authoritative disk metadata BEFORE sending
         // exit keys. aicli-shell's retry loop can launch a fresh blank session

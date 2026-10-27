@@ -667,6 +667,8 @@ class AgentHandler {
         // instead of respawning against the half-upgraded binary.
         foreach ($sessions as $s) {
             @touch(\AICliAgents\Services\SecretPaths::stateRoot() . '/close-' . $s['id'] . '.flag');
+            // #814: captureResumeForClose set the closing sentinel; the close sentinel replaces it.
+            @unlink(TerminalHandler::closingFlagPath(preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$s['id'])));
         }
         usleep(300000);
 

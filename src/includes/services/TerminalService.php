@@ -1908,6 +1908,8 @@ class TerminalService {
         // Tear down ttyd + sockets + tmux (the kill sweep would do this anyway;
         // doing it here lets the budget account for the slow part — the scrape).
         ProcessManager::stopTerminal($safeId, true);
+        // #814: the capture set the closing sentinel; the session is gone, so remove it.
+        @unlink(\AICliAgents\Handlers\TerminalHandler::closingFlagPath($safeId));
     }
 
     /**

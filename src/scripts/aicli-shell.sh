@@ -1038,6 +1038,31 @@ _aicli_capture_crash() {
     done
 }
 
+# #814: the close has started, but the close sentinel is not set yet. gracefulClose
+# sends the exit keys first and sets close-<id>.flag only after it has scraped the
+# resume id (about 3 seconds later). In that gap the loop can come round again: the
+# Ctrl-D keys end the "Press ENTER" read at once, and the flag is not there yet, so
+# the agent started again and the close fell back to the hard stop. gracefulClose
+# now sets closing-<id>.flag BEFORE the exit keys. While it exists, wait here (the
+# pane keeps the exit screen for the scrape) until close-<id>.flag appears. Wait at
+# most 30 seconds, so a close that died half way cannot park the workspace for ever.
+_aicli_wait_while_closing() {
+    local _closing="${MOUNT_ROOT}/closing-$AICLI_SESSION_ID.flag" _n=0
+    [ -f "$_closing" ] || return 0
+    log_aicli "INFO" 2 "Close in progress (closing sentinel) — not starting the agent again; waiting for the close sentinel."
+    while [ -f "$_closing" ] && [ ! -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" ] && [ "$_n" -lt 300 ]; do
+        sleep 0.1
+        _n=$((_n + 1))
+    done
+    if [ -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" ]; then
+        rm -f "$_closing" 2>/dev/null
+    elif [ -f "$_closing" ]; then
+        rm -f "$_closing" 2>/dev/null
+        log_aicli "WARN" 1 "Closing sentinel gave no close sentinel within 30s — continuing the loop."
+    fi
+    return 0
+}
+
 # A resume process that survives the existing fast-exit window reached its TUI
 # lifecycle; a later non-zero exit must not be reclassified as startup failure.
 _aicli_resume_was_established() {
@@ -1145,6 +1170,9 @@ _aicli_load_envs() {
 # retry prompts. Reset on any launch that survived >=3s.
 consecutive_fast_crashes=0
 
+# #814: a closing sentinel left by an earlier close that died must not hold this start.
+rm -f "${MOUNT_ROOT}/closing-$AICLI_SESSION_ID.flag" 2>/dev/null
+
 while true; do
     # Graceful-close sentinel — TOP-of-loop re-check (close-race fix 2026-06-07).
     # gracefulClose keeps this session alive (so it can scrape the exit screen for a
@@ -1155,6 +1183,8 @@ while true; do
     # re-exec the agent — relaunching a workspace the user just closed and forcing
     # gracefulClose into its 3s hard-stop fallback. Checking the flag before the
     # (re)launch breaks cleanly while still preserving the scrape window.
+    # #814: a close that has started but not set the sentinel yet holds the loop here.
+    _aicli_wait_while_closing
     if [ -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" ]; then
         rm -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" 2>/dev/null
         log_aicli "INFO" 2 "Graceful close sentinel observed at loop top — exiting before relaunch."
@@ -1747,6 +1777,8 @@ while true; do
     # then touch of close-<id>.flag), the agent has already flushed its state
     # and emitted its resume id. Break out of the relaunch loop so the user
     # isn't greeted by "Press ENTER to reload" on a closed workspace.
+    # #814: wait for the sentinel while a close is under way (see _aicli_wait_while_closing).
+    _aicli_wait_while_closing
     if [ -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" ]; then
         rm -f "${MOUNT_ROOT}/close-$AICLI_SESSION_ID.flag" 2>/dev/null
         log_aicli "INFO" 2 "Graceful close sentinel observed — exiting relaunch loop."
