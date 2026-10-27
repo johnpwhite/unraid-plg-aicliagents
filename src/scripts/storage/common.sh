@@ -3543,7 +3543,15 @@ _batch_prefix() {
     [ "${AICLI_BATCH_DISABLE:-0}" = "1" ] && { printf ''; return 0; }
     _batch_plan
     local def_nice=19 def_ionice=c3
-    if [ "${AICLI_BATCH_PROFILE:-}" = "interactive" ]; then def_nice=10; def_ionice=c2n7; fi
+    if [ "${AICLI_BATCH_PROFILE:-}" = "interactive" ]; then
+        # "nice -n" ADDS to the caller's level. The install worker already runs at
+        # nice 10 (plugin background work), so "-n 10" gave 19 (seen on prod02).
+        # Interactive means the level 10 itself: add only what is missing.
+        local cur; cur="$(nice 2>/dev/null)"
+        [[ "$cur" =~ ^-?[0-9]+$ ]] || cur=0
+        def_nice=$(( 10 - cur )); [ "$def_nice" -lt 0 ] && def_nice=0
+        def_ionice=c2n7
+    fi
     local nice_lvl="${AICLI_BATCH_NICE:-$def_nice}"
     local ionice_spec="${AICLI_BATCH_IONICE:-$def_ionice}"
     local out=""
