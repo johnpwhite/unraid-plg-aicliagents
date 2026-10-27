@@ -51,6 +51,8 @@ Notes on this table:
 
 OpenCode 2 is the new version of OpenCode. It is a second agent, not an update of the first one. You can install both and use both at the same time.
 
+OpenCode 2 is not in the version list of the **OpenCode** card. It has its own card, **OpenCode 2**, below it. The **Version** panel of the **OpenCode** card has a link to that card.
+
 - OpenCode 2 keeps its own data. Its sessions, its login, its settings and its MCP servers are separate from OpenCode. OpenCode 2 never reads or changes the data of OpenCode.
 - Each workspace of OpenCode 2 starts its own private server. The plugin adds this for you.
 - The Config Hub can project your instructions, skills, commands and MCP servers to OpenCode 2. See [Config Hub](config-hub.md).
@@ -100,7 +102,8 @@ The status line next to **Check for updates** always tells you where the version
 | Status line | What it means |
 | :-- | :-- |
 | Checked 3 h ago | The cards show the result of an earlier check. The line turns orange when the result is more than one hour old. |
-| Checking online for new versions… | A check is running. The button is grey until it ends. |
+| Checking online for new versions… | A check is starting. The button is grey until it ends. |
+| Checking Kimi Code (15 of 15), with an orange bar | A check is running. The line names the agent it checks now and how far the check has got. The Activity tray shows the same line. |
 | Checked just now | The check you started has ended. |
 | Check failed for 2 agents: (reason) · last good check 1 h ago | The plugin could not reach the source of 2 agents. The cards keep the last good result. The line shows the first reason. |
 | Versions not checked yet | No check has run on this server. |
@@ -150,7 +153,7 @@ The list hides versions that are built for other systems, such as Windows, macOS
 | Channel | What you get | When to use it |
 | :-- | :-- | :-- |
 | **Stable** (default) | The tested release of the vendor. | Most people. |
-| **Beta** | Newer releases that may be less tested. Only agents from npm, from GitHub releases and from an install script that has a GitHub address show this choice. | You want new features early. |
+| **Beta** | Newer releases that may be less tested. Only agents from npm, from GitHub releases and from an install script that has a GitHub address show this choice. The list shows at most the 8 newest builds. A daily build shows only its newest copy, and a build older than the current stable release is not shown. | You want new features early. |
 | **Pinned** | One version, locked. The agent never changes until you pick another version. | You need the same version every day, or a newer version broke something. |
 
 Choose a channel with its radio button. The version list then refreshes for the new channel. When you press **Pinned**, the plugin pins the version that is installed at that time. If the agent is not installed, the plugin asks you to choose an installed version first.
@@ -187,9 +190,13 @@ Expect: the plugin closes the agent in that workspace, starts it again on the in
 
 The menu entry appears only for a running workspace whose version differs from the installed version. This is also true after you roll a channel back, when the installed version is older. A stopped workspace needs no switch. It starts on the installed version the next time it starts.
 
+### An old version that no workspace uses
+
+An old version that no workspace uses does not stop an upgrade. When two versions are installed and only one is in use, the update box says: "The oldest version, v2.1.310, is no longer used by any workspace. It will be removed to make room for this update." Press **Update now**. The plugin removes that old version when the new version starts.
+
 ### When the upgrade must wait
 
-Sometimes the new version cannot go beside the old one. Examples are a third version that would be running, a storage method without versioned activation, or an earlier upgrade that waits to go live. Then the box shows:
+Sometimes the new version cannot go beside the old one. Examples are two versions that open workspaces still use, a storage method without versioned activation, or an earlier upgrade that waits to go live. Then the box shows:
 
 - **Why this upgrade must wait:** and the reason.
 - "N active sessions will remain running" and the list of the workspaces (folder and short id).
