@@ -347,6 +347,16 @@ class VersionCheckService {
             return ($b['timestamp'] ?? 0) - ($a['timestamp'] ?? 0);
         });
 
+        // #828: a beta published before the current stable release is superseded
+        // (OpenCode: a 0.1.0-beta3 and a June `next` build beside stable 1.19.4 of
+        // October). An entry with no publish time is kept.
+        if ($channel === 'beta') {
+            $stableTs = self::stableReleaseTime($versions, $distTags);
+            if ($stableTs > 0) {
+                $result = array_values(array_filter($result, static fn($e) => (int)($e['timestamp'] ?? 0) === 0 || (int)$e['timestamp'] >= $stableTs));
+            }
+        }
+
         // Stable history is bounded because many packages have hundreds of
         // ordinary releases. #828 (John, 2026-10-28): Beta is bounded too. It was
         // full of dated snapshot builds (OpenCode: dozens of 0.0.0-dev-<stamp>), so
@@ -367,6 +377,22 @@ class VersionCheckService {
      * @param array<int,array<string,mixed>> $newestFirst
      * @return array<int,array<string,mixed>>
      */
+    /**
+     * #828: the publish time of the current stable release: the `stable` dist-tag,
+     * else `latest`. 0 when neither tag or its time is known. Pure.
+     *
+     * @param array<int,array<string,mixed>> $versions
+     * @param array<string,string> $distTags
+     */
+    public static function stableReleaseTime(array $versions, array $distTags): int {
+        $v = (string)($distTags['stable'] ?? $distTags['latest'] ?? '');
+        if ($v === '') return 0;
+        foreach ($versions as $e) {
+            if ((string)($e['version'] ?? '') === $v) return (int)($e['timestamp'] ?? 0);
+        }
+        return 0;
+    }
+
     public static function newestSnapshotPerKind(array $newestFirst): array {
         $seen = [];
         $out = [];

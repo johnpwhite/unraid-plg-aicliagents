@@ -642,6 +642,9 @@ class AgentRegistry {
             ],
             'opencode' => [
                 'id' => 'opencode',
+                // #829: OpenCode 2 is a separate agent with its own card. The Version panel
+                // of this card points to it, so a person who looks for v2 in this list finds it.
+                'successor' => 'opencode2',
                 'data_dir_env' => ['OPENCODE_CONFIG' => 'Points OpenCode at a config file outside ~/.config/opencode. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin.'],
                 'name' => 'OpenCode',
                 'description' => 'An open-source oriented agent optimized for local development workflows.',

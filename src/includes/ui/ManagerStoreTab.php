@@ -417,6 +417,10 @@ function av2_secrets_schema(array $agent): array {
                                         <option value="">v<?=htmlspecialchars($installedVer, ENT_QUOTES, 'UTF-8')?> (loading...)</option>
                                     </select>
                                     <p class="av2-help" style="margin-top:6px;">Pick a version to install. The Upgrade button in the card footer installs the latest version on the selected channel.</p>
+                                    <?php $succId = (string)($agent['successor'] ?? ''); if ($succId !== '' && isset($registry[$succId])): $succName = htmlspecialchars((string)($registry[$succId]['name'] ?? $succId), ENT_QUOTES, 'UTF-8'); $succDom = htmlspecialchars($succId, ENT_QUOTES, 'UTF-8'); ?>
+                                    <!-- #829: a newer major release that ships as a separate agent is not in this list. Say where it is. -->
+                                    <p class="av2-help" data-testid="successor-hint" style="margin-top:6px;"><b><?=$succName?></b> is a separate agent, not a version of <?=htmlspecialchars((string)$agent['name'], ENT_QUOTES, 'UTF-8')?>, so it is not in this list. It runs beside this one with its own settings and sessions. <a href="#av2-card-<?=$succDom?>" onclick="var c=document.getElementById('av2-card-<?=$succDom?>'); if (c) { c.scrollIntoView({behavior:'smooth', block:'start'}); } return false;"><?=!empty($registry[$succId]['is_installed']) ? 'Go to the ' . $succName . ' card' : 'Install it from the ' . $succName . ' card'?></a>.</p>
+                                    <?php endif; ?>
                                 </div>
                             </div>
 
