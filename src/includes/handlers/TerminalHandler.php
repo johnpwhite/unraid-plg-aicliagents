@@ -117,7 +117,8 @@ class TerminalHandler {
         $repeat = (string)($_REQUEST['repeat'] ?? 'none');
         $message = (string)($_REQUEST['message'] ?? '');
         $source = (string)($_REQUEST['source'] ?? 'user');
-        $r = \AICliAgents\Services\AdminService::setScheduledContinue((string)$id, $at, $repeat, $message, $source);
+        $reason = (string)($_REQUEST['reason'] ?? '');
+        $r = \AICliAgents\Services\AdminService::setScheduledContinue((string)$id, $at, $repeat, $message, $source, $reason);
         if (isset($r['error'])) return ['status' => 'error', 'message' => (string)$r['error']];
         // The Drawer used to confirm with a page-corner popup. The Activity tray is
         // the one place a person looks, so the change is recorded there instead.
@@ -132,7 +133,9 @@ class TerminalHandler {
     }
 
     private static function clearScheduledContinueAction($id): array {
-        $r = \AICliAgents\Services\AdminService::clearScheduledContinue((string)$id);
+        // #831: with `entry` only that entry goes; without it every entry of the workspace goes.
+        $entryId = (string)($_REQUEST['entry'] ?? '');
+        $r = \AICliAgents\Services\AdminService::clearScheduledContinue((string)$id, $entryId);
         if (isset($r['error'])) return ['status' => 'error', 'message' => (string)$r['error']];
         self::recordScheduleActivity((string)$id, 'Scheduled continue cleared');
         return array_merge(['status' => 'ok'], $r);
@@ -317,6 +320,7 @@ class TerminalHandler {
         } catch (\Throwable $e) { /* a poll must never break on this */ }
         // #234: pending scheduled-continue per workspace, so the drawer can show a
         // clock tag on a workspace that will continue on its own at a set time.
+        // #831: each value is a LIST of entries (id, at, repeat, reason, source, ...).
         $scheduledContinue = [];
         try { $scheduledContinue = \AICliAgents\Services\ConfigService::getScheduledContinueMap(); }
         catch (\Throwable $e) { /* a poll must never break on this */ }

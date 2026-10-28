@@ -249,6 +249,21 @@ final class QuotaDetectionService
         return $result;
     }
 
+    /**
+     * #831: the entry of one source in a workspace's list, or null. A workspace holds at most one
+     * `quota-detect` entry, so the first match is the entry.
+     *
+     * @param list<array<string,mixed>> $entries
+     * @return array<string,mixed>|null
+     */
+    public static function entryOfSource(array $entries, string $source): ?array
+    {
+        foreach ($entries as $e) {
+            if (is_array($e) && (string)($e['source'] ?? 'user') === $source) return $e;
+        }
+        return null;
+    }
+
     /** Run the live poll for every currently running session. */
     public static function pollAll(): array
     {
@@ -268,12 +283,13 @@ final class QuotaDetectionService
             static function (string $agentId, string $sid) use (&$captures): string {
                 return $captures[$sid] = TmuxService::capturePaneRaw($agentId, $sid);
             },
-            static fn(string $sid): ?array => isset($map[$sid]) && is_array($map[$sid]) ? $map[$sid] : null,
+            // #831: a workspace holds a list; the detector sees and replaces only its own entry.
+            static fn(string $sid): ?array => self::entryOfSource($map[$sid] ?? [], 'quota-detect'),
             static function (string $sid, int $at, string $reason, string $fingerprint): bool {
                 $r = AdminService::setScheduledContinue($sid, $at, 'none', $reason, 'quota-detect');
                 return !isset($r['error']);
             },
-            static function (string $sid): void { AdminService::clearScheduledContinue($sid); },
+            static function (string $sid): void { ConfigService::clearScheduledContinue($sid, null, 'quota-detect'); },
             $now
         );
 
@@ -333,8 +349,9 @@ final class QuotaDetectionService
             if ($at <= $now) return;
             if ($best === null || $at < $best['reset_at']) $best = ['reset_at' => $at, 'workspaceId' => $sid];
         };
-        foreach ($scheduled as $sid => $entry) {
-            if (!is_array($entry) || ($entry['source'] ?? '') !== 'quota-detect') continue;
+        foreach ($scheduled as $sid => $raw) {
+            $entry = self::entryOfSource(ConfigService::normalizeScheduledEntries($raw, (string)$sid), 'quota-detect');
+            if ($entry === null) continue;
             if (($agentBySession[(string)$sid] ?? '') !== $agentId) continue;
             $consider((int)($entry['at'] ?? 0), (string)$sid);
         }

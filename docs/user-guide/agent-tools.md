@@ -110,7 +110,8 @@ These tools run at once and leave a line in the Activity tray. The line reads li
 | Type text into a running workspace and press Enter | `aicli_send_input` | `send-input` |
 | Add or remove a favourite | `aicli_add_favourite`, `aicli_remove_favourite` | `favourite-add`, `favourite-remove` |
 | Save the unsaved changes of a home to a new layer. It closes no session. | `aicli_persist_home` | `persist-home` |
-| Schedule a Continue nudge, or clear it | `aicli_set_scheduled_continue`, `aicli_clear_scheduled_continue` | `schedule-continue`, `clear-scheduled-continue` |
+| Add a Continue nudge to a workspace (it can hold up to 20), or clear one or all of them | `aicli_set_scheduled_continue`, `aicli_clear_scheduled_continue` | `schedule-continue`, `clear-scheduled-continue` |
+| List the scheduled Continue nudges of a workspace, with their ids | `aicli_list_scheduled_continues` | `list-scheduled-continues` |
 | Add one pattern to the auto-continue list | `aicli_propose_autocontinue_pattern` | `propose-pattern` |
 | Put a page in your Notebook, change it, move it, pin it, archive it, restore it, comment on it, copy it to another workspace, or add a line to the Agent journal | `aicli_create_artefact`, `aicli_update_artefact`, `aicli_move_artefact`, `aicli_pin_artefact`, `aicli_archive_artefact`, `aicli_restore_artefact`, `aicli_comment_artefact`, `aicli_share_artefact`, `aicli_journal_artefact` | `artefact-new`, `artefact-set`, `artefact-patch`, `artefact-move`, `artefact-pin`, `artefact-archive`, `artefact-restore`, `artefact-comment`, `artefact-share`, `artefact-journal` |
 | Store the secret of a connection card in the encrypted vault | `aicli_set_artefact_secret` | `artefact-secret` |

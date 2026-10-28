@@ -425,8 +425,9 @@ const ADMIN_AGENT_USAGE = [
     'favourite-remove' => 'favourite-remove <id> -- CHANGES state; removes one favourite by id',
     'voicemail-heard' => 'voicemail-heard <id> | voicemail-heard --workspace=<id> --all -- CHANGES state; marks voice mail heard on every device',
     'persist-home' => 'persist-home [user] -- CHANGES state; queues a save of the home to its storage layers, closes no session',
-    'schedule-continue' => 'schedule-continue <workspaceId> <at-epoch> [none|daily|weekly] -- CHANGES state; fire a Continue at a wall-clock time (e.g. when the quota resets)',
-    'clear-scheduled-continue' => 'clear-scheduled-continue <workspaceId> -- CHANGES state; remove a scheduled Continue',
+    'schedule-continue' => 'schedule-continue <workspaceId> <at-epoch> [none|daily|weekly] [reason] [message] -- CHANGES state; ADD a Continue at a wall-clock time (e.g. when the quota resets); prints its entryId',
+    'list-scheduled-continues' => 'list-scheduled-continues [workspaceId] -- the scheduled Continues of one workspace, or of all',
+    'clear-scheduled-continue' => 'clear-scheduled-continue <workspaceId> [entryId] -- CHANGES state; remove one scheduled Continue, or all of the workspace when no entryId is given',
     'spawn' => 'spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>]) [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended] [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...] -- CHANGES state; starts a sub-agent workspace; the task is --file, the words, or stdin',
     'start-workspace' => 'start-workspace <id> -- CHANGES state; starts a closed workspace that you created (or any, for a person)',
     'stop-workspace' => 'stop-workspace <id> -- CHANGES state; closes a workspace that you created; a sub-agent with autoClose also leaves the list and its merged, clean worktree is removed',
@@ -861,10 +862,16 @@ try {
                 'workspaceId' => (string)($argv[2] ?? ''),
                 'at'          => (int)($argv[3] ?? 0),
                 'repeat'      => (string)($argv[4] ?? 'none'),
+                'reason'      => (string)($argv[5] ?? ''),
+                'message'     => (string)($argv[6] ?? ''),
             ]);
             break;
+        case 'list-scheduled-continues':
+            // SCHEDULED_CONTINUE.md (#831). Read-only.
+            $result = AdminMcpTools::call('aicli_list_scheduled_continues', ['workspaceId' => (string)($argv[2] ?? '')]);
+            break;
         case 'clear-scheduled-continue':
-            $result = AdminMcpTools::call('aicli_clear_scheduled_continue', ['workspaceId' => (string)($argv[2] ?? '')]);
+            $result = AdminMcpTools::call('aicli_clear_scheduled_continue', ['workspaceId' => (string)($argv[2] ?? ''), 'entryId' => (string)($argv[3] ?? '')]);
             break;
         case 'spawn':
             // AGENT_SPAWN_WORKSPACE.md. The task is the words after the flags, or --file=<path>, or stdin.

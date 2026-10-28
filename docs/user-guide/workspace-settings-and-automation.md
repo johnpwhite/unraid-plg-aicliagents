@@ -293,7 +293,9 @@ Use a schedule when you know the time, for example when a usage quota resets.
 3. Set **Repeat** to **Once**, **Every day** or **Every week**. Press **Schedule**.
 4. Expect: "Scheduled Continue updated. See the Activity tray." The dialog closes after about two seconds. A clock tag shows on the row.
 
-A time in the past is refused ("Pick a future time"). Point at the tag to read the time and the repeat. Press the tag to open **Edit scheduled continue**, where you find **Update schedule** and **Cancel schedule**.
+A time in the past is refused ("Pick a future time"). A workspace can hold up to 20 schedules that you add. A new schedule never replaces an old one. Point at the tag to read the next time, the repeat and how many schedules there are. Press the tag to open the dialog. It lists every schedule with its time, its repeat and its reason, if it has one. Press **Remove** to delete one schedule. Press **Edit** on a schedule that you added, change the time or the repeat, and press **Update schedule**. Press **Cancel schedule** (**Cancel all schedules** when there are several) to delete all of them. An agent can add schedules for its own workspace too. When it gives a reason, the text that it types starts with "[Scheduled: reason]".
+
+When several schedules are due at the same time, the plugin types one for each workspace in each check, the oldest first. The others follow in the next check.
 
 At the set time, the plugin types the message as carefully as **Continue now**. It never types into a question or a busy agent. If the agent is not ready, it tries again every minute for up to 15 minutes. Then it gives up, and the Activity tray says so. A one-time schedule ends after it fires. A daily or weekly schedule moves to the next time. If the workspace is closed, the plugin starts and resumes it, but only when **Restart all saved workspaces** is on for that agent. A run that is more than 6 hours late is dropped, with a note in the Activity tray. Schedules survive a server restart and a plugin upgrade.
 

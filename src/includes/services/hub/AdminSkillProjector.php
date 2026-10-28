@@ -148,11 +148,17 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
   press Enter. See "Send input" below before your first call.
 - `aicli_persist_home` — save one user's home to its storage layers now (a
   new layer), closing no session. See "Home persist and consolidate" below.
-- `aicli_set_scheduled_continue` — schedule a Continue for a workspace at a
-  wall-clock time (an epoch you compute), one-shot or daily/weekly. Use it to
-  resume a workspace the moment its usage quota resets. The plugin fires it
-  through the same readiness gate as a manual Continue, never into a busy pane.
-- `aicli_clear_scheduled_continue` — remove a workspace's scheduled Continue.
+- `aicli_set_scheduled_continue` — ADD a scheduled Continue to a workspace at a
+  wall-clock time (an epoch you compute), one-shot or daily/weekly. A workspace
+  holds a list of them (up to 20); each call adds one and returns its `entryId`.
+  Use it to resume a workspace the moment its usage quota resets, or to wake it
+  later. Give a short `reason` and the typed text starts with
+  `[Scheduled: <reason>] `. The plugin fires every due entry through the same
+  readiness gate as a manual Continue, never into a busy pane, one entry per tick.
+- `aicli_list_scheduled_continues` — list the scheduled Continues of one
+  workspace, or of all of them, with their ids.
+- `aicli_clear_scheduled_continue` — remove one scheduled Continue (pass its
+  `entryId`), or all of the workspace's when you pass no `entryId`.
 - `aicli_spawn_workspace` — start a sub-agent workspace in ONE call: it makes the
   workspace, gives it flags and a task, and starts it. See "Start a sub-agent
   workspace" below before your first call.

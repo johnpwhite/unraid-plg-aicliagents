@@ -1563,17 +1563,19 @@ class AdminService {
     }
 
     /**
-     * SCHEDULED_CONTINUE.md (#234) Tier 2. Schedule a Continue for a workspace at
+     * SCHEDULED_CONTINUE.md (#234, #831) Tier 2. ADD a scheduled Continue to a workspace at
      * a wall-clock time, one-shot or recurring. `at` is a unix epoch (the caller
-     * resolves "3pm" etc.); `repeat` is none|daily|weekly. The supervisor tick
-     * fires it through the readiness-gated Continue path. Stored in a sidecar so a
+     * resolves "3pm" etc.); `repeat` is none|daily|weekly. A workspace holds a list of
+     * entries; this call adds one and returns its `id`. The supervisor tick fires every
+     * due entry through the readiness-gated Continue path. Stored in a sidecar so a
      * browser workspaces.json save can never drop it.
      *
-     * @param string $source `user` for an operator schedule or `quota-detect`
+     * @param string $source `user` for an operator or agent schedule, `quota-detect`
      *                       for a terminal quota detector.
+     * @param string $reason Short tag (at most 80 characters). The typed text starts with `[Scheduled: <reason>] `.
      * @return array<string,mixed>
      */
-    public static function setScheduledContinue(string $sessionId, int $at, string $repeat = 'none', string $message = '', string $source = 'user'): array {
+    public static function setScheduledContinue(string $sessionId, int $at, string $repeat = 'none', string $message = '', string $source = 'user', string $reason = ''): array {
         try {
             $sessionId = trim($sessionId);
             if ($sessionId === '') return ['error' => 'A workspace id is required.'];
@@ -1587,28 +1589,54 @@ class AdminService {
             if (!in_array($source, ['user', 'quota-detect'], true)) {
                 return ['error' => "'$source' is not a valid schedule source."];
             }
+            $reason = trim(preg_replace('/\s+/u', ' ', $reason) ?? '');
+            if (function_exists('mb_substr')) $reason = mb_substr($reason, 0, 80);
+            else $reason = substr($reason, 0, 80);
             $entry = ['at' => $at, 'repeat' => $repeat, 'source' => $source, 'created_at' => time(), 'last_fired_at' => 0];
             if ($message !== '') $entry['message'] = $message;
-            if (!ConfigService::setScheduledContinue($sessionId, $entry)) return ['error' => 'Write failed.'];
-            self::emitEvent('workspace.scheduled_continue', ['id' => $sessionId], "Scheduled continue set for '$sessionId'", ['at' => $at, 'repeat' => $repeat]);
-            return ['workspaceId' => $sessionId, 'at' => $at, 'repeat' => $repeat, 'scheduled' => true];
+            if ($reason !== '') $entry['reason'] = $reason;
+            $error = null;
+            $entryId = ConfigService::addScheduledContinue($sessionId, $entry, $error);
+            if ($entryId === null) return ['error' => $error ?? 'Write failed.'];
+            self::emitEvent('workspace.scheduled_continue', ['id' => $sessionId], "Scheduled continue set for '$sessionId'", ['at' => $at, 'repeat' => $repeat, 'entryId' => $entryId]);
+            return ['workspaceId' => $sessionId, 'entryId' => $entryId, 'at' => $at, 'repeat' => $repeat, 'scheduled' => true];
         } catch (\Throwable $e) {
             return self::failure('setScheduledContinue', $e);
         }
     }
 
     /**
-     * SCHEDULED_CONTINUE.md (#234) Tier 2. Remove a workspace's scheduled Continue.
+     * SCHEDULED_CONTINUE.md (#831) Tier 1 read. The scheduled Continues of one workspace, or of every workspace.
      *
      * @return array<string,mixed>
      */
-    public static function clearScheduledContinue(string $sessionId): array {
+    public static function listScheduledContinues(string $sessionId = ''): array {
         try {
             $sessionId = trim($sessionId);
+            $map = ConfigService::getScheduledContinueMap();
+            if ($sessionId !== '') {
+                return ['workspaceId' => $sessionId, 'entries' => $map[$sessionId] ?? []];
+            }
+            return ['workspaces' => $map];
+        } catch (\Throwable $e) {
+            return self::failure('listScheduledContinues', $e);
+        }
+    }
+
+    /**
+     * SCHEDULED_CONTINUE.md (#234, #831) Tier 2. Remove one scheduled Continue (`$entryId`) or, with no
+     * id, every scheduled Continue of the workspace.
+     *
+     * @return array<string,mixed>
+     */
+    public static function clearScheduledContinue(string $sessionId, string $entryId = ''): array {
+        try {
+            $sessionId = trim($sessionId);
+            $entryId = trim($entryId);
             if ($sessionId === '') return ['error' => 'A workspace id is required.'];
-            ConfigService::clearScheduledContinue($sessionId);
-            self::emitEvent('workspace.scheduled_continue', ['id' => $sessionId], "Scheduled continue cleared for '$sessionId'", ['cleared' => true]);
-            return ['workspaceId' => $sessionId, 'cleared' => true];
+            $removed = ConfigService::clearScheduledContinue($sessionId, $entryId !== '' ? $entryId : null);
+            self::emitEvent('workspace.scheduled_continue', ['id' => $sessionId], "Scheduled continue cleared for '$sessionId'", ['cleared' => true, 'entryId' => $entryId, 'removed' => $removed]);
+            return ['workspaceId' => $sessionId, 'cleared' => true, 'removed' => $removed] + ($entryId !== '' ? ['entryId' => $entryId] : []);
         } catch (\Throwable $e) {
             return self::failure('clearScheduledContinue', $e);
         }

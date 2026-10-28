@@ -550,11 +550,14 @@ final class TransientErrorService
             $sessions,
             static fn(string $agentId, string $sid): string => $captures[$sid] ?? TmuxService::capturePaneRaw($agentId, $sid),
             static fn(string $agentId, string $raw): bool => !empty(TmuxService::paneStateFromCapture($raw, $agentId)['ready']),
-            static fn(string $sid): ?array => isset($map[$sid]) && is_array($map[$sid]) ? $map[$sid] : null,
+            // #831: this service sees its own entry, or else a pending quota entry (which it never competes with).
+            // An operator entry does not count: it may be a day away and must not stop the retries.
+            static fn(string $sid): ?array => QuotaDetectionService::entryOfSource($map[$sid] ?? [], self::SOURCE)
+                ?? QuotaDetectionService::entryOfSource($map[$sid] ?? [], 'quota-detect'),
             static function (string $sid, int $at, array $entry): bool {
                 return ConfigService::setScheduledContinue($sid, $entry);
             },
-            static function (string $sid): void { ConfigService::clearScheduledContinue($sid); },
+            static function (string $sid): void { ConfigService::clearScheduledContinue($sid, null, self::SOURCE); },
             static function (string $sid, string $agentId, string $event, array $info) use ($names): void {
                 self::record($sid, $names[$sid] ?? $sid, $agentId, $event, $info);
             },

@@ -2014,20 +2014,78 @@ class ConfigService {
         return self::getUserStatePath() . "/scheduled_continue.json";
     }
 
-    /** @return array<string,array{at:int,repeat:string,message?:string,source?:string,created_at?:int,last_fired_at?:int}> */
+    /** Sources a scheduled-continue entry can have. */
+    public const SCHEDULED_CONTINUE_SOURCES = ['user', 'quota-detect', 'transient-error'];
+
+    /** At most this many `user` entries (operator or agent) for one workspace (#831). */
+    public const SCHEDULED_CONTINUE_USER_CAP = 20;
+
+    /**
+     * #831: turn the stored value of one workspace into a list of entries.
+     * The old shape was ONE entry (an object with an `at` key). It reads as a list of one.
+     * An entry without an `id` gets a stable id made from its own fields, so the same
+     * old entry has the same id on every read until the next write stores it.
+     *
+     * @param mixed $raw
+     * @return list<array<string,mixed>>
+     */
+    public static function normalizeScheduledEntries($raw, string $sessionId = ''): array
+    {
+        if (!is_array($raw) || $raw === []) return [];
+        $list = array_key_exists('at', $raw) ? [$raw] : array_values($raw);
+        $out = [];
+        foreach ($list as $e) {
+            if (!is_array($e) || !isset($e['at'])) continue;
+            if (!isset($e['id']) || !is_string($e['id']) || $e['id'] === '') {
+                $e['id'] = substr(sha1($sessionId . '|' . (int)$e['at'] . '|' . (int)($e['created_at'] ?? 0) . '|' . (string)($e['source'] ?? 'user')), 0, 8);
+            }
+            $out[] = $e;
+        }
+        return $out;
+    }
+
+    /** @return array<string,list<array<string,mixed>>> workspace id => entries (old single-entry files are migrated on read) */
     public static function getScheduledContinueMap(): array
     {
         $file = self::getScheduledContinueFilePath();
         if (!file_exists($file)) return [];
         $data = json_decode((string)file_get_contents($file), true);
-        return is_array($data) ? $data : [];
+        if (!is_array($data)) return [];
+        $map = [];
+        foreach ($data as $sid => $raw) {
+            $list = self::normalizeScheduledEntries($raw, (string)$sid);
+            if ($list !== []) $map[(string)$sid] = $list;
+        }
+        return $map;
     }
 
-    /** The schedule for one workspace, or null when none is set. */
+    /** @return list<array<string,mixed>> every entry of one workspace, in the order they were added */
+    public static function getScheduledContinues(string $sessionId): array
+    {
+        return self::getScheduledContinueMap()[$sessionId] ?? [];
+    }
+
+    /** The first entry of one workspace, or null when none is set. */
     public static function getScheduledContinue(string $sessionId): ?array
     {
-        $entry = self::getScheduledContinueMap()[$sessionId] ?? null;
-        return is_array($entry) ? $entry : null;
+        return self::getScheduledContinues($sessionId)[0] ?? null;
+    }
+
+    /**
+     * #831: the text the ticker types for an operator or agent entry, or null for the plain Continue
+     * nudge. A `reason` puts the tag `[Scheduled: <reason>] ` in front. A `message` replaces the
+     * standard continue prompt, but only for a `user` entry: the `message` of a quota-detect entry is
+     * a note for the person and is never typed.
+     *
+     * @param array<string,mixed> $entry
+     */
+    public static function scheduledContinueText(array $entry): ?string
+    {
+        $reason = trim((string)($entry['reason'] ?? ''));
+        $message = trim((string)($entry['message'] ?? ''));
+        $ownMessage = (string)($entry['source'] ?? 'user') === 'user' && $message !== '';
+        if ($reason === '' && !$ownMessage) return null;
+        return ($reason !== '' ? '[Scheduled: ' . $reason . '] ' : '') . ($ownMessage ? $message : TmuxService::CONTINUE_PROMPT);
     }
 
     /** How long a writer waits for the scheduled-continue lock before it goes on without it. */
@@ -2079,25 +2137,94 @@ class ConfigService {
         }
     }
 
-    /** Upsert one workspace's schedule. Persists the whole map atomically. */
-    public static function setScheduledContinue(string $sessionId, array $entry): bool
+    /**
+     * Add one entry to a workspace's list (#831). Returns the entry id, or null on failure
+     * (see $error). Rules, all inside the lock: a `quota-detect` entry replaces the
+     * workspace's older `quota-detect` and `transient-error` entries; a `transient-error`
+     * entry replaces the older `transient-error` entry; neither removes a `user` entry.
+     * A `user` entry is refused above SCHEDULED_CONTINUE_USER_CAP.
+     *
+     * @param array<string,mixed> $entry
+     */
+    public static function addScheduledContinue(string $sessionId, array $entry, ?string &$error = null): ?string
     {
-        if ($sessionId === '') return false;
-        return self::mutateScheduledContinueMap(static function (array $map) use ($sessionId, $entry): array {
-            $map[$sessionId] = $entry;
+        $error = null;
+        if ($sessionId === '') { $error = 'A workspace id is required.'; return null; }
+        $source = (string)($entry['source'] ?? 'user');
+        $entry['source'] = $source;
+        $id = isset($entry['id']) && is_string($entry['id']) && $entry['id'] !== '' ? $entry['id'] : bin2hex(random_bytes(4));
+        $entry['id'] = $id;
+        $failure = null;
+        $ok = self::mutateScheduledContinueMap(static function (array $map) use ($sessionId, $entry, $source, &$failure): ?array {
+            $list = $map[$sessionId] ?? [];
+            if ($source === 'user') {
+                $users = count(array_filter($list, static fn(array $e): bool => ($e['source'] ?? 'user') === 'user'));
+                if ($users >= self::SCHEDULED_CONTINUE_USER_CAP) {
+                    $failure = 'This workspace already has ' . self::SCHEDULED_CONTINUE_USER_CAP . ' scheduled continues. Remove one first.';
+                    return null;
+                }
+            } else {
+                $replaced = $source === 'quota-detect' ? ['quota-detect', 'transient-error'] : [$source];
+                $list = array_values(array_filter($list, static fn(array $e): bool => !in_array((string)($e['source'] ?? 'user'), $replaced, true)));
+            }
+            $list[] = $entry;
+            $map[$sessionId] = $list;
             return $map;
         });
+        if ($failure !== null) { $error = $failure; return null; }
+        if (!$ok) { $error = 'Write failed.'; return null; }
+        return $id;
     }
 
-    /** Remove one workspace's schedule. No-op if absent. */
-    public static function clearScheduledContinue(string $sessionId): void
+    /** Add one entry. Kept for the callers that need only a yes or no. */
+    public static function setScheduledContinue(string $sessionId, array $entry): bool
     {
-        if ($sessionId === '') return;
-        self::mutateScheduledContinueMap(static function (array $map) use ($sessionId): ?array {
-            if (!array_key_exists($sessionId, $map)) return null;
-            unset($map[$sessionId]);
+        return self::addScheduledContinue($sessionId, $entry) !== null;
+    }
+
+    /** Replace the entry that has this id (the ticker advances a repeating entry this way). False when it is gone. */
+    public static function replaceScheduledContinue(string $sessionId, string $entryId, array $entry): bool
+    {
+        if ($sessionId === '' || $entryId === '') return false;
+        $found = false;
+        $ok = self::mutateScheduledContinueMap(static function (array $map) use ($sessionId, $entryId, $entry, &$found): ?array {
+            foreach ($map[$sessionId] ?? [] as $i => $e) {
+                if (($e['id'] ?? '') === $entryId) {
+                    $entry['id'] = $entryId;
+                    $map[$sessionId][$i] = $entry;
+                    $found = true;
+                    return $map;
+                }
+            }
+            return null;
+        });
+        return $ok && $found;
+    }
+
+    /**
+     * Remove entries of one workspace. With $entryId only that entry goes; with $source
+     * only the entries of that source go (a detector clears its own entry and nothing
+     * else); with neither, all go. No-op when nothing matches.
+     *
+     * @return int how many entries were removed
+     */
+    public static function clearScheduledContinue(string $sessionId, ?string $entryId = null, ?string $source = null): int
+    {
+        if ($sessionId === '') return 0;
+        $removed = 0;
+        self::mutateScheduledContinueMap(static function (array $map) use ($sessionId, $entryId, $source, &$removed): ?array {
+            if (!isset($map[$sessionId])) return null;
+            $keep = [];
+            foreach ($map[$sessionId] as $e) {
+                $match = ($entryId === null || ($e['id'] ?? '') === $entryId)
+                    && ($source === null || (string)($e['source'] ?? 'user') === $source);
+                if ($match) $removed++; else $keep[] = $e;
+            }
+            if ($removed === 0) return null;
+            if ($keep === []) unset($map[$sessionId]); else $map[$sessionId] = $keep;
             return $map;
         });
+        return $removed;
     }
 
     /**
