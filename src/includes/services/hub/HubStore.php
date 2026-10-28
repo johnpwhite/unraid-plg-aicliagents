@@ -419,6 +419,51 @@ class HubStore {
         return self::saveServer($name, $server, $errors);
     }
 
+    /**
+     * #833: on its first install a successor agent (OpenCode 2 is the successor of OpenCode 1)
+     * takes the Config Hub choices of its predecessor: every MCP server, and the instruction,
+     * skill and command lists, that name the predecessor also name the successor. A predecessor
+     * that gets the global instructions through its own config ($claudeCompat, OpenCode 1 reads
+     * CLAUDE.md that way) also puts the successor on the instruction list. Nothing changes when
+     * the successor is already on any list (a person chose for it).
+     *
+     * @param array<string,array<string,mixed>> $registry agent id => registry entry (only `successor` is read)
+     * @param list<string> $claudeCompat agent ids that get the global instructions through their own config
+     * @return list<string> the lists the agent was added to, in plain words; empty when nothing changed
+     */
+    public static function inheritFromPredecessor(string $agentId, array $registry, array $claudeCompat = []): array {
+        $pred = null;
+        foreach ($registry as $id => $entry) {
+            if (is_array($entry) && (string)($entry['successor'] ?? '') === $agentId && (string)$id !== $agentId) { $pred = (string)$id; break; }
+        }
+        if ($pred === null) return [];
+        $servers = self::getMcp()['servers'] ?? [];
+        $state = self::getState();
+        foreach ($servers as $def) {
+            if (in_array($agentId, (array)($def['enabledFor'] ?? []), true)) return [];
+        }
+        foreach (self::TARGET_FIELDS as $field) {
+            if (in_array($agentId, (array)($state[$field] ?? []), true)) return [];
+        }
+        $added = [];
+        foreach ($servers as $name => $def) {
+            $for = array_map('strval', (array)($def['enabledFor'] ?? []));
+            if (!in_array($pred, $for, true)) continue;
+            $errors = [];
+            if (self::setServerTargets((string)$name, array_merge($for, [$agentId]), $errors)) $added[] = "MCP server $name";
+        }
+        $labels = ['instructions_enabledFor' => 'instructions', 'skills_enabledFor' => 'skills', 'commands_enabledFor' => 'commands'];
+        foreach (self::TARGET_FIELDS as $field) {
+            $for = array_map('strval', (array)($state[$field] ?? []));
+            $want = in_array($pred, $for, true)
+                || ($field === 'instructions_enabledFor' && in_array($pred, $claudeCompat, true) && !in_array($agentId, $claudeCompat, true));
+            if (!$want) continue;
+            $errors = [];
+            if (self::setTargetSet($field, $labels[$field], array_merge($for, [$agentId]), $errors)) $added[] = $labels[$field];
+        }
+        return $added;
+    }
+
     /** Switch a server off (or back on) for every agent without touching its targets. */
     public static function setServerDisabled(string $name, bool $disabled, array &$errors = []): bool {
         $errors = [];

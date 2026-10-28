@@ -181,6 +181,20 @@ try {
     } else {
         aicli_log("Background Install Job Complete for: $agentId", AICLI_LOG_INFO);
         \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer', 'agent_installed', ['agent' => $agentId, 'version' => $targetVersion ?? 'latest']);
+        // #833: a first install of a successor agent (OpenCode 2) takes the Config Hub choices of its
+        // predecessor, so it does not start with no plugin tools and no instructions. Never on an upgrade.
+        if (!$installedBefore) {
+            try {
+                $inherited = \AICliAgents\Services\Hub\HubStore::inheritFromPredecessor(
+                    $agentId, \AICliAgents\Services\AgentRegistry::getDefaultAgents(),
+                    array_keys(\AICliAgents\Services\Hub\HubProjector::claudeCompatVendors()));
+                if ($inherited !== []) {
+                    \AICliAgents\Services\LifecycleLogService::log(\AICliAgents\Services\LifecycleLogService::LEVEL_INFO, 'installer', 'agent_hub_inherited', ['agent' => $agentId, 'lists' => $inherited]);
+                    @\AICliAgents\Services\ActivityService::register("hub_inherit_$agentId", 'system', "Config Hub: $agentName takes the choices of the agent it replaces", ['meta' => ['kind' => 'record']]);
+                    @\AICliAgents\Services\ActivityService::finish("hub_inherit_$agentId", 'Turned on for ' . implode(', ', $inherited) . '. Change it in Settings, Config Hub.');
+                }
+            } catch (\Throwable $e) { aicli_log("Config Hub inherit for $agentId failed: " . $e->getMessage(), AICLI_LOG_WARN); }
+        }
         // AGENT_STORE_CARD_HEADER.md R16: the new layer and the now-old layer change both foot figures of the card.
         // Start a background measurement (it never runs in a web request, #552); the card reads its file.
         try { \AICliAgents\Services\BootSpaceService::startMeasure(); } catch (\Throwable $e) { /* the next card visit measures */ }
