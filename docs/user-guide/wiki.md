@@ -28,8 +28,10 @@ The wiki and the Notes list are two separate worlds. A wiki page never clutters 
 
 The wiki view has two displays. A switch in its toolbar chooses between **Pages** and **Graph**. The toolbar also holds **Read all**, **Recent** and a refresh button (**Reload the wiki**).
 
-- In a wide drawer (640 pixels or more), the toolbar sits in the drawer header, between the **Project** and **Global** switch and the icons. The header also holds the button that shows or hides the note list. The wiki view then has one bar above the content.
+- In a wide drawer (640 pixels or more), the toolbar sits in the drawer header, between the **Project** and **Global** switch and the icons, when the header has room. The header also holds the button that shows or hides the note list. The icons and **Close** always stay at the right end of the first line. When the header has no room, or on a touch screen, the toolbar moves to its own full-width second line in the header.
 - In a narrow drawer or on a phone, the toolbar is one row above the content. **Read all** shows its icon only. Its text is the tooltip.
+- The toolbar stays on the screen while you read a wiki page. **Pages** and **Graph** then close the page and show the wiki home.
+- A page does not show its title twice: when the text starts with a heading that is the same as the page title, the viewer leaves that heading out. **Copy page text** still copies it.
 
 The **Pages** display shows these parts from top to bottom.
 
@@ -196,6 +198,7 @@ The wiki is not a separate store. A wiki page is an ordinary Notebook file with 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-28** — In the wiki view, the icons and **Close** stay at the right end of the first header line, the toolbar stays on screen while a page is open (also in a narrow drawer), and a page no longer shows its title twice. Spec `docs/specs/NOTEBOOK_WIKI_COMPACT_HEADER.md`, issue #836.
 - **2026-10-22** — The setting **Show the Wiki as its own page** is now called **Show the Wiki page**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The wiki strip has a **Forward** button. Alt+Left and Alt+Right move through the wiki history. Spec `docs/specs/NOTEBOOK_WIKI_NAVIGATION.md`, issue #734.
 
