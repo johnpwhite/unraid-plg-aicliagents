@@ -492,7 +492,11 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     chmod 600 "$RUN_SCRIPT"
     echo "#!/bin/bash" > "$RUN_SCRIPT"
     printf 'export PLUGIN_SRC=%q\n' "$PLUGIN_SRC" >> "$RUN_SCRIPT"
-    
+    # #834: the quoted blocks below use ${MOUNT_ROOT} for the debug log, the crash records
+    # and the close/closing/auto-reload sentinels. tmux does not pass this shell's
+    # variables on, so set it here; without it every path became /<name> at the root.
+    printf 'export MOUNT_ROOT=%q\n' "$MOUNT_ROOT" >> "$RUN_SCRIPT"
+
     # Inject logging function into the child script for tmux diagnostics
     cat << 'FUNCOEF' >> "$RUN_SCRIPT"
 log_aicli() {
