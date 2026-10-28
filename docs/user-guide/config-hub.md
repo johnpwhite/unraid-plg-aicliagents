@@ -58,6 +58,8 @@ Notes on the table:
 - **Codex CLI** has no commands in the Config Hub, because Codex uses skills in place of commands.
 - **Antigravity CLI** and **Gemini CLI** read the same instruction file. If you select either one, the Config Hub writes that file once.
 - **Six agents share one skills folder:** Codex CLI, Gemini CLI, OpenCode, OpenCode 2, GitHub Copilot and Goose read the same shared folder. The Config Hub writes it once. It keeps the files while any of the six is still selected.
+- **OpenCode 2 starts with the choices of OpenCode.** When you install OpenCode 2 for the first time, the Config Hub selects it for every item that has OpenCode selected. Because OpenCode reads your global instructions through its own settings, OpenCode 2 is also selected for **Global Instructions**. The Activity tray says what was selected. An upgrade never changes your choices, and you can clear any of them as usual.
+- **Never link the OpenCode 2 settings file to the OpenCode settings file.** The two versions keep their MCP servers in different formats. If the OpenCode 2 file is a link to a file outside its own folder, the Config Hub does not write it, and the Activity tray tells you to remove the link.
 - The MCP file formats differ. Most agents use JSON. Codex CLI and Grok Build use TOML. Goose uses YAML. The Config Hub writes each one in the format of the agent.
 
 ## How to use it
@@ -374,6 +376,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-10-28** — A first OpenCode 2 install selects OpenCode 2 wherever OpenCode is selected, and for Global Instructions. The Config Hub does not write an OpenCode 2 file that is a link out of its own folder. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issues #832 and #833.
 - **2026-10-27** — New row **OpenCode 2**. It has its own settings folder, so its MCP servers, instructions and commands are separate from OpenCode. It reads the shared skills folder. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issue #822.
 - **2026-10-27** — In **Global Instructions**, Claude Code and OpenCode show **covered** when they already read the instructions through `~/.claude`. A tick on them asks first. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #798.
 - **2026-10-27** — The card **Config drift detected** has aligned columns, plain state words and a hover text on each button. **Compare** opens both texts side by side with colours and red and green marks. A button that cannot work on a row is grey and says why. The Release on the **Command environment block** row no longer unticks Codex from every server, and a secret that you typed into a block shows masked. Spec `docs/specs/HUB_DRIFT_VIEW.md`, issues #797, #799, #800, #801.
