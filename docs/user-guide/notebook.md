@@ -117,14 +117,14 @@ The menu also lists starting pages for the wiki (such as **Wiki home**, **Runboo
 An open note has a header with the title and a row of icon buttons. A line below the title shows a flag (when the note needs you, or is New or Changed), the time of the last update, and **Not committed** when the file differs from the last git commit.
 
 - Double-click the title to rename it. **Rename...** in the **More actions** menu does the same.
-- **Edit in the editor** opens the file of the note in the file editor.
+- **Edit in the editor** opens the file of the note in the file editor. If an agent changes the note while the editor is open, Save does not replace the change. The editor keeps your text, says who changed the note, and offers **Copy my text** and **Reload**.
 - The star pins the note to the top of its area. See "Pins" below.
 - **Open in new tab** opens the note on its own page.
 - The button with the notebook and three small stars (**Ask the agent to refresh this note**) shows at every drawer width.
 - **Read aloud**, **History**, **Go to comments** and **Properties** show as icons when the drawer is wide (760 pixels or more). In a narrower drawer they move into the **More actions** menu.
 - **More actions** also holds **Copy link**, **Move to**, **Share a copy to**, **Export**, **Lock** and **Archive**.
 
-Several open notes show as tabs above the note. A tab that does not fit goes into an "N more" menu. Press the cross on a tab, or press the middle mouse button, to close it. Alt+] and Alt+[ step to the next and the previous tab.
+Several open notes show as tabs above the note. A tab that does not fit goes into an "N more" menu. Press the cross on a tab, or press the middle mouse button, to close it. Alt+] and Alt+[ step to the next and the previous tab. A screen reader reads the tabs as a group of buttons, and the open note is marked as current. On a phone each tab, its cross and the **All notes** button have a touch area of 44 pixels. When you open a note with the Enter key, the keyboard stays in the drawer, so Ctrl+K, Alt+[ and Alt+] keep working.
 
 ### Go back to the note you came from
 
@@ -354,6 +354,8 @@ A notebook is a folder called notebook in the root of the project. It holds one 
 <details>
 <summary>Change history</summary>
 
+- **2026-10-28** — The note tabs, the checklist steps, the status colours (green, red, amber, blue) and the chart, data and device buttons are easier to use with a screen reader, a keyboard, a finger and low vision. Text in the state colours is dark enough to read. Spec `docs/specs/NOTEBOOK_ACCESSIBILITY.md`, issue #818.
+- **2026-10-28** — The file editor no longer replaces a note that an agent changed while the editor was open. It keeps your text and offers **Reload**. Spec `docs/specs/NOTEBOOK_EDITOR_VERSION.md`, issue #815.
 - **2026-10-26** — The Notebook list has a **Voice mail** heading for spoken messages. It sits after **Notes**, is closed at first, and shows how many are new. Spec `docs/specs/NOTEBOOK_VOICE_MAIL_SECTION.md`, issue #811.
 - **2026-10-25** — On a phone, the Project / Global switch and the Inbox, Working, Notes and Archive headings are big enough for a finger. The grey help text in the Notebook is darker, so it is easy to read in all four Unraid themes. Issue #768.
 - **2026-10-24** — On a phone, the editor and the Notebook fields use 16px text. The page no longer zooms in when you tap a field, so Save and the close button stay on the screen. Issue #766.
