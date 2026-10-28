@@ -138,7 +138,7 @@ class AssetsHandler {
             }
         }
 
-        return [
+        $reply = [
             'status'    => 'ok',
             'path'      => $resolved,
             'filename'  => basename($resolved),
@@ -148,5 +148,25 @@ class AssetsHandler {
             'exists'    => true,
             'readOnly'  => $readOnly,
         ];
+        $reply = self::withNoteInfo($reply, $resolved, $truncated, $readOnly);
+        return $reply;
+    }
+
+    /**
+     * #815: when the file is a Notebook note, tell the editor which note it is and its version, so the
+     * editor saves through notebook_save with expectedVersion (docs/specs/NOTEBOOK_EDITOR_VERSION.md).
+     * @param array<string,mixed> $reply
+     * @return array<string,mixed>
+     */
+    private static function withNoteInfo(array $reply, string $resolved, bool $truncated, bool $readOnly): array {
+        if ($truncated || $readOnly) return $reply;
+        try {
+            require_once __DIR__ . '/../services/NotebookService.php';
+            $note = \AICliAgents\Services\NotebookService::noteForPath($resolved);
+            if ($note !== null) $reply['note'] = $note;
+        } catch (\Throwable $e) {
+            // A note lookup failure must never stop a normal file read.
+        }
+        return $reply;
     }
 }

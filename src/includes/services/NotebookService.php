@@ -2135,6 +2135,55 @@ class NotebookService {
         }
     }
 
+    /**
+     * Is this absolute file path a note inside a notebook? (docs/specs/NOTEBOOK_EDITOR_VERSION.md, #815)
+     * The editor asks this when it opens a file. A note sits in `<root>/<area>/<name>` and `<root>` holds
+     * `.notebook.json`. The answer names the notebook (`global` or a workspace id), the note id and the
+     * version, so the editor can save through notebook_save with expectedVersion.
+     * @param array<int,array<string,mixed>>|null $sessions test seam: the workspace records (null = the registry)
+     * @return array{workspaceId:string,id:string,version:string}|null
+     */
+    public static function noteForPath(string $abs, ?array $sessions = null): ?array {
+        try {
+            $abs = rtrim($abs, '/');
+            if ($abs === '' || !is_file($abs) || is_link($abs)) return null;
+            $areaDir = dirname($abs);
+            if (!in_array(basename($areaDir), NotebookFormat::AREAS, true)) return null;
+            $root = dirname($areaDir);
+            if (!is_file($root . '/.notebook.json')) return null;
+            $ext = strtolower(pathinfo($abs, PATHINFO_EXTENSION));
+            if (!in_array($ext, NotebookFormat::EXTENSIONS, true)) return null;
+            $raw = @file_get_contents($abs);
+            if ($raw === false || strlen($raw) > self::MAX_READ_BYTES) return null;
+            $rec = self::record(basename($areaDir), basename($abs), $abs, $raw, $ext, (int)@filemtime($abs));
+            $rootReal = PoolPathService::resolvePoolPath($root) ?? $root;
+            $ws = '';
+            if ($rootReal === rtrim(self::globalRoot(), '/')) {
+                $ws = 'global';
+            } else {
+                $folder = self::settings()['folder'];
+                if ($sessions === null) {
+                    $sessions = (array)(self::$registryLookup !== null
+                        ? (self::$registryLookup)()
+                        : (class_exists('AICliAgents\Services\ConfigService') ? (ConfigService::getWorkspaces()['sessions'] ?? []) : []));
+                }
+                foreach ($sessions as $s) {
+                    if (!is_array($s)) continue;
+                    $id = (string)($s['id'] ?? '');
+                    $p = rtrim((string)($s['path'] ?? ''), '/');
+                    if ($id === '' || $p === '' || !preg_match('/^[A-Za-z0-9_\-]{1,64}$/D', $id)) continue;
+                    $proj = PoolPathService::resolvePoolPath($p) ?? $p;
+                    if ($proj . '/' . $folder === $rootReal) { $ws = $id; break; }
+                }
+            }
+            if ($ws === '') return null;
+            return ['workspaceId' => $ws, 'id' => (string)$rec['id'], 'version' => (string)$rec['version']];
+        } catch (\Throwable $e) {
+            self::log('noteForPath failed: ' . $e->getMessage());
+            return null;
+        }
+    }
+
     private static function stale(string $current): array {
         return ['error' => 'This artefact changed since you read it. Read it again and retry.', 'currentVersion' => $current, 'stale' => true];
     }
