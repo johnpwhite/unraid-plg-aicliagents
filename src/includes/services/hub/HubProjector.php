@@ -1187,7 +1187,7 @@ class HubProjector {
                         return ['status' => 'error', 'message' => 'the file already defines ' . implode(', ', $clash)
                             . ' outside the managed block; remove or rename that entry in the file, then apply again'];
                     }
-                    return ['status' => 'error', 'message' => 'vendor file write failed (unparseable file is never clobbered)'];
+                    return ['status' => 'error', 'message' => 'vendor file write failed: ' . self::writeFailReason($abs)];
                 }
                 if ($want !== null) {
                     $entry['lastProjectedHash'][$key] = VendorProjector::valueHash($want);
@@ -1588,6 +1588,8 @@ class HubProjector {
      * on the way, or a folder that is not writable.
      */
     public static function writeFailReason(string $abs): string {
+        $foreign = Opencode2Projector::foreignLinkReason($abs);
+        if ($foreign !== null) return $foreign;
         $path = rtrim($abs, '/');
         while ($path !== '' && $path !== '/' && $path !== '.') {
             if (is_link($path) && !file_exists($path)) {

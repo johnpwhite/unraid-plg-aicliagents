@@ -30,4 +30,26 @@ class Opencode2Projector extends OpencodeStyleMcpProjector {
     public function label(): string   { return 'OpenCode 2'; }
 
     protected function containerPath(): array { return ['mcp', 'servers']; }
+
+    /**
+     * #832: never write through a link that leads out of the OpenCode 2 folder. On prod02 a
+     * hand-made link pointed this file at the OpenCode 1 config, so a write would put
+     * `mcp.servers` into the OpenCode 1 file, which OpenCode 1 cannot read.
+     */
+    public function write(string $file, array $set, array $remove): bool {
+        if (self::foreignLinkReason($file) !== null) return false;
+        return parent::write($file, $set, $remove);
+    }
+
+    /** Why $file may not be written (it is a link out of the OpenCode 2 folder), or null when it may. */
+    public static function foreignLinkReason(string $file): ?string {
+        $rel = '/' . self::CONFIG_DIR . '/opencode.json';
+        if (substr($file, -strlen($rel)) !== $rel || !is_link($file)) return null;
+        $root = realpath(substr($file, 0, -strlen($rel)) . '/' . self::XDG_ROOT);
+        $target = realpath($file);
+        if ($root !== false && $target !== false && strpos($target, $root . '/') === 0) return null;
+        return "$file is a link to '" . (string)@readlink($file) . "', outside the OpenCode 2 folder. "
+            . 'OpenCode 2 keeps its MCP servers in a different shape from OpenCode 1, so the Config Hub does not write through it. '
+            . 'Remove the link; the Config Hub then makes the OpenCode 2 file again';
+    }
 }
