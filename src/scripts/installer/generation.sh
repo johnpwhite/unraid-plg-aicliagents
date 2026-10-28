@@ -389,7 +389,7 @@ _aicli_proc_text() {
 # still that process (a pid can be reused). Test seam: AICLI_SECRET_SERVICE_DIR.
 _aicli_secret_service_pids() {
     local scan_dir="${1:-/proc}" f p cmd
-    local dir="${AICLI_SECRET_SERVICE_DIR:-${MOUNT_ROOT:-/tmp/unraid-aicliagents}/secret-service}"
+    local dir="${AICLI_SECRET_SERVICE_DIR:-${MOUNT_ROOT}/secret-service}"
     for f in "$dir"/*/bus.pid "$dir"/*/daemon.pid; do
         [ -f "$f" ] || continue
         p="$(head -c 32 "$f" 2>/dev/null | tr -cd '0-9')"
