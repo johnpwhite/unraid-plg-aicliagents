@@ -247,16 +247,18 @@ if (file_exists('/var/local/emhttp/var.ini')) {
 }
 
 // Global Constants for Logging
-define('AICLI_LOG_ERROR', LogService::LOG_ERROR);
-define('AICLI_LOG_WARN',  LogService::LOG_WARN);
-define('AICLI_LOG_INFO',  LogService::LOG_INFO);
-define('AICLI_LOG_DEBUG', LogService::LOG_DEBUG);
+defined('AICLI_LOG_ERROR') || define('AICLI_LOG_ERROR', LogService::LOG_ERROR);
+defined('AICLI_LOG_WARN') || define('AICLI_LOG_WARN',  LogService::LOG_WARN);
+defined('AICLI_LOG_INFO') || define('AICLI_LOG_INFO',  LogService::LOG_INFO);
+defined('AICLI_LOG_DEBUG') || define('AICLI_LOG_DEBUG', LogService::LOG_DEBUG);
 
 /**
- * Wrapper for the LogService.
+ * Wrapper for the LogService. Guarded: NotebookLeanBoot.php (Forgejo #422) may have defined it already.
  */
-function aicli_log($message, $level = AICLI_LOG_INFO, $context = "AICliAgents") {
-    LogService::log($message, $level, $context);
+if (!function_exists('aicli_log')) {
+    function aicli_log($message, $level = AICLI_LOG_INFO, $context = "AICliAgents") {
+        LogService::log($message, $level, $context);
+    }
 }
 
 /**
@@ -267,10 +269,12 @@ function aicli_get_formatted_timestamp($includeDate = true) {
 }
 
 /**
- * Wrapper for the ConfigService.
+ * Wrapper for the ConfigService. Guarded like aicli_log.
  */
-function getAICliConfig() {
-    return ConfigService::getConfig();
+if (!function_exists('getAICliConfig')) {
+    function getAICliConfig() {
+        return ConfigService::getConfig();
+    }
 }
 
 /**

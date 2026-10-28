@@ -12,6 +12,18 @@ namespace AICliAgents\Services;
 
 class ValidationService {
 
+    /**
+     * Forgejo #422, docs/specs/NOTEBOOK_LEAN_BOOT.md: the Notebook reads the drawer asks for most. They need
+     * no terminal, storage or agent code, so AICliAjax.php answers them after loading only the Notebook files
+     * (NotebookLeanBoot.php) and not the whole plugin (about 6 MB of PHP that the server compiles again on
+     * every request, because the server has no opcache). Read actions only: a write keeps the full load.
+     */
+    public const LEAN_NOTEBOOK_ACTIONS = ['notebook_info', 'notebook_list', 'notebook_get', 'notebook_search', 'notebook_templates'];
+
+    public static function isLeanNotebookRead($action): bool {
+        return is_string($action) && in_array($action, self::LEAN_NOTEBOOK_ACTIONS, true);
+    }
+
     /** Raw media reads cannot send a form token. Every other browser action needs one. */
     public static function isCsrfExemptRead($action): bool {
         return is_string($action) && in_array($action, ['voice_clip', 'notebook_asset'], true);

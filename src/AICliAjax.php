@@ -53,6 +53,12 @@ register_shutdown_function(function() {
     }
 });
 
+// Forgejo #422 (docs/specs/NOTEBOOK_LEAN_BOOT.md): a Notebook read answers after a small start-up. The full start-up
+// below is about 6 MB of PHP that the server compiles on every request (it has no opcache).
+$aicliLean = isset($_GET['action']) && \AICliAgents\Services\ValidationService::isLeanNotebookRead($_GET['action']);
+if ($aicliLean) {
+    require_once AICLI_GEN_SRC . '/includes/NotebookLeanBoot.php';
+} else {
 require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
 require_once AICLI_GEN_SRC . '/includes/services/ValidationService.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/TerminalHandler.php';
@@ -82,6 +88,7 @@ require_once AICLI_GEN_SRC . '/includes/handlers/BootArchiveHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/AutoContinueHandler.php';
 require_once AICLI_GEN_SRC . '/includes/handlers/NotebookHandler.php';
 require_once AICLI_GEN_SRC . '/includes/services/PerfTrace.php';
+}
 use AICliAgents\Services\ValidationService;
 
 // R-176: a storage or history change comes as POST, with the action and the parameters in the body, so
@@ -142,7 +149,8 @@ if (isset($_GET['action'])) {
     // Unraid's nginx, D-405.) Turn it back into standard base64 here, once,
     // for the handlers' strict base64_decode. A request without enc is left alone.
     // The decision is UtilityHandler::decodeUploadBody() (unit tested). NotebookHandler reads $_REQUEST.
-    foreach (\AICliAgents\Handlers\UtilityHandler::decodeUploadBody($action, $_POST) as $b64Key => $b64Val) {
+    // A lean Notebook read is no upload action, so it has nothing to decode (and UtilityHandler is not loaded).
+    foreach ($aicliLean ? [] : \AICliAgents\Handlers\UtilityHandler::decodeUploadBody($action, $_POST) as $b64Key => $b64Val) {
         $_POST[$b64Key] = $b64Val;
         $_REQUEST[$b64Key] = $b64Val;
     }
@@ -231,7 +239,11 @@ if (isset($_GET['action'])) {
 
         // Initialize environment (skip mount for non-mount actions)
         $mustMountActions = ['start', 'restart', 'install_agent', 'uninstall_agent', 'migrate_agents'];
-        aicli_ensure_init(!in_array($action, $mustMountActions));
+        // A lean Notebook read skips the plugin self-heal (supervisor check, boot sweep): every other action and the
+        // page itself run it, and a Notebook read must not pay for it.
+        if (!$aicliLean) {
+            aicli_ensure_init(!in_array($action, $mustMountActions));
+        }
 
         // Route to handler - raw output actions first
         if ($action === 'filetree') {
@@ -288,7 +300,7 @@ if (isset($_GET['action'])) {
             }
         } else {
             // Standard JSON handlers
-            $result = \AICliAgents\Handlers\TerminalHandler::handle($action, $id)
+            $result = $aicliLean ? \AICliAgents\Handlers\NotebookHandler::handle($action, $id) : (\AICliAgents\Handlers\TerminalHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\StorageHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\AgentHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\TmuxHandler::handle($action, $id)
@@ -311,7 +323,7 @@ if (isset($_GET['action'])) {
                    ?? \AICliAgents\Handlers\BootArchiveHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\AutoContinueHandler::handle($action, $id)
                    ?? \AICliAgents\Handlers\NotebookHandler::handle($action, $id)
-                   ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id);
+                   ?? \AICliAgents\Handlers\UtilityHandler::handle($action, $id));
 
             ob_end_clean();
             if ($result !== null) {

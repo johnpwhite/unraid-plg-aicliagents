@@ -2310,8 +2310,32 @@ class NotebookService {
         return $out;
     }
 
+    /** Forgejo #422: the list needs the first 140 characters of a note, so a large text note is read only from its start. */
+    private const SUMMARY_HEAD_BYTES = 8192;
+    private const SUMMARY_HEAD_TYPES = ['markdown', 'checklist', 'connection', 'deck', 'mermaid', 'log', 'diff'];
+
+    /**
+     * The one-line summary of a record. For a large text note it works on the first 8 KB only (the whole body of a
+     * 1 MB note went through seven regular expressions on every list call). The result must be the same as the
+     * whole-body result, so: an odd number of code fences in the head means a fence is open, and the head then
+     * runs on to the closing fence; and when the head gives fewer than 140 characters the whole body is used.
+     */
     private static function summaryText(array $rec): string {
         $body = $rec['body'];
+        if (strlen($body) > self::SUMMARY_HEAD_BYTES && in_array($rec['type'], self::SUMMARY_HEAD_TYPES, true)) {
+            $nl = strpos($body, "\n", self::SUMMARY_HEAD_BYTES); // cut at a line end, so a fence is never cut in two
+            $head = $nl === false ? $body : substr($body, 0, $nl);
+            if (substr_count($head, '```') % 2 === 1) {
+                $close = strpos($body, '```', strlen($head));
+                $head = $close === false ? $body : substr($body, 0, $close + 3);
+            }
+            $short = self::summaryFrom($rec, $head);
+            if (mb_strlen($short) >= 140) return $short;
+        }
+        return self::summaryFrom($rec, $body);
+    }
+
+    private static function summaryFrom(array $rec, string $body): string {
         $text = '';
         switch ($rec['type']) {
             case 'markdown': case 'checklist': case 'connection': case 'deck':
@@ -2638,6 +2662,24 @@ class NotebookService {
     // Git (read only, 3 second deadline, GIT_OPTIONAL_LOCKS=0)
     // ======================================================================
 
+    /**
+     * Could this folder be inside a git work tree? False when no folder from it up to the root holds a `.git`
+     * entry (a folder, or a file for a linked work tree) and no git environment variable names a repository.
+     * Only a False answer is final; True means "ask git".
+     */
+    public static function mayBeInGitRepo(string $dir): bool {
+        if ((string)getenv('GIT_DIR') !== '' || (string)getenv('GIT_WORK_TREE') !== '') return true;
+        $d = rtrim($dir, '/');
+        for ($i = 0; $i < 64; $i++) {
+            if ($d === '') return file_exists('/.git');
+            if (file_exists($d . '/.git')) return true;
+            $up = dirname($d);
+            if ($up === $d) return false;
+            $d = $up;
+        }
+        return true;
+    }
+
     /** @return array{repo:bool,dirty:array<string,bool>} paths relative to the notebook root */
     private static function gitInfo(array $ctx): array {
         $none = ['repo' => false, 'dirty' => []];
@@ -2645,6 +2687,8 @@ class NotebookService {
         if ($ctx['scope'] === 'global' || !is_dir($root)) return $none;
         $c = self::$gitCache[$root] ?? null;
         if ($c !== null && (microtime(true) - $c[0]) < 0.5 && $c[1] !== null) return $c[1];
+        // Forgejo #422: no .git above the folder means no repository. One stat per level is far cheaper than starting git.
+        if (!self::mayBeInGitRepo($root)) { self::$gitCache[$root] = [microtime(true), $none]; return $none; }
         $top = self::git($root, ['rev-parse', '--is-inside-work-tree', '--show-prefix']);
         if ($top === null || $top[0] !== 0) { self::$gitCache[$root] = [microtime(true), $none]; return $none; }
         $lines = explode("\n", $top[1]);
