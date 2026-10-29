@@ -169,7 +169,7 @@
         var trust = q('[data-action="trust"]');
         if (trust) trust.hidden = script.fileState !== 'changed' || script.pathKind === 'userScriptCopy';
         setText('[data-view="agents"]', (script.agentNames && script.agentNames.length ? script.agentNames : (script.agents || []).map(nameForAgent)).join(', ') || 'No agent');
-        setText('[data-view="folders"]', (script.folders || []).join('\n') || 'No folder yet. A temporary folder for a run comes in a later version.');
+        setText('[data-view="folders"]', (script.folders || []).join('\n') + (script.folders && script.folders.length && script.allowTemp ? '\nand a temporary folder' : '') || 'A temporary folder only. The plugin makes a new empty folder for each run.');
         setText('[data-view="mode"]', script.maxMode === 'may-change' ? 'May change files: waits for your approval each time.' : 'Read-only: starts at once and only reads files.');
         setText('[data-view="perday"]', 'Up to ' + Number(script.maxPerDay || 6) + ' runs in 24 hours.');
 

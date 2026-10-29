@@ -671,8 +671,10 @@ class AdminService {
             'run_approval_hours'     => ['group' => 'run', 'description' => 'Hours that a person has to approve a run that may change things, 1 to 168 (default 24). Changes only on the Settings page.'],
             'run_max_minutes'        => ['group' => 'run', 'description' => 'Minutes before the plugin closes a run that has not reported, 1 to 1440 (default 60). Changes only on the Settings page.'],
             'run_notify_routine'     => ['group' => 'run', 'description' => 'Raise an Unraid notification when a run starts and reports done: 1 is on (default), 0 is off. Warnings are always sent. Changes only on the Settings page.'],
+            'run_temp_root'          => ['group' => 'run', 'description' => 'Folder that holds the temporary folders of aicli-run --temp. Empty (default) means the appdata folder of Unraid on its pool, plus /_tmp/aicliagents-runs. Never under /mnt/user. Changes only on the Settings page.'],
+            'run_temp_keep_hours'    => ['group' => 'run', 'description' => 'Hours that a temporary run folder stays after its run closed, 1 to 720 (default 24). Changes only on the Settings page.'],
             // HUMAN_ACTOR_IDENTITY.md
-            'human_display_name'     => ['group' => 'general', 'description' => 'The name shown after the Unraid login in the records of who acted, for example "root (John)". Empty shows the login only. Changes only on the Settings page, General, Advanced.'],
+            'human_display_name'    => ['group' => 'general', 'description' => 'The name shown after the Unraid login in the records of who acted, for example "root (John)". Empty shows the login only. Changes only on the Settings page, General, Advanced.'],
 
             // ---- notebook (ARTEFACTS.md) — a person changes these on Settings, Notebook; an agent cannot ----
             'notebook_enabled'            => ['group' => 'notebook', 'description' => 'The Notebook drawer and the artefact tools. 1 is on (default), 0 is off. Changes only on the Settings page, Notebook — an agent cannot change it.'],

@@ -56,9 +56,49 @@ aicli-run --agent=claude-code --folder=/mnt/cache/appdata/example \
   --title="Daily check" --key=daily-check --data-file=/tmp/finding.json
 ```
 
-The command prints one JSON object. The field `state` says what happened. Exit code 0 means the run started or finished. Check `state`, not only the shell exit code. Exit codes 2 and 3 mean bad input and feature off. Code 4 means the command was not run as root. Codes 10, 11 and 12 mean failed, blocked and timed out. Code 20 means the run waits for approval. Codes 21, 22 and 23 mean refused, duplicate or held.
+The command prints one JSON object. The field `state` says what happened. Exit code 0 means the run started or finished. Check `state`, not only the shell exit code. Exit codes 2 and 3 mean bad input and feature off. Code 4 means the command was not run as root. Codes 10, 11 and 12 mean failed, blocked and timed out. Code 20 means the run waits for approval. Codes 21, 22 and 23 mean refused, duplicate or held. The state `delivered` (exit 0) means that the plugin typed a follow-up message into a run that was open.
 
 Add `--wait` when the script must wait for the result. The reply has the report. A bare `--wait` can wait up to one hour. It can stop earlier when the run time limit comes first. A number such as `--wait=30` waits for up to 30 seconds. The plugin limits every wait to 3600 seconds. If the wait ends while the run is open, the reply says `started` and the command exits with 0. The run continues. A call with `--mode=may-change` returns at once with exit 20 while it waits for approval, even with `--wait`.
+
+### Use a temporary folder
+
+A script that has no project folder can ask for a new empty folder for each run. Add `--temp` in place of `--folder`:
+
+```bash
+aicli-run --agent=claude-code --temp --prompt="Check the finding in the data." --data-file=/tmp/finding.json
+```
+
+The plugin makes the folder when the run starts, inside the appdata folder of Unraid on its pool (the folder is named after the run). It does not make the folder for a request that still waits for your approval. The folder stays for 24 hours after the run closed, so you can look at what the agent made. Then the plugin removes it. The script entry must allow it: an entry with no folder allows a temporary folder only. If the plugin cannot find a safe place for the folder, it refuses the call and says why.
+
+### Send a new message to a run that is open
+
+A second call with the same key, while the first run is open, returns `duplicate` (exit 22). The reply now also has `workspaceId` and `openRunState`, so the script can find the open run. Add `--on-duplicate=send` (it needs `--key`) when the second call should talk to the first run instead:
+
+```bash
+aicli-run --agent=claude-code --folder=/mnt/cache/appdata/example --key=daily-check \
+  --on-duplicate=send --prompt="The finding changed. Look again." --data-file=/tmp/finding.json
+```
+
+The plugin types the new prompt into the workspace of the open run, with the data in the same fenced block as a first call. The reply is `delivered` with exit code 0. This works only when the open run was started by the same script, its agent is the same, and its workspace is running. A run that may change files never takes a follow-up message, because it runs without asking and you never approved the new instructions. One run takes at most 10 follow-up messages. If the agent is busy, the plugin does not force the message: the reply stays `duplicate` and says why, and the script may call again later. A message is not a new run, so it does not use up the runs of the day. The Activity tray shows each message that the plugin delivered.
+
+### Let the script ask to be put on the list
+
+A script can ask for its own place on **Authorised scripts**, with the limits it needs. It starts no run. Put this call in the script:
+
+```bash
+aicli-run --request-access --label="KEV check" --description="Looks into new KEV entries." \
+  --agent=claude-code --folder=/mnt/cache/appdata/example --temp \
+  --mode=read-only --max-per-day=4
+```
+
+Name the agents with `--agent` (repeat it, or give a comma list). Name the folders with `--folder` (repeat it), a temporary folder with `--temp`, or both. `--mode` is the highest mode, and `--max-per-day` is the most runs in 24 hours; the plugin lowers it to the limit **Runs each day** when it is higher. The plugin finds the script from the process list, so a script can ask only for itself.
+
+1. The call prints a JSON object with the state `pending_approval` and exits with 20. The plugin adds one item to the **Activity tray** and shows an Unraid notice that asks you to accept or decline. A second call from the same script adds no second item.
+2. Read the item. It shows the path, the fingerprint and the limits that the script asks for.
+3. Press **Approve** to accept. The script goes on the list with the fingerprint and the limits it asked for. Press **Reject** to decline.
+4. Expect: the next call of `--request-access` answers `authorised` (exit 0). After a decline it answers `rejected` (exit 21). A script whose file changed has a new fingerprint and may ask again. When the script was on the list before, Approve keeps the old limits and stores the new fingerprint.
+
+Only you can accept. No agent and no command can accept for you.
 
 ### Approve an unknown or changed script
 
@@ -87,6 +127,8 @@ When the agent reports, the plugin saves its summary in one Notebook card. A key
 | **Time to approve a run** | Hours that you have to approve a run that may change files. | 24 | Raise it if you check the tray rarely. |
 | **Time limit for a run** | Minutes before the plugin closes a run that has not reported. | 60 | Raise it for a long check. |
 | **Notify me when a run starts and ends** | An Unraid notice when a run starts or reports done. Warnings always show. | Yes (default) | Turn it off for a script that runs often. |
+| **Folder for temporary run folders** | The folder that holds the temporary folders of `--temp` runs. Empty means the appdata folder of Unraid on its pool, plus `_tmp/aicliagents-runs`. | Empty (default) | A full path inside a share of a pool, never under `/mnt/user` | Change it only when you want these folders on another pool. | Applies to the next run that asks for a temporary folder. |
+| **Keep a temporary folder after the run for** | Hours that a temporary folder stays after its run closed. | 24 | 1 to 720 | Lower it to free space sooner. | Applies at the next clean-up. |
 
 ## What happens behind the scenes
 
@@ -108,7 +150,7 @@ The plugin reads the script from the file that the shell has open, and it looks 
 | The entry shows **Needs attention** | It points at a temporary User Scripts copy. | Open it and press **Switch to the original and trust it as it is now**. |
 | The entry shows **File missing** | The script file is not on the server. | Restore the file at the same path or remove the entry. |
 
-This version runs every agent as root. A restricted run user and a temporary folder for a run are not available yet.
+This version runs every agent as root. A restricted run user is not available yet.
 
 ## Related pages
 
@@ -119,6 +161,10 @@ This version runs every agent as root. A restricted run user and a temporary fol
 <details>
 <summary>Change history</summary>
 
+- **2026-10-29** — A run that may change files takes no follow-up message, and one run takes at most 10. A temporary folder must be inside a share that exists already. A script file under `/tmp` cannot ask for access. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issues #838, #839, #840.
+- **2026-10-29** — A script can ask to be put on the list with `aicli-run --request-access`, with the limits it needs. You accept or decline in the Activity tray. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #838.
+- **2026-10-29** — A duplicate call names the workspace and state of the open run, and `--on-duplicate=send` types a follow-up into it. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #839.
+- **2026-10-29** — A script can ask for a temporary folder with `--temp`. The card has two new settings, **Folder for temporary run folders** and **Keep a temporary folder after the run for**. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #840.
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.
 - **2026-10-26** — The Script runs card shows short names and descriptions. Its dialog can add User Scripts by name, change an entry and fix an old temporary-copy entry. Spec `docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md`, issue #788.
 - **2026-10-26** — A tray approval keeps the User Scripts name and description linked to their source, so later changes stay visible. Spec `docs/specs/SCRIPT_RUNS_CARD_REDESIGN.md`, issue #788.

@@ -161,6 +161,10 @@ class ConfigService {
             'run_approval_hours'                   => '24',
             'run_max_minutes'                      => '60',
             'run_notify_routine'                   => '1',
+            // run_temp_root: folder for the temporary run folders of aicli-run --temp ('' = the appdata pool path + /_tmp/aicliagents-runs).
+            // run_temp_keep_hours: hours that a temporary run folder stays after its run closed.
+            'run_temp_root'                        => '',
+            'run_temp_keep_hours'                  => '24',
             // HUMAN_ACTOR_IDENTITY.md: the name shown after the Unraid login in the records of who acted,
             // for example "root (John)". Empty shows the login only. Attribution only, never a right.
             'human_display_name'                   => '',
@@ -537,13 +541,21 @@ class ConfigService {
                 $newConfig[$runFlag] = ((string)$newConfig[$runFlag] === '1') ? '1' : '0';
             }
         }
-        foreach (['run_max_concurrent' => [1, 10, 2], 'run_daily_budget' => [1, 500, 6], 'run_cooldown_hours' => [0, 720, 24], 'run_approval_hours' => [1, 168, 24], 'run_max_minutes' => [1, 1440, 60]] as $runCap => [$runMin, $runMax, $runDefault]) {
+        foreach (['run_max_concurrent' => [1, 10, 2], 'run_daily_budget' => [1, 500, 6], 'run_cooldown_hours' => [0, 720, 24], 'run_approval_hours' => [1, 168, 24], 'run_max_minutes' => [1, 1440, 60], 'run_temp_keep_hours' => [1, 720, 24]] as $runCap => [$runMin, $runMax, $runDefault]) {
             if (array_key_exists($runCap, $newConfig)) {
                 $runRaw = $newConfig[$runCap];
                 $runOk = is_scalar($runRaw) && preg_match('/^\d{1,4}$/D', (string)$runRaw) === 1
                     && (int)$runRaw >= $runMin && (int)$runRaw <= $runMax;
                 $newConfig[$runCap] = (string)($runOk ? (int)$runRaw : $runDefault);
             }
+        }
+
+        // AGENT_RUN_ENTRY_POINT.md R19: the root of the temporary run folders is empty (the appdata pool path) or a full path
+        // that AgentRunService accepts. A refused value is never stored; it becomes empty.
+        if (array_key_exists('run_temp_root', $newConfig)) {
+            $tempRoot = is_scalar($newConfig['run_temp_root']) ? rtrim(trim((string)$newConfig['run_temp_root']), '/') : '';
+            if ($tempRoot !== '' && class_exists('\\AICliAgents\\Services\\AgentRunService') && AgentRunService::tempRootProblem($tempRoot) !== null) $tempRoot = '';
+            $newConfig['run_temp_root'] = $tempRoot;
         }
 
         // HUMAN_ACTOR_IDENTITY.md R3: the display name is one short line of plain text.

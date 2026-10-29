@@ -59,7 +59,19 @@ final class AgentRunService
         'run_approval_hours' => '24',
         'run_max_minutes' => '60',
         'run_notify_routine' => '1',
+        // R19, R20: the root of the temporary run folders ('' = appdata pool path + /_tmp/aicliagents-runs) and the
+        // hours that a temporary folder stays after its run closed.
+        'run_temp_root' => '',
+        'run_temp_keep_hours' => '24',
     ];
+    /** R20: the marker file in a temporary run folder. */
+    public const TEMP_MARKER = '.aicli-run.json';
+    /** #839: a run that may change things takes no follow-up message. */
+    public const FOLLOWUP_MAY_CHANGE_MESSAGE = "A run that may change things takes no follow-up message; each change needs a person's approval. Start a new run after this one closes.";
+    /** #839: the most follow-up messages that one run takes. */
+    public const MAX_FOLLOWUPS = 10;
+    /** #838: the most agents, and the most folders, that one access request may name. */
+    public const MAX_ACCESS_LIST = 10;
 
     // ---- Test seams. Every one is null in production. ----
 
@@ -87,6 +99,12 @@ final class AgentRunService
     public static ?int $lockWaitSeconds = null;
     /** @var callable|null fn(int $milliseconds): void. Replaces the wait between CLI report checks. */
     public static $waiter = null;
+    /** @var string|null Replaces /boot/config/docker.cfg (the appdata path of Unraid). */
+    public static ?string $dockerCfg = null;
+    /** @var callable|null fn(string $workspaceId, string $text): array. Replaces AdminService::sendInput() for a follow-up message (#839). */
+    public static $sender = null;
+    /** @var callable|null fn(string $path, int $device): int. Replaces the device number of a path in the folder removal (#840). */
+    public static $deviceOf = null;
 
     /**
      * The value of a test seam. A seam counts only when the PHPUnit bootstrap ran (it defines AICLI_TEST_TMP).
@@ -219,6 +237,14 @@ final class AgentRunService
             if (!self::enabled()) {
                 return self::reply('refused', 'Script runs are turned off. A person turns them on in Settings, Script runs, "Let scripts start agent runs".', self::EXIT_FEATURE_OFF);
             }
+            $scan = self::scanFlags($args);
+            if (isset($scan['error'])) return self::reply('refused', (string)$scan['error'], self::EXIT_BAD_INPUT);
+            if (!empty($scan['flags']['request-access'])) {
+                // #838: a request for a place on the list. The same root, switch, workspace and script-file checks apply.
+                $access = self::parseAccessArgs($scan);
+                if (isset($access['error'])) return self::reply('refused', (string)$access['error'], self::EXIT_BAD_INPUT);
+                return self::requestAccess($access['request'], RunCallerIdentity::identify(self::myPid()));
+            }
             $parsed = self::parseArgs($args, $stdinReader);
             if (isset($parsed['error'])) return self::reply('refused', (string)$parsed['error'], self::EXIT_BAD_INPUT);
             return self::run($parsed['request'], RunCallerIdentity::identify(self::myPid()));
@@ -232,18 +258,25 @@ final class AgentRunService
     // ======================================================================
 
     /** Flags that take a value. The value follows `=` or the next word. */
-    private const VALUE_FLAGS = ['agent', 'folder', 'prompt', 'prompt-file', 'title', 'mode', 'user', 'model', 'effort', 'key', 'data-file', 'wait'];
-    private const BOOL_FLAGS = ['temp'];
+    private const VALUE_FLAGS = ['agent', 'folder', 'prompt', 'prompt-file', 'title', 'mode', 'user', 'model', 'effort', 'key', 'data-file', 'wait', 'on-duplicate',
+        'label', 'description', 'max-per-day'];
+    private const BOOL_FLAGS = ['temp', 'request-access'];
+    /** The options that only `--request-access` takes (#838). */
+    private const ACCESS_ONLY_FLAGS = ['label', 'description', 'max-per-day'];
+    /** The options that a request for access takes. The agent and the folder may repeat. */
+    private const ACCESS_FLAGS = ['request-access', 'label', 'description', 'agent', 'folder', 'temp', 'mode', 'max-per-day'];
 
     /**
-     * Read and check the words of the command line.
+     * Split the words of the command line into options. `$flags` holds the last value of each option; `$multi` holds
+     * every value of each option that takes a value, in order, so --agent and --folder may repeat for a request.
      *
      * @param list<string> $args
-     * @return array{request:array<string,mixed>}|array{error:string}
+     * @return array{flags:array<string,mixed>,multi:array<string,list<string>>}|array{error:string}
      */
-    public static function parseArgs(array $args, ?callable $stdinReader = null): array
+    public static function scanFlags(array $args): array
     {
         $flags = [];
+        $multi = [];
         $count = count($args);
         for ($i = 0; $i < $count; $i++) {
             $word = (string)$args[$i];
@@ -265,6 +298,25 @@ final class AgentRunService
             } else {
                 return ['error' => "The option --$name needs a value."];
             }
+            $multi[$name][] = (string)$flags[$name];
+        }
+        return ['flags' => $flags, 'multi' => $multi];
+    }
+
+    /**
+     * Read and check the words of the command line.
+     *
+     * @param list<string> $args
+     * @return array{request:array<string,mixed>}|array{error:string}
+     */
+    public static function parseArgs(array $args, ?callable $stdinReader = null): array
+    {
+        $scan = self::scanFlags($args);
+        if (isset($scan['error'])) return ['error' => (string)$scan['error']];
+        $flags = $scan['flags'];
+        if (!empty($flags['request-access'])) return ['error' => '--request-access asks for a place on the Authorised scripts list. It does not start a run.'];
+        foreach (self::ACCESS_ONLY_FLAGS as $only) {
+            if (array_key_exists($only, $flags)) return ['error' => "The option --$only goes with --request-access only."];
         }
 
         // Agent. There is no default agent (R3).
@@ -280,10 +332,19 @@ final class AgentRunService
         $folderIn = trim((string)($flags['folder'] ?? ''));
         $temp = !empty($flags['temp']);
         if (($folderIn === '') === !$temp) return ['error' => 'Give --folder=<path> or --temp, not both and not neither.'];
-        if ($temp) return ['error' => 'A temporary folder (--temp) comes in a later slice of this feature. Give --folder=<path> for now.'];
-        $folder = ValidationService::validatePath($folderIn, SpawnService::allowedBases());
-        if ($folder === false || !is_dir($folder) || !is_readable($folder)) {
-            return ['error' => "The folder '" . self::cut($folderIn, 200) . "' is not an existing, readable folder inside an allowed location."];
+        $tempRoot = '';
+        if ($temp) {
+            // R19: the folder is made when the run starts, under <root>/<runId>. The root is checked now, so a call that
+            // cannot get a temporary folder is refused before any side effect.
+            $root = self::tempRoot();
+            if (isset($root['error'])) return ['error' => (string)$root['error']];
+            $tempRoot = (string)$root['path'];
+            $folder = '';
+        } else {
+            $folder = ValidationService::validatePath($folderIn, SpawnService::allowedBases());
+            if ($folder === false || !is_dir($folder) || !is_readable($folder)) {
+                return ['error' => "The folder '" . self::cut($folderIn, 200) . "' is not an existing, readable folder inside an allowed location."];
+            }
         }
 
         // The prompt: --prompt, --prompt-file or standard input.
@@ -328,6 +389,10 @@ final class AgentRunService
         $key = (string)($flags['key'] ?? '');
         if ($key !== '' && preg_match(self::KEY_PATTERN, $key) !== 1) return ['error' => 'The key may use letters, digits and the characters . _ : / @ - only, up to 200 characters.'];
 
+        $onDuplicate = trim((string)($flags['on-duplicate'] ?? ''));
+        if (!in_array($onDuplicate, ['', 'refuse', 'send'], true)) return ['error' => '--on-duplicate is send or refuse. With send, a second call with the same key types its prompt into the open run of the same script.'];
+        if ($onDuplicate === 'send' && $key === '') return ['error' => '--on-duplicate=send needs a --key: the key names the run that receives the message.'];
+
         $waitRequested = array_key_exists('wait', $flags);
         $waitSeconds = null;
         if ($waitRequested) {
@@ -354,8 +419,235 @@ final class AgentRunService
         return ['request' => [
             'agent' => $agent, 'folder' => $folder, 'prompt' => $prompt, 'title' => $title, 'mode' => $mode, 'user' => $user,
             'model' => $model, 'effort' => $effort, 'key' => $key, 'data' => trim($data) === '' ? '' : $data,
-            'waitRequested' => $waitRequested, 'waitSeconds' => $waitSeconds,
+            'waitRequested' => $waitRequested, 'waitSeconds' => $waitSeconds, 'onDuplicate' => $onDuplicate === 'send' ? 'send' : '', 'temp' => $temp, 'tempRoot' => $tempRoot,
         ]];
+    }
+
+    // ======================================================================
+    // Temporary run folders (R19, R20; issue #840)
+    // ======================================================================
+
+    /**
+     * R19: the root of the temporary run folders. The setting run_temp_root when it is set, else the appdata folder of
+     * Unraid (DOCKER_APP_CONFIG_PATH in docker.cfg) resolved to its pool path, plus /_tmp/aicliagents-runs. It is never
+     * under /mnt/user (FUSE), never a new top-level folder on a pool, and never found by guessing.
+     *
+     * @return array{path:string}|array{error:string}
+     */
+    public static function tempRoot(): array
+    {
+        $setting = rtrim(trim(self::settings()['run_temp_root']), '/');
+        if ($setting !== '') {
+            $bad = self::tempRootProblem($setting);
+            return $bad === null ? ['path' => $setting] : ['error' => $bad];
+        }
+        $cfg = self::seam('dockerCfg') ?? '/boot/config/docker.cfg';
+        $raw = is_file($cfg) ? @file_get_contents($cfg) : false;
+        $app = '';
+        if (is_string($raw) && preg_match('/^DOCKER_APP_CONFIG_PATH=["\']?([^"\'\r\n]*)["\']?\s*$/m', $raw, $m) === 1) $app = rtrim(trim($m[1]), '/');
+        if ($app === '') {
+            return ['error' => 'A temporary folder needs the appdata folder of Unraid, and DOCKER_APP_CONFIG_PATH is not set in the Docker settings. A person can set a folder in Settings, Script runs, "Folder for temporary run folders".'];
+        }
+        $resolved = PoolPathService::resolvePoolPath($app) ?? $app;
+        if (!is_dir($resolved)) {
+            return ['error' => "The appdata folder '" . self::cut($app, 100) . "' was not found on a pool, so there is no place for a temporary folder."];
+        }
+        $root = rtrim($resolved, '/') . '/_tmp/aicliagents-runs';
+        $bad = self::tempRootProblem($root);
+        return $bad === null ? ['path' => $root] : ['error' => $bad];
+    }
+
+    /** One sentence when a temporary root is not acceptable, else null. */
+    public static function tempRootProblem(string $root): ?string
+    {
+        if ($root === '' || $root[0] !== '/' || strlen($root) > 300 || strpos($root, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $root) === 1) {
+            return 'The folder for temporary run folders must be a full path.';
+        }
+        // No empty part ("//") and no "." part: the path must be written in its plain form.
+        foreach (explode('/', substr($root, 1)) as $part) {
+            if ($part === '' || $part === '.' || $part === '..') return 'The folder for temporary run folders must be a full path with no empty part and no "." or ".." part.';
+        }
+        if (preg_match('#^/mnt/(user0?|remotes|disks|addons|rootshare)(/|$)#', $root) === 1) {
+            return 'The folder for temporary run folders cannot be under /mnt/user, /mnt/user0, /mnt/remotes, /mnt/disks, /mnt/addons or /mnt/rootshare. Use the path of a pool, for example /mnt/cache/appdata/_tmp/aicliagents-runs, because heavy work through /mnt/user can freeze the server.';
+        }
+        if (preg_match('#^/boot(/|$)#', $root) === 1) {
+            return 'The folder for temporary run folders cannot be on the boot disk.';
+        }
+        if (strpos($root, '/mnt/') === 0) {
+            // A pool shows every top-level folder as a share. The root sits inside an existing share: /mnt/<pool>/<share>/<folder>.
+            if (preg_match('#^/mnt/[^/]+/[^/]+/[^/]+#', $root) !== 1) {
+                return 'The folder for temporary run folders must be inside a share of a pool, for example /mnt/cache/appdata/_tmp/aicliagents-runs. It cannot be a new top-level folder.';
+            }
+            return null;
+        }
+        $testBase = defined('AICLI_TEST_TMP') ? (string)@realpath((string)AICLI_TEST_TMP) : '';
+        if ($testBase !== '' && strpos($root, $testBase . '/') === 0) return null;
+        return 'The folder for temporary run folders must be on a pool, under /mnt.';
+    }
+
+    /** False for /mnt, /mnt/<pool> and /mnt/<pool>/<share>: the plugin never makes a folder at depth 3 or less under /mnt. */
+    public static function levelMayBeMade(string $level): bool
+    {
+        return preg_match('#^/mnt(/[^/]+){0,2}$#D', $level) !== 1;
+    }
+
+    /**
+     * R20: make the folder <root>/<runId>, mode 700, with the marker. Nothing follows a link: every new level is made
+     * with mkdir (which fails on an existing name), the folder is checked with lstat and realpath before and after the
+     * marker is written, and the marker goes through the no-follow writer.
+     *
+     * @return array{path:string}|array{error:string}
+     */
+    private static function makeTempFolder(string $runId, string $expected): array
+    {
+        $root = self::tempRoot();
+        if (isset($root['error'])) return ['error' => (string)$root['error']];
+        $path = $root['path'] . '/' . $runId;
+        if ($path !== $expected) return ['error' => 'The temporary folder changed after the call was checked. Call again.'];
+        // Make each missing level of the root. An existing level must be a real folder, never a link.
+        $level = '';
+        foreach (explode('/', ltrim($root['path'], '/')) as $part) {
+            $level .= '/' . $part;
+            $st = @lstat($level);
+            if ($st !== false) {
+                // A link at any level is refused: nothing here follows a link.
+                if (($st['mode'] & 0170000) !== 0040000) return ['error' => 'A level of the temporary folder root is a link or not a folder.'];
+                continue;
+            }
+            // /mnt/<pool>/<share> must exist already: a missing pool name would make a folder in RAM, and a missing share
+            // would make a new share (a top-level folder on a pool). Only levels below the share are made.
+            if (!self::levelMayBeMade($level)) {
+                return ['error' => "The folder '" . self::cut($level, 100) . "' does not exist. The pool and the share for temporary run folders must exist already; the plugin does not make them."];
+            }
+            $old = umask(0);
+            try {
+                $made = @mkdir($level, 0700);
+            } finally {
+                umask($old);
+            }
+            if (!$made && !is_dir($level)) return ['error' => 'The temporary folder root could not be made.'];
+        }
+        $rootReal = @realpath($root['path']);
+        $rootSt = @lstat($root['path']);
+        if ($rootReal === false || $rootSt === false || ($rootSt['mode'] & 0170000) !== 0040000 || preg_match('#^/mnt/user0?(/|$)#', $rootReal) === 1) {
+            return ['error' => 'The temporary folder root is not a real folder outside /mnt/user.'];
+        }
+        $old = umask(0);
+        try {
+            $made = @mkdir($path, 0700);
+        } finally {
+            umask($old);
+        }
+        if (!$made) return ['error' => 'The temporary folder could not be made (the name is taken or the disk refused it).'];
+        $st = @lstat($path);
+        $real = @realpath($path);
+        // The folder must belong to the user that runs the plugin (the real user, not the test seam of euid()).
+        $euid = \function_exists('posix_geteuid') ? (int)posix_geteuid() : -1;
+        if ($st === false || ($st['mode'] & 0170000) !== 0040000 || $real !== $rootReal . '/' . $runId || ($euid >= 0 && $st['uid'] !== $euid) || ($st['mode'] & 0777) !== 0700) {
+            self::removeTreeNoFollow($path);
+            return ['error' => 'The temporary folder did not pass the safety check, so it was removed.'];
+        }
+        $now = self::now();
+        $keep = self::intSetting('run_temp_keep_hours', 1, 720);
+        $marker = ['runId' => $runId, 'created' => $now, 'expires' => $now + self::intSetting('run_max_minutes', 1, 1440) * 60 + $keep * 3600];
+        $json = json_encode($marker, JSON_UNESCAPED_SLASHES);
+        if ($json === false || !SpawnService::writeNoFollow($path . '/' . self::TEMP_MARKER, $json . "\n", 0600)) {
+            self::removeTreeNoFollow($path);
+            return ['error' => 'The marker of the temporary folder could not be written, so the folder was removed.'];
+        }
+        $after = @lstat($path);
+        if ($after === false || ($after['mode'] & 0170000) !== 0040000 || @realpath($path) !== $real) {
+            return ['error' => 'The temporary folder changed while it was made. Call again.'];
+        }
+        return ['path' => $real];
+    }
+
+    /**
+     * The marker of a temporary folder, or null when it is missing or not valid. The marker is a plain file with one
+     * name, at most 4 KB, and it names the folder's own run id. It is opened and checked with fstat, so a link or a
+     * swapped file is refused.
+     *
+     * @return array{runId:string,created:int,expires:int}|null
+     */
+    private static function readTempMarker(string $dir, string $runId): ?array
+    {
+        $file = $dir . '/' . self::TEMP_MARKER;
+        $l = @lstat($file);
+        if ($l === false || ($l['mode'] & 0170000) !== 0100000 || $l['nlink'] > 1 || $l['size'] > 4096) return null;
+        $h = @fopen($file, 'rb');
+        if ($h === false) return null;
+        $f = fstat($h);
+        $raw = null;
+        if ($f !== false && ($f['mode'] & 0170000) === 0100000 && $f['dev'] === $l['dev'] && $f['ino'] === $l['ino']) {
+            $c = stream_get_contents($h, 4097);
+            $raw = is_string($c) && strlen($c) <= 4096 ? $c : null;
+        }
+        fclose($h);
+        $d = $raw !== null ? json_decode($raw, true) : null;
+        if (!is_array($d) || ($d['runId'] ?? null) !== $runId || !is_int($d['created'] ?? null) || !is_int($d['expires'] ?? null)) return null;
+        return ['runId' => $runId, 'created' => $d['created'], 'expires' => $d['expires']];
+    }
+
+    /** Remove the temporary folder of a run that never got a workspace. Only a folder with a valid marker goes. */
+    private static function discardTemp(string $runId, string $folder): void
+    {
+        try {
+            $root = self::tempRoot();
+            if (isset($root['error']) || $folder !== $root['path'] . '/' . $runId) return;
+            $st = @lstat($folder);
+            if ($st === false || ($st['mode'] & 0170000) !== 0040000) return;
+            if (self::readTempMarker($folder, $runId) === null) return;
+            self::removeTreeNoFollow($folder);
+        } catch (\Throwable $e) {
+            // The supervisor sweep removes it later.
+        }
+    }
+
+    /**
+     * R20: remove each temporary run folder that is old enough. A folder goes only when (1) it is a real folder inside
+     * the root (a link is skipped and never followed), (2) its marker is valid and names its own run, (3) the run is
+     * closed (its record has closedAt, or the record ended without a workspace, or the record is gone after a reboot and
+     * the marker's own expiry has passed), and (4) run_temp_keep_hours have passed since it closed. Best effort.
+     *
+     * @return list<string> The run ids whose folder was removed.
+     */
+    public static function sweepTempFolders(): array
+    {
+        $removed = [];
+        try {
+            $root = self::tempRoot();
+            if (isset($root['error']) || !is_dir($root['path']) || is_link($root['path'])) return [];
+            $rootReal = @realpath($root['path']);
+            if ($rootReal === false) return [];
+            $keep = self::intSetting('run_temp_keep_hours', 1, 720) * 3600;
+            $now = self::now();
+            foreach (scandir($root['path']) ?: [] as $name) {
+                if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $name) !== 1) continue;
+                $dir = $root['path'] . '/' . $name;
+                $st = @lstat($dir);
+                if ($st === false || ($st['mode'] & 0170000) !== 0040000 || @realpath($dir) !== $rootReal . '/' . $name) continue;
+                $marker = self::readTempMarker($dir, $name);
+                if ($marker === null) continue;
+                // A folder whose workspace exists is never removed, with or without a run record ('?' = records unreadable).
+                if (self::workspaceOfRun($name) !== '') continue;
+                $record = self::loadRun($name);
+                if ($record === null) {
+                    if ($now < $marker['expires']) continue;
+                } else {
+                    $state = (string)($record['state'] ?? '');
+                    $closedAt = (int)($record['closedAt'] ?? 0);
+                    if ($closedAt <= 0 && in_array($state, ['done', 'failed', 'blocked', 'timed_out', 'expired', 'rejected'], true)) {
+                        $closedAt = (int)($record['reportedAt'] ?? 0) ?: (int)($record['startedAt'] ?? 0) ?: (int)($record['ts'] ?? 0);
+                    }
+                    if ($closedAt <= 0 || $now < $closedAt + $keep) continue;
+                }
+                self::removeTreeNoFollow($dir);
+                if (!file_exists($dir)) $removed[] = $name;
+            }
+        } catch (\Throwable $e) {
+            // The next tick tries again.
+        }
+        return $removed;
     }
 
     /**
@@ -483,7 +775,7 @@ final class AgentRunService
         return [
             'id' => $id, 'label' => $label, 'description' => self::cut($description, 120), 'path' => $path, 'sha256' => $hash,
             'agents' => array_values(array_unique($agents)), 'folders' => array_values(array_unique($folders)),
-            'tempOnly' => $folders === [], 'maxMode' => $maxMode, 'users' => array_values(array_unique($users)),
+            'tempOnly' => $folders === [], 'allowTemp' => $folders === [] || !empty($e['allowTemp']), 'maxMode' => $maxMode, 'users' => array_values(array_unique($users)),
             'maxPerDay' => (int)$perDay, 'addedAt' => (int)($e['addedAt'] ?? 0), 'addedBy' => self::cut((string)($e['addedBy'] ?? ''), 80),
             'trustedAt' => max(0, (int)($e['trustedAt'] ?? 0)), 'trustedBy' => self::cut((string)($e['trustedBy'] ?? ''), 80),
         ];
@@ -671,7 +963,7 @@ final class AgentRunService
     {
         $agentText = count($names) > 2 ? count($names) . ' agents' : ($names === [] ? 'No agent' : implode(', ', $names));
         $folderCount = count($entry['folders'] ?? []);
-        $folderText = $folderCount === 0 ? 'no folder yet' : ($folderCount . ' ' . ($folderCount === 1 ? 'folder' : 'folders'));
+        $folderText = $folderCount === 0 ? 'temporary folder only' : ($folderCount . ' ' . ($folderCount === 1 ? 'folder' : 'folders') . (!empty($entry['allowTemp']) ? ' and a temporary folder' : ''));
         return implode(' · ', [
             ($entry['maxMode'] ?? '') === 'may-change' ? 'May change, asks you first' : 'Read-only',
             $agentText,
@@ -832,6 +1124,7 @@ final class AgentRunService
             'id' => $old['id'] ?? '', 'label' => (string)($in['label'] ?? ''), 'description' => (string)($in['description'] ?? ''), 'path' => $path, 'sha256' => $hash,
             'agents' => $csv($in['agents'] ?? ''), 'folders' => $folders, 'maxMode' => (string)($in['maxMode'] ?? 'read-only'),
             'users' => $csv($in['users'] ?? 'root'), 'maxPerDay' => $in['maxPerDay'] ?? 6,
+            'allowTemp' => !empty($old['allowTemp']),
             'addedAt' => $old['addedAt'] ?? 0, 'addedBy' => $old['addedBy'] ?? HumanIdentity::name(),
             'trustedAt' => $trustChanged ? self::now() : ($old['trustedAt'] ?? 0),
             'trustedBy' => $trustChanged ? HumanIdentity::name() : ($old['trustedBy'] ?? ''),
@@ -900,6 +1193,7 @@ final class AgentRunService
     public static function run(array $req, array $who): array
     {
         $runId = self::newRunId();
+        if (!empty($req['temp'])) $req['folder'] = rtrim((string)$req['tempRoot'], '/') . '/' . $runId;
         $path = (string)$who['path'];
         $actor = $path !== '' ? 'script ' . $path : 'interactive shell';
 
@@ -934,8 +1228,24 @@ final class AgentRunService
             // R24, R25: duplicates and caps.
             $hold = self::duplicateOrCap($req, $entry, '');
             if ($hold !== null) {
+                $extra = [];
+                if (isset($hold['openRunId'])) {
+                    // #839: the caller can reach the open run: its workspace (when it has one) and its state.
+                    // Only the script that started the open run learns its workspace and state.
+                    $extra = ['openRunId' => $hold['openRunId']];
+                    if ((string)($hold['openRun']['script'] ?? '') === (string)$who['path']) $extra['openRunState'] = (string)($hold['openRunState'] ?? '');
+                    else $hold['workspaceId'] = '';
+                    if (($req['onDuplicate'] ?? '') === 'send') {
+                        $why = self::followUpRefusal($hold, $req, $who);
+                        if ($why === null) {
+                            // Checked under the lock; the message is typed after the lock is released.
+                            return ['reply' => ['deliver' => true, 'record' => $hold['openRun']], 'exit' => self::EXIT_OK];
+                        }
+                        $hold['reason'] .= ' The new message was not sent to it: ' . $why;
+                    }
+                }
                 self::emit('run.refused', $actor, 'Run not started: ' . $hold['reason'], ['runId' => $runId, 'reason' => $hold['state']], $who);
-                return self::reply($hold['state'], $hold['reason'], $hold['exit'], $runId, '', isset($hold['openRunId']) ? ['openRunId' => $hold['openRunId']] : []);
+                return self::reply($hold['state'], $hold['reason'], $hold['exit'], $runId, (string)($hold['workspaceId'] ?? ''), $extra);
             }
             self::emit('run.requested', $actor, "Run requested: {$req['title']}", ['runId' => $runId, 'agent' => $req['agent'], 'mode' => $req['mode'], 'key' => $req['key'], 'label' => $entry['label'], 'sha256' => $who['sha256']], $who);
             // A read-only run starts at once, with no tray approval (John, 2026-10-25). It has passed the caller check, the
@@ -944,6 +1254,7 @@ final class AgentRunService
             if ($req['mode'] === 'read-only') return self::holdForStart($runId, $req, $who, $entry);
             return self::proposeRun($runId, $req, $who, $entry);
         });
+        if (!empty($out['reply']['deliver'])) return self::deliverFollowUp($runId, $req, $who, (array)$out['reply']['record']);
         if (empty($out['reply']['begin'])) {
             return !empty($req['waitRequested']) && ($out['reply']['state'] ?? '') === 'started' ? self::waitForRun($out, $req) : $out;
         }
@@ -962,6 +1273,7 @@ final class AgentRunService
             // A fault after the record became `starting` must not leave it holding a place.
             self::updateRun($runId, ['state' => 'failed']);
             self::removeRunFiles($runId);
+            if (!empty($req['temp'])) self::discardTemp($runId, (string)$req['folder']);
             return self::reply('failed', 'The run could not be started: ' . self::safeText($e->getMessage(), 300), self::EXIT_INTERNAL, $runId);
         }
     }
@@ -1353,7 +1665,16 @@ final class AgentRunService
             return "The script '$label' may not start the agent '{$req['agent']}'. Its list allows: " . ($entry['agents'] === [] ? 'no agent' : implode(', ', $entry['agents'])) . '.';
         }
         $folderOk = false;
+        if (!empty($req['temp'])) {
+            // R19: a temporary folder needs an entry that allows it: "temporary folder only" (no folder) or a folder list
+            // that also allows the temporary folder. An entry with named folders and no such choice refuses --temp.
+            if (empty($entry['allowTemp']) && $entry['folders'] !== []) {
+                return "The script '$label' may not use a temporary folder. Its list allows: " . implode(', ', $entry['folders']) . '.';
+            }
+            $folderOk = true;
+        }
         foreach ($entry['folders'] as $allowed) {
+            if ($folderOk) break;
             if ($req['folder'] === $allowed || strpos($req['folder'], rtrim($allowed, '/') . '/') === 0) {
                 $folderOk = true;
                 break;
@@ -1377,11 +1698,24 @@ final class AgentRunService
     }
 
     /**
+     * R24: the hold of a duplicate call. It names the other run: its id, its workspace (when it has one) and its state, so
+     * the caller can reach it (#839). `open` is true when that run still holds a place (not only inside the cooldown).
+     *
+     * @param array<string,mixed> $r The run record of the other run.
+     * @return array{state:string,reason:string,exit:int,openRunId:string,workspaceId:string,openRunState:string,open:bool,openRun:array<string,mixed>}
+     */
+    private static function duplicateHold(string $reason, array $r, bool $open): array
+    {
+        return ['state' => 'duplicate', 'reason' => $reason, 'exit' => self::EXIT_DUPLICATE, 'openRunId' => (string)$r['runId'],
+            'workspaceId' => (string)($r['workspaceId'] ?? ''), 'openRunState' => (string)($r['state'] ?? ''), 'open' => $open, 'openRun' => $r];
+    }
+
+    /**
      * R24 and R25. Null when the run may go on.
      *
      * @param array<string,mixed> $req
      * @param array<string,mixed> $entry
-     * @return array{state:string,reason:string,exit:int,openRunId?:string}|null
+     * @return array{state:string,reason:string,exit:int,openRunId?:string,workspaceId?:string,openRunState?:string,open?:bool,openRun?:array<string,mixed>}|null
      */
     private static function duplicateOrCap(array $req, array $entry, string $excludeRunId): ?array
     {
@@ -1392,10 +1726,10 @@ final class AgentRunService
             foreach ($records as $r) {
                 if (($r['key'] ?? '') !== $req['key']) continue;
                 if (self::isOpen($r)) {
-                    return ['state' => 'duplicate', 'reason' => 'A run with this key is open already (run ' . $r['runId'] . ').', 'exit' => self::EXIT_DUPLICATE, 'openRunId' => (string)$r['runId']];
+                    return self::duplicateHold('A run with this key is open already (run ' . $r['runId'] . ').', $r, true);
                 }
                 if (in_array($r['state'] ?? '', ['started', 'starting', 'pending_approval', 'done', 'failed', 'blocked', 'timed_out'], true) && $cool > 0 && ((int)($r['ts'] ?? 0) + $cool) > $now) {
-                    return ['state' => 'duplicate', 'reason' => 'A run with this key started less than ' . ($cool / 3600) . ' hours ago (run ' . $r['runId'] . ').', 'exit' => self::EXIT_DUPLICATE, 'openRunId' => (string)$r['runId']];
+                    return self::duplicateHold('A run with this key started less than ' . ($cool / 3600) . ' hours ago (run ' . $r['runId'] . ').', $r, false);
                 }
             }
         }
@@ -1415,6 +1749,99 @@ final class AgentRunService
         return null;
     }
 
+    // ---- A follow-up message to an open run (#839) ----
+
+    /**
+     * #839: the reason why a duplicate call may NOT type its prompt into the open run, or null when it may. The open run
+     * must have been started by this same script path, hold a live workspace of the same agent, and not be more
+     * trusting than the new call (a read-only run never receives a may-change message).
+     *
+     * @param array<string,mixed> $hold The duplicate hold (duplicateHold()).
+     * @param array<string,mixed> $req
+     * @param array<string,mixed> $who
+     */
+    private static function followUpRefusal(array $hold, array $req, array $who): ?string
+    {
+        $r = (array)($hold['openRun'] ?? []);
+        if (empty($hold['open'])) return 'that run is closed; the same key waits for the cooldown.';
+        if ((string)($r['script'] ?? '') !== (string)$who['path']) return 'that run was started by another script.';
+        if ((string)($r['state'] ?? '') !== 'started') return 'that run has no workspace yet (state ' . (string)($r['state'] ?? '') . ').';
+        $ws = (string)($r['workspaceId'] ?? '');
+        if ($ws === '' || !ProcessManager::isRunning($ws)) return 'its workspace is not running.';
+        if ((string)($r['agent'] ?? '') !== (string)$req['agent']) return 'that run uses another agent.';
+        // A run that a person approved to change things goes unattended. New instructions from a script were never
+        // approved, so such a run takes no follow-up message at all.
+        if ((string)($r['mode'] ?? 'may-change') !== 'read-only') return self::FOLLOWUP_MAY_CHANGE_MESSAGE;
+        if ((int)($r['followups'] ?? 0) >= self::MAX_FOLLOWUPS) return 'that run has had ' . self::MAX_FOLLOWUPS . ' follow-up messages already, which is the most for one run.';
+        if ((string)$req['mode'] !== 'read-only') return 'that run is read-only and this call asks for a mode that may change things.';
+        return null;
+    }
+
+    /**
+     * #839: type the new prompt into the workspace of the open run. The data of the call goes into a file in the data
+     * folder of that run, in the same fenced block as a first call (composeDataFile), and the message names the file
+     * after the fixed line (composeTask). The idle gate of AdminService::sendInput applies: a busy pane defers the
+     * message, and the reply stays `duplicate` with the reason. A delivered message leaves a tray record and a ledger
+     * row, and it does not count as a new run.
+     *
+     * @param array<string,mixed> $req
+     * @param array<string,mixed> $who
+     * @param array<string,mixed> $record The open run.
+     * @return array{reply:array<string,mixed>,exit:int}
+     */
+    private static function deliverFollowUp(string $callId, array $req, array $who, array $record): array
+    {
+        $openId = (string)($record['runId'] ?? '');
+        $ws = (string)($record['workspaceId'] ?? '');
+        $extra = ['openRunId' => $openId, 'openRunState' => (string)($record['state'] ?? '')];
+        $notSent = static function (string $why) use ($callId, $who, $openId, $ws, $extra): array {
+            $reason = 'A run with this key is open already (run ' . $openId . '). The new message was not sent to it: ' . $why;
+            self::emit('run.refused', 'script ' . (string)$who['path'], 'Follow-up not delivered: ' . $why, ['runId' => $callId, 'openRunId' => $openId, 'reason' => 'followup'], $who);
+            return self::reply('duplicate', $reason, self::EXIT_DUPLICATE, $callId, $ws, $extra);
+        };
+        if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $openId) !== 1) return $notSent('the open run has no valid id.');
+        $dataFile = '';
+        if ((string)$req['data'] !== '') {
+            $dir = self::runsDir() . '/' . $openId . '.d';
+            $file = $dir . '/data-' . $callId . '.txt';
+            if ((!is_dir($dir) && !@mkdir($dir, 0700, true)) || !SpawnService::writeNoFollow($file, self::composeDataFile((string)$req['data']), 0600)) {
+                return $notSent('the data of the call could not be stored.');
+            }
+            $dataFile = $file;
+        }
+        $text = "Follow-up from the script for this run:\n" . self::composeTask((string)$req['prompt'], $dataFile, (string)($record['mode'] ?? $req['mode']));
+        try {
+            $sent = self::seam('sender') !== null ? (self::seam('sender'))($ws, $text) : AdminService::sendInput($ws, $text, true, false);
+        } catch (\Throwable $e) {
+            $sent = ['error' => self::safeText($e->getMessage(), 200)];
+        }
+        if (!is_array($sent)) $sent = ['error' => 'the workspace gave no answer.'];
+        if (isset($sent['error']) || empty($sent['delivered'])) {
+            if ($dataFile !== '') @unlink($dataFile);
+            $why = isset($sent['error']) ? (string)$sent['error'] : 'its workspace is busy now' . (!empty($sent['reason']) ? ' (' . self::safeText((string)$sent['reason'], 150) . ')' : '') . '. Call again later.';
+            return $notSent($why);
+        }
+        // Count it on the run record (the run lock is taken for the update only; a busy lock skips the count).
+        self::withRunLock(static function () use ($openId): array {
+            $fresh = self::loadRun($openId);
+            if ($fresh !== null) self::updateRun($openId, ['followups' => (int)($fresh['followups'] ?? 0) + 1]);
+            return self::reply('closed', '', self::EXIT_OK);
+        });
+        self::emit('run.delivered', 'script ' . (string)$who['path'], 'Follow-up delivered to run ' . $openId,
+            ['runId' => $callId, 'openRunId' => $openId, 'workspaceId' => $ws, 'key' => (string)($record['key'] ?? ''), 'label' => (string)($record['label'] ?? ''), 'chars' => self::length($text)], $who);
+        try {
+            $opId = 'runmsg_' . $callId;
+            ActivityService::register($opId, 'admin', 'A script sent a message to a run', ['actor' => 'script ' . (string)$who['path'], 'meta' => [
+                'tool' => 'aicli_run', 'kind' => 'record', 'workspaceId' => $ws,
+                'by' => ['agentName' => 'Script run', 'workspaceName' => ''],
+            ]]);
+            ActivityService::finish($opId, 'Script ' . self::safeText((string)$who['path'], 300) . ' typed a new message into the workspace of run ' . $openId . ' (' . self::length($text) . ' characters).');
+        } catch (\Throwable $e) {
+            // Best effort.
+        }
+        return self::reply('delivered', 'The message was typed into workspace ' . $ws . ' of run ' . $openId . '.', self::EXIT_OK, $openId, $ws, ['openRunId' => $openId, 'openRunState' => (string)($record['state'] ?? '')]);
+    }
+
     // ---- Refusal of an unknown or changed script (R10) ----
 
     /**
@@ -1426,10 +1853,23 @@ final class AgentRunService
     private static function refuseUnknown(string $runId, array $req, array $who, ?array $entry): array
     {
         $path = (string)$who['path'];
+        if (self::isTemporaryScript($path)) {
+            self::emit('run.refused', 'script ' . $path, 'Run refused: the script file is temporary', ['runId' => $runId, 'reason' => 'temporary_script'], $who);
+            return self::reply('refused', self::TEMPORARY_SCRIPT_MESSAGE, self::EXIT_REFUSED, $runId);
+        }
         $changed = $entry !== null;
         $opId = 'runauth_' . substr(hash('sha256', $path . '|' . $who['sha256']), 0, 16);
         $why = $changed ? 'The script changed since a person authorised it.' : 'The script is not on the Authorised scripts list.';
         $summary = $changed ? "A script that changed wants to start agents: $path" : "A script wants to start agents: $path";
+        // #838: when this script has asked for access with its limits, that item is the one decision for this path and
+        // hash. A run call only counts up on it; it makes no second item.
+        $accessOpId = self::accessOpId($path, (string)$who['sha256']);
+        $accessItem = ActivityService::get($accessOpId);
+        if ($accessItem !== null && ($accessItem['status'] ?? '') === ActivityService::STATUS_PENDING_APPROVAL) {
+            ActivityService::update($accessOpId, ['meta' => ['count' => (int)(($accessItem['meta']['count'] ?? 1)) + 1, 'lastSeenAt' => self::now()]]);
+            self::emit('run.refused', 'script ' . $path, 'Run refused: ' . $why, ['runId' => $runId, 'reason' => $changed ? 'changed' : 'unknown', 'sha256' => $who['sha256'], 'opId' => $accessOpId], $who);
+            return self::reply('refused', $why . ' A request for access from this script waits in the Activity tray.', self::EXIT_REFUSED, $runId, '', ['opId' => $accessOpId]);
+        }
 
         $existing = ActivityService::get($opId);
         if ($existing !== null && ($existing['status'] ?? '') === ActivityService::STATUS_PENDING_APPROVAL) {
@@ -1438,7 +1878,7 @@ final class AgentRunService
             ActivityService::update($opId, ['meta' => ['count' => $count, 'lastSeenAt' => self::now()]]);
         } else {
             $request = [
-                'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'user' => $req['user'],
+                'agent' => $req['agent'], 'folder' => !empty($req['temp']) ? '' : $req['folder'], 'temp' => !empty($req['temp']), 'mode' => $req['mode'], 'user' => $req['user'],
                 'title' => $req['title'], 'key' => $req['key'], 'model' => $req['model'], 'effort' => $req['effort'],
                 'prompt' => self::safeText($req['prompt'], 2000),
             ];
@@ -1449,9 +1889,9 @@ final class AgentRunService
             ];
             $statement = $why . " Path: $path. New hash: " . $who['sha256'] . ($changed ? '. Old hash: ' . $entry['sha256'] : '')
                 . '. Caller user id: ' . $who['uid'] . '. Process chain: ' . $params['chain'] . '. Request: agent ' . $req['agent']
-                . ', folder ' . $req['folder'] . ', mode ' . $req['mode'] . ', title "' . $req['title'] . '". Approve stores the hash. '
+                . ', folder ' . (!empty($req['temp']) ? 'a temporary folder' : $req['folder']) . ', mode ' . $req['mode'] . ', title "' . $req['title'] . '". Approve stores the hash. '
                 . 'Each later read-only call of this script starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : 6) . ' runs a day. '
-                . ($changed ? 'The limits of the old entry stay.' : 'The new entry may start this agent in this folder, read-only, as root.');
+                . ($changed ? 'The limits of the old entry stay.' : (!empty($req['temp']) ? 'The new entry may start this agent in a temporary folder only, read-only, as root.' : 'The new entry may start this agent in this folder, read-only, as root.'));
             $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], ['label' => 'A script wants to start agents: ' . $path . '?']);
             if ($tray !== null) ActivityService::update($opId, ['actor' => 'script ' . $path, 'meta' => ['count' => 1]]);
         }
@@ -1480,6 +1920,172 @@ final class AgentRunService
         } catch (\Throwable $e) {
             // Best effort.
         }
+    }
+
+    // ======================================================================
+    // Request access (issue #838): a script asks to be put on the Authorised scripts list
+    // ======================================================================
+
+    /**
+     * Read and check the words of `aicli-run --request-access`. The checks follow the Settings form (saveFromForm and
+     * cleanEntry): a registered agent, an existing folder inside an allowed place, a mode, a number of runs. The number
+     * of runs is capped to the plugin limit for all runs in a day (run_daily_budget).
+     *
+     * @param array{flags:array<string,mixed>,multi:array<string,list<string>>} $scan
+     * @return array{request:array<string,mixed>}|array{error:string}
+     */
+    public static function parseAccessArgs(array $scan): array
+    {
+        $flags = $scan['flags'];
+        $multi = $scan['multi'];
+        foreach (array_keys($flags) as $name) {
+            if (!in_array($name, self::ACCESS_FLAGS, true)) return ['error' => "The option --$name does not go with --request-access. A request names the limits the script wants: --label, --description, --agent, --folder, --temp, --mode and --max-per-day."];
+        }
+        $registry = AgentRegistry::getRegistry();
+        $agents = [];
+        foreach ($multi['agent'] ?? [] as $value) {
+            foreach (explode(',', $value) as $a) {
+                $a = trim($a);
+                if ($a === '') continue;
+                if (preg_match('/^[a-z0-9][a-z0-9_-]{0,40}$/D', $a) !== 1 || $a === 'terminal') return ['error' => "The agent id '" . self::cut($a, 40) . "' is not valid."];
+                if (!isset($registry[$a])) return ['error' => "Unknown agent '$a'."];
+                $agents[] = $a;
+            }
+        }
+        $agents = array_values(array_unique($agents));
+        if ($agents === []) return ['error' => 'Give --agent=<id> at least once (a comma list works too).'];
+        if (count($agents) > self::MAX_ACCESS_LIST) return ['error' => 'A request names at most ' . self::MAX_ACCESS_LIST . ' agents.'];
+
+        $folders = [];
+        foreach ($multi['folder'] ?? [] as $value) {
+            $value = trim($value);
+            if ($value === '') continue;
+            $real = ValidationService::validatePath($value, SpawnService::allowedBases());
+            if ($real === false || !is_dir($real)) return ['error' => "The folder '" . self::cut($value, 100) . "' is not an existing folder inside an allowed location."];
+            $folders[] = $real;
+        }
+        $folders = array_values(array_unique($folders));
+        if (count($folders) > self::MAX_ACCESS_LIST) return ['error' => 'A request names at most ' . self::MAX_ACCESS_LIST . ' folders.'];
+        $temp = !empty($flags['temp']);
+        if ($folders === [] && !$temp) return ['error' => 'Give --folder=<path> (once or more), --temp, or both.'];
+
+        $mode = (string)($flags['mode'] ?? 'read-only');
+        if (!in_array($mode, self::MODES, true)) return ['error' => 'The mode is read-only or may-change.'];
+
+        $perDay = (string)($flags['max-per-day'] ?? '6');
+        if (preg_match('/^\d{1,4}$/D', $perDay) !== 1 || (int)$perDay < 1 || (int)$perDay > 1000) return ['error' => '--max-per-day is a number from 1 to 1000.'];
+        $cap = self::intSetting('run_daily_budget', 1, 500);
+        $capped = (int)$perDay > $cap;
+        $perDayValue = min((int)$perDay, $cap);
+
+        $label = trim((string)preg_replace('/[\x00-\x1F\x7F]/', ' ', (string)($flags['label'] ?? '')));
+        $description = trim((string)preg_replace('/[\x00-\x1F\x7F]/', ' ', (string)($flags['description'] ?? '')));
+        return ['request' => [
+            'label' => self::safeText($label, 60), 'description' => self::safeText($description, 120), 'agents' => $agents, 'folders' => $folders,
+            'temp' => $temp, 'maxMode' => $mode, 'maxPerDay' => $perDayValue, 'maxPerDayCapped' => $capped, 'maxPerDayAsked' => (int)$perDay,
+        ]];
+    }
+
+    /** True for a script file under /tmp (gone after a reboot) or a User Scripts copy: the Settings form refuses both. */
+    private static function isTemporaryScript(string $path): bool
+    {
+        return self::temporaryPathMessage($path) !== null || RunCallerIdentity::isUserScriptsCopy($path);
+    }
+
+    /** The id of the tray item for the request of one script file (path and fingerprint). */
+    private static function accessOpId(string $path, string $sha256): string
+    {
+        return 'runaccess_' . substr(hash('sha256', $path . '|' . $sha256), 0, 16);
+    }
+
+    /** The limits of a request as short plain text. @param array<string,mixed> $limits */
+    private static function limitsText(array $limits): string
+    {
+        $places = array_merge($limits['folders'] ?? [], !empty($limits['temp']) || !empty($limits['allowTemp']) ? ['a temporary folder'] : []);
+        return 'agents ' . implode(', ', (array)($limits['agents'] ?? [])) . '; folders ' . ($places === [] ? 'none' : implode(', ', $places))
+            . '; highest mode ' . (string)($limits['maxMode'] ?? 'read-only') . '; ' . (int)($limits['maxPerDay'] ?? 6) . ' runs in 24 hours';
+    }
+
+    /**
+     * #838: the script that called asks to be put on the Authorised scripts list, with the limits it wants. The caller
+     * is found the same way as for a run, so a script can only ask for itself. Nothing is stored here: one pending tray
+     * item (and one Unraid warning) waits for a person, who accepts in the Activity tray. There is no CLI and no agent
+     * tool that accepts (R9). The tray Approve is the existing `aicli_run_authorise_script` step.
+     *
+     * @param array<string,mixed> $req The request that parseAccessArgs() returned.
+     * @param array<string,mixed> $who The answer of RunCallerIdentity::identify().
+     * @return array{reply:array<string,mixed>,exit:int}
+     */
+    public static function requestAccess(array $req, array $who): array
+    {
+        $path = (string)$who['path'];
+        $actor = $path !== '' ? 'script ' . $path : 'interactive shell';
+        if (!empty($who['insideWorkspace'])) {
+            self::emit('run.refused', $actor, 'Access request refused: the call comes from inside an agent workspace', ['reason' => 'inside_workspace'], $who);
+            return self::reply('refused', 'An agent workspace cannot ask for access. Agents use the sub-agent tool (aicli_spawn_workspace) instead.', self::EXIT_REFUSED);
+        }
+        if ($who['kind'] !== 'script') {
+            self::emit('run.refused', $actor, 'Access request refused: no script file found behind the call', ['reason' => 'interactive'], $who);
+            return self::reply('refused', 'No script file was found behind this call (an interactive shell, a pipe or a command line). A request for access must come from a script file. Add the file to Settings, Script runs, Authorised scripts yourself.', self::EXIT_REFUSED);
+        }
+        // The same refusal as the Settings form: a script file under /tmp is gone after a reboot. (A User Scripts copy is
+        // already mapped to its original by RunCallerIdentity, so the original is what is checked here.)
+        if (self::isTemporaryScript($path)) {
+            self::emit('run.refused', $actor, 'Access request refused: the script file is temporary', ['reason' => 'temporary_script'], $who);
+            return self::reply('refused', self::TEMPORARY_SCRIPT_MESSAGE, self::EXIT_REFUSED);
+        }
+        $sha = (string)$who['sha256'];
+        $entry = self::findEntry($path);
+        $asked = ['agents' => $req['agents'], 'folders' => $req['folders'], 'temp' => $req['temp'], 'maxMode' => $req['maxMode'], 'maxPerDay' => $req['maxPerDay']];
+        if ($entry !== null && $entry['sha256'] === $sha) {
+            return self::reply('authorised', 'The script is on the Authorised scripts list with this fingerprint. Its limits: '
+                . self::limitsText(['agents' => $entry['agents'], 'folders' => $entry['folders'], 'allowTemp' => $entry['allowTemp'], 'maxMode' => $entry['maxMode'], 'maxPerDay' => $entry['maxPerDay']]) . '.',
+                self::EXIT_OK, '', '', ['limits' => ['agents' => $entry['agents'], 'folders' => $entry['folders'], 'temp' => $entry['allowTemp'], 'maxMode' => $entry['maxMode'], 'maxPerDay' => $entry['maxPerDay']]]);
+        }
+
+        $opId = self::accessOpId($path, $sha);
+        $existing = ActivityService::get($opId);
+        $status = (string)($existing['status'] ?? '');
+        if ($existing !== null && $status === 'done' && (string)($existing['step'] ?? '') === 'Rejected') {
+            self::emit('run.refused', $actor, 'Access request not accepted: a person declined it', ['reason' => 'access_rejected', 'opId' => $opId], $who);
+            return self::reply('rejected', 'A person declined this request in the Activity tray. If the script file changes, it may ask again.', self::EXIT_REFUSED, '', '', ['opId' => $opId]);
+        }
+        $changed = $entry !== null;
+        $label = $req['label'] !== '' ? $req['label'] : ($changed ? (string)$entry['label'] : basename($path));
+        if ($existing !== null && $status === ActivityService::STATUS_PENDING_APPROVAL) {
+            // One pending item for each path and hash. A repeat call only counts up.
+            $count = (int)(($existing['meta']['count'] ?? 1)) + 1;
+            ActivityService::update($opId, ['meta' => ['count' => $count, 'lastSeenAt' => self::now()]]);
+        } elseif ($existing !== null && $status === 'approved') {
+            // A person accepted it a moment ago and the plugin is carrying it out. Do not write a new item over it.
+        } else {
+            // One decision for this path and hash: a pending "wants to start agents" item (made by a run call) is replaced
+            // by this request, which carries the limits. It can no longer be approved. The change is one step that fails
+            // when the item is not pending any more (a person may have clicked Approve meanwhile).
+            ActivityService::transitionIf('runauth_' . substr(hash('sha256', $path . '|' . $sha), 0, 16), [ActivityService::STATUS_PENDING_APPROVAL],
+                ['status' => 'done', 'step' => 'Replaced by a request for access', 'meta' => ['kind' => 'record']]);
+            $access = ['label' => $label, 'description' => $req['description']] + $asked;
+            $request = ['agent' => (string)$req['agents'][0], 'folder' => (string)($req['folders'][0] ?? ''), 'temp' => $req['temp'], 'mode' => $req['maxMode'],
+                'user' => 'root', 'title' => 'Request for access', 'key' => '', 'model' => '', 'effort' => '', 'prompt' => ''];
+            $params = [
+                'path' => $path, 'sha256' => $sha, 'oldSha256' => $changed ? $entry['sha256'] : '', 'label' => $label, 'userScript' => $who['userScript'],
+                'uid' => $who['uid'], 'chain' => RunCallerIdentity::chainText($who['chain']), 'request' => $request, 'access' => $access,
+            ];
+            $statement = ($changed ? 'A script that changed asks to be authorised again: ' : 'A script asks to be put on the Authorised scripts list: ') . $path
+                . '. It asks for: ' . self::limitsText($asked) . ($req['maxPerDayCapped'] ? ' (it asked for ' . (int)$req['maxPerDayAsked'] . ' runs; the plugin limit for a day is ' . (int)$req['maxPerDay'] . ')' : '')
+                . ($req['description'] !== '' ? '. Its description: "' . self::safeText($req['description'], 120) . '"' : '')
+                . '. New hash: ' . $sha . ($changed ? '. Old hash: ' . $entry['sha256'] : '') . '. Caller user id: ' . $who['uid'] . '. Process chain: ' . $params['chain']
+                . '. Accept stores the hash and ' . ($changed ? 'keeps the limits of the old entry (' . self::limitsText(['agents' => $entry['agents'], 'folders' => $entry['folders'], 'allowTemp' => $entry['allowTemp'], 'maxMode' => $entry['maxMode'], 'maxPerDay' => $entry['maxPerDay']]) . '; you can change them in Settings, Script runs)' : 'adds the script with these limits')
+                . '. Each later read-only call of this script then starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : (int)$req['maxPerDay']) . ' runs a day. Decline turns the request away.';
+            $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], ['label' => 'A script asks for access: ' . $path . '?']);
+            if ($tray !== null) {
+                ActivityService::update($opId, ['actor' => 'script ' . $path, 'meta' => ['count' => 1]]);
+                self::notifyOnce($path . '|' . $sha, 'access', 'AICliAgents: a script asks for access',
+                    "The script $path asks to be put on the Authorised scripts list. Accept or Decline in the Activity tray.", 'warning');
+            }
+        }
+        self::emit('run.access_requested', 'script ' . $path, 'Access requested: ' . self::limitsText($asked), ['opId' => $opId, 'label' => $label, 'sha256' => $sha, 'oldSha256' => $changed ? $entry['sha256'] : ''], $who);
+        return self::reply('pending_approval', 'A person must accept this request in the Activity tray. The script may call again later.', self::EXIT_PENDING, '', '', ['opId' => $opId, 'requested' => $asked]);
     }
 
     // ---- A may-change run waits for a person (R13) ----
@@ -1632,6 +2238,7 @@ final class AgentRunService
                 if ($r !== null && in_array($r['state'] ?? '', ['starting', 'pending_approval'], true)) {
                     self::updateRun((string)$runId, ['state' => 'failed']);
                     self::removeRunFiles((string)$runId);
+                    if (isset($req) && is_array($req) && !empty($req['temp'])) self::discardTemp((string)$runId, (string)($req['folder'] ?? ''));
                 }
             }
             return ['error' => 'The approved run could not be started: ' . self::safeText($e->getMessage(), 300)];
@@ -1685,6 +2292,20 @@ final class AgentRunService
     private static function startRun(string $runId, array $req, array $who, array $entry, bool $approved): array
     {
         $readOnly = $req['mode'] === 'read-only';
+        $madeTemp = false;
+        if (!empty($req['temp'])) {
+            // R19, R20: the temporary folder is made now, when the run really starts. A request that waits, is rejected or
+            // runs out of time never makes one.
+            $made = self::makeTempFolder($runId, (string)$req['folder']);
+            if (isset($made['error'])) {
+                self::updateRun($runId, ['state' => 'failed']);
+                self::removeRunFiles($runId);
+                self::emit('run.refused', 'script ' . $who['path'], 'Run not started: ' . (string)$made['error'], ['runId' => $runId, 'reason' => 'temp_folder'], $who);
+                return self::reply('held', (string)$made['error'], self::EXIT_HELD, $runId);
+            }
+            $req['folder'] = $made['path'];
+            $madeTemp = true;
+        }
         $task = self::composeTask((string)$req['prompt'], (string)($req['dataFile'] ?? ''), (string)$req['mode']);
         $spawn = ['agentId' => $req['agent'], 'path' => $req['folder'], 'task' => $task, 'taskTitle' => $req['title'], 'model' => $req['model'], 'effort' => $req['effort'], 'name' => self::cut($req['title'], 60)];
         // Decision 13: only an approved may-change run goes unattended, and only when the agent has such flags.
@@ -1703,10 +2324,28 @@ final class AgentRunService
             if ($json === false || !SpawnService::writeNoFollow($mcpFile, $json, 0600)) {
                 self::updateRun($runId, ['state' => 'failed']);
                 self::removeRunFiles($runId);
+                if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
                 return self::reply('held', 'The MCP file of the read-only run could not be written.', self::EXIT_HELD, $runId);
             }
             $run['mcpConfig'] = $mcpFile;
-            if ((string)($req['dataFile'] ?? '') !== '') $run['dataDir'] = dirname((string)$req['dataFile']);
+            // The data folder of the run (mode 700) is always made and passed, also when the first call had no data: a
+            // later follow-up message (#839) writes its data file there, and the read-only agent may read only this folder.
+            $dataDir = self::runsDir() . '/' . $runId . '.d';
+            if (!is_dir($dataDir)) {
+                $oldMask = umask(0);
+                try {
+                    @mkdir($dataDir, 0700, true);
+                } finally {
+                    umask($oldMask);
+                }
+            }
+            if (!is_dir($dataDir) || is_link($dataDir)) {
+                self::updateRun($runId, ['state' => 'failed']);
+                self::removeRunFiles($runId);
+                if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
+                return self::reply('held', 'The data folder of the read-only run could not be made.', self::EXIT_HELD, $runId);
+            }
+            $run['dataDir'] = $dataDir;
         }
         // The agent must not inherit the environment of the script that called (finding 7).
         self::cleanEnvironment();
@@ -1714,6 +2353,7 @@ final class AgentRunService
         if (isset($started['error'])) {
             self::updateRun($runId, ['state' => 'failed']);
             self::removeRunFiles($runId);
+            if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
             self::emit('run.refused', 'script ' . $who['path'], 'Run not started: ' . (string)$started['error'], ['runId' => $runId, 'reason' => 'start'], $who);
             return self::reply('held', (string)$started['error'], self::EXIT_HELD, $runId);
         }
@@ -1754,6 +2394,11 @@ final class AgentRunService
             $hash = (string)($params['sha256'] ?? '');
             $old = self::findEntry($path);
             $req = is_array($params['request'] ?? null) ? $params['request'] : [];
+            // A request for a changed script was made against an old entry. When a person removed that entry meanwhile,
+            // Accept must not turn it into a new entry with wider limits.
+            if ((string)($params['oldSha256'] ?? '') !== '' && $old === null) {
+                return ['error' => 'The old entry is gone. The script must ask again.'];
+            }
             $trustedAt = $old['trustedAt'] ?? 0;
             $trustedBy = $old['trustedBy'] ?? '';
             if ($old === null || $hash !== $old['sha256']) {
@@ -1784,6 +2429,19 @@ final class AgentRunService
                     'addedBy' => HumanIdentity::name(),
                     'trustedAt' => $trustedAt, 'trustedBy' => $trustedBy,
                 ];
+                // #838: a script that asked for access with `--request-access` gets the limits it asked for, not the
+                // defaults. The request was checked when it came; it is cleaned again here, and the number of runs in
+                // a day is capped to the plugin limit again (the limit may have changed while the item waited).
+                $access = is_array($params['access'] ?? null) ? $params['access'] : null;
+                if ($access !== null) {
+                    $entry['label'] = (string)($access['label'] ?? '') !== '' ? (string)$access['label'] : $entry['label'];
+                    $entry['description'] = (string)($access['description'] ?? '');
+                    $entry['agents'] = array_values(array_map('strval', (array)($access['agents'] ?? [])));
+                    $entry['folders'] = array_values(array_map('strval', (array)($access['folders'] ?? [])));
+                    $entry['allowTemp'] = !empty($access['temp']);
+                    $entry['maxMode'] = (string)($access['maxMode'] ?? 'read-only');
+                    $entry['maxPerDay'] = min((int)($access['maxPerDay'] ?? 6), self::intSetting('run_daily_budget', 1, 500));
+                }
             }
             $res = self::upsertEntry($entry);
             if (isset($res['error'])) return $res;
@@ -1939,7 +2597,7 @@ final class AgentRunService
     }
 
     /** Remove one run folder without following a link at any depth. */
-    private static function removeTreeNoFollow(string $path): void
+    private static function removeTreeNoFollow(string $path, ?int $dev = null): void
     {
         $st = @lstat($path);
         if ($st === false) return;
@@ -1948,11 +2606,22 @@ final class AgentRunService
             @unlink($path);
             return;
         }
+        // The device of the top folder rules the whole tree: an entry on another device is a bind mount or another file
+        // system. It is neither entered nor removed (#840).
+        $here = self::deviceOf($path, (int)$st['dev']);
+        if ($dev === null) $dev = $here;
+        if ($here !== $dev) return;
         foreach (scandir($path) ?: [] as $name) {
             if ($name === '.' || $name === '..') continue;
-            self::removeTreeNoFollow($path . '/' . $name);
+            self::removeTreeNoFollow($path . '/' . $name, $dev);
         }
         @rmdir($path);
+    }
+
+    /** The device number of a path. The test seam $deviceOf replaces it under PHPUnit (a real mount point needs root). */
+    private static function deviceOf(string $path, int $real): int
+    {
+        return self::seam('deviceOf') !== null ? (int)(self::seam('deviceOf'))($path, $real) : $real;
     }
 
     /**

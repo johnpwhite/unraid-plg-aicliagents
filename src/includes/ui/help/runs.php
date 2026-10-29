@@ -45,7 +45,7 @@ HTML,
 <p>Tick the agents this script may start. A call for another agent is refused.</p>
 HTML,
     'run-script-folders' => <<<'HTML'
-<p>One folder on each line. The script may start an agent in these folders and in the folders inside them. No folder means a temporary folder only, which comes in a later version. Use Browse to pick a folder.</p>
+<p>One folder on each line. The script may start an agent in these folders and in the folders inside them. No folder means a temporary folder only: the script may ask for a new empty folder for each run (aicli-run --temp). Use Browse to pick a folder.</p>
 HTML,
     'run-script-mode' => <<<'HTML'
 <p>A read-only run starts at once, with no approval. A run that may change files waits in the Activity tray until you approve it. For a read-only run, the agent may use only the tools Read, Grep and Glob and the read tools of the plugin. It has no shell and no file editing, and the plugin tools that change things are denied. The file tools stay in the run folder, and the agent ignores the settings files of that folder. It can still report its result.</p>
@@ -71,5 +71,11 @@ HTML,
 HTML,
     'run-notify' => <<<'HTML'
 <p>With On, Unraid shows a notice when a run starts and when it reports done. Warnings, for example a refused script, a failed run or a run that waits for approval, always show.</p>
+HTML,
+    'run-temp-root' => <<<'HTML'
+<p>A script can ask for a temporary folder with <code>aicli-run --temp</code>. The plugin makes one folder for each run inside this folder. Leave it empty to use the appdata folder of Unraid on its pool, plus <code>_tmp/aicliagents-runs</code>. The folder cannot be under <code>/mnt/user</code>, and it cannot be a new top-level folder on a pool.</p>
+HTML,
+    'run-temp-keep' => <<<'HTML'
+<p>A temporary run folder stays this many hours after its run closed, so you can look at what the agent made. Then the plugin removes it. It removes only a folder that it made and marked itself.</p>
 HTML,
 ];

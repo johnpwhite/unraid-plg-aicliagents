@@ -28,6 +28,8 @@ try {
     SpawnService::sweepPersonClosed();
     // An existing script run must close at its time limit, even when new helper work is turned off.
     AgentRunService::sweepTimeouts();
+    // R20: a temporary run folder goes run_temp_keep_hours after its run closed (a valid marker, never through a link).
+    AgentRunService::sweepTempFolders();
     // Script runs also close after a report when helper work is off; this sweep selects only run workspaces.
     SpawnService::sweepAutoClose(true);
     // The switch is read like every other one: only the string "1" means on. When it is off, a helper that

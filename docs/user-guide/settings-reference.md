@@ -247,11 +247,11 @@ Let your own scripts on this server start an agent for you, while you stay in co
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
 | **Let scripts start agent runs** | With On, a script on the list can start an agent. With Off, the command refuses every call and creates nothing. | Off (default) | On; Off (default) | Turn it on when you add your first script. | Saves, nothing else. | No |
-| **Authorised scripts** | Each entry shows its name and description. Select an entry to see its file, fingerprint, agents, folders, mode and runs each day, and to edit or remove it. A changed file is refused until you trust it again. A script path under `/tmp` is refused because it is temporary. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray. The agent runs as root. | Empty | **Add a script**; in the dialog: **Edit**, **Save**, **Cancel**, **Remove**, **Trust the file as it is now**, **Switch to the original and trust it as it is now** | Add a script for each job. | Saves when you press **Save**. | No |
+| **Authorised scripts** | Each entry shows its name and description. Select an entry to see its file, fingerprint, agents, folders, mode and runs each day, and to edit or remove it. A changed file is refused until you trust it again. A script path under `/tmp` is refused because it is temporary. A script can also ask for its own entry with `aicli-run --request-access`; the request waits in the Activity tray until you approve it. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray. The agent runs as root. | Empty | **Add a script**; in the dialog: **Edit**, **Save**, **Cancel**, **Remove**, **Trust the file as it is now**, **Switch to the original and trust it as it is now** | Add a script for each job. | Saves when you press **Save**. | No |
 
 #### Advanced
 
-The **Advanced** part of the card is closed at first. Its **(i)** button says what is inside. It holds the limits on runs, the time to approve a run, the run time limit and the notice setting.
+The **Advanced** part of the card is closed at first. Its **(i)** button says what is inside. It holds the limits on runs, the time to approve a run, the run time limit, the notice setting and the two settings for temporary folders.
 
 | Setting | What it does | Default | Allowed values | When to change it | At once | Agent |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
@@ -261,6 +261,8 @@ The **Advanced** part of the card is closed at first. Its **(i)** button says wh
 | **Time to approve a run** | A run that may change files waits for your approval. With no answer in this time, it ends and starts nothing. | 24 hours | 1 to 168 | Raise it when you look at the Activity tray rarely. | Saves, nothing else. | No |
 | **Time limit for a run** | The plugin closes a run that has not reported when this time passes. It keeps the result and the Notebook card. | 60 minutes | 1 to 1440 | Raise it for a long check. | Saves, nothing else. | No |
 | **Notify me when a run starts and ends** | Raises an Unraid notice when a run starts or reports done. Warnings, for example a refused script, always show. | Yes (default) | Yes (default); No | Turn it off for a script that runs often. | Saves, nothing else. | No |
+| **Folder for temporary run folders** | The folder that holds the temporary folders of runs that a script starts with `--temp`. Empty means the appdata folder of Unraid on its pool, plus `_tmp/aicliagents-runs`. | Empty (default) | A full path inside a share of a pool. A path under `/mnt/user`, or a new top-level folder on a pool, is not stored | Change it only when you want these folders on another pool. | Saves. The next run that asks for a temporary folder uses it. | No |
+| **Keep a temporary folder after the run for** | The plugin removes a temporary run folder this many hours after its run closed. It removes only a folder that it made. | 24 hours | 1 to 720 | Lower it to free space sooner. | Saves. The next clean-up uses it. | No |
 
 ### Sub-agent workspaces card
 
@@ -568,6 +570,8 @@ Open the "..." menu of a workspace row to reach these. On a phone, the menu rows
 <details>
 <summary>Change history</summary>
 
+- **2026-10-29** — **Authorised scripts** can get a new entry from a script that asks with `aicli-run --request-access`, after you approve the request in the Activity tray. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #838.
+- **2026-10-29** — The card **Script runs**, part **Advanced**, has **Folder for temporary run folders** and **Keep a temporary folder after the run for**. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #840.
 - **2026-10-27** — New card **Sub-agent workspaces**, after **Script runs**. It holds **Let agents start sub-agent workspaces**, **Sub-agents allowed at once** and **Let sub-agents run without asking**, which were in **General**, part **Advanced**. The word "helper" is now "sub-agent" on the page, in the tray and in the notices. The tab has eleven cards. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #792.
 - **2026-10-27** — The Agent Store card header shows the versions in full and opens the dialog **Update <agent>**. **Uninstall** moved to the card foot. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issue #793.
 - **2026-10-27** — The row **Config drift detected** names the buttons **Compare**, **Adopt**, **Overwrite** and **Release**, the plain state words, and the grey buttons. Spec `docs/specs/HUB_DRIFT_VIEW.md`, issue #797.
