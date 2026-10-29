@@ -138,6 +138,10 @@
         }
         if (f.badge) v += '<span class="c-badge ' + (f.tone === 'warn' ? 'warn' : 'ok') + '">' + esc(f.badge) + '</span>';
         if (f.value) v += esc(f.value);
+        // Several values (for example folders) each get their own line.
+        if (Array.isArray(f.lines)) {
+            v += f.lines.map(function (l) { return '<div class="c-line">' + esc(l) + '</div>'; }).join('');
+        }
         return '<dt>' + esc(f.label) + '</dt><dd>' + v + '</dd>';
     }
     function cardTechHtml(t) {
@@ -382,7 +386,16 @@
         + '  max-height: 6em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }'
         + '.card .c-effect { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-color, #3a3a3a); font-size: 12px; font-weight: 400; }'
         + '.card .c-tech { margin-top: 8px; }'
-        + '.card .c-tech summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-size: 11px; opacity: 0.85; }'
+        // display:flex removes the native marker, so the summary draws its own arrow; it turns when the details open.
+        + '.card .c-tech summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; gap: 6px; font-size: 11px; opacity: 0.85; list-style: none; }'
+        + '.card .c-tech summary::-webkit-details-marker { display: none; }'
+        + '.card .c-tech summary::before { content: ""; width: 0; height: 0; border-left: 5px solid currentColor; border-top: 4px solid transparent;'
+        + '  border-bottom: 4px solid transparent; transition: transform 0.15s ease-out; }'
+        + '.card .c-tech[open] summary::before { transform: rotate(90deg); }'
+        + '.card .c-tech summary:hover { opacity: 1; text-decoration: underline; }'
+        + '.card .c-line + .c-line { margin-top: 2px; }'
+        // A long approval card scrolls inside the panel; its Approve and Reject stay in view at the bottom.
+        + '.row.has-card .btns { position: sticky; bottom: 0; background: var(--background-color, #262626); padding: 6px 0 2px; margin-top: 4px; }'
         + '.card .c-techlist { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 8px; margin: 4px 0 0; }'
         + '.card .c-techlist dt { font-size: 11px; opacity: 0.75; margin: 0; }'
         + '.card .c-techlist dd { margin: 0; font-size: 11px; overflow-wrap: anywhere; }'
@@ -1226,7 +1239,7 @@
             // title is a short question, else the label itself — an older proposal) is shown in
             // full below the title, never just in the hover tooltip, since a human must read
             // this before clicking Approve.
-            return '<div class="row">'
+            return '<div class="row' + (card ? ' has-card' : '') + '">'
                 + '<div class="top"><span class="label" title="' + esc(a.label) + '">' + esc(a.label || a.opId) + '</span>'
                 + pillHtml + '</div>'
                 + (card ? cardHtml(card, a.opId, !!this._cardOpen[a.opId]) : '')

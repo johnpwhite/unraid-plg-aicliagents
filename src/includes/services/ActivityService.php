@@ -217,6 +217,12 @@ class ActivityService {
                 if ($c !== '') $chips[] = $c;
             }
             if ($chips !== []) $fact['chips'] = $chips;
+            $factLines = [];
+            foreach (array_slice(is_array($f['lines'] ?? null) ? array_values($f['lines']) : [], 0, 12) as $l) {
+                $l = self::cardText($l);
+                if ($l !== '') $factLines[] = $l;
+            }
+            if ($factLines !== []) $fact['lines'] = $factLines;
             foreach (['value', 'badge'] as $k) {
                 $v = self::cardText($f[$k] ?? '');
                 if ($v !== '') $fact[$k] = $v;

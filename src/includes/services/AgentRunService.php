@@ -187,6 +187,11 @@ final class AgentRunService
     {
         return \function_exists('mb_substr') ? mb_substr($text, 0, $max) : substr($text, 0, $max);
     }
+    /** Cuts to $max characters and ends a cut text with "…", so a reader sees that text is missing. */
+    private static function markCut(string $text, int $max): string
+    {
+        return self::length($text) > $max ? rtrim(self::cut($text, $max - 1)) . '…' : $text;
+    }
 
     /** Text with secrets replaced, cut to $max. Fails closed: '' when the redaction cannot run. */
     private static function safeText(string $text, int $max): string
@@ -1998,7 +2003,7 @@ final class AgentRunService
         $label = trim((string)preg_replace('/[\x00-\x1F\x7F]/', ' ', (string)($flags['label'] ?? '')));
         $description = trim((string)preg_replace('/[\x00-\x1F\x7F]/', ' ', (string)($flags['description'] ?? '')));
         return ['request' => [
-            'label' => self::safeText($label, 60), 'description' => self::safeText($description, 120), 'agents' => $agents, 'folders' => $folders,
+            'label' => self::safeText($label, 60), 'description' => self::markCut(self::safeText($description, 501), 500), 'agents' => $agents, 'folders' => $folders,
             'temp' => $temp, 'maxMode' => $mode, 'maxPerDay' => $perDayValue, 'maxPerDayCapped' => $capped, 'maxPerDayAsked' => (int)$perDay,
         ]];
     }
@@ -2146,7 +2151,7 @@ final class AgentRunService
             ];
             $statement = ($changed ? 'A script that changed asks to be authorised again: ' : 'A script asks to be put on the Authorised scripts list: ') . $path
                 . '. It asks for: ' . self::limitsText($asked) . ($req['maxPerDayCapped'] ? ' (it asked for ' . (int)$req['maxPerDayAsked'] . ' runs; the plugin limit for a day is ' . (int)$req['maxPerDay'] . ')' : '')
-                . ($req['description'] !== '' ? '. Its description: "' . self::safeText($req['description'], 120) . '"' : '')
+                . ($req['description'] !== '' ? '. Its description: "' . (string)$req['description'] . '"' : '')
                 . '. New hash: ' . $sha . ($changed ? '. Old hash: ' . $entry['sha256'] : '') . '. Caller user id: ' . $who['uid'] . '. Process chain: ' . $params['chain']
                 . '. Accept stores the hash and ' . ($changed ? 'keeps the limits of the old entry (' . self::limitsText(['agents' => $entry['agents'], 'folders' => $entry['folders'], 'allowTemp' => $entry['allowTemp'], 'maxMode' => $entry['maxMode'], 'maxPerDay' => $entry['maxPerDay']]) . '; you can change them in Settings, Script runs)' : 'adds the script with these limits')
                 . '. Each later read-only call of this script then starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : (int)$req['maxPerDay']) . ' runs a day. Decline turns the request away.';
@@ -2156,15 +2161,16 @@ final class AgentRunService
                 'subject' => ['name' => $label !== '' ? $label : basename($path), 'detail' => $path],
                 'facts' => [
                     ['label' => 'Agents', 'chips' => array_map([self::class, 'agentName'], array_map('strval', (array)$req['agents']))],
-                    ['label' => 'Folders', 'value' => $places === [] ? 'None' : implode(', ', $places)],
+                    $places === [] ? ['label' => 'Folders', 'value' => 'None'] : ['label' => 'Folders', 'lines' => $places],
                     self::modeFact((string)$req['maxMode'], 'Highest mode'),
                     ['label' => 'Limit', 'value' => self::perDayText((int)$req['maxPerDay']) . (!empty($req['maxPerDayCapped']) ? ' (it asked for ' . (int)$req['maxPerDayAsked'] . ')' : '')],
                 ],
                 'effect' => 'If you approve: each later read-only call of this script starts the agent at once, with no more approval, up to ' . self::perDayText($shownMax) . '. '
+                    . ((string)($changed ? $entry['maxMode'] : $req['maxMode']) === 'may-change' ? 'A call that may change things still waits for your approval each time. ' : '')
                     . ($changed ? 'The limits of the old entry stay. You can change them in Settings, Script runs.' : 'The script is added to the Authorised scripts list with these limits.'),
                 'technical' => self::techRows($who, $changed ? (string)$entry['sha256'] : ''),
             ];
-            if ((string)$req['description'] !== '') $card['quotes'] = [['label' => 'The script says (not checked)', 'text' => self::safeText((string)$req['description'], 120)]];
+            if ((string)$req['description'] !== '') $card['quotes'] = [['label' => 'The script says (not checked)', 'text' => (string)$req['description']]];
             $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], [
                 'label' => $changed ? 'A changed script asks to start agents' : 'A script asks to start agents', 'card' => $card,
             ]);
