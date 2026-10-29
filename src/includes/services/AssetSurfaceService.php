@@ -37,6 +37,7 @@
 namespace AICliAgents\Services;
 
 use AICliAgents\Services\Hub\HubProjector;
+use AICliAgents\Services\Hub\VendorProjector;
 
 class AssetSurfaceService {
 
@@ -276,13 +277,15 @@ class AssetSurfaceService {
             $key = ($p->surface() === 'skills') ? 'skill' : 'command';
             $rel = $p->relPath();
             $d[$key]['global'][]  = $rel;
-            $d[$key]['project'][] = $rel;   // project mirror of the config-dir surface
+            // Project mirror of the config-dir surface; a home-only XDG folder has no project twin (#846).
+            if (!VendorProjector::isHomeOnlyRel($rel)) $d[$key]['project'][] = $rel;
         }
         $vendors = HubProjector::supportedVendors();
         if (isset($vendors[$agentId])) {
-            $rel = $vendors[$agentId]->relPath();
-            $d['mcp']['global'][]  = $rel;
-            $d['mcp']['project'][] = $rel;
+            $d['mcp']['global'][] = $vendors[$agentId]->relPath();
+            // The file the agent reads in a project (OpenCode: opencode.json at the root), not the home path (#846).
+            $projectRel = $vendors[$agentId]->projectRelPath();
+            if ($projectRel !== null) $d['mcp']['project'][] = $projectRel;
         }
 
         // Project + ancestor instruction files. An agent reads a project-level
@@ -296,7 +299,8 @@ class AssetSurfaceService {
         $rootNames  = array_values(array_unique(array_merge($instrBasenames, $crossAgent)));
         $d['instruction']['project'] = array_values(array_unique(array_merge(
             $rootNames,
-            $d['instruction']['global']   // e.g. a project-local .codex/AGENTS.md
+            // e.g. a project-local .codex/AGENTS.md; never a home-only XDG path (#846)
+            array_values(array_filter($d['instruction']['global'], static fn($r) => !VendorProjector::isHomeOnlyRel($r)))
         )));
         $d['instruction']['ancestorFilenames'] = $rootNames;
 
@@ -326,10 +330,33 @@ class AssetSurfaceService {
                 self::buildNode($home, $baseDir, $rel, true, $nodes);
             }
             if (empty($nodes)) continue;
+            $nodes = self::mergeLinkedNodes($nodes);
             self::markCreatable($type, $nodes);
             $types[] = ['type' => $type, 'typeLabel' => self::TYPE_LABELS[$type], 'nodes' => $nodes];
         }
         return $types;
+    }
+
+    /**
+     * #846: one row per real file. A link (AGENTS.md -> CLAUDE.md) resolves to the same path
+     * as its target, and both rows were named CLAUDE.md. Keep the first node of each path and
+     * collect the other names it is read under in `aliases`, so the panel can say so.
+     * @param array<int,array> $nodes
+     * @return array<int,array>
+     */
+    private static function mergeLinkedNodes(array $nodes): array {
+        $out = [];
+        $at = [];
+        foreach ($nodes as $n) {
+            if (!isset($at[$n['path']])) {
+                $at[$n['path']] = count($out);
+                $out[] = $n;
+                continue;
+            }
+            $i = $at[$n['path']];
+            $out[$i]['aliases'] = array_values(array_unique(array_merge($out[$i]['aliases'], $n['aliases'])));
+        }
+        return $out;
     }
 
     /**
@@ -395,6 +422,8 @@ class AssetSurfaceService {
             // node of a FILE_CREATABLE_TYPES type whose scope has zero
             // existing nodes — never true here at build time.
             'creatable'  => false,
+            // The descriptor name when it is a link to another name (AGENTS.md -> CLAUDE.md); see mergeLinkedNodes().
+            'aliases'    => (basename($abs) !== basename($resolved)) ? [basename($abs)] : [],
         ];
 
         if ($isDir && $expandChildren) {

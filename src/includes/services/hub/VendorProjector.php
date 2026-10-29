@@ -29,6 +29,20 @@ abstract class VendorProjector {
     abstract public function label(): string;
 
     /**
+     * Project-relative MCP config file the agent reads in a workspace, for the asset tree,
+     * or null when there is none. Default: the home path, unless it lies in a home-only
+     * folder (.config/, .local/), which no agent reads inside a project.
+     */
+    public function projectRelPath(): ?string {
+        return self::isHomeOnlyRel($this->relPath()) ? null : $this->relPath();
+    }
+
+    /** True for a home-relative path under an XDG folder (.config/, .local/): never a project path. */
+    public static function isHomeOnlyRel(string $rel): bool {
+        return strpos($rel, '.config/') === 0 || strpos($rel, '.local/') === 0;
+    }
+
+    /**
      * Desired managed-key map for the given canonical servers (env placeholders
      * already resolved). JSON vendors: 'mcpServers.<name>' => vendor-shape array.
      * Fenced vendors: single fence key => full fenced block string.

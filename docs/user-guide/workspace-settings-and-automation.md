@@ -125,14 +125,15 @@ See [Agent Store](agent-store.md) for the rest of the card.
 The tree has three levels.
 
 1. **Scope**: **Global (home)** holds the files in the home of the agent. **Project (workspace)** holds the files in the workspace folder. A folder above the workspace that holds an instruction file has its own scope, named with its path. The plugin looks up to 8 levels up and never reaches the root of the disk.
-2. **Type**: **Instructions**, **Skills**, **Commands**, **Hooks**, **MCP Servers**, **Settings**, **State** and **Logs**, with the number of entries. Claude Code shows all eight. Other agents show **Instructions**, **Skills**, **Commands** and **MCP Servers**.
+2. **Type**: **Instructions**, **Skills**, **Commands**, **Hooks**, **MCP Servers**, **Settings**, **State** and **Logs**, with the number of files. A **+ Add** row is not counted. Claude Code shows all eight. Other agents show **Instructions**, **Skills**, **Commands** and **MCP Servers**.
 3. **Files and folders**: a folder shows its number of items and opens when you press it. A folder with more than 50 entries shows the first 50 ("50 of N shown").
 
 Scopes and types start open. Folders start closed. Marks on a row:
 
 - **managed**: Config Hub writes this file. You can edit it, but the next **Apply** in Config Hub writes the shared definition over your edit. See [Config Hub](config-hub.md).
 - **not present**: the agent can read a file at this place, but the file does not exist. The row is grey.
-- **+ Add** with a file name: shown for **Instructions**, **Settings**, **MCP Servers** and **Hooks** when the scope has no file of that type. It opens an empty editor. **Save** creates the file, and the tree shows it.
+- **also read as** with a name: the file has a link with another name, for example `AGENTS.md` that leads to `CLAUDE.md`. The tree shows the file once.
+- **+ Add** with a file name: shown for **Instructions**, **Settings**, **MCP Servers** and **Hooks** when the scope has no file of that type. It opens an empty editor. **Save** creates the file (and its folders, when they do not exist yet), and the tree shows it. In a project, OpenCode and OpenCode 2 offer `opencode.json` in the workspace folder.
 
 Edits to files in the home follow the normal save of the home. See [Home and agent storage](storage.md).
 

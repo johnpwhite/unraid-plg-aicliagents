@@ -28,6 +28,8 @@ class Opencode2Projector extends OpencodeStyleMcpProjector {
     public function agentId(): string { return 'opencode2'; }
     public function relPath(): string { return self::CONFIG_DIR . '/opencode.json'; }
     public function label(): string   { return 'OpenCode 2'; }
+    /** `<project>/opencode.json` (https://opencode.ai/v2/docs/config/); XDG_CONFIG_HOME moves only the global file. */
+    public function projectRelPath(): ?string { return 'opencode.json'; }
 
     protected function containerPath(): array { return ['mcp', 'servers']; }
 

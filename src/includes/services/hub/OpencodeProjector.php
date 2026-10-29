@@ -20,4 +20,6 @@ class OpencodeProjector extends OpencodeStyleMcpProjector {
     public function agentId(): string { return 'opencode'; }
     public function relPath(): string { return '.config/opencode/opencode.json'; }
     public function label(): string   { return 'OpenCode'; }
+    /** "Add opencode.json in your project root" (https://opencode.ai/docs/config/). */
+    public function projectRelPath(): ?string { return 'opencode.json'; }
 }

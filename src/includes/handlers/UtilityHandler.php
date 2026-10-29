@@ -923,6 +923,9 @@ class UtilityHandler {
 
         $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
         $targetPath = ValidationService::validatePath($rawPath);
+        // #846: a new file in folders that do not exist yet (the asset tree's "+ Add"); the
+        // mkdir below creates them, still inside the allow-list.
+        if ($targetPath === false) $targetPath = ValidationService::validateIntendedPath($rawPath);
         $filename = ValidationService::sanitizeFilename($rawFilename);
 
         if ($targetPath === false) {

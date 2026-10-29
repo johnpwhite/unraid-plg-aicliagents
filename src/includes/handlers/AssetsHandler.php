@@ -92,6 +92,11 @@ class AssetsHandler {
         $rawPath = \AICliAgents\Services\UtilityService::expandAgentHome($rawPath);
         // #368: /tmp is readable here (and only here); see ValidationService::validateReadPath.
         $resolved = ValidationService::validateReadPath($rawPath);
+        // #846: a "+ Add" target can sit in folders that do not exist yet (the tree offers it via
+        // validateIntendedPath); Save creates them. Only a path that does not exist takes this branch.
+        if ($resolved === false && $allowMissing && !file_exists($rawPath)) {
+            $resolved = ValidationService::validateIntendedPath($rawPath);
+        }
         if ($resolved === false) {
             return ['status' => 'error', 'message' => 'File not found or access denied'];
         }
