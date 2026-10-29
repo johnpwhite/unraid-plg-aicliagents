@@ -75,6 +75,9 @@ class ActivityService {
      * ending (spec Edge Cases) — see propose()/approve()/reject() below.
      */
     const STATUS_PENDING_APPROVAL = 'pending_approval';
+    /** meta.card limits (cleanCard): one text, and the lines of a process chain. */
+    const CARD_MAX_TEXT = 4000;
+    const CARD_MAX_LINES = 20;
 
     /**
      * True while listAll() still runs its own evaluate() pass, one release
@@ -170,8 +173,91 @@ class ActivityService {
         if (array_key_exists('cancel', $meta)) {
             if ($meta['cancel'] === 'none') $meta['cancel'] = 'none'; else unset($meta['cancel']);
         }
+        if (array_key_exists('card', $meta)) {
+            $card = self::cleanCard($meta['card']);
+            if ($card === null) unset($meta['card']); else $meta['card'] = $card;
+        }
         return $meta;
     }
+
+    /** One string of a card: scalar only, trimmed, cut at CARD_MAX_TEXT characters. */
+    private static function cardText(mixed $v): string {
+        if (!is_scalar($v)) return '';
+        $t = trim((string)$v);
+        return function_exists('mb_substr') ? mb_substr($t, 0, self::CARD_MAX_TEXT) : substr($t, 0, self::CARD_MAX_TEXT);
+    }
+
+    /**
+     * meta.card (ACTIVITY_TRAY_PLAIN_NOTICES.md "Structured approval card"): the structured block a proposal can carry
+     * for the tray to draw in place of the plain statement. Only the known keys stay; every value is a string; a text is
+     * cut at CARD_MAX_TEXT characters, a list at its own limit (a process chain at 20 lines). A card with no subject
+     * name and no facts is dropped, so the tray falls back to the statement.
+     *
+     * @return array<string,mixed>|null
+     */
+    private static function cleanCard(mixed $card): ?array {
+        if (!is_array($card)) return null;
+        $out = [];
+        $subject = is_array($card['subject'] ?? null) ? $card['subject'] : [];
+        $name = self::cardText($subject['name'] ?? '');
+        if ($name !== '') {
+            $out['subject'] = ['name' => $name];
+            $detail = self::cardText($subject['detail'] ?? '');
+            if ($detail !== '') $out['subject']['detail'] = $detail;
+        }
+        $facts = [];
+        foreach (array_slice(is_array($card['facts'] ?? null) ? array_values($card['facts']) : [], 0, 12) as $f) {
+            if (!is_array($f)) continue;
+            $label = self::cardText($f['label'] ?? '');
+            if ($label === '') continue;
+            $fact = ['label' => $label];
+            $chips = [];
+            foreach (array_slice(is_array($f['chips'] ?? null) ? array_values($f['chips']) : [], 0, 12) as $c) {
+                $c = self::cardText($c);
+                if ($c !== '') $chips[] = $c;
+            }
+            if ($chips !== []) $fact['chips'] = $chips;
+            foreach (['value', 'badge'] as $k) {
+                $v = self::cardText($f[$k] ?? '');
+                if ($v !== '') $fact[$k] = $v;
+            }
+            if (isset($fact['badge'])) $fact['tone'] = (($f['tone'] ?? '') === 'warn') ? 'warn' : 'ok';
+            if (count($fact) > 1) $facts[] = $fact;
+        }
+        if ($facts !== []) $out['facts'] = $facts;
+        $quotes = [];
+        $rawQuotes = is_array($card['quotes'] ?? null) ? array_values($card['quotes']) : [];
+        if (is_array($card['quote'] ?? null)) array_unshift($rawQuotes, $card['quote']);
+        foreach (array_slice($rawQuotes, 0, 3) as $q) {
+            if (!is_array($q)) continue;
+            $text = self::cardText($q['text'] ?? '');
+            if ($text === '') continue;
+            $quotes[] = ['label' => self::cardText($q['label'] ?? ''), 'text' => $text];
+        }
+        if ($quotes !== []) $out['quotes'] = $quotes;
+        $effect = self::cardText($card['effect'] ?? '');
+        if ($effect !== '') $out['effect'] = $effect;
+        $tech = [];
+        foreach (array_slice(is_array($card['technical'] ?? null) ? array_values($card['technical']) : [], 0, 12) as $t) {
+            if (!is_array($t)) continue;
+            $label = self::cardText($t['label'] ?? '');
+            if ($label === '') continue;
+            $row = ['label' => $label, 'mono' => !empty($t['mono'])];
+            $lines = [];
+            foreach (array_slice(is_array($t['lines'] ?? null) ? array_values($t['lines']) : [], 0, self::CARD_MAX_LINES) as $l) {
+                $l = self::cardText($l);
+                if ($l !== '') $lines[] = $l;
+            }
+            if ($lines !== []) $row['lines'] = $lines;
+            $v = self::cardText($t['value'] ?? '');
+            if ($v !== '') $row['value'] = $v;
+            if (isset($row['lines']) || isset($row['value'])) $tech[] = $row;
+        }
+        if ($tech !== []) $out['technical'] = $tech;
+        if (!isset($out['subject']) && !isset($out['facts'])) return null;
+        return $out;
+    }
+
 
     /**
      * docs/specs/HUMAN_ACTOR_IDENTITY.md R4: a record made by a person's web request names the person in
@@ -454,7 +540,7 @@ class ActivityService {
      *
      * @param array<string,mixed> $params  What approve() will execute, verbatim.
      * @param array{workspaceId?:string,agentId?:string,name?:string} $caller
-     * @param array{label?:string} $tray  A short question for the row title, for example
+     * @param array{label?:string,card?:array<string,mixed>} $tray  A short question for the row title, for example
      *        'Delete workspace "home-homelab"?'. When it is set, $description (the full
      *        statement of what approval does) moves to meta.statement and the tray draws it
      *        under the title; without it the title is $description, as before.
@@ -485,6 +571,10 @@ class ActivityService {
             ],
         ];
         if ($question !== '') $entry['meta']['statement'] = $description;
+        if (isset($tray['card'])) {
+            $card = self::cleanCard($tray['card']);
+            if ($card !== null) $entry['meta']['card'] = $card;
+        }
         self::save($entry);
         return $entry;
     }

@@ -121,6 +121,60 @@
         return (a.meta && typeof a.meta.statement === 'string' && a.meta.statement.trim() !== '') ? a.meta.statement : (a.label || '');
     }
 
+    // ACTIVITY_TRAY_PLAIN_NOTICES.md "Structured approval card": an optional meta.card on a proposal. The server
+    // builds it; every value is a string and goes through esc() here. Without a card the row draws the statement.
+    function cardOf(a) {
+        var c = a && a.meta && a.meta.card;
+        if (!c || typeof c !== 'object') return null;
+        var hasName = c.subject && typeof c.subject === 'object' && String(c.subject.name || '') !== '';
+        var hasFacts = Array.isArray(c.facts) && c.facts.length > 0;
+        return (hasName || hasFacts) ? c : null;
+    }
+    function cardFactHtml(f) {
+        if (!f || typeof f !== 'object' || !f.label) return '';
+        var v = '';
+        if (Array.isArray(f.chips)) {
+            v += f.chips.map(function (c) { return '<span class="c-chip">' + esc(c) + '</span>'; }).join(' ');
+        }
+        if (f.badge) v += '<span class="c-badge ' + (f.tone === 'warn' ? 'warn' : 'ok') + '">' + esc(f.badge) + '</span>';
+        if (f.value) v += esc(f.value);
+        return '<dt>' + esc(f.label) + '</dt><dd>' + v + '</dd>';
+    }
+    function cardTechHtml(t) {
+        if (!t || typeof t !== 'object' || !t.label) return '';
+        var cls = t.mono ? ' class="mono"' : '';
+        var v = '';
+        if (Array.isArray(t.lines)) {
+            v = '<ol class="c-chain">' + t.lines.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ol>';
+        } else {
+            v = esc(t.value);
+        }
+        return '<dt>' + esc(t.label) + '</dt><dd' + cls + '>' + v + '</dd>';
+    }
+    function cardHtml(c, opId, open) {
+        var h = '<div class="card" data-testid="approval-card">';
+        if (c.subject && c.subject.name) {
+            h += '<div class="c-name">' + esc(c.subject.name) + '</div>'
+                + (c.subject.detail ? '<div class="c-path">' + esc(c.subject.detail) + '</div>' : '');
+        }
+        if (Array.isArray(c.facts) && c.facts.length) {
+            h += '<dl class="c-facts">' + c.facts.map(cardFactHtml).join('') + '</dl>';
+        }
+        var quotes = Array.isArray(c.quotes) ? c.quotes.slice() : [];
+        if (c.quote && typeof c.quote === 'object') quotes.unshift(c.quote);
+        quotes.forEach(function (q) {
+            if (!q || !q.text) return;
+            h += (q.label ? '<div class="c-quote-label">' + esc(q.label) + '</div>' : '')
+                + '<blockquote class="c-quote" tabindex="0">' + esc(q.text) + '</blockquote>';
+        });
+        if (c.effect) h += '<div class="c-effect">' + esc(c.effect) + '</div>';
+        if (Array.isArray(c.technical) && c.technical.length) {
+            h += '<details class="c-tech" data-card-opid="' + esc(opId) + '"' + (open ? ' open' : '') + '>'
+                + '<summary>Technical details</summary><dl class="c-techlist">' + c.technical.map(cardTechHtml).join('') + '</dl></details>';
+        }
+        return h + '</div>';
+    }
+
     // #493: ask with Unraid's own dialog (swal), never the browser's native
     // confirm, which only stays as the fallback when swal is missing. The open
     // tray sits at z-index 1000003, so a body class lifts the dialog above it
@@ -311,6 +365,30 @@
         + '.row .step { margin-top: 4px; font-size: 11px; opacity: 0.65; word-break: break-word; }'
         + '.row .err { margin-top: 4px; font-size: 11px; color: color-mix(in srgb, #d9534f 60%, var(--text-color, #e0e0e0)); word-break: break-word; }'
         + '.row .consequence { margin-top: 4px; font-size: 11px; opacity: 0.85; word-break: break-word; }'
+        // Structured approval card. Colour comes from the theme text colour (opacity and grey tints), so both themes read.
+        // The Mode badge carries its meaning in its word; the tint only adds to it.
+        + '.card { margin-top: 6px; font-size: 12px; }'
+        + '.card .c-name { font-size: 13px; font-weight: 600; word-break: break-word; }'
+        + '.card .c-path { font-size: 11px; font-family: monospace; opacity: 0.75; overflow-wrap: anywhere; margin-top: 2px; }'
+        + '.card .c-facts { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 8px; margin: 8px 0 0; }'
+        + '.card .c-facts dt { font-size: 11px; opacity: 0.75; margin: 0; }'
+        + '.card .c-facts dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }'
+        + '.card .c-chip { display: inline-block; padding: 0 8px; border-radius: 9px; background: rgba(128,128,128,0.22); font-size: 11px; line-height: 18px; }'
+        + '.card .c-badge { display: inline-block; padding: 0 8px; border-radius: 9px; font-size: 11px; font-weight: 600; line-height: 18px; }'
+        + '.card .c-badge.ok { background: rgba(0,128,64,0.2); color: color-mix(in srgb, #4caf50 40%, var(--text-color, #e0e0e0)); }'
+        + '.card .c-badge.warn { background: rgba(234,179,8,0.2); color: color-mix(in srgb, #eab308 40%, var(--text-color, #e0e0e0)); }'
+        + '.card .c-quote-label { font-size: 11px; opacity: 0.75; margin-top: 8px; }'
+        + '.card .c-quote { margin: 2px 0 0; padding: 4px 8px; border-left: 3px solid rgba(128,128,128,0.6); background: rgba(128,128,128,0.12);'
+        + '  max-height: 6em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }'
+        + '.card .c-effect { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-color, #3a3a3a); font-size: 12px; font-weight: 400; }'
+        + '.card .c-tech { margin-top: 8px; }'
+        + '.card .c-tech summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-size: 11px; opacity: 0.85; }'
+        + '.card .c-techlist { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 8px; margin: 4px 0 0; }'
+        + '.card .c-techlist dt { font-size: 11px; opacity: 0.75; margin: 0; }'
+        + '.card .c-techlist dd { margin: 0; font-size: 11px; overflow-wrap: anywhere; }'
+        + '.card .c-techlist dd.mono { font-family: monospace; }'
+        + '.card .c-chain { margin: 0; padding-left: 16px; }'
+        + '@media (pointer: coarse) { .btn { min-height: 44px; } }'
         + '.btn.approve { border-color: #9b59b6; color: color-mix(in srgb, #9b59b6 50%, var(--text-color, #e0e0e0)); font-weight: 700; }'
         + '.bar { margin-top: 6px; height: 4px; border-radius: 2px; overflow: hidden;'
         + '  background: rgba(255,255,255,0.08); }'
@@ -425,6 +503,8 @@
             // in the row. The tray used to throw this reply away, so a refused
             // delivery looked exactly like a successful one.
             this._relayNote = {};
+            // opId -> true while the person has opened the Technical details of that card, so a redraw keeps it open.
+            this._cardOpen = {};
             // opId -> {count, at} of the newest relay message the tray has seen for that
             // row. A message that is newer than this resets the arming and the note, so
             // Force inject is never offered for a message the person has not looked at.
@@ -941,6 +1021,14 @@
             }
             this._positionAboveFooter();   // re-measure: footer height varies by viewport/version
 
+            // Keep an opened Technical details open across the redraws of the poll.
+            this._root.querySelectorAll('details[data-card-opid]').forEach(function (d) {
+                d.addEventListener('toggle', function () {
+                    var id = d.getAttribute('data-card-opid');
+                    if (d.open) self._cardOpen[id] = true; else delete self._cardOpen[id];
+                });
+            });
+
             this._root.querySelectorAll('[data-act]').forEach(function (el) {
                 el.addEventListener('click', function (ev) {
                     ev.stopPropagation();
@@ -1132,6 +1220,8 @@
                 ? '<span class="status age">' + esc(ageText(a, Math.floor(Date.now() / 1000))) + '</span>'
                 : '<span class="status ' + esc(a.status) + '">' + esc(pillWord(a)) + '</span>';
             var grey = pending ? '' : greyLine(a);
+            var card = pending ? cardOf(a) : null;
+            if (!this._cardOpen) this._cardOpen = {};
             // The pending item's full plain-language consequence (R6: meta.statement when the
             // title is a short question, else the label itself — an older proposal) is shown in
             // full below the title, never just in the hover tooltip, since a human must read
@@ -1139,7 +1229,8 @@
             return '<div class="row">'
                 + '<div class="top"><span class="label" title="' + esc(a.label) + '">' + esc(a.label || a.opId) + '</span>'
                 + pillHtml + '</div>'
-                + (pending && statementText(a) ? '<div class="consequence">' + esc(statementText(a)) + '</div>' : '')
+                + (card ? cardHtml(card, a.opId, !!this._cardOpen[a.opId]) : '')
+                + (pending && !card && statementText(a) ? '<div class="consequence">' + esc(statementText(a)) + '</div>' : '')
                 // The grey step line carries "from <sender> · held because <reason>" (R2); no separate reason line.
                 // What the last Force inject actually did — see _action().
                 + (this._relayNote[a.opId] ? '<div class="consequence">' + esc(this._relayNote[a.opId]) + '</div>' : '')
@@ -1157,7 +1248,7 @@
     // Pure row rules (ACTIVITY_TRAY_PLAIN_NOTICES.md), read by ui-build/src/__tests__/activityTrayRows.test.ts.
     AicliActivityTray.rules = {
         stepText: stepText, pillWord: pillWord, greyLine: greyLine, actorLine: actorLine, ageText: ageText,
-        isRecord: isRecord, showsCancel: showsCancel, statementText: statementText
+        isRecord: isRecord, showsCancel: showsCancel, statementText: statementText, cardOf: cardOf
     };
 
     if (!customElements.get('aicli-activity-tray')) {

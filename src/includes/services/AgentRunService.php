@@ -1892,7 +1892,24 @@ final class AgentRunService
                 . ', folder ' . (!empty($req['temp']) ? 'a temporary folder' : $req['folder']) . ', mode ' . $req['mode'] . ', title "' . $req['title'] . '". Approve stores the hash. '
                 . 'Each later read-only call of this script starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : 6) . ' runs a day. '
                 . ($changed ? 'The limits of the old entry stay.' : (!empty($req['temp']) ? 'The new entry may start this agent in a temporary folder only, read-only, as root.' : 'The new entry may start this agent in this folder, read-only, as root.'));
-            $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], ['label' => 'A script wants to start agents: ' . $path . '?']);
+            $perDay = $changed ? (int)$entry['maxPerDay'] : 6;
+            $temp = !empty($req['temp']);
+            $card = [
+                'subject' => ['name' => basename($path), 'detail' => $path],
+                'facts' => [
+                    ['label' => 'Agents', 'chips' => [self::agentName((string)$req['agent'])]],
+                    ['label' => 'Folders', 'value' => $temp ? 'Temporary folder' : (string)$req['folder']],
+                    self::modeFact('read-only'),
+                    ['label' => 'Limit', 'value' => self::perDayText($perDay)],
+                ],
+                'effect' => 'If you approve: each later read-only call of this script starts the agent at once, with no more approval, up to ' . self::perDayText($perDay) . '. '
+                    . ($changed ? 'The limits of the old entry stay.' : ($temp ? 'The script may start this agent in a temporary folder only, as root.' : 'The script may start this agent in this folder only, as root.')),
+                'technical' => self::techRows($who, $changed ? (string)$entry['sha256'] : ''),
+            ];
+            if ((string)$req['title'] !== '') $card['quotes'] = [['label' => 'The script says (not checked)', 'text' => 'Title: ' . (string)$req['title'] . ($request['prompt'] !== '' ? "\n" . $request['prompt'] : '')]];
+            $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], [
+                'label' => $changed ? 'A changed script asks to start agents' : 'A script asks to start agents', 'card' => $card,
+            ]);
             if ($tray !== null) ActivityService::update($opId, ['actor' => 'script ' . $path, 'meta' => ['count' => 1]]);
         }
         self::emit('run.refused', 'script ' . $path, 'Run refused: ' . $why, ['runId' => $runId, 'reason' => $changed ? 'changed' : 'unknown', 'sha256' => $who['sha256'], 'oldSha256' => $changed ? $entry['sha256'] : '', 'opId' => $opId], $who);
@@ -1992,6 +2009,62 @@ final class AgentRunService
         return self::temporaryPathMessage($path) !== null || RunCallerIdentity::isUserScriptsCopy($path);
     }
 
+    // ---- The structured approval card (ACTIVITY_TRAY_PLAIN_NOTICES.md "Structured approval card") ----
+
+    /** The name of an agent for a person: the registry name, or the id when the registry does not know it. */
+    private static function agentName(string $id): string
+    {
+        try {
+            $registry = AgentRegistry::getRegistry();
+            $name = trim((string)($registry[$id]['name'] ?? ''));
+        } catch (\Throwable $e) {
+            $name = '';
+        }
+        return $name !== '' ? $name : $id;
+    }
+
+    /** One fact for the card: the mode as a badge. The word carries the meaning; the tone only tints it. */
+    private static function modeFact(string $mode, string $label = 'Mode'): array
+    {
+        return $mode === 'may-change'
+            ? ['label' => $label, 'badge' => 'May change', 'tone' => 'warn']
+            : ['label' => $label, 'badge' => 'Read-only', 'tone' => 'ok'];
+    }
+
+    /** The lines of a process chain, nearest caller first, one line for each process. @param array<int,array<string,mixed>> $chain @return list<string> */
+    private static function chainLines(array $chain): array
+    {
+        $lines = [];
+        foreach ($chain as $item) {
+            $text = (string)($item['name'] ?? '?');
+            if (!empty($item['script'])) $text .= ' ' . (string)$item['script'];
+            $lines[] = $text . ' (' . (int)($item['pid'] ?? 0) . ')';
+        }
+        return $lines;
+    }
+
+    /**
+     * The technical rows of a card: the fingerprint, the old fingerprint, the user and the process chain.
+     *
+     * @param array<string,mixed> $who
+     * @return list<array<string,mixed>>
+     */
+    private static function techRows(array $who, string $oldSha = ''): array
+    {
+        $rows = [['label' => 'Fingerprint', 'value' => (string)$who['sha256'], 'mono' => true]];
+        if ($oldSha !== '') $rows[] = ['label' => 'Old fingerprint', 'value' => $oldSha, 'mono' => true];
+        $rows[] = ['label' => 'Runs as', 'value' => ((int)$who['uid'] === 0 ? 'root' : 'user') . ' (user id ' . (int)$who['uid'] . ')'];
+        $chain = self::chainLines(is_array($who['chain'] ?? null) ? $who['chain'] : []);
+        if ($chain !== []) $rows[] = ['label' => 'Process chain', 'lines' => $chain, 'mono' => true];
+        return $rows;
+    }
+
+    /** The word for a number of runs in a day. */
+    private static function perDayText(int $n): string
+    {
+        return $n === 1 ? '1 run a day' : $n . ' runs a day';
+    }
+
     /** The id of the tray item for the request of one script file (path and fingerprint). */
     private static function accessOpId(string $path, string $sha256): string
     {
@@ -2077,7 +2150,24 @@ final class AgentRunService
                 . '. New hash: ' . $sha . ($changed ? '. Old hash: ' . $entry['sha256'] : '') . '. Caller user id: ' . $who['uid'] . '. Process chain: ' . $params['chain']
                 . '. Accept stores the hash and ' . ($changed ? 'keeps the limits of the old entry (' . self::limitsText(['agents' => $entry['agents'], 'folders' => $entry['folders'], 'allowTemp' => $entry['allowTemp'], 'maxMode' => $entry['maxMode'], 'maxPerDay' => $entry['maxPerDay']]) . '; you can change them in Settings, Script runs)' : 'adds the script with these limits')
                 . '. Each later read-only call of this script then starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : (int)$req['maxPerDay']) . ' runs a day. Decline turns the request away.';
-            $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], ['label' => 'A script asks for access: ' . $path . '?']);
+            $shownMax = $changed ? (int)$entry['maxPerDay'] : (int)$req['maxPerDay'];
+            $places = array_merge((array)$req['folders'], !empty($req['temp']) ? ['Temporary folder'] : []);
+            $card = [
+                'subject' => ['name' => $label !== '' ? $label : basename($path), 'detail' => $path],
+                'facts' => [
+                    ['label' => 'Agents', 'chips' => array_map([self::class, 'agentName'], array_map('strval', (array)$req['agents']))],
+                    ['label' => 'Folders', 'value' => $places === [] ? 'None' : implode(', ', $places)],
+                    self::modeFact((string)$req['maxMode'], 'Highest mode'),
+                    ['label' => 'Limit', 'value' => self::perDayText((int)$req['maxPerDay']) . (!empty($req['maxPerDayCapped']) ? ' (it asked for ' . (int)$req['maxPerDayAsked'] . ')' : '')],
+                ],
+                'effect' => 'If you approve: each later read-only call of this script starts the agent at once, with no more approval, up to ' . self::perDayText($shownMax) . '. '
+                    . ($changed ? 'The limits of the old entry stay. You can change them in Settings, Script runs.' : 'The script is added to the Authorised scripts list with these limits.'),
+                'technical' => self::techRows($who, $changed ? (string)$entry['sha256'] : ''),
+            ];
+            if ((string)$req['description'] !== '') $card['quotes'] = [['label' => 'The script says (not checked)', 'text' => self::safeText((string)$req['description'], 120)]];
+            $tray = ActivityService::propose($opId, 'aicli_run_authorise_script', $statement, $params, [], [
+                'label' => $changed ? 'A changed script asks to start agents' : 'A script asks to start agents', 'card' => $card,
+            ]);
             if ($tray !== null) {
                 ActivityService::update($opId, ['actor' => 'script ' . $path, 'meta' => ['count' => 1]]);
                 self::notifyOnce($path . '|' . $sha, 'access', 'AICliAgents: a script asks for access',
@@ -2169,7 +2259,26 @@ final class AgentRunService
             . 'Title: "' . $req['title'] . '". Prompt: ' . self::safeText($req['prompt'], 2000)
             . ($dataBytes > 0 ? ' Data from the script (' . $dataBytes . ' bytes) is in a file that the task names. Start of the data: "' . $dataPreview . '".' : '')
             . ' No answer in ' . $hours . ' hours ends the run.';
-        $tray = ActivityService::propose($opId, 'aicli_run_start', $statement, $params, [], ['label' => 'Approve run: ' . $req['title'] . '?']);
+        $facts = [
+            ['label' => 'Agent', 'chips' => [self::agentName((string)$req['agent'])]],
+            ['label' => 'Folder', 'value' => !empty($req['temp']) ? 'Temporary folder' : (string)$req['folder']],
+            self::modeFact((string)$req['mode']),
+        ];
+        foreach (['model' => 'Model', 'effort' => 'Effort', 'key' => 'Key'] as $k => $l) {
+            if ((string)($req[$k] ?? '') !== '') $facts[] = ['label' => $l, 'value' => (string)$req[$k]];
+        }
+        $quotes = [['label' => 'Prompt', 'text' => self::safeText((string)$req['prompt'], 2000)]];
+        if ($dataPreview !== '') $quotes[] = ['label' => 'Data from the script (' . $dataBytes . ' bytes, start only, secrets hidden)', 'text' => $dataPreview];
+        $card = [
+            'subject' => ['name' => (string)$req['title'], 'detail' => (string)$who['path']],
+            'facts' => $facts,
+            'quotes' => $quotes,
+            'effect' => $readOnly
+                ? 'If you approve: the agent starts at once and may only read. It cannot run a shell or change a file. No answer in ' . $hours . ' hours ends the run.'
+                : 'If you approve: the agent starts at once and works without asking for permission. It may change files. No answer in ' . $hours . ' hours ends the run.',
+            'technical' => self::techRows($who),
+        ];
+        $tray = ActivityService::propose($opId, 'aicli_run_start', $statement, $params, [], ['label' => 'Approve run: ' . $req['title'] . '?', 'card' => $card]);
         if ($tray === null) {
             self::removeRunFiles($runId);
             return self::reply('failed', 'The approval item could not be created.', self::EXIT_INTERNAL, $runId);

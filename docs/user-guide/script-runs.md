@@ -94,7 +94,7 @@ aicli-run --request-access --label="KEV check" --description="Looks into new KEV
 Name the agents with `--agent` (repeat it, or give a comma list). Name the folders with `--folder` (repeat it), a temporary folder with `--temp`, or both. `--mode` is the highest mode, and `--max-per-day` is the most runs in 24 hours; the plugin lowers it to the limit **Runs each day** when it is higher. The plugin finds the script from the process list, so a script can ask only for itself.
 
 1. The call prints a JSON object with the state `pending_approval` and exits with 20. The plugin adds one item to the **Activity tray** and shows an Unraid notice that asks you to accept or decline. A second call from the same script adds no second item.
-2. Read the item. It shows the path, the fingerprint and the limits that the script asks for.
+2. Read the card. It shows the script name and its full path, then the agents, the folders, the highest mode and the runs a day that the script asks for. The **Mode** shows the word **Read-only** or **May change**. A grey quote **The script says (not checked)** shows what the script says about itself. Treat it as the script's own words. The last line, **If you approve**, says what Approve allows. Press **Technical details** to see the fingerprint, the user and the process chain.
 3. Press **Approve** to accept. The script goes on the list with the fingerprint and the limits it asked for. Press **Reject** to decline.
 4. Expect: the next call of `--request-access` answers `authorised` (exit 0). After a decline it answers `rejected` (exit 21). A script whose file changed has a new fingerprint and may ask again. When the script was on the list before, Approve keeps the old limits and stores the new fingerprint.
 
@@ -103,7 +103,7 @@ Only you can accept. No agent and no command can accept for you.
 ### Approve an unknown or changed script
 
 1. A script that is not on the list is refused. The plugin adds one item to the **Activity tray** and shows an Unraid notice.
-2. Read the path, the fingerprint and the request in the item.
+2. Read the card. The title is **A script asks to start agents**, or **A changed script asks to start agents** when the file changed. The card shows the script name and path, the agent, the folder and the mode. Press **Technical details** to see the fingerprint (and the old one), the user and the process chain.
 3. Press **Approve** to put the script on the list as a read-only script. Each later read-only call of this script then starts the agent at once, with no further approval, up to the runs a day that the entry allows. Press **Reject** to turn it away.
 4. Expect: the next call of the script starts. The call that was refused does not start by itself.
 
@@ -111,7 +111,7 @@ A script whose file changed is refused until you trust its new fingerprint. The 
 
 ### Runs that need approval
 
-A read-only call starts at once. It needs no approval, and it still counts against the limits. The **Activity tray** shows it as **Run started**. A call with `--mode=may-change` waits in the **Activity tray** as **Approve run**. The item shows the script, the agent, the folder, the mode and the full task. Press **Approve** to start the run. A run with `--mode=may-change` then works without asking for permission, when the agent has such a mode. A read-only run keeps its permission questions and all its read-only limits. Before it starts, the plugin checks again that the script is still on the list with the same fingerprint, that the file is unchanged and that the limits still allow the run. With no answer in the time you set, the run ends and starts nothing.
+A read-only call starts at once. It needs no approval, and it still counts against the limits. The **Activity tray** shows it as **Run started**. A call with `--mode=may-change` waits in the **Activity tray** as **Approve run**. The card shows the run title, the script path, the agent, the folder, the mode (**May change** is marked in amber, with the words) and the model, effort and key when set. A quote **Prompt** shows the full task, and a second quote shows the start of the data, with secrets hidden. The line **If you approve** says what the agent does after Approve. **Technical details** shows the fingerprint, the user and the process chain. Press **Approve** to start the run. A run with `--mode=may-change` then works without asking for permission, when the agent has such a mode. A read-only run keeps its permission questions and all its read-only limits. Before it starts, the plugin checks again that the script is still on the list with the same fingerprint, that the file is unchanged and that the limits still allow the run. With no answer in the time you set, the run ends and starts nothing.
 
 When the agent reports, the plugin saves its summary in one Notebook card. A key reuses the same card on later runs. The Activity tray keeps a result notice. The plugin closes the workspace after its report. It also closes a run that reaches the time limit.
 
@@ -161,6 +161,7 @@ This version runs every agent as root. A restricted run user is not available ye
 <details>
 <summary>Change history</summary>
 
+- **2026-10-29** — The Activity tray draws an approval of a script as a card: name and path, a grid of facts, the script's own words as a quote, one line on what Approve allows, and closed **Technical details**. The title is short: **A script asks to start agents**. Spec `docs/specs/ACTIVITY_TRAY_PLAIN_NOTICES.md`.
 - **2026-10-29** — A run that may change files takes no follow-up message, and one run takes at most 10. A temporary folder must be inside a share that exists already. A script file under `/tmp` cannot ask for access. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issues #838, #839, #840.
 - **2026-10-29** — A script can ask to be put on the list with `aicli-run --request-access`, with the limits it needs. You accept or decline in the Activity tray. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #838.
 - **2026-10-29** — A duplicate call names the workspace and state of the open run, and `--on-duplicate=send` types a follow-up into it. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #839.
