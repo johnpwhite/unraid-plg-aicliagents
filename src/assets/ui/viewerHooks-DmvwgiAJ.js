@@ -1,1 +1,0 @@
-import{r as c,c as i}from"./fileEditor-Ck2RfceR.js";import{u as n}from"./index.js";function y(){const{toast:e,show:t}=n(),o=c.useCallback((s,a="Copied")=>{i(s).then(r=>{r?t(a):t("Copy failed. Select the text and copy it by hand.","err")})},[t]);return{toast:e,say:t,copy:o}}export{y as u};
