@@ -88,6 +88,27 @@ download_verified() {
     return 1
 }
 
+# unsquashfs 4.5 intentionally exits 1 after printing -version. Accept that
+# specific contract only when the expected version banner was actually emitted.
+# A loader error, timeout, or arbitrary exit 1 must still fail closed.
+runtime_probe() {
+    local executable="$1" flag="$2" name="$3" quiet="${4:-0}" output rc
+    output=$(mktemp "$RUNTIME_WORK/probe.XXXXXX") || return 1
+    if timeout 5 "$executable" "$flag" > "$output" 2>&1; then rc=0; else rc=$?; fi
+    if { [ "$name" != unsquashfs ] && [ "$rc" -eq 0 ]; } ||
+        { [ "$name" = unsquashfs ] && { [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; } &&
+          grep -Eq '^unsquashfs version [0-9]' "$output"; }; then
+        rm -f "$output"
+        return 0
+    fi
+    if [ "$quiet" != 1 ]; then
+        log_fail "$name: executable probe failed: path=$executable rc=$rc"
+        while IFS= read -r line; do log_status "$name: $line"; done < <(head -n 5 "$output")
+    fi
+    rm -f "$output"
+    return 1
+}
+
 # A validated executable replaces the destination with a single rename. Never
 # truncate a usable binary, even when extraction or a smoke check fails.
 publish_binary() {
@@ -95,7 +116,7 @@ publish_binary() {
     mkdir -p "$(dirname "$dest")" || return 1
     candidate=$(mktemp "$dest.next.XXXXXX") || return 1
     if cp "$source" "$candidate" && chmod 755 "$candidate" &&
-        timeout 5 "$candidate" "$flag" >/dev/null 2>&1 && mv -f "$candidate" "$dest"; then
+        runtime_probe "$candidate" "$flag" "$(basename "$dest")" && mv -f "$candidate" "$dest"; then
         return 0
     fi
     rm -f "$candidate"
@@ -319,7 +340,7 @@ if [ "$IS_SYSTEM" -eq 1 ]; then
     SYS_UNSQUASHFS=$(which unsquashfs 2>/dev/null || true)
     [ -n "$SYS_UNSQUASHFS" ] && ln -sf "$SYS_UNSQUASHFS" "$BIN_DEST/unsquashfs"
 else
-    if ! "$RUNTIME_BASE/bin/mksquashfs" -version >/dev/null 2>&1 || ! "$RUNTIME_BASE/bin/unsquashfs" -version >/dev/null 2>&1; then
+    if ! runtime_probe "$RUNTIME_BASE/bin/mksquashfs" -version mksquashfs 1 || ! runtime_probe "$RUNTIME_BASE/bin/unsquashfs" -version unsquashfs 1; then
         download_verified "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_SHA256" "squashfs-tools" "$SQUASH_URL" "$SQUASH_URL_ALT" || exit 1
 
         TMP_EXTRACT="$RUNTIME_WORK/squash"
@@ -369,7 +390,7 @@ ln -sf "$BIN_DEST/unsquashfs" /usr/local/bin/unsquashfs
 # is not sufficient (empty files, broken symlinks, wrong architecture/loader).
 for spec in node:--version npm:--version npx:--version tmux:-V git-lfs:--version mksquashfs:-version unsquashfs:-version; do
     tool=${spec%%:*}; flag=${spec#*:}
-    if ! timeout 5 "$BIN_DEST/$tool" "$flag" >/dev/null 2>&1; then
+    if ! runtime_probe "$BIN_DEST/$tool" "$flag" "$tool"; then
         log_fail "Required runtime smoke check failed: $BIN_DEST/$tool $flag"
         exit 1
     fi

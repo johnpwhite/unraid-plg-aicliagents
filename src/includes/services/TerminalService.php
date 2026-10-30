@@ -168,8 +168,14 @@ class TerminalService {
         $runtimeBin = '/usr/local/emhttp/plugins/unraid-aicliagents/bin/';
         foreach (['node' => '--version', 'npm' => '--version', 'npx' => '--version', 'tmux' => '-V', 'git-lfs' => '--version', 'mksquashfs' => '-version', 'unsquashfs' => '-version'] as $tool => $flag) {
             $runtimeRc = 1;
-            exec('timeout 5 ' . escapeshellarg($runtimeBin . $tool) . ' ' . escapeshellarg($flag) . ' >/dev/null 2>&1', $runtimeOutput, $runtimeRc);
-            if ($runtimeRc !== 0) {
+            $runtimeOutput = [];
+            exec('timeout 5 ' . escapeshellarg($runtimeBin . $tool) . ' ' . escapeshellarg($flag) . ' 2>&1', $runtimeOutput, $runtimeRc);
+            $valid = $runtimeRc === 0;
+            if ($tool === 'unsquashfs') {
+                $valid = in_array($runtimeRc, [0, 1], true)
+                    && preg_match('/^unsquashfs version [0-9]/m', implode("\n", $runtimeOutput)) === 1;
+            }
+            if (!$valid) {
                 LogService::log("Start blocked: required runtime $tool failed (rc=$runtimeRc). See install.log.", LogService::LOG_ERROR, "TerminalService");
                 return false;
             }

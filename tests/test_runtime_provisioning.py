@@ -177,6 +177,30 @@ readlink() { echo "$2"; }
 ''' + selection + '\n[ "$USE_SYSTEM_NODE" -eq 0 ]\n')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_unsquashfs_version_contract_accepts_exit_one_with_banner(self):
+        r = self.run_shell('''printf '#!/bin/bash\\necho "unsquashfs version 4.5"\\nexit 1\\n' > candidate
+publish_binary candidate "$PWD/unsquashfs" -version
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.root / 'unsquashfs').exists())
+
+    def test_unsquashfs_exit_one_without_banner_is_rejected(self):
+        r = self.run_shell('''printf previous > unsquashfs
+printf '#!/bin/bash\\necho "error while loading shared libraries" >&2\\nexit 1\\n' > candidate
+publish_binary candidate "$PWD/unsquashfs" -version
+''')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual((self.root / 'unsquashfs').read_text(), 'previous')
+        self.assertIn('rc=1', r.stdout)
+        self.assertIn('error while loading shared libraries', r.stdout)
+
+    def test_unsquashfs_fatal_status_with_banner_is_rejected(self):
+        r = self.run_shell('''printf '#!/bin/bash\\necho "unsquashfs version 4.5"\\nexit 2\\n' > candidate
+publish_binary candidate "$PWD/unsquashfs" -version
+''')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse((self.root / 'unsquashfs').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
