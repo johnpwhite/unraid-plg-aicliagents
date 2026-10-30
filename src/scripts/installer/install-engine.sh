@@ -142,6 +142,20 @@ if [ -f "/tmp/aicli-src.tar.gz" ]; then
             exit 2
         fi
 
+        # Required runtime gates publication, service/storage initialization and
+        # the parent's success/autolaunch path. Always recheck on reboot/reuse.
+        log_step "Checking required runtime before backend activation..."
+        if [ ! -s /tmp/aicli-runtime.sh ] || ! bash -n /tmp/aicli-runtime.sh; then
+            log_fail "Runtime installer missing or invalid; activation blocked."
+            exit 1
+        fi
+        bash /tmp/aicli-runtime.sh
+        runtime_rc=$?
+        if [ "$runtime_rc" -ne 0 ]; then
+            log_fail "Runtime provisioning failed (rc=$runtime_rc); activation, services and auto-launch blocked."
+            exit "$runtime_rc"
+        fi
+
         if ! aicli_activate_generation "$EMHTTP_DEST" "$STAGING_ROOT" "$GENERATION_ID"; then
             log_fail "Atomic generation activation failed; prior generation remains available."
             exit 1
@@ -216,18 +230,6 @@ log_ok "Root entry points and directory mapping complete."
 /usr/bin/php -r "if(function_exists('opcache_reset')) opcache_reset();" >/dev/null 2>&1
 
 cd - > /dev/null
-
-# -----------------------------------------------------------------
-#  [3/5]  RUNTIME DEPENDENCIES
-# -----------------------------------------------------------------
-log_progress "40"
-log_step "[3/5] Checking Runtime Tools..."
-
-if [ -f "/tmp/aicli-runtime.sh" ]; then
-    bash /tmp/aicli-runtime.sh
-else
-    log_warn "Runtime script (aicli-runtime.sh) missing. Tools may be unavailable."
-fi
 
 # -----------------------------------------------------------------
 #  [4/5]  STORAGE & SERVICE INITIALIZATION

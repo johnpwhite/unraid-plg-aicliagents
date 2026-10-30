@@ -1,0 +1,20 @@
+name: Runtime provisioning regression
+on:
+  pull_request:
+    paths:
+      - 'src/scripts/installer/**'
+      - 'src/includes/services/TerminalService.php'
+      - 'src/includes/services/AutoLaunchService.php'
+      - 'unraid-aicliagents.plg'
+      - 'tests/test_runtime_provisioning.py'
+      - '.github/workflows/runtime-provisioning.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-runtime-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n src/scripts/installer/runtime.sh && bash -n src/scripts/installer/install-engine.sh
+      - run: php -l src/includes/services/TerminalService.php && php -l src/includes/services/AutoLaunchService.php
+      - run: python3 tests/test_runtime_provisioning.py

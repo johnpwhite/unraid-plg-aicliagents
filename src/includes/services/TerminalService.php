@@ -162,6 +162,22 @@ class TerminalService {
         return "$agentName did not start.";
     }
 
+    /** Verify required programs without mounting or changing user storage. */
+    public static function runtimeReady(): bool
+    {
+        $runtimeBin = '/usr/local/emhttp/plugins/unraid-aicliagents/bin/';
+        foreach (['node' => '--version', 'npm' => '--version', 'npx' => '--version', 'tmux' => '-V', 'git-lfs' => '--version', 'mksquashfs' => '-version', 'unsquashfs' => '-version'] as $tool => $flag) {
+            $runtimeRc = 1;
+            exec('timeout 5 ' . escapeshellarg($runtimeBin . $tool) . ' ' . escapeshellarg($flag) . ' >/dev/null 2>&1', $runtimeOutput, $runtimeRc);
+            if ($runtimeRc !== 0) {
+                LogService::log("Start blocked: required runtime $tool failed (rc=$runtimeRc). See install.log.", LogService::LOG_ERROR, "TerminalService");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /** startTerminal() body. Call it only while this process holds the workspace's SessionLaunchLock. */
     private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin): array {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
@@ -176,6 +192,12 @@ class TerminalService {
         if (ProcessManager::isTtydBound($id)) {
             LogService::log("Session $id already has a bound ttyd — reusing.", LogService::LOG_DEBUG, "TerminalService");
             return ['ok' => true, 'reason' => 'already_running'];
+        }
+
+        // Check before HOME/storage initialization. Every manual and headless
+        // start converges here; a previous successful install is not readiness.
+        if (!self::runtimeReady()) {
+            return ['ok' => false, 'reason' => 'runtime_unavailable'];
         }
 
         // Issue #56: every caller converges here, including boot auto-launch,
@@ -556,7 +578,9 @@ class TerminalService {
             return ['ok' => false, 'reason' => 'ensure_timeout'];
         } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
-            LogService::log("ensure-session returned rc=$ensureRc for $id (continuing to ttyd; attach will retry). tail: $tail", LogService::LOG_WARN, "TerminalService");
+            LogService::log("ensure-session returned rc=$ensureRc for $id (start aborted). tail: $tail", LogService::LOG_ERROR, "TerminalService");
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('ensure_failed', $agentName), self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'ensure_failed'];
         } else {
             LogService::log("Detached agent session is live for $id ($agentId).", LogService::LOG_INFO, "TerminalService");
         }

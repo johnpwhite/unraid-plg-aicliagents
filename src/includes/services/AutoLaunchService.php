@@ -168,6 +168,12 @@ class AutoLaunchService
      */
     public static function launchAllPending(?string $filterAgentId = null, string $reason = 'unknown', ?array $onlySessionIds = null, bool $resumePreviouslyRunning = false): array
     {
+        // Refuse the whole sweep before HOME consolidation planning or workers.
+        if (!TerminalService::runtimeReady()) {
+            self::log("Auto-launch blocked: required runtime unavailable (trigger=$reason). See install.log.", AICLI_LOG_WARN);
+            return ['launched' => 0, 'skipped' => 0, 'failed' => 0, 'sessions' => [], 'busy' => true, 'reason' => 'runtime_unavailable'];
+        }
+
         // Bug #532: serialise concurrent sweeps. PLG INLINE / disks_mounted /
         // InitService boot-marker can all fire within the same ~50 ms window
         // after Bug 521. Without this flock both processes pass the
