@@ -3,6 +3,63 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.30.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.10.30.02
+
+**Script runs (new)**
+
+- **Feat: your scripts can start an agent.** A User Script or a cron job can call `aicli-run` to start a real agent session in a workspace that you can see and use. The script waits for the answer and gets a short report, and the workspace closes when the run ends. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray. You choose which scripts may do this on **Settings, Script runs**.
+- **Feat: a script can ask for access.** `aicli-run --request-access` puts a request in the Activity tray and sends one Unraid notification. **Approve** adds the script with the limits it asked for. **Reject** stops it from asking again until the script file changes.
+- **Feat: a script approval is a readable card.** It shows the script, the agents, the folders, the mode and the daily limit, with the technical details folded away. Approve and Reject stay in view.
+- **Feat: a script can send a follow-up to its open run.** A second call with the same key sends its prompt into the read-only run that is still open, instead of starting a second run.
+- **Feat: a run can have its own temporary folder.** `aicli-run --temp` gives the run a private folder on your appdata pool. The plugin removes it a day after the run ends.
+
+**Agents and workspaces**
+
+- **Feat: OpenCode 2 is a new agent in the Agent Store.** It runs beside OpenCode, keeps its own data, and takes your Config Hub choices from OpenCode at its first install.
+- **Feat: an agent can start a helper workspace for a task**, report back and close it. This is off until you turn it on in **Settings, Sub-agent workspaces**. An agent can also start an existing workspace.
+- **Feat: a workspace can hold several scheduled Continues**, each with an optional reason.
+- **Fix: closing a workspace lets the agent save and exit cleanly** instead of a hard stop.
+- **Fix: after a reboot every auto-started workspace gets its terminal.** A workspace whose folder was deleted now says so.
+- **Fix: when an agent does not take the continue message after a restart**, the plugin presses Enter again, and the Activity tray asks you to press Enter if it stays.
+- **Fix: OpenCode sees each plugin skill once**, so new sessions with a local model start much faster. Codex no longer warns at every start that it cannot create its helper commands.
+- **Fix: the drawer nests every workspace an agent made under that agent**, and the tab of a deleted workspace closes.
+- **Fix: after a restart, an agent gets the continue message once**, also when several pages are open.
+- **Fix: the plugin no longer starts its background service again while the server shuts down.**
+
+**Agent Store and upgrades**
+
+- **Feat: an Agent Store card shows the version you run and the new version in full.** Select the new version to see its release notes and what an update does. The card also says how much space **Remove old versions** and **Uninstall** free, and **Check for updates** shows its progress.
+- **Fix: agent upgrades show real progress, pack about three times faster and survive a server restart.** An upgrade no longer waits for a home save that is not needed, or for old versions that no workspace uses.
+- **Fix: the Beta version list shows only the newest builds** and hides builds older than the stable release.
+- **Fix: Remove old versions finds every old version**, and a damaged cached install file is downloaded again.
+
+**Settings and Activity tray**
+
+- **Feat: the Settings page is easier to use.** It has plain labels, an (i) next to each setting for its help, cards that you can fold and reorder, Advanced parts that stay closed, and a Storage tab built from cards. A storage change waits for an **Apply** button.
+- **Feat: the Activity tray shows who acted**, for example "by root (John)", with an optional display name in Settings. Rows that offer only Dismiss leave after 5 minutes.
+- **Fix: a plugin page whose Unraid sign-in ended stops asking the server for updates** and shows a **Sign in again** bar, so it no longer blocks your next sign-in.
+
+**Notebook**
+
+- **Feat: voice mail notes have their own Voice mail heading**, folded at first, with a count of new messages.
+- **Improve: the Notebook opens faster**, also with many notes or a large note. The button that asks the agent to refresh a note is always in the note header.
+- **Fix: the file editor no longer replaces a note that an agent changed while you edited it.** It keeps your text, says who changed the note, and offers Reload and Copy my text.
+- **Fix: the Notebook and the Secrets folder work on an iPhone**, and the Notebook is easier to use with a screen reader, a keyboard, a finger and low vision.
+
+**Storage and boot disk**
+
+- **Feat: the Boot disk space card can archive and restore old layer images and old session logs.** It warns at 80 % full and refuses large writes over 85 % full. Your saves are never held back.
+- **Feat: a home card shows the old layers kept after Convert to plain folders**, with their size, the date they are removed, and a **Remove old layers** button. Configuration shows **Home storage** and **Agent storage** separately.
+- **Fix: an array stop with plugin storage on a pool no longer leaves the pool busy** (thanks to Joly0, GitHub PR #30). **Up one level** in the folder picker works again (thanks to Joly0, GitHub PR #32).
+
+**Config Hub and Relay**
+
+- **Security: a secret that you typed by hand into a Codex, Grok Build or Goose block no longer shows in the Config drift view.**
+- **Feat: the Config drift card is easier to read.** It has plain state words, a hover text on each button, and a **Compare** window that shows both texts side by side.
+- **Fix: Release on the Codex "command environment" row no longer removes Codex from every MCP server.** Global Instructions shows Claude Code and OpenCode as covered when they already read your instructions.
+- **Fix: the workspace config tree offers the right project file.** For OpenCode it is opencode.json in the project folder. **+ Add** opens an empty file even when its folder does not exist yet, and a file that two rows link to shows once.
+- **Improve: the Relay command has help for every action**, and an empty inbox says how to see messages that you already read.
+
 ## 2026.10.21.01
 
 **Live dictation (new)**
