@@ -784,12 +784,12 @@ class InstallerService {
         $plan = [];
         // The SquashFS layers (delta and consolidated).
         foreach (glob("$persist/agent_{$agentId}_*.sqsh") ?: [] as $f) $plan[] = ['path' => $f, 'kind' => 'file', 'ram' => false];
-        // Disk and RAM writable layers and work dirs: <id> and <id>@<generation>.
+        // Disk and RAM writable layers and work dirs: <id>, <id>@<generation> and <id>.stale-<time> (#859).
         $ramParent = StoragePathResolver::zramBase() . "/agents";
         foreach (["$persist/_upper/agents", "$persist/_work/agents", $ramParent] as $parent) {
             foreach (glob("$parent/" . $agentId . "*") ?: [] as $d) {
                 $name = basename($d);
-                if ($name === $agentId || preg_match('/^' . $q . '@/', $name)) {
+                if ($name === $agentId || preg_match('/^' . $q . '[@.]/', $name)) {
                     $plan[] = ['path' => $d, 'kind' => 'dir', 'ram' => $parent === $ramParent];
                 }
             }

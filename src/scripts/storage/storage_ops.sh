@@ -925,6 +925,24 @@ if [ "$_AGENT_VERSIONED" = "1" ]; then
         _LEGACY_UPPER="$UPPER_DIR"
         _LEGACY_WORK="$WORK_DIR"
         _entity_paths "$TYPE" "$ID" "$PERSIST_PATH" "$_AGENT_GEN_ID"
+        # #859: the shared layer may hold only files of an OLDER install that a
+        # bake already passed. Adopting it would hide the newer layer (the Store
+        # said 0.65.0, the binary was 0.46.0). Set it aside under a name no
+        # overlay mounts; the generation then starts with an empty layer.
+        _NEWEST_LAYER="$(ls -t "${FILES[@]}" 2>/dev/null | head -1)"
+        if [ -d "$_LEGACY_UPPER" ] && agent_upper_is_stale "$_LEGACY_UPPER" "$_NEWEST_LAYER" \
+           && [ "$(agent_generation_count "$ID")" -eq 0 ] \
+           && ! mountpoint -q "$_AGENT_STABLE_LINK" 2>/dev/null; then
+            if _STALE_DEST="$(agent_quarantine_stale_upper "$_LEGACY_UPPER" "$_LEGACY_WORK")"; then
+                log "Agent $ID: the shared writable layer $_LEGACY_UPPER holds only files older than the layer $(basename -- "$_NEWEST_LAYER"). It is NOT adopted into generation $_AGENT_GEN_ID. Moved aside to $_STALE_DEST."
+                lifecycle_log "warn" "mount_stack" "agent_stale_upper_quarantined" \
+                    "{\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\",\"from\":\"$_LEGACY_UPPER\",\"to\":\"$_STALE_DEST\"}" 2>/dev/null || true
+                _LEGACY_UPPER=""
+            else
+                log "Agent $ID: the shared writable layer $_LEGACY_UPPER is stale but could not be moved aside — generation $_AGENT_GEN_ID starts with a fresh one and the old layer stays unused."
+                _LEGACY_UPPER=""
+            fi
+        fi
         if [ "$(agent_generation_count "$ID")" -eq 0 ] \
            && ! mountpoint -q "$_AGENT_STABLE_LINK" 2>/dev/null \
            && [ -d "$_LEGACY_UPPER" ] && [ ! -e "$UPPER_DIR" ]; then

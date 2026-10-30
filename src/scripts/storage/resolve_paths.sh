@@ -476,6 +476,37 @@ agent_generation_upper_is_shared() {
     return 1
 }
 
+# agent_upper_is_stale <upper_dir> <layer_file>   (#859)
+# True when the writable layer holds at least one regular file and NO file is
+# newer than the layer. Work that is not baked yet is always newer than the
+# newest baked layer, so such a layer holds only files of an older install that a
+# bake already passed. It must never sit above that layer: it hides the layer.
+# PURE: it reads modification times and changes nothing.
+agent_upper_is_stale() {
+    local upper="${1:-}" layer="${2:-}"
+    [ -d "$upper" ] && [ -n "$layer" ] && [ -e "$layer" ] || return 1
+    [ -n "$(find "$upper" -type f -print -quit 2>/dev/null)" ] || return 1
+    [ -z "$(find "$upper" -type f -newer "$layer" -print -quit 2>/dev/null)" ]
+}
+
+# agent_quarantine_stale_upper <upper_dir> <work_dir>   (#859)
+# Rename a stale writable layer (and its work dir) to "<name>.stale-<UTC time>"
+# beside it. No overlay mounts that name, and nothing is deleted: the files stay
+# on flash until the person removes them (an agent uninstall removes them too).
+# Prints the new upper path. Returns 1 when the rename fails.
+agent_quarantine_stale_upper() {
+    local upper="${1:-}" work="${2:-}" stamp dest
+    [ -d "$upper" ] || return 1
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dest="${upper%/}.stale-$stamp"
+    [ ! -e "$dest" ] || dest="$dest-$$"
+    mv -T "$upper" "$dest" 2>/dev/null || return 1
+    if [ -n "$work" ] && [ -d "$work" ]; then
+        mv -T "$work" "${work%/}.stale-$stamp" 2>/dev/null || true
+    fi
+    printf '%s\n' "$dest"
+}
+
 # agent_staging_mount <agent_id>
 # SIDE_BY_SIDE_AGENT_INSTALLS.md Phase 3 (2026-09-15): where a NEW version of an
 # agent is installed, while the version in service keeps running untouched.
