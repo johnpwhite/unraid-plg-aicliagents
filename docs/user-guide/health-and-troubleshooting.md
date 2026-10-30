@@ -225,6 +225,7 @@ The Health check reads cheap information: files, the mount list and free space. 
 | A Relay message did not reach an agent. | The agent was busy, so the notice is held. | Look for the pill in the Activity tray. See [Agent Relay](relay.md). |
 | An agent says "Plugin management tools are turned off". | The switch is Off. | Turn on **Let agents manage the plugin**. See [Plugin management tools for agents](agent-tools.md). |
 | An Unraid page hangs or freezes while the Notebook is on. | The cause is not known yet. | Open **Settings, AI CLI Agents, Configuration**, find the **Notebook** card and set **Notebook** to Off. The page frees up at once. Then open an issue on GitHub (use **Create GitHub issue** in the Support menu) or ask on the forum thread. Say what hung (every Unraid page, or only the plugin pages), how long it lasted, and what your server was doing. If you can, tick **Performance trace** (in the **Support** menu on the **Debug Console** tab) before it hangs again. See **The Performance trace switch** above. |
+| A bar at the top says "Your Unraid sign-in has ended". | Your Unraid sign-in in this browser ended, for example after a time-out or a sign-out in another tab. The page stopped asking the server for updates, so it does not fill the server's sign-in limit. | Press **Sign in again**, then sign in. The page opens again. |
 | A browser tab shows errors again and again. | The page code is old or damaged. | Reload the page. Check the **client_errors** check. Send a support bundle if it continues. |
 | You do not know the cause. | — | Build a support bundle, copy the forum post, and ask on the support thread. |
 
@@ -245,6 +246,7 @@ If the problem is not here, build a support bundle and ask on the forum thread f
 <details>
 <summary>Change history</summary>
 
+- **2026-10-30** — A page whose Unraid sign-in ended stops asking the server for updates and shows a bar with **Sign in again**. Spec `docs/specs/EVENT_STREAM_MULTIPLEX.md`, issue #857.
 - **2026-10-26** — The Activity tray groups refused agent actions in a short-lived row and groups calls after the first 20 per tool each minute. Spec `docs/specs/PLUGIN_MANAGEMENT_TOOLS.md`, issue #804.
 - **2026-10-24** — A row in the Activity tray shows who did it, for example "by root (John)", and who approved or rejected a proposal. Spec `docs/specs/HUMAN_ACTOR_IDENTITY.md`, issue #450.
 - **2026-10-23** — The Health dot has an (i) button. Its panel lists the checks that are not fine and has a button to the Debug Console. Two pointers to the **Home Storage** tab now say **Storage**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
