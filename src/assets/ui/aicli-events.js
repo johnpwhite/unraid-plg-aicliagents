@@ -157,7 +157,110 @@
         });
     }
 
+    // #857: when the Unraid sign-in of an open tab ends, nginx answers every plugin request
+    // and every stream request with a redirect to /login. The tab went on polling, so each
+    // poll and each stream reopen loaded the login page; in 11 s that hit nginx's login rate
+    // limit (zone "authlimit"), which can refuse the person's own next sign-in. The first
+    // plugin request that ends on /login marks the page signed out: no plugin request and no
+    // stream reopen leaves the page after that, and one bar asks the person to sign in again.
+    // This script loads before every consumer, so it sees every fetch and every XHR (jQuery).
+    var signedOut = false;
+    api.signedOut = false;
+
+    function pathOf(url) {
+        try { return new URL(String(url), window.location.href).pathname; } catch (e) { return ''; }
+    }
+    function isPluginUrl(url) {
+        var p = pathOf(url);
+        return p.indexOf('/plugins/unraid-aicliagents/') === 0 || p.indexOf('/sub/aicli_') === 0;
+    }
+
+    function showSignedOutBar() {
+        if (!document.body || document.getElementById('aicli-signed-out-bar')) return;
+        var bar = document.createElement('div');
+        bar.id = 'aicli-signed-out-bar';
+        bar.setAttribute('role', 'alert');
+        bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10002;display:flex;flex-wrap:wrap;'
+            + 'align-items:center;justify-content:center;gap:12px;padding:10px 16px;'
+            + 'background:#7a4b00;color:#fff;font-size:14px;line-height:1.4';
+        var text = document.createElement('span');
+        text.textContent = 'Your Unraid sign-in has ended. This page stopped asking the server for updates.';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Sign in again';
+        btn.style.cssText = 'min-height:44px;padding:0 16px;margin:0';
+        btn.addEventListener('click', function () { window.location.reload(); });
+        bar.appendChild(text);
+        bar.appendChild(btn);
+        document.body.appendChild(bar);
+    }
+
+    function markSignedOut() {
+        if (signedOut) return;
+        signedOut = true;
+        api.signedOut = true;
+        if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        try { if (api._es) api._es.close(); } catch (e) { /* already closed */ }
+        setStatus('signed-out');
+        fire('aicli-signed-out', {});
+        if (document.body) showSignedOutBar();
+        else document.addEventListener('DOMContentLoaded', showSignedOutBar);
+    }
+    api._markSignedOut = markSignedOut; // test seam
+
+    // The wrappers are installed once per page and read the state from window.aicliEvents
+    // when they run, never from the closure of the load that installed them.
+    function pageSignedOut() { return !!(window.aicliEvents && window.aicliEvents.signedOut); }
+    function notePageSignedOut() {
+        if (window.aicliEvents && typeof window.aicliEvents._markSignedOut === 'function') window.aicliEvents._markSignedOut();
+    }
+
+    var nativeFetch = window.fetch;
+    if (typeof nativeFetch === 'function' && nativeFetch.__aicliNative) nativeFetch = nativeFetch.__aicliNative;
+    if (typeof window.fetch === 'function' && !window.fetch.__aicliNative) {
+        var pageFetch = window.fetch;
+        var guardedFetch = function (input) {
+            var url = (input && typeof input === 'object' && 'url' in input) ? input.url : input;
+            if (pageSignedOut() && isPluginUrl(url)) {
+                // "Failed to fetch" is network noise to the page's error handler: no toast.
+                return Promise.reject(new TypeError('Failed to fetch (signed out)'));
+            }
+            return pageFetch.apply(this, arguments).then(function (res) {
+                if (res && res.redirected && pathOf(res.url) === '/login' && isPluginUrl(url)) notePageSignedOut();
+                return res;
+            });
+        };
+        guardedFetch.__aicliNative = pageFetch;
+        window.fetch = guardedFetch;
+    }
+
+    var XHR = window.XMLHttpRequest;
+    if (XHR && XHR.prototype && !XHR.prototype.__aicliSignedOutGuard) {
+        var nativeOpen = XHR.prototype.open;
+        var nativeSend = XHR.prototype.send;
+        XHR.prototype.__aicliSignedOutGuard = true;
+        XHR.prototype.open = function (method, url) {
+            this.__aicliUrl = url;
+            return nativeOpen.apply(this, arguments);
+        };
+        XHR.prototype.send = function () {
+            var xhr = this;
+            if (pageSignedOut() && isPluginUrl(xhr.__aicliUrl)) {
+                // Never sent: the caller sees an aborted request, as after a lost network.
+                try { xhr.abort(); } catch (e) { /* not open */ }
+                return undefined;
+            }
+            if (isPluginUrl(xhr.__aicliUrl)) {
+                xhr.addEventListener('loadend', function () {
+                    if (xhr.responseURL && pathOf(xhr.responseURL) === '/login') notePageSignedOut();
+                });
+            }
+            return nativeSend.apply(this, arguments);
+        };
+    }
+
     function connect() {
+        if (signedOut) return;
         if (!channels.length) { setStatus('unsupported'); return; }
         if (typeof EventSource === 'undefined') { setStatus('unsupported'); return; }
         try {
@@ -192,9 +295,19 @@
     function scheduleReconnect(deadEs) {
         if (reconnectTimer !== null) return;
         try { deadEs.close(); } catch (e) { /* already closed */ }
+        if (signedOut) return;
         reconnectTimer = setTimeout(function () {
             reconnectTimer = null;
-            connect();
+            // #857: a stream request after the sign-in ended follows the redirect to /login
+            // and gives the script no address to read. One small request that does not
+            // follow redirects tells the two cases apart before the stream opens again.
+            if (typeof nativeFetch !== 'function') { connect(); return; }
+            nativeFetch.call(window, '/plugins/unraid-aicliagents/AICliAjax.php?action=get_asset_version',
+                { redirect: 'manual', credentials: 'same-origin', cache: 'no-store' })
+                .then(function (res) {
+                    if (res && res.type === 'opaqueredirect') markSignedOut();
+                    else connect();
+                }, function () { connect(); });
         }, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, 30000);
     }
