@@ -187,6 +187,9 @@ if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
         stopping|halting) IS_SHUTDOWN=true ;;
     esac
 fi
+# #853: tell the supervisor not to start again while the server goes down.
+# On tmpfs, so it is gone after the boot.
+[ "$IS_SHUTDOWN" = true ] && { touch "${MOUNT_ROOT}/.system_shutdown" 2>/dev/null || true; }
 
 # Helper: run the full stop script, bounded by the Unraid-derived budget.
 # GH #10 / #228: reserve a slice of that budget for the squashfs loop-mount

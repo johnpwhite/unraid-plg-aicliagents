@@ -471,7 +471,13 @@ class ActivityService {
             $dir = dirname(StoragePathResolver::degradedStatePath());
         }
         $n = 0;
+        $bootTime = self::bootTime();
         foreach (glob($dir . '/interrupted-install_*.json') ?: [] as $file) {
+            // #852: a record written in THIS boot belongs to a shutdown that is still
+            // running. A page that reads the tray then must not take it into the RAM
+            // tray, which the reboot erases. It stays on flash for the next boot.
+            $mtime = @filemtime($file);
+            if ($bootTime > 0 && $mtime !== false && $mtime >= $bootTime) continue;
             $rec = @json_decode((string)@file_get_contents($file), true);
             @unlink($file);
             $opId = is_array($rec) ? self::safeOpId($rec['opId'] ?? '') : null;
@@ -489,6 +495,16 @@ class ActivityService {
 
     /** Test hook: let the next listAll() import again. */
     public static function resetInterruptedImport(): void { self::$interruptedImported = false; }
+
+    /** #852 test seam: the boot time in epoch seconds. Null reads /proc/uptime. */
+    public static ?int $bootTimeOverride = null;
+
+    /** Epoch seconds of the current boot; 0 when unknown (then every record is imported). */
+    private static function bootTime(): int {
+        if (self::$bootTimeOverride !== null) return self::$bootTimeOverride;
+        $up = (float)strtok((string)@file_get_contents('/proc/uptime'), ' ');
+        return $up > 0 ? time() - (int)$up : 0;
+    }
 
     /**
      * #823: the step text of a running bake. mksquashfs 4.5 (prod01) redraws its

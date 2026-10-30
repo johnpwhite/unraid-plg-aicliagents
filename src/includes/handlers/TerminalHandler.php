@@ -83,7 +83,11 @@ class TerminalHandler {
             // workspace run again; the server says no for all of them. The menu
             // Continue ('menu') is not held: a click is always the operator's choice.
             $result = ['status' => 'ok', 'delivered' => false, 'deferred' => true, 'reason' => 'held-after-switch'];
+        } elseif (($slot = self::claimContinueSlot($id)) === null) {
+            // #851: another page's request for this session is pasting right now.
+            $result = ['status' => 'ok', 'delivered' => false, 'deferred' => true, 'reason' => 'in-flight'];
         } elseif (self::continueOnCooldown($id)) {
+            self::releaseContinueSlot($slot);
             // REVIEW_2026-09-13_EVENTS_AND_SECURITY.md E3: the push guard (an
             // event handler) and the poll guard (DrawerPanel's own timer) can
             // both decide, within the same few seconds, that this session just
@@ -100,6 +104,7 @@ class TerminalHandler {
             if (($result['status'] ?? '') === 'ok') {
                 self::markContinueDelivered($id);
             }
+            self::releaseContinueSlot($slot);
         }
         self::recordContinue($id, $agentId, $trigger, $result);
         return $result;
@@ -208,6 +213,35 @@ class TerminalHandler {
             @mkdir($dir, 0777, true);
         }
         @touch(self::continueCooldownMarker($id));
+    }
+
+    /**
+     * #851: the cooldown marker is armed only after the paste ends (about 3 s), so
+     * two pages that ask in the same second both passed the check and both pasted
+     * the continue message. The caller holds this per-session lock (non-blocking,
+     * tmpfs) over the check, the paste and the mark. Returns the lock handle, or
+     * null when another request for the same session holds it.
+     *
+     * @return resource|null
+     */
+    public static function claimContinueSlot(string $id) {
+        $dir = self::continueCooldownDir();
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0777, true);
+        }
+        $fh = @fopen($dir . '/.lock-' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $id), 'c');
+        if ($fh === false) return null;
+        if (!flock($fh, LOCK_EX | LOCK_NB)) {
+            fclose($fh);
+            return null;
+        }
+        return $fh;
+    }
+
+    /** @param resource $fh */
+    public static function releaseContinueSlot($fh): void {
+        flock($fh, LOCK_UN);
+        fclose($fh);
     }
 
     /** Allow-listed origin of a continue request — never a free-form string in a log. */

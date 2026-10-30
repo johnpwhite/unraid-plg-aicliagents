@@ -5011,6 +5011,14 @@ _do_start() {
         lifecycle_log "info" "supervisor" "supervisor_start_refused_array_stopping" "{}" 2>/dev/null || true
         return 0
     fi
+    # #853: during a reboot or power-off, a page request must not start the
+    # supervisor again (on 2026-10-30 it reconciled every agent and mounted the
+    # home 3 s after event/stopping had stopped it).
+    if declare -f aicli_system_shutting_down >/dev/null 2>&1 && aicli_system_shutting_down; then
+        log_info "Supervisor start refused: the server is shutting down"
+        lifecycle_log "info" "supervisor" "supervisor_start_refused_shutdown" "{}" 2>/dev/null || true
+        return 0
+    fi
 
     mkdir -p "$STATUS_DIR" 2>/dev/null || true
     mkdir -p "$SUPERVISOR_DIR" 2>/dev/null || true

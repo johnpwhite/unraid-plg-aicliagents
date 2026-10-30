@@ -134,6 +134,14 @@ aicli_array_stopping() {
     grep -q '^fsState="Stopping"' "${AICLI_VAR_INI:-/var/local/emhttp/var.ini}" 2>/dev/null
 }
 
+# aicli_system_shutting_down: true from event/stopping on a reboot or power-off
+# until the power goes (the flag is on tmpfs). #853: with storage on flash the
+# array-stop guard below does not apply, so an open page started the supervisor
+# again during the shutdown. AICLI_SYSTEM_SHUTDOWN_FLAG is a test seam.
+aicli_system_shutting_down() {
+    [ -f "${AICLI_SYSTEM_SHUTDOWN_FLAG:-$MOUNT_ROOT/.system_shutdown}" ]
+}
+
 # aicli_blocked_by_array_stop <path>: true when <path> is on the array or a
 # pool and the array is stopping. Then nothing may mount from it, and nothing
 # may start a process that holds it. Storage on flash or RAM is never blocked.
