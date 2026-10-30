@@ -1,6 +1,6 @@
 <?xml version='1.0' standalone='yes'?>
 
-<PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.30.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
+<PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.30.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
 ## 2026.10.21.01
@@ -685,51 +685,51 @@
 
 
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/cleanup.sh</URL>
 <SHA256>41219fd49f33ffb98ba7038d948a82970b2d3960a587b6b2c5826567de1ed50f</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/migrate-from-geminicli.sh</URL>
 <SHA256>2b9bedd8ec730e00f0dadd62b2c87c11a0792505f83742f857c22bc87b0dc24b</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/runtime.sh</URL>
 <SHA256>5f22be3487a1152d813c210696c97d88c1cc35c0c40cad75e8d8584d29b68644</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/ui-assets.sh</URL>
 <SHA256>61ae68743a6da42aa8c33996b932e0ec8fc5fc8033fcd11ec420579c2e8a2474</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-storage-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-storage-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/storage.sh</URL>
 <SHA256>d5384889b25ef728fcceaf9c435da99c7e6c8305d52bd7e74fffb3338be853a9</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
 <SHA256>864771ef1f3c31d03e3bea24d33de2b6085445dcac438be3b633020bd68676ac</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
 <SHA256>915d3bb58e9a95659e45bbc86d5954817a8ba89ece05c7cb6d6cd9d46750c58c</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/stop-plugin.sh</URL>
 <SHA256>10f066fd7ef279c75833d280c6757c4f1d66154ffb31902c90a7ee7fa497f62e</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.10.30.01.page">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.10.30.02.page">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>
 <SHA256>4293d13ca84783aca5a12adc9e09c136f7aee353f0aebf65b796d5e63475e05d</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-src-2026.10.30.01.tar.gz">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-src-2026.10.30.02.tar.gz">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src.tar.gz</URL>
-<SHA256>5cdd67229a5d5f957c5e9ec6c5528c08e12ec272d70f43dc885182c265a9daef</SHA256>
+<SHA256>b7db0b3543bdc9c34debcad98e038bd03380f4a8df1f71049d216d30ce0ea528</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/install-engine.sh</URL>
 <SHA256>8e15c8762a8fae491a4b72bdbe36c5fab9e14d5037b1e9d0305dd1bd443d3795</SHA256>
 </FILE>
-<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.10.30.01.sh">
+<FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.10.30.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/uninstaller/uninstall-engine.sh</URL>
 <SHA256>c791c93fef3ac3f6017d99947a7fe0c59484fd1b014a514259d28bebfcc3917e</SHA256>
 </FILE>
@@ -740,7 +740,7 @@
 #!/bin/bash
 # AICliAgents Modular Installer Engine
 export NAME="unraid-aicliagents"
-export VERSION="2026.10.30.01"
+export VERSION="2026.10.30.02"
 export GIT_URL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main"
 export EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 export CONFIG_DIR="/boot/config/plugins/unraid-aicliagents"
@@ -780,12 +780,12 @@ export OLD_LAYOUT_VERSION="$_OLD_LV"
 for _orphan in "/boot/config/plugins/${NAME}-new.plg"; do
     [ -f "$_orphan" ] || continue
     _orphan_ver=$(grep -oP '&lt;!ENTITY version\s+"[^"]+"' "$_orphan" 2>/dev/null | grep -oP '"[^"]+"' | tr -d '"' | head -1)
-    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.10.30.01" ]; then
+    if [ -n "$_orphan_ver" ] &amp;&amp; [ "$_orphan_ver" != "2026.10.30.02" ]; then
         # Sort: if orphan_ver lex-sorts BEFORE our version, orphan is older — safe to remove.
-        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.10.30.01" | sort -V | tail -1)
-        if [ "$_newest" = "2026.10.30.01" ]; then
+        _newest=$(printf '%s\n%s\n' "$_orphan_ver" "2026.10.30.02" | sort -V | tail -1)
+        if [ "$_newest" = "2026.10.30.02" ]; then
             rm -f "$_orphan" "/var/log/plugins/${NAME}-new.plg" 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.10.30.01)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AICliAgents] INFO: Removed orphan ${NAME}-new.plg ($_orphan_ver, older than 2026.10.30.02)" &gt;&gt; "$LOG_FILE" 2&gt;/dev/null || true
         fi
     fi
 done
@@ -819,12 +819,12 @@ export -f log_status log_step log_ok log_warn log_fail log_progress get_ts
 # exists — on EVERY invocation, including a CA "Check for Updates" upgrade and a
 # reinstall — and no checksum is declared, so a FIXED cache name would serve the
 # first-ever installed payload forever. Every cached file therefore carries the
-# plugin version in its name (aicli-src-2026.10.30.01.tar.gz, aicli-engine-2026.10.30.01.sh,
+# plugin version in its name (aicli-src-2026.10.30.02.tar.gz, aicli-engine-2026.10.30.02.sh,
 # …): a new version is a new name that has never existed on flash, so it MUST be
 # fetched; the same version (reboot, reinstall) is a hit and stays network-free.
 # The version suffix is stripped here so every path the engine uses is unchanged.
 LOCAL_CACHE="/boot/config/plugins/unraid-aicliagents"
-CACHE_VERSION="2026.10.30.01"
+CACHE_VERSION="2026.10.30.02"
 for f in "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".sh "$LOCAL_CACHE"/aicli-*-"$CACHE_VERSION".page "$LOCAL_CACHE"/aicli-src-"$CACHE_VERSION".tar.gz; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
