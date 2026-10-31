@@ -1,5 +1,6 @@
 #!/bin/bash
-_INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
+_INSTALLER_RESOLVER="${AICLI_STAGED_SRC:-}/scripts/storage/resolve_paths.sh"
+[ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
 [ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/storage/resolve_paths.sh"
 source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents Installer: Runtime Dependencies (Node, tmux, fd, rg)
@@ -25,10 +26,31 @@ source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; exit 1; 
 # D-170: Move Runtime to plugin root (Flash/RAM) instead of Btrfs agents image.
 # This ensures that if the agent image is corrupted or being replaced during a repair,
 # the core system tools (Node, tmux, etc.) remain available to the repair engine.
-RUNTIME_BASE="$EMHTTP_DEST/.runtime"
-BIN_DEST="$EMHTTP_DEST/bin"
+RUNTIME_BASE="${AICLI_RUNTIME_BASE:-$EMHTTP_DEST/.runtime}"
+BIN_DEST="${AICLI_BIN_DEST:-$EMHTTP_DEST/bin}"
+GLOBAL_BIN_DIR="${AICLI_GLOBAL_BIN_DIR:-/usr/local/bin}"
 mkdir -p "$RUNTIME_BASE"
 mkdir -p "$BIN_DEST"
+mkdir -p "$GLOBAL_BIN_DIR"
+
+RUNTIME_WORK=$(mktemp -d "$RUNTIME_BASE/.provision.XXXXXX") || {
+    log_fail "Could not create the runtime staging directory: $RUNTIME_BASE"
+    exit 1
+}
+RUNTIME_ARCHIVE_PARTIAL=""
+cleanup_runtime_work() {
+    [ -z "${RUNTIME_ARCHIVE_PARTIAL:-}" ] || rm -f -- "$RUNTIME_ARCHIVE_PARTIAL"
+    rm -rf -- "$RUNTIME_WORK"
+}
+trap cleanup_runtime_work EXIT
+exec 8>"$RUNTIME_BASE/.provision.lock" || {
+    log_fail "Could not open the runtime provisioning lock."
+    exit 1
+}
+flock -w 60 8 || {
+    log_fail "Runtime provisioning is already running."
+    exit 1
+}
 
 # WP #1082 (2026-05-24): SHA256 verification for every download. Pinned URLs
 # return the same bytes per upstream contract; a mismatch means the download
@@ -37,26 +59,145 @@ mkdir -p "$BIN_DEST"
 # update via tools/refresh-runtime-sha256.sh if a URL is changed.
 #
 # verify_sha256 <file_path> <expected_sha256> <name>
-# Returns 0 on match, exits 1 on mismatch (removes the bad file first).
+# Returns 0 on a non-empty file with a matching checksum.
 verify_sha256() {
-    local _file="$1" _expected="$2" _name="${3:-binary}"
-    if [ ! -f "$_file" ]; then
-        log_fail "$_name: download missing at $_file (cannot verify)."
+    local file="$1" expected="${2:-}" name="${3:-binary}" actual bytes
+    bytes=0
+    [ ! -f "$file" ] || { bytes=$(wc -c < "$file" 2>/dev/null) || bytes=0; }
+    if [ ! -s "$file" ]; then
+        log_fail "$name: download missing or empty at $file (bytes=$bytes)."
         return 1
     fi
-    local _actual
-    _actual=$(sha256sum "$_file" 2>/dev/null | awk '{print $1}')
-    if [ -z "$_actual" ]; then
-        log_fail "$_name: sha256sum failed on $_file."
-        rm -f "$_file"
-        exit 1
+    [ -n "$expected" ] || return 0
+    actual=$(sha256sum "$file" 2>/dev/null | awk '{print $1}') || actual=""
+    if [ -z "$actual" ]; then
+        log_fail "$name: sha256sum failed on $file."
+        return 1
     fi
-    if [ "$_actual" != "$_expected" ]; then
-        log_fail "$_name: SHA256 mismatch — expected=$_expected actual=$_actual (possible corruption / MITM)."
-        rm -f "$_file"
-        exit 1
+    if [ "$actual" != "$expected" ]; then
+        log_fail "$name: SHA256 mismatch — expected=$expected actual=$actual (possible corruption / MITM)."
+        return 1
     fi
     return 0
+}
+
+# download_verified <cache_path> <sha256-or-empty> <name> <url> [alternate_url...]
+# Keep the old cache until a complete, non-empty candidate passes verification.
+download_verified() {
+    local dest="$1" expected="$2" name="$3" url attempt rc part publish_partial bytes
+    shift 3
+    publish_partial="${dest}.partial"
+    RUNTIME_ARCHIVE_PARTIAL="$publish_partial"
+    if [ -e "$dest" ]; then
+        if verify_sha256 "$dest" "$expected" "$name"; then return 0; fi
+        log_warn "$name: cached download failed verification; trying a fresh download."
+    fi
+
+    mkdir -p "$(dirname "$dest")" || return 1
+    if ! rm -f -- "$publish_partial"; then
+        log_fail "$name: could not clear the previous cache staging file: $publish_partial."
+        return 1
+    fi
+    part=$(mktemp "$RUNTIME_WORK/download.XXXXXX") || return 1
+    for url in "$@"; do
+        for attempt in 1 2 3; do
+            : > "$part"
+            rc=0
+            wget -q --timeout=20 --tries=1 -O "$part" "$url" || rc=$?
+            bytes=$(wc -c < "$part" 2>/dev/null) || bytes=0
+            log_status "$name: download attempt=$attempt rc=$rc url=$url bytes=$bytes"
+            if [ "$rc" -eq 0 ] && verify_sha256 "$part" "$expected" "$name"; then
+                if ! cp "$part" "$publish_partial"; then
+                    log_fail "$name: could not stage the verified download on the cache filesystem."
+                    rm -f -- "$part" "$publish_partial"
+                    return 1
+                fi
+                if ! verify_sha256 "$publish_partial" "$expected" "$name"; then
+                    rm -f -- "$part" "$publish_partial"
+                    return 1
+                fi
+                if mv -f "$publish_partial" "$dest"; then
+                    rm -f -- "$part"
+                    return 0
+                fi
+                log_fail "$name: could not publish the verified download to $dest."
+                rm -f -- "$part" "$publish_partial"
+                return 1
+            fi
+            [ "$attempt" -eq 3 ] || sleep "$attempt"
+        done
+    done
+    rm -f "$part"
+    log_fail "$name: all verified download attempts failed; runtime unavailable."
+    return 1
+}
+
+# publish_binary <source> <destination> <version-flag>
+# Validate a staged executable before an atomic rename replaces the destination.
+publish_binary() {
+    local source="$1" dest="$2" flag="$3" candidate
+    if [ ! -s "$source" ] || [ ! -x "$source" ] || ! timeout 5 "$source" "$flag" >/dev/null 2>&1; then
+        log_fail "Executable validation failed for candidate: $source"
+        return 1
+    fi
+    mkdir -p "$(dirname "$dest")" || return 1
+    candidate=$(mktemp "$dest.next.XXXXXX") || return 1
+    if ! cp "$source" "$candidate" || ! chmod 755 "$candidate" \
+        || ! timeout 5 "$candidate" "$flag" >/dev/null 2>&1; then
+        rm -f "$candidate"
+        log_fail "Executable validation failed before publication: $dest"
+        return 1
+    fi
+    if ! mv -f "$candidate" "$dest"; then
+        rm -f "$candidate"
+        log_fail "Could not publish the validated executable: $dest"
+        return 1
+    fi
+    return 0
+}
+
+# runtime_executable_works <bin_dir> <executable> <version_flag>
+# npm and npx use /usr/bin/env node, so test them with the matching Node first.
+runtime_executable_works() {
+    local bin_dir="$1" executable="$2" flag="$3"
+    PATH="$bin_dir:$PATH" timeout 5 "$executable" "$flag" >/dev/null 2>&1
+}
+
+# cleanup_stale_runtime_archives <cache_dir> <current_archive...>
+# Keep only the current runtime archives for offline repair and reboot.
+cleanup_stale_runtime_archives() {
+    local cache_dir="$1" pattern file filename keep current current_cached
+    shift
+    for pattern in \
+        'node-v*-linux-x64.tar.gz' \
+        'tmux-v*.gz' \
+        'fd-v*-x86_64-unknown-linux-musl.tar.gz' \
+        'ripgrep-*-x86_64-unknown-linux-musl.tar.gz' \
+        'git-lfs-linux-amd64-v*.tar.gz' \
+        'squashfs-tools-*.txz'; do
+        current_cached=0
+        for keep in "$@"; do
+            case "$keep" in
+                $pattern) [ -f "$cache_dir/$keep" ] && current_cached=1 ;;
+            esac
+        done
+        if [ "$current_cached" -ne 1 ]; then
+            log_status "Keeping cached $pattern archives because the current archive is unavailable."
+            continue
+        fi
+        for file in "$cache_dir"/$pattern; do
+            [ -f "$file" ] || continue
+            filename=${file##*/}
+            current=0
+            for keep in "$@"; do
+                if [ "$filename" = "$keep" ]; then current=1; break; fi
+            done
+            if [ "$current" -eq 0 ]; then
+                log_status "Removing stale runtime archive $filename."
+                rm -f -- "$file" || log_warn "Could not remove stale runtime archive $filename."
+            fi
+        done
+    done
 }
 
 # --- 1. Node.js Runtime (v22+ required) ---
@@ -64,39 +205,82 @@ NODE_TAR="node-v22.22.0-linux-x64.tar.gz"
 NODE_URL="https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.gz"
 NODE_SHA256="c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744"
 
-USE_SYSTEM_NODE=0
-if command -v node > /dev/null 2>&1; then
-    NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [[ "$NODE_VER" =~ ^[0-9]+$ ]] && [ "$NODE_VER" -ge 22 ]; then
-        USE_SYSTEM_NODE=1
+USE_SYSTEM_NODE=1
+REAL_NODE=""
+REAL_NPM=""
+REAL_NPX=""
+for node_tool in node npm npx; do
+    found=$(command -v "$node_tool" 2>/dev/null || true)
+    real=$(readlink -f "$found" 2>/dev/null || true)
+    case "$real" in
+        ""|"$BIN_DEST"/*|"$RUNTIME_BASE"/*) USE_SYSTEM_NODE=0 ;;
+    esac
+    if [ -z "$real" ] || [ ! -x "$real" ] \
+        || ! runtime_executable_works "$(dirname "$found")" "$found" --version; then
+        USE_SYSTEM_NODE=0
     fi
-fi
+    case "$node_tool" in
+        node) REAL_NODE="$real" ;;
+        npm) REAL_NPM="$real" ;;
+        npx) REAL_NPX="$real" ;;
+    esac
+done
+NODE_VER=$("${REAL_NODE:-/nonexistent}" -v 2>/dev/null | sed 's/v//' | cut -d. -f1) || NODE_VER=0
+if ! [[ "$NODE_VER" =~ ^[0-9]+$ ]] || [ "$NODE_VER" -lt 22 ]; then USE_SYSTEM_NODE=0; fi
 
 log_step "Node.js runtime..."
 if [ "$USE_SYSTEM_NODE" -eq 1 ]; then
     log_ok "System Node.js v$NODE_VER -- using system runtime."
-    ln -sf "$(which node)" "$BIN_DEST/node"
-    if command -v npm > /dev/null 2>&1; then ln -sf "$(which npm)" "$BIN_DEST/npm"; fi
-    if command -v npx > /dev/null 2>&1; then ln -sf "$(which npx)" "$BIN_DEST/npx"; fi
+    ln -sfn "$REAL_NODE" "$BIN_DEST/node"
+    ln -sfn "$REAL_NPM" "$BIN_DEST/npm"
+    ln -sfn "$REAL_NPX" "$BIN_DEST/npx"
 else
-    if [ ! -f "$RUNTIME_BASE/node/bin/node" ]; then
-        log_status "    > Downloading portable Node.js..."
-        if [ ! -f "$CONFIG_DIR/$NODE_TAR" ]; then
-            wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$NODE_TAR" "$NODE_URL"
+    PORTABLE_NODE_READY=1
+    for node_tool in node npm npx; do
+        if [ ! -x "$RUNTIME_BASE/node/bin/$node_tool" ] \
+            || ! runtime_executable_works "$RUNTIME_BASE/node/bin" "$RUNTIME_BASE/node/bin/$node_tool" --version; then
+            PORTABLE_NODE_READY=0
         fi
-        verify_sha256 "$CONFIG_DIR/$NODE_TAR" "$NODE_SHA256" "Node.js" || exit 1
-        TMP_EXTRACT="/tmp/node-extract-$$"
-        mkdir -p "$TMP_EXTRACT"
-        tar -xf "$CONFIG_DIR/$NODE_TAR" -C "$TMP_EXTRACT" --no-same-owner
+    done
+    if [ "$PORTABLE_NODE_READY" -ne 1 ]; then
+        log_status "    > Downloading portable Node.js..."
+        download_verified "$CONFIG_DIR/$NODE_TAR" "$NODE_SHA256" "Node.js" "$NODE_URL" || exit 1
+        TMP_EXTRACT="$RUNTIME_WORK/node-extract"
+        mkdir -p "$TMP_EXTRACT" || exit 1
+        if ! tar -xzf "$CONFIG_DIR/$NODE_TAR" -C "$TMP_EXTRACT" --no-same-owner; then
+            log_fail "Node.js archive extraction failed."
+            exit 1
+        fi
         NODE_DIR=$(find "$TMP_EXTRACT" -maxdepth 1 -mindepth 1 -type d -name "node-*" | head -n 1)
-        mkdir -p "$RUNTIME_BASE/node"
-        cp -r "$NODE_DIR/"* "$RUNTIME_BASE/node/"
-        chmod +x "$RUNTIME_BASE/node/bin/"*
-        rm -rf "$TMP_EXTRACT"
-        rm -f "$CONFIG_DIR/$NODE_TAR"
-        log_ok "Portable Node.js installed to Btrfs storage."
+        if [ -z "$NODE_DIR" ] || [ ! -d "$NODE_DIR/bin" ]; then
+            log_fail "Node.js archive has no runtime directory."
+            exit 1
+        fi
+        NODE_CANDIDATE="$RUNTIME_WORK/node-candidate"
+        mkdir -p "$NODE_CANDIDATE" || exit 1
+        if ! cp -R "$NODE_DIR/." "$NODE_CANDIDATE/" || ! chmod +x "$NODE_CANDIDATE/bin/"*; then
+            log_fail "Node.js candidate staging failed."
+            exit 1
+        fi
+        for node_tool in node npm npx; do
+            if [ ! -x "$NODE_CANDIDATE/bin/$node_tool" ] \
+                || ! runtime_executable_works "$NODE_CANDIDATE/bin" "$NODE_CANDIDATE/bin/$node_tool" --version; then
+                log_fail "Portable Node.js candidate failed validation: $node_tool"
+                exit 1
+            fi
+        done
+        NODE_OLD="$RUNTIME_WORK/node-old"
+        if [ -e "$RUNTIME_BASE/node" ] || [ -L "$RUNTIME_BASE/node" ]; then
+            mv "$RUNTIME_BASE/node" "$NODE_OLD" || { log_fail "Could not preserve the old Node.js runtime."; exit 1; }
+        fi
+        if ! mv "$NODE_CANDIDATE" "$RUNTIME_BASE/node"; then
+            [ ! -e "$NODE_OLD" ] || mv "$NODE_OLD" "$RUNTIME_BASE/node" 2>/dev/null || true
+            log_fail "Could not publish the validated Node.js runtime."
+            exit 1
+        fi
+        log_ok "Portable Node.js installed to plugin runtime."
     else
-        log_ok "Portable Node.js found in Btrfs storage."
+        log_ok "Portable Node.js found in plugin runtime."
     fi
     ln -sf "$RUNTIME_BASE/node/bin/node" "$BIN_DEST/node"
     ln -sf "$RUNTIME_BASE/node/bin/npm" "$BIN_DEST/npm"
@@ -104,8 +288,8 @@ else
 fi
 
 # Global npm/npx symlinks
-[ ! -e /usr/local/bin/npm ] && ln -sf "$BIN_DEST/npm" /usr/local/bin/npm
-[ ! -e /usr/local/bin/npx ] && ln -sf "$BIN_DEST/npx" /usr/local/bin/npx
+[ -x "$GLOBAL_BIN_DIR/npm" ] || ln -sfn "$BIN_DEST/npm" "$GLOBAL_BIN_DIR/npm"
+[ -x "$GLOBAL_BIN_DIR/npx" ] || ln -sfn "$BIN_DEST/npx" "$GLOBAL_BIN_DIR/npx"
 
 # --- 2. tmux (v3.6a) ---
 TMUX_TAR="tmux-v3.6a.gz"
@@ -113,34 +297,37 @@ TMUX_URL="https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6a
 TMUX_SHA256="e6e1b346af08e17f47b66571a50fa76ed499e6a1cd000519f5f9e04c4722b7be"
 
 log_step "tmux..."
-# Always remove stale global symlinks first to prevent circular references on upgrades.
-# (Prior installs leave /usr/local/bin/tmux -> bin/tmux; without this, `which tmux`
-#  resolves to our own symlink and we create a loop: bin/tmux -> /usr/local/bin/tmux -> bin/tmux)
-rm -f /usr/local/bin/tmux "$BIN_DEST/tmux"
-
-# Resolve tmux to a real binary — not a symlink into our own paths
-REAL_TMUX=$(command -v tmux 2>/dev/null)
-if [ -n "$REAL_TMUX" ] && [ -f "$REAL_TMUX" ] && [[ "$REAL_TMUX" != "$BIN_DEST"* ]] && [[ "$REAL_TMUX" != "/usr/local/bin/tmux" ]]; then
+TMUX_FOUND=$(command -v tmux 2>/dev/null || true)
+REAL_TMUX=$(readlink -f "$TMUX_FOUND" 2>/dev/null || true)
+case "$REAL_TMUX" in
+    "$BIN_DEST"/*|"$RUNTIME_BASE"/*) REAL_TMUX="" ;;
+esac
+if [ -n "$REAL_TMUX" ] && [ -x "$REAL_TMUX" ] && timeout 5 "$REAL_TMUX" -V >/dev/null 2>&1; then
     log_ok "System tmux found at $REAL_TMUX."
-    ln -sf "$REAL_TMUX" "$BIN_DEST/tmux"
+    ln -sfn "$REAL_TMUX" "$BIN_DEST/tmux"
 else
-    if [ ! -f "$RUNTIME_BASE/bin/tmux" ]; then
+    if [ ! -x "$RUNTIME_BASE/bin/tmux" ] || ! timeout 5 "$RUNTIME_BASE/bin/tmux" -V >/dev/null 2>&1; then
         log_status "    > Downloading portable tmux..."
-        if [ ! -f "$CONFIG_DIR/$TMUX_TAR" ]; then
-            wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$TMUX_TAR" "$TMUX_URL"
+        download_verified "$CONFIG_DIR/$TMUX_TAR" "$TMUX_SHA256" "tmux" "$TMUX_URL" || exit 1
+        if ! gunzip -c "$CONFIG_DIR/$TMUX_TAR" > "$RUNTIME_WORK/tmux"; then
+            log_fail "tmux archive extraction failed."
+            exit 1
         fi
-        verify_sha256 "$CONFIG_DIR/$TMUX_TAR" "$TMUX_SHA256" "tmux" || exit 1
-        mkdir -p "$RUNTIME_BASE/bin"
-        gunzip -c "$CONFIG_DIR/$TMUX_TAR" > "$RUNTIME_BASE/bin/tmux"
-        chmod +x "$RUNTIME_BASE/bin/tmux"
-        rm -f "$CONFIG_DIR/$TMUX_TAR"
+        chmod +x "$RUNTIME_WORK/tmux" || { log_fail "Could not mark the tmux candidate executable."; exit 1; }
+        publish_binary "$RUNTIME_WORK/tmux" "$RUNTIME_BASE/bin/tmux" -V || exit 1
         log_ok "Portable tmux installed."
     else
         log_ok "Portable tmux found in plugin root."
     fi
-    ln -sf "$RUNTIME_BASE/bin/tmux" "$BIN_DEST/tmux"
+    ln -sfn "$RUNTIME_BASE/bin/tmux" "$BIN_DEST/tmux"
 fi
-ln -sf "$BIN_DEST/tmux" /usr/local/bin/tmux
+if [ ! -x "$GLOBAL_BIN_DIR/tmux" ]; then
+    ln -sfn "$BIN_DEST/tmux" "$GLOBAL_BIN_DIR/tmux"
+fi
+if ! timeout 5 "$BIN_DEST/tmux" -V >/dev/null 2>&1; then
+    log_fail "Required tmux runtime failed its executable check."
+    exit 1
+fi
 
 # --- 3. fd and ripgrep ---
 FD_TAR="fd-v10.3.0-x86_64-unknown-linux-musl.tar.gz"
@@ -170,74 +357,70 @@ GIT_LFS_SHA256="e7ebba491af8a54e560be3a00666fa97e4cf2bbbb223178a0934b8ef74cf9bed
 # and the commit still succeeds for everything else — so large files are omitted from
 # a commit that looks clean.
 #
-# Two rules prevent it coming back:
-#   1. Only adopt a "system" tool that resolves to a real executable OUTSIDE our own
-#      trees. Anything resolving into $BIN_DEST or $RUNTIME_BASE is our own shim, and
-#      anything that does not resolve at all is an existing loop — both mean "install
-#      the portable copy", not "adopt it".
-#   2. Only replace /usr/local/bin/<n> when it is missing, already broken, or a link
-#      into our own trees. A genuine system binary there is never overwritten — which
-#      the old `[ ! -e ]` guard got right for a real file but wrong for a loop, because
-#      -e is FALSE on a circular symlink, so it happily rebuilt the other half.
+# Adopt only executable system tools outside the plugin's own trees. Stage and
+# validate portable candidates before publication. Leave working system tools
+# in place when their global command already works.
 install_tool() {
     local tar=$1 url=$2 name=$3 expected_sha=$4
     log_step "$name..."
 
-    local found real=""
+    local found real="" tmp bin pub
     found=$(command -v "$name" 2>/dev/null || true)
     [ -n "$found" ] && real=$(readlink -f "$found" 2>/dev/null || true)
     case "$real" in
         ""|"$BIN_DEST"/*|"$RUNTIME_BASE"/bin/*) real="" ;;   # our own shim, or already looping
     esac
 
-    if [ -n "$real" ] && [ -x "$real" ]; then
+    if [ -n "$real" ] && [ -x "$real" ] && timeout 5 "$real" --version >/dev/null 2>&1; then
         log_ok "System $name found."
-        ln -sfn "$real" "$BIN_DEST/$name"
+        ln -sfn "$real" "$BIN_DEST/$name" || return 1
     else
-        if [ ! -f "$RUNTIME_BASE/bin/$name" ]; then
+        if [ ! -x "$RUNTIME_BASE/bin/$name" ] || ! timeout 5 "$RUNTIME_BASE/bin/$name" --version >/dev/null 2>&1; then
             log_status "    > Downloading portable $name..."
-            if [ ! -f "$CONFIG_DIR/$tar" ]; then
-                wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$tar" "$url"
+            download_verified "$CONFIG_DIR/$tar" "$expected_sha" "$name" "$url" || return 1
+            tmp=$(mktemp -d "$RUNTIME_WORK/$name-extract.XXXXXX") || return 1
+            if ! tar -xf "$CONFIG_DIR/$tar" -C "$tmp" --no-same-owner; then
+                rm -rf "$tmp"
+                log_fail "$name archive extraction failed."
+                return 1
             fi
-            verify_sha256 "$CONFIG_DIR/$tar" "$expected_sha" "$name" || exit 1
-            local tmp="/tmp/$name-extract-$$"
-            mkdir -p "$tmp"
-            tar -xf "$CONFIG_DIR/$tar" -C "$tmp" --no-same-owner
-            local bin=$(find "$tmp" -name "$name" -type f -executable | head -n 1)
-            mkdir -p "$RUNTIME_BASE/bin"
-            mv "$bin" "$RUNTIME_BASE/bin/$name"
-            chmod +x "$RUNTIME_BASE/bin/$name"
+            bin=$(find "$tmp" -name "$name" -type f -executable | head -n 1)
+            if [ -z "$bin" ]; then
+                rm -rf "$tmp"
+                log_fail "$name binary is missing from its archive."
+                return 1
+            fi
+            if ! publish_binary "$bin" "$RUNTIME_BASE/bin/$name" --version; then
+                rm -rf "$tmp"
+                return 1
+            fi
             rm -rf "$tmp"
-            rm -f "$CONFIG_DIR/$tar"
             log_ok "Portable $name installed."
         else
             log_ok "$name found in plugin root."
         fi
-        ln -sfn "$RUNTIME_BASE/bin/$name" "$BIN_DEST/$name"
+        ln -sfn "$RUNTIME_BASE/bin/$name" "$BIN_DEST/$name" || return 1
     fi
 
-    # Publish to /usr/local/bin, and SELF-HEAL a link left looping by an older install.
-    local pub="/usr/local/bin/$name" pub_real=""
-    [ -L "$pub" ] && pub_real=$(readlink -f "$pub" 2>/dev/null || true)
-    if [ ! -e "$pub" ] || { [ -L "$pub" ] && { [ -z "$pub_real" ] || case "$pub_real" in "$BIN_DEST"/*|"$RUNTIME_BASE"/bin/*) true ;; *) false ;; esac; }; }; then
-        ln -sfn "$BIN_DEST/$name" "$pub"
+    pub="$GLOBAL_BIN_DIR/$name"
+    if [ ! -x "$pub" ]; then
+        ln -sfn "$BIN_DEST/$name" "$pub" || return 1
     fi
+    if ! timeout 5 "$BIN_DEST/$name" --version >/dev/null 2>&1; then
+        log_fail "$name runtime failed its executable check."
+        return 1
+    fi
+    return 0
 }
 
-# GitHub #13 (part 2): fd and rg are optional conveniences (shell search
-# helpers some agents call), not load-bearing for persistence. install_tool
-# does `exit 1` on a failed download/checksum, which used to kill this whole
-# script — squashfs-tools below never got installed, and every bake/consolidate
-# failed with only "Atomic bake failed" and no clue why. Run each of these two
-# in a subshell so its internal exit only ends that subshell; a failure here
-# is logged and skipped, and squashfs-tools always gets a chance to install.
-# git-lfs stays fatal below (it silently drops large files if missing/broken —
-# see the 2026-09-09 note above install_tool — so failing loudly is correct).
+# fd and rg are optional conveniences. Their callers run in subshells and log
+# a warning when installation fails. git-lfs remains required because a broken
+# LFS filter can omit large files from a successful commit.
 ( install_tool "$FD_TAR" "$FD_URL" "fd" "$FD_SHA256" ) \
     || log_warn "fd install failed — continuing without it (fd is an optional convenience tool)."
 ( install_tool "$RG_TAR" "$RG_URL" "rg" "$RG_SHA256" ) \
     || log_warn "rg install failed — continuing without it (rg is an optional convenience tool)."
-install_tool "$GIT_LFS_TAR" "$GIT_LFS_URL" "git-lfs" "$GIT_LFS_SHA256"
+install_tool "$GIT_LFS_TAR" "$GIT_LFS_URL" "git-lfs" "$GIT_LFS_SHA256" || exit 1
 
 # --- 4. squashfs-tools (mksquashfs/unsquashfs) ---
 # D-304: Ensure SquashFS tools are available for the new storage architecture.
@@ -249,84 +432,90 @@ SQUASH_SHA256="1615c7198fe92513fb47326c53a52031448dc9c2b7858382a0d2a1d39bd95b45"
 
 log_step "squashfs-tools..."
 
-# D-307: Prevent circular symlinks. 
-# If 'which' returns our own BIN_DEST or /usr/local/bin symlink, it's not a 'System' tool.
-SYS_MKSQUASHFS=$(which mksquashfs 2>/dev/null)
+# D-307: Prevent circular symlinks. Resolve command names before deciding
+# whether a binary is a system tool or one of our own plugin links.
+SYS_MKSQUASHFS=$(readlink -f "$(command -v mksquashfs 2>/dev/null || true)" 2>/dev/null || true)
+SYS_UNSQUASHFS=$(readlink -f "$(command -v unsquashfs 2>/dev/null || true)" 2>/dev/null || true)
 IS_SYSTEM=0
-if [ -n "$SYS_MKSQUASHFS" ] && [ -f "$SYS_MKSQUASHFS" ]; then
-    # If it's not a symlink to our own bin, it's a real system tool
-    if [[ "$SYS_MKSQUASHFS" != "$BIN_DEST"* ]] && [[ "$SYS_MKSQUASHFS" != "/usr/local/bin/mksquashfs" ]]; then
-        IS_SYSTEM=1
+case "$SYS_MKSQUASHFS:$SYS_UNSQUASHFS" in
+    *"$BIN_DEST"*|*"$RUNTIME_BASE"*) ;;
+    *)
+        if [ -x "$SYS_MKSQUASHFS" ] && [ -x "$SYS_UNSQUASHFS" ] \
+            && timeout 5 "$SYS_MKSQUASHFS" -version >/dev/null 2>&1 \
+            && timeout 5 "$SYS_UNSQUASHFS" -version >/dev/null 2>&1; then
+            IS_SYSTEM=1
+        fi
+        ;;
+esac
+
+PORTABLE_SQUASH_READY=1
+for squash_tool in mksquashfs unsquashfs; do
+    if [ ! -x "$RUNTIME_BASE/bin/$squash_tool" ] \
+        || ! timeout 5 "$RUNTIME_BASE/bin/$squash_tool" -version >/dev/null 2>&1; then
+        PORTABLE_SQUASH_READY=0
     fi
-fi
+done
 
 if [ "$IS_SYSTEM" -eq 1 ]; then
-    log_ok "System mksquashfs found at $SYS_MKSQUASHFS."
-    rm -f "$BIN_DEST/mksquashfs" "$BIN_DEST/unsquashfs"
-    ln -sf "$SYS_MKSQUASHFS" "$BIN_DEST/mksquashfs"
-    SYS_UNSQUASHFS=$(which unsquashfs 2>/dev/null)
-    [ -n "$SYS_UNSQUASHFS" ] && ln -sf "$SYS_UNSQUASHFS" "$BIN_DEST/unsquashfs"
+    log_ok "System squashfs-tools found."
+    ln -sfn "$SYS_MKSQUASHFS" "$BIN_DEST/mksquashfs"
+    ln -sfn "$SYS_UNSQUASHFS" "$BIN_DEST/unsquashfs"
 else
-    if [ ! -f "$RUNTIME_BASE/bin/mksquashfs" ]; then
-        if [ ! -f "$CONFIG_DIR/$SQUASH_TAR" ]; then
-            log_status "    > Downloading squashfs-tools..."
-            wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_URL" || \
-            wget -q --timeout=15 --tries=3 -O "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_URL_ALT"
-        fi
-        
-        if [ ! -f "$CONFIG_DIR/$SQUASH_TAR" ] || [ ! -s "$CONFIG_DIR/$SQUASH_TAR" ]; then
-            log_fail "Failed to download squashfs-tools from all mirrors."
-            rm -f "$CONFIG_DIR/$SQUASH_TAR"
-            exit 1
-        fi
-
-        verify_sha256 "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_SHA256" "squashfs-tools" || exit 1
-
-        TMP_EXTRACT="/tmp/squash-extract-$$"
-        mkdir -p "$TMP_EXTRACT"
-        
-        log_status "    > Extracting squashfs-tools..."
-        if ! tar -xf "$CONFIG_DIR/$SQUASH_TAR" -C "$TMP_EXTRACT" --no-same-owner 2>&1; then
+    if [ "$PORTABLE_SQUASH_READY" -ne 1 ]; then
+        download_verified "$CONFIG_DIR/$SQUASH_TAR" "$SQUASH_SHA256" "squashfs-tools" "$SQUASH_URL" "$SQUASH_URL_ALT" || exit 1
+        TMP_EXTRACT="$RUNTIME_WORK/squash-extract"
+        mkdir -p "$TMP_EXTRACT" || exit 1
+        if ! tar -xf "$CONFIG_DIR/$SQUASH_TAR" -C "$TMP_EXTRACT" --no-same-owner; then
             log_fail "Extraction of squashfs-tools failed. The download may be corrupted."
-            rm -rf "$TMP_EXTRACT"
-            rm -f "$CONFIG_DIR/$SQUASH_TAR"
             exit 1
         fi
-
-        mkdir -p "$RUNTIME_BASE/bin"
-        
-        # Verify files exist in extraction before copying
-        if [ ! -f "$TMP_EXTRACT/usr/bin/mksquashfs" ]; then
-            log_fail "mksquashfs binary missing from extracted package."
-            rm -rf "$TMP_EXTRACT"
+        SQUASH_MKS="$TMP_EXTRACT/usr/bin/mksquashfs"
+        SQUASH_UNS="$TMP_EXTRACT/usr/bin/unsquashfs"
+        if [ ! -s "$SQUASH_MKS" ] || [ ! -s "$SQUASH_UNS" ]; then
+            log_fail "mksquashfs or unsquashfs is missing from the extracted package."
             exit 1
         fi
-
-        cp "$TMP_EXTRACT/usr/bin/mksquashfs" "$RUNTIME_BASE/bin/mksquashfs"
-        cp "$TMP_EXTRACT/usr/bin/unsquashfs" "$RUNTIME_BASE/bin/unsquashfs"
-        chmod +x "$RUNTIME_BASE/bin/mksquashfs" "$RUNTIME_BASE/bin/unsquashfs"
-        
-        rm -rf "$TMP_EXTRACT"
-        rm -f "$CONFIG_DIR/$SQUASH_TAR"
-        
-        if [ -x "$RUNTIME_BASE/bin/mksquashfs" ]; then
-            log_ok "Portable squashfs-tools installed successfully."
-        else
-            log_fail "Failed to finalize squashfs-tools installation."
+        chmod +x "$SQUASH_MKS" "$SQUASH_UNS" || exit 1
+        if ! timeout 5 "$SQUASH_MKS" -version >/dev/null 2>&1 \
+            || ! timeout 5 "$SQUASH_UNS" -version >/dev/null 2>&1; then
+            log_fail "Extracted squashfs-tools failed executable checks."
             exit 1
         fi
+        publish_binary "$SQUASH_MKS" "$RUNTIME_BASE/bin/mksquashfs" -version || exit 1
+        publish_binary "$SQUASH_UNS" "$RUNTIME_BASE/bin/unsquashfs" -version || exit 1
+        log_ok "Portable squashfs-tools installed."
     else
-        log_ok "squashfs-tools found in plugin root."
+        log_ok "Portable squashfs-tools found in plugin runtime."
     fi
-    rm -f "$BIN_DEST/mksquashfs" "$BIN_DEST/unsquashfs"
-    ln -sf "$RUNTIME_BASE/bin/mksquashfs" "$BIN_DEST/mksquashfs"
-    ln -sf "$RUNTIME_BASE/bin/unsquashfs" "$BIN_DEST/unsquashfs"
+    ln -sfn "$RUNTIME_BASE/bin/mksquashfs" "$BIN_DEST/mksquashfs"
+    ln -sfn "$RUNTIME_BASE/bin/unsquashfs" "$BIN_DEST/unsquashfs"
 fi
 
-# Final Global Symlinks (Ensure they point to our clean BIN_DEST proxy)
-rm -f /usr/local/bin/mksquashfs /usr/local/bin/unsquashfs
-ln -sf "$BIN_DEST/mksquashfs" /usr/local/bin/mksquashfs
-ln -sf "$BIN_DEST/unsquashfs" /usr/local/bin/unsquashfs
+if [ ! -x "$GLOBAL_BIN_DIR/mksquashfs" ]; then
+    ln -sfn "$BIN_DEST/mksquashfs" "$GLOBAL_BIN_DIR/mksquashfs"
+fi
+if [ ! -x "$GLOBAL_BIN_DIR/unsquashfs" ]; then
+    ln -sfn "$BIN_DEST/unsquashfs" "$GLOBAL_BIN_DIR/unsquashfs"
+fi
+
+# Required runtime programs must execute through the paths that the plugin uses.
+for runtime_spec in "node:--version" "npm:--version" "npx:--version" "tmux:-V" "git-lfs:--version" "mksquashfs:-version" "unsquashfs:-version"; do
+    runtime_tool=${runtime_spec%%:*}
+    runtime_flag=${runtime_spec#*:}
+    if ! runtime_executable_works "$BIN_DEST" "$BIN_DEST/$runtime_tool" "$runtime_flag"; then
+        log_fail "Required runtime check failed: $runtime_tool $runtime_flag."
+        exit 1
+    fi
+done
+
+TTYD_BIN=$(command -v ttyd 2>/dev/null || true)
+if [ -z "$TTYD_BIN" ] && [ -x /usr/bin/ttyd ]; then TTYD_BIN=/usr/bin/ttyd; fi
+if [ -z "$TTYD_BIN" ] || [ ! -x "$TTYD_BIN" ]; then
+    log_fail "Required runtime ttyd is missing or not executable."
+    exit 1
+fi
+
+cleanup_stale_runtime_archives "$CONFIG_DIR" "$NODE_TAR" "$TMUX_TAR" "$FD_TAR" "$RG_TAR" "$GIT_LFS_TAR" "$SQUASH_TAR"
 
 # --- 5. Agent Proxy Wrappers ---
 # D-346: Create robust proxy scripts in BIN_DEST that point to the actual entry points.
@@ -382,7 +571,7 @@ fi
 PROXYEOF
     chmod +x "$wrapper_tmp"
     mv -f "$wrapper_tmp" "$wrapper"
-    ln -sf "$wrapper" "/usr/local/bin/$cmd"
+    ln -sfn "$wrapper" "$GLOBAL_BIN_DIR/$cmd"
 }
 
 # Proxy mapping: cmd -> relative path from /agents/ to entry
@@ -460,7 +649,7 @@ DOCKEREOF
 
     chmod +x "$wrapper_tmp"
     mv -f "$wrapper_tmp" "$wrapper"
-    ln -sf "$wrapper" "/usr/local/bin/$cmd"
+    ln -sfn "$wrapper" "$GLOBAL_BIN_DIR/$cmd"
 }
 
 create_docker_proxy "semgrep" "semgrep/semgrep" "semgrep" \

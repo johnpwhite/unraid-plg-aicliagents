@@ -13,6 +13,38 @@ namespace AICliAgents\Services;
 require_once __DIR__ . '/SessionLaunchLock.php';
 
 class TerminalService {
+    /** Test seam: callable(string $name, string $path): bool for required runtime readiness. */
+    public static $requiredRuntimeProbe = null;
+
+    /** Resolve the programs used by every terminal start and auto-launch sweep. */
+    public static function requiredRuntimePrograms(): array
+    {
+        $ttyd = '/usr/bin/ttyd';
+        if (!is_callable(self::$requiredRuntimeProbe)) {
+            $foundTtyd = trim((string)shell_exec('timeout 2 which ttyd 2>/dev/null'));
+            if ($foundTtyd !== '') $ttyd = $foundTtyd;
+        }
+        return [
+            'node' => '/usr/local/emhttp/plugins/unraid-aicliagents/bin/node',
+            'tmux' => '/usr/local/emhttp/plugins/unraid-aicliagents/bin/tmux',
+            'ttyd' => $ttyd,
+        ];
+    }
+
+    /** Required programs used by every terminal start and auto-launch sweep. */
+    public static function missingRequiredRuntimePrograms(?array $programs = null): array
+    {
+        $programs ??= self::requiredRuntimePrograms();
+        $missing = [];
+        foreach ($programs as $name => $path) {
+            $ready = is_callable(self::$requiredRuntimeProbe)
+                ? (bool)call_user_func(self::$requiredRuntimeProbe, $name, $path)
+                : is_executable($path);
+            if (!$ready) $missing[] = $name;
+        }
+        return $missing;
+    }
+
     /**
      * Starts a new AICli console session via ttyd.
      *
@@ -165,11 +197,13 @@ class TerminalService {
             case 'storage_migration':    return 'Storage is being migrated. Workspaces open again when it finishes.';
             case 'agent_unknown':       return 'This agent is not installed on this server.';
             case 'no_terminal_server':  return 'The terminal server program is missing.';
+            case 'runtime_unavailable': return 'A required terminal program is missing or cannot run. Check the Debug Console.';
             case 'agent_storage':       return "The storage for $agentName could not be mounted.";
             case 'home_storage':        return 'The home storage could not be mounted.';
             case 'terminal_no_answer':  return 'The terminal server did not answer in 2 seconds.';
             case 'terminal_no_launch':  return 'The terminal server could not be started.';
             case 'ensure_timeout':      return "$agentName did not start in time.";
+            case 'ensure_failed':       return "$agentName could not start. Check the Debug Console.";
         }
         return "$agentName did not start.";
     }
@@ -364,6 +398,15 @@ class TerminalService {
             return ['ok' => false, 'reason' => 'agent_unknown'];
         }
 
+        $runtimePrograms = self::requiredRuntimePrograms();
+        $missingRuntime = self::missingRequiredRuntimePrograms($runtimePrograms);
+        if ($missingRuntime !== []) {
+            $missingNames = implode(', ', $missingRuntime);
+            LogService::log("Start of $id refused: required runtime program(s) unavailable: $missingNames.", LogService::LOG_ERROR, "TerminalService");
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('runtime_unavailable', $agentName), self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'runtime_unavailable'];
+        }
+
         // Running-agent-safe updates: resolve the active `src` pointer once at
         // launch. ttyd and the detached tmux bootstrap then keep an immutable
         // generation path in argv, so a later atomic activation cannot replace
@@ -405,10 +448,7 @@ class TerminalService {
             LogService::log("Warning: Shell script missing: $shell", LogService::LOG_WARN, "TerminalService");
         }
 
-        $ttyd = trim((string)shell_exec("timeout 2 which ttyd"));
-        if (empty($ttyd) || !file_exists($ttyd)) {
-            $ttyd = "/usr/bin/ttyd"; // Standard Unraid fallback
-        }
+        $ttyd = (string)($runtimePrograms['ttyd'] ?? '/usr/bin/ttyd');
 
         if (!file_exists($ttyd)) {
             LogService::log("CRITICAL: ttyd binary not found in PATH or /usr/bin/ttyd!", LogService::LOG_ERROR, "TerminalService");
@@ -669,7 +709,9 @@ class TerminalService {
             return ['ok' => false, 'reason' => 'ensure_timeout'];
         } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
-            LogService::log("ensure-session returned rc=$ensureRc for $id (continuing to ttyd; attach will retry). tail: $tail", LogService::LOG_WARN, "TerminalService");
+            LogService::log("ensure-session returned rc=$ensureRc for $id. Start aborted before ttyd. tail: $tail", LogService::LOG_ERROR, "TerminalService");
+            self::recordStartFailure($actId, $agentName, self::startFailureSentence('ensure_failed', $agentName), self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'ensure_failed'];
         } else {
             LogService::log("Detached agent session is live for $id ($agentId).", LogService::LOG_INFO, "TerminalService");
         }

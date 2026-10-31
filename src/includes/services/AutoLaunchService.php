@@ -190,6 +190,13 @@ class AutoLaunchService
      */
     public static function launchAllPending(?string $filterAgentId = null, string $reason = 'unknown', ?array $onlySessionIds = null, bool $resumePreviouslyRunning = false): array
     {
+        $missingRuntime = TerminalService::missingRequiredRuntimePrograms();
+        if ($missingRuntime !== []) {
+            $missingNames = implode(', ', $missingRuntime);
+            self::log("Auto-launch blocked: required runtime program(s) unavailable: $missingNames (trigger=$reason)", AICLI_LOG_ERROR);
+            return ['launched' => 0, 'skipped' => 0, 'failed' => 1, 'sessions' => [], 'reason' => 'runtime_unavailable'];
+        }
+
         // Bug #532: serialise concurrent sweeps. PLG INLINE / disks_mounted /
         // InitService boot-marker can all fire within the same ~50 ms window
         // after Bug 521. Without this flock both processes pass the

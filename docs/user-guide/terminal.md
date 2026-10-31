@@ -197,6 +197,7 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 | A plain drag does not select text. | The terminal uses the mouse for the agent. | Hold Shift while you drag, or use the **Copy from terminal** icon. |
 | The **Paste into Terminal** box opens each time. | The page runs on plain HTTP, or the browser blocks clipboard reads. | Use the box. Or open the Unraid page with HTTPS. |
 | "Paste too large (max 256 KB)". | The paste is above the limit. | Save the text in a file and upload the file. |
+| The Activity tray says a required terminal program is missing or cannot run. | The server cannot start the agent or its terminal. | Open the Debug Console to see which program is unavailable. Retry the workspace after the plugin is repaired. |
 | The upload window does not open when you drag. | No workspace is open. | Open a workspace, then drag again. |
 | "Upload Failed" with a file name and a size. | The file is over the **Largest upload**, or it is empty. | Raise the limit in **Settings, Configuration**, or choose a different file. |
 | "Upload Failed" with a network message. | The network dropped during the upload. The plugin already tried each piece twice. | Press **Confirm Upload** again. The files that were saved stay saved. |
@@ -216,6 +217,7 @@ When the plugin types a fixed notice into an agent (for example, a Relay notice)
 <details>
 <summary>Change history</summary>
 
+- **2026-10-31** — A missing terminal program appears as a failed start in the Activity tray. Open the Debug Console to see which program is unavailable. Spec `docs/specs/RUNTIME_PROVISIONING_FAIL_CLOSED.md`, issue #870.
 - **2026-10-22** — The terminal settings have new labels: **Colour scheme**, **Text size**, **Largest upload**, **Keep typing fast when the server is busy** and **Agent temporary files**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-16** — New setting **Agent temporary folder** on the Configuration tab. Spec `docs/specs/AGENT_TEMP_FOLDER.md`, issue #554.
 - **2026-10-16** — New setting **Keep the terminal responsive** on the Configuration tab. Spec `docs/specs/RESPONSIVE_PRIORITY.md`, issue #553.

@@ -12,6 +12,29 @@ if ! flock -n 9; then
     exit 1
 fi
 
+# BEGIN runtime gate
+# Provisioning must succeed before the new backend becomes active. This is a
+# function so its exit contract can be tested without running the full installer.
+aicli_provision_required_runtime() {
+    local runtime_script="${1:-/tmp/aicli-runtime.sh}"
+    local staged_src="${2:-}"
+    local runtime_rc=0
+
+    if [ ! -s "$runtime_script" ] || ! bash -n "$runtime_script"; then
+        log_fail "Runtime installer is missing or invalid; backend activation is blocked."
+        return 1
+    fi
+
+    AICLI_STAGED_SRC="$staged_src" bash "$runtime_script"
+    runtime_rc=$?
+    if [ "$runtime_rc" -ne 0 ]; then
+        log_fail "Runtime provisioning failed (rc=$runtime_rc); backend activation and service initialization are blocked."
+        return "$runtime_rc"
+    fi
+    return 0
+}
+# END runtime gate
+
 # --- Path Telemetry & Environment ---
 REAL_EMHTTP=$(readlink -f "$EMHTTP_DEST")
 log_status "  -----------------------------------------------------------"
@@ -142,6 +165,17 @@ if [ -f "/tmp/aicli-src.tar.gz" ]; then
             exit 2
         fi
 
+        # The `.plg` propagates this engine's exit status. Provision runtimes
+        # before the atomic backend switch, and before storage/service setup.
+        log_progress "40"
+        log_step "Checking required runtime before backend activation..."
+        if aicli_provision_required_runtime "/tmp/aicli-runtime.sh" "$STAGING_ROOT/src"; then
+            :
+        else
+            runtime_rc=$?
+            exit "$runtime_rc"
+        fi
+
         if ! aicli_activate_generation "$EMHTTP_DEST" "$STAGING_ROOT" "$GENERATION_ID"; then
             log_fail "Atomic generation activation failed; prior generation remains available."
             exit 1
@@ -216,18 +250,6 @@ log_ok "Root entry points and directory mapping complete."
 /usr/bin/php -r "if(function_exists('opcache_reset')) opcache_reset();" >/dev/null 2>&1
 
 cd - > /dev/null
-
-# -----------------------------------------------------------------
-#  [3/5]  RUNTIME DEPENDENCIES
-# -----------------------------------------------------------------
-log_progress "40"
-log_step "[3/5] Checking Runtime Tools..."
-
-if [ -f "/tmp/aicli-runtime.sh" ]; then
-    bash /tmp/aicli-runtime.sh
-else
-    log_warn "Runtime script (aicli-runtime.sh) missing. Tools may be unavailable."
-fi
 
 # -----------------------------------------------------------------
 #  [4/5]  STORAGE & SERVICE INITIALIZATION

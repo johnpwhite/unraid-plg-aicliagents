@@ -753,7 +753,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.10.31.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/runtime.sh</URL>
-<SHA256>5f22be3487a1152d813c210696c97d88c1cc35c0c40cad75e8d8584d29b68644</SHA256>
+<SHA256>6858f464d6e2460f40c7ecda8cd580ef44c7d6bc518cc514b7237bbd6517b8c9</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.10.31.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/ui-assets.sh</URL>
@@ -785,7 +785,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-engine-2026.10.31.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/install-engine.sh</URL>
-<SHA256>8e15c8762a8fae491a4b72bdbe36c5fab9e14d5037b1e9d0305dd1bd443d3795</SHA256>
+<SHA256>3208b9b4f100de347d3336ac5abbc72f98742188bc14fcf98a1d62133f3accd6</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.10.31.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/uninstaller/uninstall-engine.sh</URL>
