@@ -3,7 +3,7 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.31.01" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
-## 2026.10.30.02
+## 2026.10.31.01
 
 **Script runs (new)**
 
@@ -25,6 +25,7 @@
 - **Fix: the drawer nests every workspace an agent made under that agent**, and the tab of a deleted workspace closes.
 - **Fix: after a restart, an agent gets the continue message once**, also when several pages are open.
 - **Fix: the plugin no longer starts its background service again while the server shuts down.**
+- **Fix: an agent no longer runs an old version that an earlier install left behind** while the Agent Store shows the new one.
 
 **Agent Store and upgrades**
 
