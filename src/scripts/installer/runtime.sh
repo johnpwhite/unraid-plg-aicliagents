@@ -132,18 +132,35 @@ download_verified() {
     return 1
 }
 
+# binary_version_ok <executable> <version-flag> [tool-name]
+# True when the executable runs and answers its version flag. squashfs-tools
+# 4.5 prints its version and then exits 1 for "unsquashfs -version", so for
+# the two squashfs tools exit 1 counts only with the real version line.
+# A loader error ("version GLIBC_x not found") never matches that line.
+# tool-name defaults to the file name; pass it for a temporary candidate file.
+binary_version_ok() {
+    local exe="$1" flag="$2" name="${3:-$(basename "$1")}" out rc
+    out=$(timeout 5 "$exe" "$flag" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    case "$name:$flag:$rc" in
+        mksquashfs:-version:1|unsquashfs:-version:1)
+            printf '%s\n' "$out" | head -n 1 | grep -Eq "^$name version [0-9]" ;;
+        *) return 1 ;;
+    esac
+}
+
 # publish_binary <source> <destination> <version-flag>
 # Validate a staged executable before an atomic rename replaces the destination.
 publish_binary() {
     local source="$1" dest="$2" flag="$3" candidate
-    if [ ! -s "$source" ] || [ ! -x "$source" ] || ! timeout 5 "$source" "$flag" >/dev/null 2>&1; then
+    if [ ! -s "$source" ] || [ ! -x "$source" ] || ! binary_version_ok "$source" "$flag" "$(basename "$dest")"; then
         log_fail "Executable validation failed for candidate: $source"
         return 1
     fi
     mkdir -p "$(dirname "$dest")" || return 1
     candidate=$(mktemp "$dest.next.XXXXXX") || return 1
     if ! cp "$source" "$candidate" || ! chmod 755 "$candidate" \
-        || ! timeout 5 "$candidate" "$flag" >/dev/null 2>&1; then
+        || ! binary_version_ok "$candidate" "$flag" "$(basename "$dest")"; then
         rm -f "$candidate"
         log_fail "Executable validation failed before publication: $dest"
         return 1
@@ -160,7 +177,7 @@ publish_binary() {
 # npm and npx use /usr/bin/env node, so test them with the matching Node first.
 runtime_executable_works() {
     local bin_dir="$1" executable="$2" flag="$3"
-    PATH="$bin_dir:$PATH" timeout 5 "$executable" "$flag" >/dev/null 2>&1
+    PATH="$bin_dir:$PATH" binary_version_ok "$executable" "$flag"
 }
 
 # cleanup_stale_runtime_archives <cache_dir> <current_archive...>
@@ -441,8 +458,8 @@ case "$SYS_MKSQUASHFS:$SYS_UNSQUASHFS" in
     *"$BIN_DEST"*|*"$RUNTIME_BASE"*) ;;
     *)
         if [ -x "$SYS_MKSQUASHFS" ] && [ -x "$SYS_UNSQUASHFS" ] \
-            && timeout 5 "$SYS_MKSQUASHFS" -version >/dev/null 2>&1 \
-            && timeout 5 "$SYS_UNSQUASHFS" -version >/dev/null 2>&1; then
+            && binary_version_ok "$SYS_MKSQUASHFS" -version mksquashfs \
+            && binary_version_ok "$SYS_UNSQUASHFS" -version unsquashfs; then
             IS_SYSTEM=1
         fi
         ;;
@@ -451,7 +468,7 @@ esac
 PORTABLE_SQUASH_READY=1
 for squash_tool in mksquashfs unsquashfs; do
     if [ ! -x "$RUNTIME_BASE/bin/$squash_tool" ] \
-        || ! timeout 5 "$RUNTIME_BASE/bin/$squash_tool" -version >/dev/null 2>&1; then
+        || ! binary_version_ok "$RUNTIME_BASE/bin/$squash_tool" -version; then
         PORTABLE_SQUASH_READY=0
     fi
 done
@@ -476,8 +493,8 @@ else
             exit 1
         fi
         chmod +x "$SQUASH_MKS" "$SQUASH_UNS" || exit 1
-        if ! timeout 5 "$SQUASH_MKS" -version >/dev/null 2>&1 \
-            || ! timeout 5 "$SQUASH_UNS" -version >/dev/null 2>&1; then
+        if ! binary_version_ok "$SQUASH_MKS" -version \
+            || ! binary_version_ok "$SQUASH_UNS" -version; then
             log_fail "Extracted squashfs-tools failed executable checks."
             exit 1
         fi
