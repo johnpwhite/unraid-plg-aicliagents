@@ -139,12 +139,12 @@ download_verified() {
 # A loader error ("version GLIBC_x not found") never matches that line.
 # tool-name defaults to the file name; pass it for a temporary candidate file.
 binary_version_ok() {
-    local exe="$1" flag="$2" name="${3:-$(basename "$1")}" out rc
+    local exe="$1" flag="$2" name="${3:-${1##*/}}" out rc
     out=$(timeout 5 "$exe" "$flag" 2>&1); rc=$?
     [ "$rc" -eq 0 ] && return 0
     case "$name:$flag:$rc" in
         mksquashfs:-version:1|unsquashfs:-version:1)
-            printf '%s\n' "$out" | head -n 1 | grep -Eq "^$name version [0-9]" ;;
+            [[ "${out%%$'\n'*}" =~ ^$name\ version\ [0-9] ]] ;;
         *) return 1 ;;
     esac
 }
@@ -153,14 +153,14 @@ binary_version_ok() {
 # Validate a staged executable before an atomic rename replaces the destination.
 publish_binary() {
     local source="$1" dest="$2" flag="$3" candidate
-    if [ ! -s "$source" ] || [ ! -x "$source" ] || ! binary_version_ok "$source" "$flag" "$(basename "$dest")"; then
+    if [ ! -s "$source" ] || [ ! -x "$source" ] || ! binary_version_ok "$source" "$flag" "${dest##*/}"; then
         log_fail "Executable validation failed for candidate: $source"
         return 1
     fi
     mkdir -p "$(dirname "$dest")" || return 1
     candidate=$(mktemp "$dest.next.XXXXXX") || return 1
     if ! cp "$source" "$candidate" || ! chmod 755 "$candidate" \
-        || ! binary_version_ok "$candidate" "$flag" "$(basename "$dest")"; then
+        || ! binary_version_ok "$candidate" "$flag" "${dest##*/}"; then
         rm -f "$candidate"
         log_fail "Executable validation failed before publication: $dest"
         return 1
