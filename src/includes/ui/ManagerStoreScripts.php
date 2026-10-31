@@ -330,6 +330,9 @@ function av2SetCardState(id, state, text, opts) {
     if (versions) {
         if (busy) {
             if (!_av2HeaderNodes[id]) {
+                // #869: the header line keeps the height it has at rest (16 px of text, or 44 px with the new-version
+                // button), so "Installing…" never makes the card taller or shorter.
+                versions.style.minHeight = versions.getBoundingClientRect().height + 'px';
                 _av2HeaderNodes[id] = Array.prototype.slice.call(versions.childNodes);
                 _av2HeaderNodes[id].forEach(function (n) { versions.removeChild(n); });
             }
@@ -340,6 +343,7 @@ function av2SetCardState(id, state, text, opts) {
         } else if (_av2HeaderNodes[id]) {
             while (versions.firstChild) versions.removeChild(versions.firstChild);
             _av2HeaderNodes[id].forEach(function (n) { versions.appendChild(n); });
+            versions.style.minHeight = '';
             delete _av2HeaderNodes[id];
         }
     }

@@ -2583,8 +2583,9 @@
     .av2-card .aicli-card-title { flex: 0 1 auto; min-width: 4ch; }
     .av2-card > .aicli-card-head > .aicli-card-status { flex: 1 0 auto; overflow: visible; text-overflow: clip; text-align: left; padding-left: 4px; }
     .av2-versions { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-    /* Same height as the new-version button, so the header line does not shrink while the card installs. */
-    .av2-installing { font-style: italic; display: inline-flex; align-items: center; min-height: 44px; }
+    /* #869: no fixed height here. av2SetCardState() copies the height of the header line at rest to .av2-versions,
+       so the line is the same height with and without the new-version button. */
+    .av2-installing { font-style: italic; display: inline-flex; align-items: center; }
     .av2-newver {
         appearance: none; -webkit-appearance: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
         min-width: 44px !important; min-height: 44px !important; margin: 0 !important; padding: 0 2px !important;
