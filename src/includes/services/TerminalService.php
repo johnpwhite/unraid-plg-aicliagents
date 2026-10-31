@@ -271,7 +271,7 @@ class TerminalService {
         // we must fall through and (re)launch ttyd; ensure-session is idempotent so
         // it attaches to the existing detached session rather than double-spawning.
         if (ProcessManager::isTtydBound($id)) {
-            LogService::log("Session $id already has a bound ttyd — reusing.", LogService::LOG_DEBUG, "TerminalService");
+            LogService::log("Session $id (Agent: $agentId): reusing bound bridge.", LogService::LOG_INFO, "TerminalService", false);   // debug.log only: this line repeats at every page reload
             return ['ok' => true, 'reason' => 'already_running'];
         }
 
@@ -464,6 +464,8 @@ class TerminalService {
             @chown($userWorkDir, $pw['uid']);
             @chgrp($userWorkDir, $pw['gid']);
             @chmod($userWorkDir, 0755);
+            // TERMINAL_FAST_ATTACH.md S5: the PHP file-cache folder of this user. Only root can make it.
+            UtilityService::ensurePhpCacheDirFor((int)$pw["uid"]);
         }
         // A stale perf.log from an earlier root-as-user run is 0644 root-owned;
         // a non-root agent can't append. World-appendable is fine for a debug

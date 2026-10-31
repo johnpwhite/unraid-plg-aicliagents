@@ -31,7 +31,14 @@ TMP_DIR="${MOUNT_ROOT}"
 #     'NR>=s {if(prev) printf \"%-30s +%5d ms\\n\", \$2, \$1-prev; prev=\$1}' ${MOUNT_ROOT}/perf.log"
 PERF_LOG="${MOUNT_ROOT}/perf.log"
 perf_log() {
-    printf '%s %s %s %s\n' "$(date +%s%N | cut -c1-13)" "$1" "$AGENT_ID" "$ID" >> "$PERF_LOG" 2>/dev/null
+    # bash 5 keeps the time in $EPOCHREALTIME (seconds.microseconds): no process is started.
+    local _t="${EPOCHREALTIME:-}"
+    if [ -n "$_t" ]; then
+        _t="${_t//[.,]/}"; _t="${_t:0:13}"
+    else
+        _t="$(date +%s%N | cut -c1-13)"
+    fi
+    printf '%s %s %s %s\n' "$_t" "$1" "$AGENT_ID" "$ID" >> "$PERF_LOG" 2>/dev/null
 }
 # Rotate if log exceeds 256 KB (cheap, avoids growth across many sessions)
 [ -f "$PERF_LOG" ] && [ "$(stat -c %s "$PERF_LOG" 2>/dev/null || echo 0)" -gt 262144 ] && \
@@ -53,22 +60,341 @@ EMHTTP_DEST="/usr/local/emhttp/plugins/unraid-aicliagents"
 PLUGIN_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"
 [ -n "$PLUGIN_SRC" ] || PLUGIN_SRC="$EMHTTP_DEST/src"
 
-# Unified terminal output logging via safe PHP bridge (no string interpolation)
-BRIDGE_SCRIPT="$PLUGIN_SRC/scripts/log-bridge.php"
-log_aicli() {
-    local level_name="$1"
-    local level_val="$2"
-    local msg="$3"
-
-    # D-201: Fallback to file-based logging if the bridge is missing (e.g. during uninstall)
-    if [ ! -f "$BRIDGE_SCRIPT" ]; then
-        echo "[$(date "+%Y-%m-%d %H:%M:%S")] [SHELL-$USER_NAME-$ID] $msg" >> "$DEBUG_LOG" 2>/dev/null
-        return
+# S5 (docs/specs/TERMINAL_FAST_ATTACH.md): every command-line PHP call of this launcher uses the PHP
+# file cache, so the plugin's 147 files are not parsed again on each call (about 150 ms a call).
+# The shell function `php` below adds the flags, so each `php ...` line in this file and in the
+# run script gets them. The state folder is mode 1777, so the cache folder is checked with care,
+# because PHP runs any code it finds in the cache: <state root>/opcache must be a real directory
+# (no symlink) owned by root and not writable by group or other (root makes it, mode 0711), and
+# <state root>/opcache/<uid> must be a real directory owned by that uid; its mode is set to 0700
+# at every check. Only root can make the per-uid folder (the plugin makes it at each launch). If any
+# check fails, AICLI_PHP_FLAGS stays empty and PHP runs without a cache, as before. Nothing in
+# Unraid's php.ini changes. Generation folders never change, and validate_timestamps stays on, so a
+# cached file cannot serve old code. The check runs at the first `php` call, not at start, so the
+# fast attach pays nothing for it.
+_aicli_php_cache_init() {
+    local _base="${MOUNT_ROOT}/opcache" _d _st _bt _bu _bm _dt _du _dm
+    _d="$_base/${EUID}"
+    AICLI_PHP_FLAGS=()
+    _AICLI_PHP_INIT=1
+    [ ! -L "$MOUNT_ROOT" ] || return 0
+    if [ "$EUID" = "0" ]; then
+        if [ ! -e "$_base" ] && [ ! -L "$_base" ]; then
+            mkdir -p "$_base" 2>/dev/null && chmod 0711 "$_base" 2>/dev/null
+        fi
+        if [ -d "$_base" ] && [ ! -L "$_base" ] && [ ! -e "$_d" ] && [ ! -L "$_d" ]; then
+            mkdir -m 0700 "$_d" 2>/dev/null
+        fi
     fi
-
-    # Safe PHP bridge: arguments via $argv, no string interpolation
-    php "$BRIDGE_SCRIPT" log "$msg" "$level_val" "SHELL-$USER_NAME-$ID" 2>/dev/null
+    # stat without -L: a symbolic link shows as "symbolic link", never as the directory it names.
+    _st="$(stat -c '%F|%u|%a' -- "$_base" "$_d" 2>/dev/null)" || return 0
+    { IFS='|' read -r _bt _bu _bm; IFS='|' read -r _dt _du _dm; } <<< "$_st"
+    [ "$_bt" = "directory" ] && [ "$_bu" = "0" ] || return 0
+    case "${_bm: -2}" in *[2367]*) return 0 ;; esac
+    [ "$_dt" = "directory" ] && [ "$_du" = "$EUID" ] || return 0
+    [ "$_dm" = "700" ] || chmod 0700 "$_d" 2>/dev/null || return 0
+    [ -w "$_d" ] || return 0
+    AICLI_PHP_FLAGS=(-d opcache.enable_cli=1 -d "opcache.file_cache=$_d" -d opcache.file_cache_only=1 -d opcache.validate_timestamps=1)
+    return 0
 }
+php() {
+    [ -n "${_AICLI_PHP_INIT:-}" ] || _aicli_php_cache_init
+    command php "${AICLI_PHP_FLAGS[@]}" "$@"
+}
+
+# S3: log level filter and direct debug.log writer. The level comes from the plugin cfg file
+# (key log_level, same file and default as LogService). It is read once per launcher run, in
+# bash, with no process. A line above the level returns at once. A line that passes is appended
+# to debug.log with printf in the format of LogService::log:
+#   [YYYY-mm-dd HH:MM:SS] [LEVL] [AICliAgents] [<context>] <message>
+# and, for WARN/ERR/INFO, copied to syslog as LogService does. Only a message that PHP must
+# clean (a control character, a line break) or a cfg that asks for the JSONL format goes
+# through `php log-bridge.php`.
+_AICLI_LOG_LEVEL=2
+_AICLI_LOG_MAX=5242880
+_AICLI_LOG_JSONL=0
+_aicli_read_log_cfg() {
+    local _l _v
+    _AICLI_LOG_LEVEL=2
+    _AICLI_LOG_MAX=5242880
+    _AICLI_LOG_JSONL=0
+    [ -r "${CONFIG_FILE:-}" ] || return 0
+    while IFS= read -r _l || [ -n "$_l" ]; do
+        case "$_l" in
+            log_level=*)
+                _v="${_l#log_level=}"; _v="${_v//[\"\' ]/}"
+                if [[ "$_v" =~ ^[0-9]+ ]]; then _AICLI_LOG_LEVEL=$((10#${BASH_REMATCH[0]})); else _AICLI_LOG_LEVEL=0; fi ;;
+            debug_log_format=*)
+                _v="${_l#debug_log_format=}"; _v="${_v//[\"\' ]/}"
+                [ "$_v" = "jsonl" ] && _AICLI_LOG_JSONL=1 ;;
+            debug_log_max_bytes=*)
+                _v="${_l#debug_log_max_bytes=}"; _v="${_v//[\"\' ]/}"
+                [[ "$_v" =~ ^[0-9]+$ ]] && [ "$((10#$_v))" -gt 0 ] && _AICLI_LOG_MAX=$((10#$_v)) ;;
+        esac
+    done < "$CONFIG_FILE"
+    return 0
+}
+_aicli_read_log_cfg
+
+# Unified terminal output logging (no string interpolation).
+BRIDGE_SCRIPT="$PLUGIN_SRC/scripts/log-bridge.php"
+_AICLI_LOG_CTX="SHELL-$USER_NAME-$ID"
+log_aicli() {
+    local level_name="$1" level_val="$2" msg="$3" lev line bridge
+    # Above the configured level: nothing to write, nothing to start.
+    [ "$level_val" -gt "$_AICLI_LOG_LEVEL" ] 2>/dev/null && return 0
+    bridge="${BRIDGE_SCRIPT:-$PLUGIN_SRC/scripts/log-bridge.php}"
+    if { [ "${_AICLI_LOG_JSONL:-0}" = "1" ] || [[ "$msg" =~ [[:cntrl:]] ]]; } && [ -f "$bridge" ]; then
+        # Safe PHP bridge: arguments via $argv, no string interpolation
+        php "$bridge" log "$msg" "$level_val" "$_AICLI_LOG_CTX" 2>/dev/null
+        return 0
+    fi
+    # debug.log is bounded by LogService (rotation at debug_log_max_bytes). The direct writer must not
+    # grow it without bound: when the file has reached that size, this line goes through the PHP
+    # bridge, which rotates. The size is read once per run (one process, only for a passing line).
+    if [ -z "${_AICLI_LOG_BIG+x}" ]; then
+        _AICLI_LOG_BIG=0
+        local _sz
+        _sz="$(stat -c %s -- "${DEBUG_LOG:-${MOUNT_ROOT}/debug.log}" 2>/dev/null)"
+        [ "${_sz:-0}" -ge "${_AICLI_LOG_MAX:-5242880}" ] 2>/dev/null && _AICLI_LOG_BIG=1
+    fi
+    if [ "$_AICLI_LOG_BIG" = "1" ] && [ -f "$bridge" ]; then
+        php "$bridge" log "$msg" "$level_val" "$_AICLI_LOG_CTX" 2>/dev/null
+        unset _AICLI_LOG_BIG
+        return 0
+    fi
+    case "$level_val" in 0) lev="ERR!" ;; 1) lev="WARN" ;; 3) lev="DBUG" ;; *) lev="INFO" ;; esac
+    line="[$_AICLI_LOG_CTX] $msg"
+    line="${line%"${line##*[![:space:]]}"}"
+    printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] [AICliAgents] %s\n' -1 "$lev" "$line" >> "${DEBUG_LOG:-${MOUNT_ROOT}/debug.log}" 2>/dev/null
+    if [ "$level_val" -le 2 ] 2>/dev/null && command -v logger >/dev/null 2>&1; then
+        logger -p user.info -t aicliagents -- "[AICliAgents] $line" 2>/dev/null
+    fi
+    return 0
+}
+
+# ---------- Moved up for the fast attach (S1): socket directory, adoption, uid-dir check ----------
+# Bug #1043: point tmux at a plugin-private socket directory instead of the
+# shared /tmp/tmux-<uid>. Other processes on the box (a user's own SSH tmux, a
+# container bind-mounting /tmp, another plugin) can leave /tmp/tmux-<uid> with
+# permissions tmux rejects ("unsafe permissions"), and the terminal then fails
+# with "Terminal session not found". ${MOUNT_ROOT}/tmux is the
+# plugin's alone, so tmux's tmux-<uid> dir inside it cannot be corrupted from
+# outside. Exported so the tmux server and every child inherit the same socket
+# location; every other plugin script that calls tmux sets it identically.
+# Bug #141: ONE tmux server per session, not one shared by the whole fleet.
+# The shared server inherited the AICLI_SESSION_ID of whichever session forked
+# it, and tmux copies its environment into every session created afterwards —
+# so gracefulClose's environment-matched reap SIGKILLed the shared server and
+# every other workspace died with it (twice on 2026-08-11). A per-session
+# TMUX_TMPDIR gives each session a private server, so a close can only ever
+# reach its own processes. Setting TMUX_TMPDIR (rather than passing -S) means
+# every bare `tmux` call in this script, in RUN_SCRIPT, and in any child
+# automatically targets the right server with no call-site changes.
+#
+# AICLI_TMUX_ROOT stays shared: PHP writes per-agent quirk files there, and
+# socket discovery (ProcessManager::tmuxSocketPaths) scans it for both layouts.
+export AICLI_TMUX_ROOT="${MOUNT_ROOT}/tmux"
+mkdir -p "$AICLI_TMUX_ROOT" 2>/dev/null
+# Sticky world-writable (like /tmp) so multiple agent uids can each create their
+# own subtree but cannot delete or replace another uid's.
+chmod 1777 "$AICLI_TMUX_ROOT" 2>/dev/null
+
+# Keyed on the session id ONLY (not the full session name), so it matches
+# ProcessManager::sessionTmuxTmpdir() exactly — TmuxSocketLayoutTest pins both.
+export TMUX_TMPDIR="$AICLI_TMUX_ROOT/s-$ID"
+mkdir -p "$TMUX_TMPDIR" 2>/dev/null
+# Owner-only: this directory belongs to exactly one session's server.
+chmod 0700 "$TMUX_TMPDIR" 2>/dev/null
+
+# An inherited $TMUX PINS every tmux call to the server named in it and silently
+# overrides TMUX_TMPDIR — which would put this session back on a shared server
+# and re-open the exact cross-workspace kill this change exists to prevent. The
+# normal launch path (php-fpm → ttyd → runuser) has no $TMUX, but any invocation
+# from inside a pane does, and that failure is silent. Drop it unconditionally;
+# nothing in this script reads $TMUX.
+unset TMUX TMUX_PANE
+
+# ADOPT an existing server before creating one here.
+#
+# The socket location moved in v2026.08.11.02 (shared -> per-session). A session
+# launched by an older generation therefore lives somewhere this script would
+# not look, and every existence check below ("does my session exist?") consults
+# only $TMUX_TMPDIR. The result is a FORK: the script sees nothing on the
+# per-session socket, starts a second agent there, and the real one is orphaned
+# on the old socket, still running, invisible to the browser.
+#
+# That happened for real on 2026-08-11: reconnecting one workspace onto a newer
+# generation produced two tmux sessions of the same name — the original agent
+# from 10:47 stranded on the shared socket, and a fresh empty agent on the
+# per-session socket that the browser attached to.
+#
+# So: look for this session on EVERY plugin socket first and adopt the server
+# that already has it. Only when it exists nowhere do we use the per-session
+# default set above. Ordering matters — the per-session location is preferred,
+# so a session already migrated is never dragged back to the shared server.
+adopt_existing_session_socket() {
+    local uid sock dir
+    uid="$(id -u)"
+    for sock in "$AICLI_TMUX_ROOT/s-$ID/tmux-$uid/default" \
+                "$AICLI_TMUX_ROOT"/s-*/tmux-"$uid"/default \
+                "$AICLI_TMUX_ROOT/tmux-$uid/default"; do
+        [ -S "$sock" ] || continue
+        tmux -S "$sock" has-session -t "$SESSION" 2>/dev/null || continue
+        # TMUX_TMPDIR is the grandparent of the socket (<dir>/tmux-<uid>/default).
+        dir="$(dirname "$(dirname "$sock")")"
+        if [ "$dir" != "$TMUX_TMPDIR" ]; then
+            export TMUX_TMPDIR="$dir"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ADOPT-SOCKET] sess=$SESSION adopted existing server at $sock (TMUX_TMPDIR=$dir)" >> "$DEBUG_LOG"
+        fi
+        return 0
+    done
+    return 0
+}
+adopt_existing_session_socket
+
+# Bug #1054 follow-up: tmux 3.4+ hard-refuses its per-uid socket dir unless it is
+# mode 0700 AND owned by the running uid — it aborts new-session with
+# "directory <TMUX_TMPDIR>/tmux-<uid> has unsafe permissions", which surfaces to
+# the user as "Terminal session not found". The world-writable parent lets another
+# uid create tmux-<uid> first, and an overlay/tmpfs restore can bring the dir back
+# with loose perms. Force it ours-and-0700 before tmux ever looks at it; if it is
+# owned by a uid we cannot chown and is still not 0700, remove it so tmux recreates
+# it cleanly (a directory tmux rejects can hold no live server anyway).
+sanitize_tmux_uid_dir() {
+    local dir="$TMUX_TMPDIR/tmux-$(id -u)"
+    [ -e "$dir" ] || return 0
+    chown "$(id -u):$(id -g)" "$dir" 2>/dev/null
+    chmod 0700 "$dir" 2>/dev/null
+    local perm own
+    perm="$(stat -c '%a' "$dir" 2>/dev/null)"
+    own="$(stat -c '%u' "$dir" 2>/dev/null)"
+    if [ "$perm" != "700" ] || [ "$own" != "$(id -u)" ]; then
+        rm -rf "$dir" 2>/dev/null
+    fi
+}
+sanitize_tmux_uid_dir
+
+# #219: detach any tmux client whose backing ttyd is DEAD, so `window-size
+# latest` cannot size the window to a deploy leftover (the terminal renders
+# shrunk with xterm's background dots). A deploy SIGTERMs the old ttyd but its
+# tmux client lingers (setsid stops the SIGHUP). "Backing ttyd is dead" = no live
+# `ttyd` process anywhere in the client process's ancestry; a genuine second live
+# browser (its own live ttyd) is kept. If no live ttyd can be found at all
+# (pgrep unavailable / renamed) the whole pass is skipped, so we never detach
+# every client. Separate from prune_excess_tmux_clients (which caps by count) so
+# each stays independently testable.
+detach_dead_ttyd_clients() {
+    local session="$1" live_ttyds cpid ctty walk hops alive
+    live_ttyds="$(pgrep -x ttyd 2>/dev/null | tr '\n' ' ')"
+    [ -n "$live_ttyds" ] || return 0
+    while IFS= read -r line; do
+        cpid="${line%% *}"; ctty="${line#* }"
+        [ -n "$cpid" ] && [ -n "$ctty" ] && [ "$cpid" != "$ctty" ] || continue
+        walk="$cpid"; hops=0; alive=0
+        while [ -n "$walk" ] && [ "$walk" != "1" ] && [ "$hops" -lt 12 ]; do
+            case " $live_ttyds " in *" $walk "*) alive=1; break ;; esac
+            walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')"
+            hops=$(( hops + 1 ))
+        done
+        [ "$alive" -eq 1 ] || tmux detach-client -t "$ctty" 2>/dev/null
+    done <<< "$(tmux list-clients -t "$session" -F '#{client_pid} #{client_tty}' 2>/dev/null)"
+    return 0
+}
+
+# Bound the number of simultaneously attached clients, keeping the NEWEST.
+#
+# This replaces `attach-session -d` (detach-others). -d was introduced for the
+# reconnect leak (2026-06-06): ttyd's web client reconnects on ANY websocket
+# drop — background-tab throttling, proxy idle timeout, a network blip — and
+# each reconnect attaches a NEW client while the previous one is NOT reaped
+# (runuser/setsid puts each attach in its own session, so ttyd can't SIGHUP it
+# on disconnect). Clients accumulated without bound; tmux mirrors the agent TUI
+# to every one of them on every redraw, so CPU compounded (7 clients on one
+# session, load avg ~5).
+#
+# But -d evicts EVERY other client, which is fine for one browser and broken
+# for two. Opening the same workspace on a phone while a desktop tab is open
+# put them in an eviction loop: the phone's attach evicted the desktop, the
+# desktop's terminal auto-reconnected and evicted the phone, and so on without
+# end — each side seeing a permanent reconnect churn.
+#
+# A cap fixes both. Leaked clients are ALWAYS older than a live reconnect, so
+# pruning oldest-first removes exactly the stale ones while letting genuine
+# concurrent viewers coexist. Set AICLI_MAX_TMUX_CLIENTS=1 to restore the old
+# evict-everyone behaviour.
+prune_excess_tmux_clients() {
+    local session="$1" limit="${2:-4}" keep list total drop client_tty
+    # We are about to attach as one more client, so at most limit-1 may remain.
+    keep=$(( limit - 1 ))
+    [ "$keep" -lt 0 ] && keep=0
+    list="$(tmux list-clients -t "$session" -F '#{client_created} #{client_tty}' 2>/dev/null \
+            | sort -n | awk 'NF==2 {print $2}')"
+    [ -n "$list" ] || return 0
+    total=$(printf '%s\n' "$list" | wc -l)
+    drop=$(( total - keep ))
+    [ "$drop" -gt 0 ] || return 0
+    # Feed the loop from a here-string, NOT `... | while`: a piped while runs in
+    # a subshell, so anything it changes is discarded when the pipeline ends.
+    while IFS= read -r client_tty; do
+        [ -n "$client_tty" ] && tmux detach-client -t "$client_tty" 2>/dev/null
+    done <<< "$(printf '%s\n' "$list" | head -n "$drop")"
+    return 0
+}
+
+# The attach, shared by the fast path below and by the end of the full launch path. The cap on
+# attached clients is applied BEFORE the attach: pruning after it would evict this very client.
+aicli_attach_exec() {
+    detach_dead_ttyd_clients "$SESSION"
+    prune_excess_tmux_clients "$SESSION" "${AICLI_MAX_TMUX_CLIENTS:-4}"
+
+    perf_log tmux.attach.exec
+    exec tmux -u attach-session -t "$SESSION" 2>>"$DEBUG_LOG"
+}
+
+# S2: the tier inputs. The full launch pass stores two session options: @aicli_tiers_files (the
+# four files that the options block reads: the agent quirk file, the agent JSON, the workspace JSON
+# and the workspace .conf, joined with "|"; a file that does not exist yet is in the list) and
+# @aicli_tiers_stamp (the plugin source folder of this launcher, then name, mtime, ctime, inode and size of each file that exists). The fast path computes the stamp again.
+# A change, a new file, a removed file, an atomic rewrite (new inode) or a plugin update (another source folder) gives another stamp, and the next connect runs the
+# options block once.
+_aicli_tiers_stamp() {
+    local -a _cand=() _present=()
+    local _f _out
+    IFS='|' read -r -a _cand <<< "$1"
+    for _f in "${_cand[@]}"; do
+        [ -n "$_f" ] && [ -f "$_f" ] && _present+=("$_f")
+    done
+    if [ "${#_present[@]}" -eq 0 ]; then printf '%s#none' "$PLUGIN_SRC"; return 0; fi
+    _out="$(stat -c '%n:%Y:%Z:%i:%s' "${_present[@]}" 2>/dev/null)" || _out="stat-failed"
+    printf '%s#%s' "$PLUGIN_SRC" "${_out//$'\n'/|}"
+}
+
+# S1: fast attach. ttyd runs this whole script for every browser connection. When the tmux
+# session already exists (the launch pass made it and applied the options), the connect goes
+# straight to the attach: no env setup, no args load, no terminfo compile, no log call, no PHP,
+# no options block. The ensure-session mode never takes this path. When the session does not
+# exist, or the stamp is missing or has changed, this returns and the full path below runs.
+_aicli_fast_attach() {
+    local _files _stamp
+    export PATH="${AICLI_HOME:-$USER_WORK_DIR/home}/.local/bin:/usr/local/emhttp/plugins/unraid-aicliagents/bin:$PATH"
+    command -v tmux >/dev/null 2>&1 || return 0
+    tmux has-session -t "$SESSION" 2>/dev/null || return 0
+    _files="$(tmux show-options -t "$SESSION" -qv @aicli_tiers_files 2>/dev/null)"
+    _stamp="$(tmux show-options -t "$SESSION" -qv @aicli_tiers_stamp 2>/dev/null)"
+    if [ -z "$_files" ] || [ -z "$_stamp" ] || [ "$(_aicli_tiers_stamp "$_files")" != "$_stamp" ]; then
+        perf_log fast.attach.skipped
+        return 0
+    fi
+    export HOME="${AICLI_HOME:-$USER_WORK_DIR/home}"
+    export TERM=xterm-256color COLORTERM=truecolor LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+    [ -d "${MOUNT_ROOT}/terminfo" ] && export TERMINFO_DIRS="${MOUNT_ROOT}/terminfo:${TERMINFO_DIRS:-}"
+    perf_log fast.attach
+    aicli_attach_exec
+}
+if [ "$AICLI_ENSURE_ONLY" -eq 0 ]; then
+    _aicli_fast_attach
+fi
 
 log_aicli "DEBUG" 3 "Shell wrapper started for session $ID (Agent: $AGENT_ID). Running as $USER_NAME."
 
@@ -348,106 +674,7 @@ if [ "$AICLI_ENSURE_ONLY" -eq 0 ]; then
     trap trap_exit EXIT
 fi
 
-# Bug #1043: point tmux at a plugin-private socket directory instead of the
-# shared /tmp/tmux-<uid>. Other processes on the box (a user's own SSH tmux, a
-# container bind-mounting /tmp, another plugin) can leave /tmp/tmux-<uid> with
-# permissions tmux rejects ("unsafe permissions"), and the terminal then fails
-# with "Terminal session not found". ${MOUNT_ROOT}/tmux is the
-# plugin's alone, so tmux's tmux-<uid> dir inside it cannot be corrupted from
-# outside. Exported so the tmux server and every child inherit the same socket
-# location; every other plugin script that calls tmux sets it identically.
-# Bug #141: ONE tmux server per session, not one shared by the whole fleet.
-# The shared server inherited the AICLI_SESSION_ID of whichever session forked
-# it, and tmux copies its environment into every session created afterwards —
-# so gracefulClose's environment-matched reap SIGKILLed the shared server and
-# every other workspace died with it (twice on 2026-08-11). A per-session
-# TMUX_TMPDIR gives each session a private server, so a close can only ever
-# reach its own processes. Setting TMUX_TMPDIR (rather than passing -S) means
-# every bare `tmux` call in this script, in RUN_SCRIPT, and in any child
-# automatically targets the right server with no call-site changes.
-#
-# AICLI_TMUX_ROOT stays shared: PHP writes per-agent quirk files there, and
-# socket discovery (ProcessManager::tmuxSocketPaths) scans it for both layouts.
-export AICLI_TMUX_ROOT="${MOUNT_ROOT}/tmux"
-mkdir -p "$AICLI_TMUX_ROOT" 2>/dev/null
-# Sticky world-writable (like /tmp) so multiple agent uids can each create their
-# own subtree but cannot delete or replace another uid's.
-chmod 1777 "$AICLI_TMUX_ROOT" 2>/dev/null
-
-# Keyed on the session id ONLY (not the full session name), so it matches
-# ProcessManager::sessionTmuxTmpdir() exactly — TmuxSocketLayoutTest pins both.
-export TMUX_TMPDIR="$AICLI_TMUX_ROOT/s-$ID"
-mkdir -p "$TMUX_TMPDIR" 2>/dev/null
-# Owner-only: this directory belongs to exactly one session's server.
-chmod 0700 "$TMUX_TMPDIR" 2>/dev/null
-
-# An inherited $TMUX PINS every tmux call to the server named in it and silently
-# overrides TMUX_TMPDIR — which would put this session back on a shared server
-# and re-open the exact cross-workspace kill this change exists to prevent. The
-# normal launch path (php-fpm → ttyd → runuser) has no $TMUX, but any invocation
-# from inside a pane does, and that failure is silent. Drop it unconditionally;
-# nothing in this script reads $TMUX.
-unset TMUX TMUX_PANE
-
-# ADOPT an existing server before creating one here.
-#
-# The socket location moved in v2026.08.11.02 (shared -> per-session). A session
-# launched by an older generation therefore lives somewhere this script would
-# not look, and every existence check below ("does my session exist?") consults
-# only $TMUX_TMPDIR. The result is a FORK: the script sees nothing on the
-# per-session socket, starts a second agent there, and the real one is orphaned
-# on the old socket, still running, invisible to the browser.
-#
-# That happened for real on 2026-08-11: reconnecting one workspace onto a newer
-# generation produced two tmux sessions of the same name — the original agent
-# from 10:47 stranded on the shared socket, and a fresh empty agent on the
-# per-session socket that the browser attached to.
-#
-# So: look for this session on EVERY plugin socket first and adopt the server
-# that already has it. Only when it exists nowhere do we use the per-session
-# default set above. Ordering matters — the per-session location is preferred,
-# so a session already migrated is never dragged back to the shared server.
-adopt_existing_session_socket() {
-    local uid sock dir
-    uid="$(id -u)"
-    for sock in "$AICLI_TMUX_ROOT/s-$ID/tmux-$uid/default" \
-                "$AICLI_TMUX_ROOT"/s-*/tmux-"$uid"/default \
-                "$AICLI_TMUX_ROOT/tmux-$uid/default"; do
-        [ -S "$sock" ] || continue
-        tmux -S "$sock" has-session -t "$SESSION" 2>/dev/null || continue
-        # TMUX_TMPDIR is the grandparent of the socket (<dir>/tmux-<uid>/default).
-        dir="$(dirname "$(dirname "$sock")")"
-        if [ "$dir" != "$TMUX_TMPDIR" ]; then
-            export TMUX_TMPDIR="$dir"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ADOPT-SOCKET] sess=$SESSION adopted existing server at $sock (TMUX_TMPDIR=$dir)" >> "$DEBUG_LOG"
-        fi
-        return 0
-    done
-    return 0
-}
-adopt_existing_session_socket
-
-# Bug #1054 follow-up: tmux 3.4+ hard-refuses its per-uid socket dir unless it is
-# mode 0700 AND owned by the running uid — it aborts new-session with
-# "directory <TMUX_TMPDIR>/tmux-<uid> has unsafe permissions", which surfaces to
-# the user as "Terminal session not found". The world-writable parent lets another
-# uid create tmux-<uid> first, and an overlay/tmpfs restore can bring the dir back
-# with loose perms. Force it ours-and-0700 before tmux ever looks at it; if it is
-# owned by a uid we cannot chown and is still not 0700, remove it so tmux recreates
-# it cleanly (a directory tmux rejects can hold no live server anyway).
-sanitize_tmux_uid_dir() {
-    local dir="$TMUX_TMPDIR/tmux-$(id -u)"
-    [ -e "$dir" ] || return 0
-    chown "$(id -u):$(id -g)" "$dir" 2>/dev/null
-    chmod 0700 "$dir" 2>/dev/null
-    local perm own
-    perm="$(stat -c '%a' "$dir" 2>/dev/null)"
-    own="$(stat -c '%u' "$dir" 2>/dev/null)"
-    if [ "$perm" != "700" ] || [ "$own" != "$(id -u)" ]; then
-        rm -rf "$dir" 2>/dev/null
-    fi
-}
-sanitize_tmux_uid_dir
+# (The tmux socket directory, the socket adoption and the uid-dir check run near the top of this script, before the fast attach.)
 
 # Bug #1054 root cause: tmux uses the user's login SHELL (from /etc/passwd, or
 # $SHELL env if set) to run the session's command. System users created with
@@ -497,21 +724,17 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     # variables on, so set it here; without it every path became /<name> at the root.
     printf 'export MOUNT_ROOT=%q\n' "$MOUNT_ROOT" >> "$RUN_SCRIPT"
 
-    # Inject logging function into the child script for tmux diagnostics
+    # Inject the logging function into the child script for tmux diagnostics, with the level
+    # filter and the direct debug.log writer (S3), and the PHP cache helper (S5, S7). `declare -f`
+    # copies the very functions that are defined at the top of this file, so the launcher and the
+    # run script share one source. The child reads the level at its start and again at each
+    # relaunch of the agent (the run loop calls _aicli_read_log_cfg).
+    printf 'export AICLI_FLASH_ROOT=%q\n' "$AICLI_FLASH_ROOT" >> "$RUN_SCRIPT"
+    printf 'CONFIG_FILE=%q\n' "$CONFIG_FILE" >> "$RUN_SCRIPT"
+    printf '_AICLI_LOG_CTX=SHELL-CHILD\n' >> "$RUN_SCRIPT"
+    declare -f _aicli_php_cache_init php _aicli_read_log_cfg log_aicli >> "$RUN_SCRIPT"
+    printf '_aicli_read_log_cfg\n' >> "$RUN_SCRIPT"
     cat << 'FUNCOEF' >> "$RUN_SCRIPT"
-log_aicli() {
-    local level_name="$1"
-    local level_val="$2"
-    local msg="$3"
-    local bridge="$PLUGIN_SRC/scripts/log-bridge.php"
-    local debug_log="${MOUNT_ROOT}/debug.log"
-
-    if [ ! -f "$bridge" ]; then
-        echo "[$(date "+%Y-%m-%d %H:%M:%S")] [SHELL-CHILD] $msg" >> "$debug_log" 2>/dev/null
-        return
-    fi
-    php "$bridge" log "$msg" "$level_val" "SHELL-CHILD" 2>/dev/null
-}
 perf_log() {
     # Optional $2 is appended as a free-form extra field (issue #71 uses it for
     # `run.exit ... rc=<code>`). AICLI_PERF_LOG override exists for unit tests
@@ -751,12 +974,6 @@ PRIOEOF
     printf 'export AICLI_EXPORTED_KEYS_FILE=%q\n' "$EXPORTED_KEYS_FILE" >> "$RUN_SCRIPT"
 
     cat << 'EOF' >> "$RUN_SCRIPT"
-# Bug #1054 diagnostic: log VERY early so we can pin down where RUN_SCRIPT
-# dies in failing non-root launches. The previous death pre-empted any
-# perf_log/log_aicli call, so the FIRST line of the heredoc body is now
-# a direct debug.log write -- bypasses log_aicli (which calls php) so it
-# works even if php is broken in this context.
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-A] RUN_SCRIPT entered (uid=$(id -u) sess=$AICLI_SESSION_ID agent=$AGENT_ID home=$HOME tty=$(tty 2>&1) shell=$0)" >> "${MOUNT_ROOT}/debug.log"
 export TERM=xterm-256color
 export LC_ALL=en_US.UTF-8
 # Ensure the agent (and every child) runs in the WORKSPACE, not the tmux server's
@@ -789,11 +1006,8 @@ export VISUAL="${VISUAL:-true}"
 export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-B] before stty sane" >> "${MOUNT_ROOT}/debug.log"
 stty sane 2>/dev/null
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-C] after stty sane (rc=$?)" >> "${MOUNT_ROOT}/debug.log"
 perf_log run.start
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-D] after perf_log run.start" >> "${MOUNT_ROOT}/debug.log"
 
 # WP #1253: keep opost+onlcr asserted on this pane for the life of the session.
 # A TUI agent (e.g. agy) cfmakeraw's the pane (turning opost OFF) for its own UI.
@@ -1131,10 +1345,12 @@ _aicli_build_resume_cmd() {
 # When that policy is missing, the Relay command is not there and the agent falls back to the slow MCP tool.
 # This runs for every agent and every launch (the shared launch path). The script reads the registry key
 # `command_env` and does nothing for an agent that has none. It never stops the launch.
+# `timeout` starts a program, not a shell function, so the cache flags (S7) are passed here.
 _aicli_ensure_command_env() {
     local _s="$PLUGIN_SRC/scripts/ensure-command-env.php"
-    [ -f "$_s" ] && [ "$(command -v php)" ] || return 0
-    timeout 20 php -d display_errors=0 "$_s" "$AGENT_ID" "${HOME_DIR:-$HOME}" >/dev/null 2>&1 || true
+    [ -f "$_s" ] && [ -n "$(type -P php)" ] || return 0
+    [ -n "${_AICLI_PHP_INIT:-}" ] || _aicli_php_cache_init
+    timeout 20 "$(type -P php)" "${AICLI_PHP_FLAGS[@]}" -d display_errors=0 "$_s" "$AGENT_ID" "${HOME_DIR:-$HOME}" >/dev/null 2>&1 || true
     return 0
 }
 
@@ -1216,6 +1432,8 @@ while true; do
         log_aicli "INFO" 2 "Graceful close sentinel observed at loop top — exiting before relaunch."
         break
     fi
+    # S3/S7: pick up a changed log level at each relaunch (a bash read, no process).
+    _aicli_read_log_cfg
     perf_log agent.exec.begin
     clear
 
@@ -1899,9 +2117,6 @@ EOF
     # new-session, in case anything since the early setup left it with perms tmux
     # rejects. Cheap and idempotent.
     sanitize_tmux_uid_dir
-    # Bug #1054 diagnostic: capture caller env + cwd so we can compare working
-    # vs failing launches. Removed once root cause is fixed.
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-PRE-TMUX] sess=$SESSION uid=$(id -u) cwd=$(pwd) TMUX_TMPDIR=$TMUX_TMPDIR tmux_v=$(tmux -V) script_size=$(wc -c < "$RUN_SCRIPT")" >> "$DEBUG_LOG"
     # Pin the new session's start dir to the workspace. Without -c, new-session
     # takes the invoking client / tmux-server cwd, so a headless --ensure-session
     # relaunch landed the agent in the server's /mnt instead of $ROOT_DIR (agy
@@ -1909,7 +2124,6 @@ EOF
     # is ${AICLI_ROOT:-/mnt} so it's never empty.
     tmux -u new-session -d -s "$SESSION" -c "${WORK_CWD:-$ROOT_DIR}" "$RUN_SCRIPT" 2>>"$DEBUG_LOG"
     _tmux_rc=$?
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DIAG-1054-POST-TMUX] new-session rc=$_tmux_rc has-session-now=$(tmux has-session -t "$SESSION" 2>&1 && echo YES || echo NO)" >> "$DEBUG_LOG"
     if [ "$_tmux_rc" -ne 0 ]; then
         log_aicli "ERROR" 1 "Failed to create tmux session $SESSION. Check $DEBUG_LOG"
     fi
@@ -2010,7 +2224,9 @@ tmux_append_once terminal-overrides ",tmux-256color:Tc"
 tmux_append_once terminal-overrides ",tmux-256color:RGB"
 [ -n "${TERMINFO_DIRS:-}" ] && tmux set-environment -g TERMINFO_DIRS "$TERMINFO_DIRS" 2>/dev/null
 
-# Helper: apply a JSON file of allow-listed tmux options via a single PHP pass.
+# Helper: apply the JSON files of the tiers (allow-listed tmux options) in ONE PHP pass (S4).
+# The files that exist go to one apply-tmux-json.php call, in the order given; a file that does
+# not exist is skipped, and there is no log call per file.
 # T-03: allowed/append key lists are single-sourced from TmuxService::ALLOWED_KEYS and
 #        TmuxService::APPEND_KEYS rather than duplicated here as string literals, so any
 #        future extension to the PHP const is automatically reflected in the shell tier.
@@ -2019,11 +2235,14 @@ tmux_append_once terminal-overrides ",tmux-256color:RGB"
 # script also accepts APPEND_KEYS entries (quirk files carry terminal-features) which
 # the old inline filter accidentally dropped.
 apply_tmux_json() {
-    local jsonfile="$1"
-    [ -f "$jsonfile" ] || return 0
-    log_aicli "DEBUG" 3 "Applying tmux settings from $jsonfile"
+    local _f
+    local -a _present=()
+    for _f in "$@"; do
+        [ -n "$_f" ] && [ -f "$_f" ] && _present+=("$_f")
+    done
+    [ "${#_present[@]}" -gt 0 ] || return 0
     php "$PLUGIN_SRC/scripts/user/apply-tmux-json.php" \
-        "$jsonfile" "$SESSION" 2>>"$DEBUG_LOG" | bash 2>>"$DEBUG_LOG"
+        "${_present[0]}" "$SESSION" "${_present[@]:1}" 2>>"$DEBUG_LOG" | bash 2>>"$DEBUG_LOG"
 }
 
 # Legacy migration: rename pre-4-tier per-(ws,agent) hash files to .legacy so the old
@@ -2031,7 +2250,7 @@ apply_tmux_json() {
 # first launch because there's nothing left to match.
 for _legacy in "$HOME_DIR/.aicli/tmux/"tmux_*.json; do
     [ -e "$_legacy" ] || continue
-    _legacy_base=$(basename "$_legacy")
+    _legacy_base="${_legacy##*/}"
     case "$_legacy_base" in
         tmux_agent_*.json|tmux_ws_*.json) continue ;;
     esac
@@ -2050,26 +2269,35 @@ unset _legacy _legacy_base
 # accumulates rather than clobbers the BUILTIN terminal-overrides entries.
 # Bug #141: quirk files are written by PHP (TmuxService::quirkPath) into the
 # SHARED tmux root, not the per-session TMUX_TMPDIR — read them from there.
-apply_tmux_json "$AICLI_TMUX_ROOT/quirks_${AGENT_ID}.json"
-
-# Tier 2 — Agent-level defaults (edited via the Store card's Terminal panel).
-apply_tmux_json "$HOME_DIR/.aicli/tmux/tmux_agent_${AGENT_ID}.json"
-
-# Tier 3 — Workspace-level overrides (edited via the drawer tmux tab). Keyed by
-# md5(ROOT_DIR) so the same agent in different workspaces has isolated deltas.
+# Tier 2 (agent JSON) and Tier 3 (workspace JSON) go in the same pass, in that order, so the
+# later tier wins. Tier 2 is tmux_agent_<agent>.json (edited via the Store card's Terminal
+# panel). Tier 3 is tmux_ws_<md5(ROOT_DIR)>_<agent>.json (edited via the drawer tmux tab); the
+# md5 keeps the deltas of one agent isolated per workspace.
+# S2: before the pass, note the name, mtime and size of every tier input. A file that changes
+# while the pass runs then shows at the next connect. The note is stored after Tier 4.
+_AICLI_TIER_AGENT="$HOME_DIR/.aicli/tmux/tmux_agent_${AGENT_ID}.json"
+_AICLI_TIER_WS=""
 if [ -n "$ROOT_DIR" ]; then
     WS_HASH=$(printf %s "$ROOT_DIR" | md5sum | cut -d' ' -f1)
-    apply_tmux_json "$HOME_DIR/.aicli/tmux/tmux_ws_${WS_HASH}_${AGENT_ID}.json"
+    _AICLI_TIER_WS="$HOME_DIR/.aicli/tmux/tmux_ws_${WS_HASH}_${AGENT_ID}.json"
 fi
+WS_TMUX_CONF="$ROOT_DIR/.aicli/tmux/${AGENT_ID}.conf"
+_AICLI_TIER_FILES="$AICLI_TMUX_ROOT/quirks_${AGENT_ID}.json|$_AICLI_TIER_AGENT|$_AICLI_TIER_WS|$WS_TMUX_CONF"
+_AICLI_TIER_STAMP="$(_aicli_tiers_stamp "$_AICLI_TIER_FILES")"
+apply_tmux_json "$AICLI_TMUX_ROOT/quirks_${AGENT_ID}.json" "$_AICLI_TIER_AGENT" "$_AICLI_TIER_WS"
+# Tier 2 — Agent-level defaults and Tier 3 — Workspace-level overrides: applied by the call above.
 
 # Tier 4 — Power-user workspace .conf (raw tmux syntax, escape hatch — wins all).
-WS_TMUX_CONF="$ROOT_DIR/.aicli/tmux/${AGENT_ID}.conf"
 if [ -n "$ROOT_DIR" ] && [ -f "$WS_TMUX_CONF" ] && [ -r "$WS_TMUX_CONF" ]; then
     log_aicli "DEBUG" 3 "Sourcing workspace tmux conf: $WS_TMUX_CONF"
     if ! tmux source-file -t "$SESSION" "$WS_TMUX_CONF" 2>>"$DEBUG_LOG"; then
         log_aicli "WARN" 2 "Workspace tmux conf had errors (see $DEBUG_LOG) - prior tiers remain active"
     fi
 fi
+# S2: the options are applied; store the input note. The fast attach at the top compares it with
+# the files at each later connect, and runs this block again only when it differs.
+tmux set-option -t "$SESSION" @aicli_tiers_files "$_AICLI_TIER_FILES" 2>/dev/null
+tmux set-option -t "$SESSION" @aicli_tiers_stamp "$_AICLI_TIER_STAMP" 2>/dev/null
 perf_log tmux.options.done
 # D-400: exec replaces this process - error handling must happen before exec
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -2078,32 +2306,6 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     sleep 5
     exit 1
 fi
-# #219: detach any tmux client whose backing ttyd is DEAD, so `window-size
-# latest` cannot size the window to a deploy leftover (the terminal renders
-# shrunk with xterm's background dots). A deploy SIGTERMs the old ttyd but its
-# tmux client lingers (setsid stops the SIGHUP). "Backing ttyd is dead" = no live
-# `ttyd` process anywhere in the client process's ancestry; a genuine second live
-# browser (its own live ttyd) is kept. If no live ttyd can be found at all
-# (pgrep unavailable / renamed) the whole pass is skipped, so we never detach
-# every client. Separate from prune_excess_tmux_clients (which caps by count) so
-# each stays independently testable.
-detach_dead_ttyd_clients() {
-    local session="$1" live_ttyds cpid ctty walk hops alive
-    live_ttyds="$(pgrep -x ttyd 2>/dev/null | tr '\n' ' ')"
-    [ -n "$live_ttyds" ] || return 0
-    while IFS= read -r line; do
-        cpid="${line%% *}"; ctty="${line#* }"
-        [ -n "$cpid" ] && [ -n "$ctty" ] && [ "$cpid" != "$ctty" ] || continue
-        walk="$cpid"; hops=0; alive=0
-        while [ -n "$walk" ] && [ "$walk" != "1" ] && [ "$hops" -lt 12 ]; do
-            case " $live_ttyds " in *" $walk "*) alive=1; break ;; esac
-            walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')"
-            hops=$(( hops + 1 ))
-        done
-        [ "$alive" -eq 1 ] || tmux detach-client -t "$ctty" 2>/dev/null
-    done <<< "$(tmux list-clients -t "$session" -F '#{client_pid} #{client_tty}' 2>/dev/null)"
-    return 0
-}
 
 # R-B1: headless ensure-session mode — the detached session now exists (verified
 # by the has-session check above) with the agent running inside it, and all four
@@ -2121,48 +2323,4 @@ if [ "$AICLI_ENSURE_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-# Bound the number of simultaneously attached clients, keeping the NEWEST.
-#
-# This replaces `attach-session -d` (detach-others). -d was introduced for the
-# reconnect leak (2026-06-06): ttyd's web client reconnects on ANY websocket
-# drop — background-tab throttling, proxy idle timeout, a network blip — and
-# each reconnect attaches a NEW client while the previous one is NOT reaped
-# (runuser/setsid puts each attach in its own session, so ttyd can't SIGHUP it
-# on disconnect). Clients accumulated without bound; tmux mirrors the agent TUI
-# to every one of them on every redraw, so CPU compounded (7 clients on one
-# session, load avg ~5).
-#
-# But -d evicts EVERY other client, which is fine for one browser and broken
-# for two. Opening the same workspace on a phone while a desktop tab is open
-# put them in an eviction loop: the phone's attach evicted the desktop, the
-# desktop's terminal auto-reconnected and evicted the phone, and so on without
-# end — each side seeing a permanent reconnect churn.
-#
-# A cap fixes both. Leaked clients are ALWAYS older than a live reconnect, so
-# pruning oldest-first removes exactly the stale ones while letting genuine
-# concurrent viewers coexist. Set AICLI_MAX_TMUX_CLIENTS=1 to restore the old
-# evict-everyone behaviour.
-prune_excess_tmux_clients() {
-    local session="$1" limit="${2:-4}" keep list total drop client_tty
-    # We are about to attach as one more client, so at most limit-1 may remain.
-    keep=$(( limit - 1 ))
-    [ "$keep" -lt 0 ] && keep=0
-    list="$(tmux list-clients -t "$session" -F '#{client_created} #{client_tty}' 2>/dev/null \
-            | sort -n | awk 'NF==2 {print $2}')"
-    [ -n "$list" ] || return 0
-    total=$(printf '%s\n' "$list" | wc -l)
-    drop=$(( total - keep ))
-    [ "$drop" -gt 0 ] || return 0
-    # Feed the loop from a here-string, NOT `... | while`: a piped while runs in
-    # a subshell, so anything it changes is discarded when the pipeline ends.
-    while IFS= read -r client_tty; do
-        [ -n "$client_tty" ] && tmux detach-client -t "$client_tty" 2>/dev/null
-    done <<< "$(printf '%s\n' "$list" | head -n "$drop")"
-    return 0
-}
-
-detach_dead_ttyd_clients "$SESSION"
-prune_excess_tmux_clients "$SESSION" "${AICLI_MAX_TMUX_CLIENTS:-4}"
-
-perf_log tmux.attach.exec
-exec tmux -u attach-session -t "$SESSION" 2>>"$DEBUG_LOG"
+aicli_attach_exec

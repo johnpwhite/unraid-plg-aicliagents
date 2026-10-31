@@ -33,8 +33,9 @@ class LogService {
      * @param string $message The log message.
      * @param int $level The log level.
      * @param string $context The component context (e.g., [TaskService]).
+     * @param bool $syslog false keeps a line that repeats often (for example one per page reload) out of the system log; it still goes to debug.log.
      */
-    public static function log($message, $level = self::LOG_INFO, $context = "AICliAgents") {
+    public static function log($message, $level = self::LOG_INFO, $context = "AICliAgents", $syslog = true) {
         // 1. Determine current threshold
         if (self::$currentLevel === null) {
             self::$currentLevel = self::getStoredLogLevel();
@@ -99,7 +100,7 @@ class LogService {
             if (empty($line)) continue;
 
             // 1. Syslog (Only for non-debug lines to avoid spam)
-            if ($level <= self::LOG_INFO) {
+            if ($level <= self::LOG_INFO && $syslog) {
                 @syslog($syslogLevel, "$contextTag$traceTag $line");
             }
 

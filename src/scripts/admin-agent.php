@@ -382,6 +382,27 @@
  * script must not grow its own copy of what each tool does, only how a
  * positional command line maps onto a tool name and its arguments.
  */
+/**
+ * TERMINAL_FAST_ATTACH.md S5: run once more with the PHP file cache, so the plugin's files are
+ * not parsed again on each call. opcache.* are start-up settings: a script cannot turn them on
+ * for itself, so it replaces its own process with a second PHP that has the flags (same argv,
+ * same stdin, same exit code, same environment: no variable is added). It happens only when the
+ * OPcache extension is loaded, no file cache is set yet, pcntl is available and the checked cache
+ * folder is usable (UtilityService::phpCacheFlags). The second PHP has the file cache set, so
+ * the condition is false there and no loop is possible. Without pcntl the script runs without the
+ * cache; it never goes through a shell, because a shell hop would change the environment that
+ * the caller controls.
+ */
+if (PHP_SAPI === 'cli' && extension_loaded('Zend OPcache') && (string)ini_get('opcache.file_cache') === ''
+    && function_exists('pcntl_exec')) {
+    require_once __DIR__ . '/../includes/services/SecretPaths.php';
+    require_once __DIR__ . '/../includes/services/UtilityService.php';
+    $cacheFlags = \AICliAgents\Services\UtilityService::phpCacheFlags();
+    if ($cacheFlags !== []) {
+        @pcntl_exec(PHP_BINARY, array_merge($cacheFlags, [$argv[0]], array_slice($argv, 1)));
+    }
+}
+
 require_once __DIR__ . '/../includes/AICliAgentsManager.php';
 // Prefer the launcher's identity. A caller can change its own environment
 // before it starts this process, so the child's variable is only a fallback.

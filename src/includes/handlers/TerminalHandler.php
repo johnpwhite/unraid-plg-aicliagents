@@ -369,10 +369,30 @@ class TerminalHandler {
         $unreachable = [];
         try { $unreachable = self::unreachableCopies(); }
         catch (\Throwable $e) { /* a poll must never break on this */ }
-        return ['status' => 'ok', 'running' => $running, 'stale' => $stale, 'generation' => $active,
+        return ['status' => 'ok', 'running' => $running, 'bound' => self::boundSockets($running), 'stale' => $stale, 'generation' => $active,
                 'orphans' => $orphans, 'unreachable' => $unreachable, 'auto_continue' => $autoContinue, 'continue_held' => $continueHeld,
                 'agent_version_differs' => $otherVersion, 'agent_installed_versions' => $agentVersions,
                 'scheduled_continue' => $scheduledContinue];
+    }
+
+    /**
+     * TERMINAL_FAST_ATTACH.md U2: which running workspaces have a ttyd socket now.
+     * One `file_exists` per RUNNING id on the path `ProcessManager::isTtydBound`
+     * uses (`/var/run/aicliterm-<id>.sock`); a stopped id costs nothing. The page
+     * asks `attach_bridge` instead of `start` for an id that is true here. The
+     * answer is a hint: `attach_bridge` checks again under the session lock.
+     *
+     * @param array<string,bool> $running id => runs
+     * @return array<string,bool> id => socket exists (only the running ids)
+     */
+    public static function boundSockets(array $running, string $dir = '/var/run'): array {
+        $bound = [];
+        foreach ($running as $id => $runs) {
+            if ($runs !== true) continue;
+            $safe = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$id);
+            $bound[(string)$id] = $safe !== '' && file_exists($dir . '/aicliterm-' . $safe . '.sock');
+        }
+        return $bound;
     }
 
     /**

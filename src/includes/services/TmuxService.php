@@ -324,7 +324,14 @@ class TmuxService {
             if (file_exists($path)) @unlink($path);
             return true;
         }
-        return (bool) file_put_contents($path, json_encode($quirks, JSON_PRETTY_PRINT));
+        // TERMINAL_FAST_ATTACH.md S2: the launcher's tier stamp names this file's mtime, so a
+        // rewrite with the same content would send every session of the agent through the slow
+        // connect path after each bridge restart. Write only when the content changes.
+        $json = json_encode($quirks, JSON_PRETTY_PRINT);
+        if (is_file($path) && @file_get_contents($path) === $json) {
+            return true;
+        }
+        return (bool) file_put_contents($path, $json);
     }
 
     // ---------- Legacy migration ----------

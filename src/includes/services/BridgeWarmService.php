@@ -65,15 +65,18 @@ class BridgeWarmService
             return ['status' => 'busy'];
         }
         try {
+            // The same states that make `start` refuse (a running upgrade, a home consolidate, an array
+            // stop, a storage migration) are checked FIRST, also for a workspace that is already
+            // connected: a non-ok answer sends the page to `start`, which gives the reason.
+            $held = self::heldReason($ws['agentId'], $ws['path']);
+            if ($held !== '') {
+                return ['status' => 'held', 'message' => $held];
+            }
             if (self::isBound($id)) {
                 return ['status' => 'ok', 'result' => 'bound', 'terminalGeneration' => self::generation($id)];
             }
             if (!self::isRunning($id)) {
                 return ['status' => 'not_running'];
-            }
-            $held = self::heldReason($ws['agentId'], $ws['path']);
-            if ($held !== '') {
-                return ['status' => 'held', 'message' => $held];
             }
             self::launch($id, $ws['path'], $ws['agentId']);
             if (!self::isBound($id)) {
@@ -106,7 +109,7 @@ class BridgeWarmService
         if ($spawn) return (int)$spawn($ids);
         $script = dirname(__DIR__, 2) . '/scripts/bridge-warm.php';
         if (!is_file($script)) return 0;
-        return UtilityService::spawnDetached(array_merge(['php', $script], $ids), self::respawnLog());
+        return UtilityService::spawnDetached(array_merge(['php'], UtilityService::phpCacheFlags(), [$script], $ids), self::respawnLog());
     }
 
     /**
@@ -196,6 +199,14 @@ class BridgeWarmService
             if ($user === '' || $user === '0') $user = 'root';
             if (class_exists(ConsolidateState::class) && ConsolidateState::isHomeConsolidating($user)) {
                 return 'home consolidate in progress';
+            }
+            // The same two predicates that `start` uses (TerminalHandler::start): a storage migration
+            // and an array stop that makes this workspace's folder unavailable.
+            if (StorageBackendMigrationService::isMigrationInProgress()) {
+                return 'storage migration in progress';
+            }
+            if ($path !== '' && StorageMountService::startBlockedByArrayStop($path)) {
+                return 'array is stopping';
             }
             if ($path !== '' && !StorageMountService::isPathAvailable($path)) {
                 return 'workspace folder not available';

@@ -3,7 +3,10 @@
  * apply-tmux-json.php — emit `tmux set-option` commands for an allow-listed
  * JSON settings file. Invoked by aicli-shell.sh's apply_tmux_json helper:
  *
- *   php apply-tmux-json.php <settings.json> <target-session> | bash
+ *   php apply-tmux-json.php <settings.json> <target-session> [<more-settings.json>...] | bash
+ *
+ * TERMINAL_FAST_ATTACH.md S4: the launcher passes every tier file that exists in ONE call
+ * (quirk file, agent JSON, workspace JSON); the files are applied in the order given.
  *
  * T-03: the allowed/append key lists are single-sourced from
  * TmuxService::ALLOWED_KEYS / ::APPEND_KEYS — any future extension of the PHP
@@ -22,18 +25,24 @@ $srcRoot = dirname(__DIR__, 2);
 require_once $srcRoot . '/includes/AICliAgentsManager.php';
 require_once $srcRoot . '/includes/services/TmuxService.php';
 
-$jsonfile = $argv[1] ?? '';
+// Files: argv[1] first, then any more files after the session name (argv[3...]), applied in
+// that order so a later tier wins. The one-file call of the older launcher still works.
 $target = $argv[2] ?? '';
-if ($jsonfile === '' || !is_file($jsonfile) || !preg_match('/^[A-Za-z0-9_-]{1,160}$/D', $target)) {
-    exit(0); // nothing to apply — mirrors the shell helper's [ -f ] guard
+if (!preg_match('/^[A-Za-z0-9_-]{1,160}$/D', $target)) {
+    exit(0);
 }
+$jsonfiles = array_merge([$argv[1] ?? ''], array_slice($argv, 3));
 
 $allowed = \AICliAgents\Services\TmuxService::ALLOWED_KEYS;
 $append  = \AICliAgents\Services\TmuxService::APPEND_KEYS;
 
+foreach ($jsonfiles as $jsonfile) {
+if ($jsonfile === '' || !is_file($jsonfile)) {
+    continue; // nothing to apply — mirrors the shell helper's [ -f ] guard
+}
 $s = json_decode((string)@file_get_contents($jsonfile), true);
 if (!is_array($s)) {
-    exit(0);
+    continue;
 }
 
 foreach ($s as $k => $v) {
@@ -55,4 +64,5 @@ foreach ($s as $k => $v) {
     }
     echo 'tmux set-option -t ' . escapeshellarg($target) . ' '
         . escapeshellarg($k) . ' ' . escapeshellarg((string)$v) . "\n";
+}
 }

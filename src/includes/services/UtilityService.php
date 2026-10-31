@@ -42,6 +42,65 @@ class UtilityService {
     }
 
     /**
+     * TERMINAL_FAST_ATTACH.md S5: the `php` flags that give a command-line plugin script the PHP
+     * file cache (the same flags and the same checks as `_aicli_php_cache_init` in aicli-shell.sh).
+     * PHP runs any code it finds in the cache, and the state root is mode 1777, so the folder is
+     * checked at every call: <state root> and <state root>/opcache are real directories (no
+     * symlink); <state root>/opcache is owned by root and not writable by group or other; and
+     * <state root>/opcache/<euid> is a real directory owned by the caller, set to mode 0700.
+     * Root makes the folders that are missing. When any check fails the list is empty and PHP runs
+     * without the cache, as before. Nothing in Unraid's php.ini changes, and a generation folder
+     * never changes, so a cached file cannot serve old code (validate_timestamps stays on).
+     *
+     * @return string[]
+     */
+    public static function phpCacheFlags(): array {
+        $uid = function_exists('posix_geteuid') ? posix_geteuid() : 0;
+        $root = rtrim(SecretPaths::stateRoot(), '/');
+        $base = $root . '/opcache';
+        $dir = $base . '/' . $uid;
+        if ($uid === 0) {
+            self::ensurePhpCacheDirFor(0);
+        }
+        clearstatcache(true);
+        if (is_link($root)) return [];
+        $b = @lstat($base);
+        $d = @lstat($dir);
+        if ($b === false || $d === false) return [];
+        if (($b['mode'] & 0170000) !== 0040000 || $b['uid'] !== 0 || ($b['mode'] & 0022) !== 0) return [];
+        if (($d['mode'] & 0170000) !== 0040000 || $d['uid'] !== $uid) return [];
+        if (($d['mode'] & 0777) !== 0700 && !@chmod($dir, 0700)) return [];
+        if (!is_writable($dir)) return [];
+        return ['-d', 'opcache.enable_cli=1', '-d', 'opcache.file_cache=' . $dir, '-d', 'opcache.file_cache_only=1',
+                '-d', 'opcache.validate_timestamps=1'];
+    }
+
+    /**
+     * Root only: make <state root>/opcache (owned by root, mode 0711) and <state root>/opcache/<uid>
+     * (owned by that uid, mode 0700) when they are missing. It never follows a symlink and never
+     * takes over a folder that exists with another owner: such a folder stays and is refused by the
+     * check in phpCacheFlags(). The launch calls it for the user an agent runs as, because only root
+     * can make a folder inside the root-owned parent.
+     */
+    public static function ensurePhpCacheDirFor(int $uid): void {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) return;
+        $root = rtrim(SecretPaths::stateRoot(), '/');
+        if (is_link($root)) return;
+        $base = $root . '/opcache';
+        if (!file_exists($base) && !is_link($base)) {
+            @mkdir($base, 0711, true);
+            @chmod($base, 0711);
+        }
+        $b = @lstat($base);
+        if ($b === false || ($b['mode'] & 0170000) !== 0040000 || $b['uid'] !== 0) return;
+        $dir = $base . '/' . $uid;
+        if (!file_exists($dir) && !is_link($dir) && @mkdir($dir, 0700)) {
+            @chown($dir, $uid);
+            @chmod($dir, 0700);
+        }
+    }
+
+    /**
      * #337: start a long-lived background process fully detached from this PHP
      * process: a new session, stdin from /dev/null, stdout/stderr to $log, and
      * no inherited descriptor (every fd above 2 is closed). A plain
