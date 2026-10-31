@@ -2854,13 +2854,14 @@ bake_via_hardlink_merge() {
 #   consolidate_lowerdir_incomplete — live overlay short vs on-disk layers (op_consolidate, WP #1278)
 #   bake_lock_held                  — consolidate found the per-entity bake lock held (bake wins);
 #                                     a bake that waited its limit for a NON-bake holder (#357, NOT saved)
+#   storage_move_active             — an exclusive home path move owns the path; mounts retry when it clears
 #   bake_landed_during_consolidate  — a delta baked during the unlocked mksquashfs window
 #   target_not_mounted              — persist path's backing mount absent (UD device may mount late) (op_mount, S-02 #1352)
 #   array_stopping                  — the array is stopping and the persist path is on it (op_mount and storagectl mount, issue #761)
 #   fat32_size_cap                  — projected layer would exceed the FAT32 4 GiB per-file cap (bake/consolidate exit 4, S-09 #1352)
 #   upper_not_empty                 — graduate found unflushed files in the upper after the flush+consolidate (op_graduate exit 2, S-10 #1354)
 #   graduate_precondition           — graduate precondition failed (exit 4 — wrong device/engine/backend, no layers, or pt dir occupied) (op_graduate, S-10 #1354)
-AICLI_DEFER_REASONS="mount_busy busy_cooldown sqlite_backup_deferred consolidate_lowerdir_incomplete bake_lock_held bake_landed_during_consolidate target_not_mounted fat32_size_cap upper_not_empty graduate_precondition no_space boot_disk_too_small space_estimate_unavailable array_stopping"
+AICLI_DEFER_REASONS="mount_busy busy_cooldown sqlite_backup_deferred consolidate_lowerdir_incomplete bake_lock_held bake_landed_during_consolidate target_not_mounted fat32_size_cap upper_not_empty graduate_precondition no_space boot_disk_too_small space_estimate_unavailable array_stopping storage_move_active"
 
 # 2026-09-29 (#357): a bake's exit 2 does NOT always mean "saved". mount_busy
 # (the refresh after the layer was written) and busy_cooldown (saved within

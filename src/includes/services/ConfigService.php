@@ -845,6 +845,113 @@ class ConfigService {
 
     /** @var (callable(string):bool)|null test seam: replaces FileStorage::ensureReady("home/<user>")->ok. */
     public static $homeReadyProbe = null;
+    /** @var (callable():int)|null test seam for the persistent home-mount retry timer. */
+    public static $homeMountBackoffClock = null;
+    /** @var (callable(string):void)|null test seam for the one-per-state failure warning. */
+    public static $homeMountUnavailableLogger = null;
+    /** @var (callable(string,array<string,mixed>,bool):string)|null test seam for the failure-state fingerprint. */
+    public static $homeMountFailureFingerprintProbe = null;
+
+    private const HOME_MOUNT_RETRY_BASE_SECONDS = 30;
+    private const HOME_MOUNT_RETRY_MAX_SECONDS = 300;
+
+    /** The cross-request failure marker for one user's home. */
+    public static function homeMountFailureMarkerPath(string $user): string {
+        $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
+        return rtrim(SecretPaths::stateRoot(), '/') . "/home_mount_failure_{$safeUser}.json";
+    }
+
+    private static function homeMountBackoffNow(): int {
+        if (self::$homeMountBackoffClock !== null) return (int)(self::$homeMountBackoffClock)();
+        return time();
+    }
+
+    /** Hash the inputs that can change whether a home mount can now succeed. */
+    private static function homeMountFailureFingerprint(string $user, array $config, bool $mountRefused): string {
+        if (self::$homeMountFailureFingerprintProbe !== null) {
+            return (string)(self::$homeMountFailureFingerprintProbe)($user, $config, $mountRefused);
+        }
+        require_once __DIR__ . '/StoragePathResolver.php';
+        require_once __DIR__ . '/StorageMountService.php';
+        $persistPath = StoragePathResolver::homePersistPathFromConfig($config);
+        $mountPath = UtilityService::getWorkDir($user) . '/home';
+        $facts = [
+            'user' => $user,
+            'persist' => $persistPath,
+            'backend' => (string)($config['storage_backend_mode'] ?? ''),
+            'upper_mode' => (string)($config['home_upper_mode'] ?? ''),
+            'migration' => StorageMountService::isMigrationInProgress(),
+            'array_stop' => $mountRefused,
+            'backing_mount' => StorageMountService::isBackingMountAvailable($persistPath),
+            'mounted' => StorageMountService::isMounted($mountPath),
+            'healthy' => StorageMountService::isHomeMountHealthy($user, null, $mountPath, $persistPath),
+        ];
+        return hash('sha256', (string)json_encode($facts));
+    }
+
+    /** @return array<string,mixed>|null */
+    private static function readHomeMountFailureState(string $user): ?array {
+        $raw = @file_get_contents(self::homeMountFailureMarkerPath($user));
+        if (!is_string($raw) || $raw === '') return null;
+        $state = json_decode($raw, true);
+        return is_array($state) ? $state : null;
+    }
+
+    private static function writeHomeMountFailureState(string $user, array $state): void {
+        $path = self::homeMountFailureMarkerPath($user);
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return;
+        try {
+            $tmp = $path . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
+            $json = json_encode($state, JSON_UNESCAPED_SLASHES);
+            if (!is_string($json) || @file_put_contents($tmp, $json) === false) {
+                @unlink($tmp);
+                return;
+            }
+            @chmod($tmp, 0600);
+            if (!@rename($tmp, $path)) @unlink($tmp);
+        } catch (\Throwable $e) {
+            // A failed cache write must not block the safe unmounted-state path.
+        }
+    }
+
+    private static function clearHomeMountFailureState(string $user): void {
+        @unlink(self::homeMountFailureMarkerPath($user));
+    }
+
+    private static function homeMountFailureBackoffActive(?array $state, string $fingerprint, int $now): bool {
+        return is_array($state)
+            && isset($state['fingerprint'], $state['retry_at'])
+            && is_string($state['fingerprint'])
+            && hash_equals($state['fingerprint'], $fingerprint)
+            && (int)$state['retry_at'] > $now;
+    }
+
+    /** Store one failure warning per stable state and increase the retry delay. */
+    private static function recordHomeMountFailure(string $user, string $fingerprint, ?array $previous, string $fallback, bool $logWarning): void {
+        $sameState = is_array($previous)
+            && isset($previous['fingerprint'])
+            && is_string($previous['fingerprint'])
+            && hash_equals($previous['fingerprint'], $fingerprint);
+        $failures = $sameState ? max(0, (int)($previous['failures'] ?? 0)) + 1 : 1;
+        $delay = min(self::HOME_MOUNT_RETRY_MAX_SECONDS, self::HOME_MOUNT_RETRY_BASE_SECONDS * (2 ** min(4, $failures - 1)));
+        $logged = $sameState && !empty($previous['logged']);
+        if (!$logged && $logWarning) {
+            $message = "getUserStatePath: home mount unavailable for '$user' — state goes to $fallback (outside the mount point) until the home mounts";
+            if (self::$homeMountUnavailableLogger !== null) {
+                (self::$homeMountUnavailableLogger)($message);
+            } else {
+                LogService::log($message, LogService::LOG_WARN, 'ConfigService');
+            }
+            $logged = true;
+        }
+        self::writeHomeMountFailureState($user, [
+            'fingerprint' => $fingerprint,
+            'failures' => $failures,
+            'retry_at' => self::homeMountBackoffNow() + $delay,
+            'logged' => $logged,
+        ]);
+    }
 
     /**
      * Pause (microseconds) before the one retry of a failed home mount. The default is
@@ -887,9 +994,15 @@ class ConfigService {
         return StorageMountService::storageDownWithArray(StoragePathResolver::homePersistPath($user));
     }
 
-    private static function homeReady(string $user): bool {
-        if (self::$homeReadyProbe !== null) return (bool)(self::$homeReadyProbe)($user);
-        return FileStorage::ensureReady("home/$user")->ok;   // Epic #1310: facade intent
+    /** @var (callable(string):FileStorageReadiness)|null test seam for deferred home mounts. */
+    public static $homeReadinessProbe = null;
+
+    private static function homeReadiness(string $user): FileStorageReadiness {
+        if (self::$homeReadinessProbe !== null) return (self::$homeReadinessProbe)($user);
+        if (self::$homeReadyProbe !== null) {
+            return FileStorageReadiness::fromExit((self::$homeReadyProbe)($user) ? 0 : 1, null);
+        }
+        return FileStorage::ensureReady("home/$user");   // Epic #1310: facade intent
     }
 
     /**
@@ -947,29 +1060,59 @@ class ConfigService {
         $user = $config['user'] ?? 'root';
         if (empty($user)) $user = 'root';
 
-        // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs
-        $ready = self::homeReady($user);
-        // Issue #761: while the array stops, the mount is refused on purpose. A retry cannot
-        // succeed, so do not wait for it. State still goes to the fallback below, which is
-        // outside the mount point: a refused mount never lets a write reach the bare folder.
-        $mountRefused = !$ready && self::homeMountRefusedByArrayStop();
-        if (!$ready && !$mountRefused) {
-            // The first mount can fail once (the mount point vanished between mkdir and mount, #692).
-            $pause = self::homeMountRetryPauseUs();
-            if ($pause > 0) usleep($pause);
-            $ready = self::homeReady($user);
+        // A stable failure gets one persistent retry marker across PHP-FPM
+        // requests. This prevents every UI poll and supervisor tick from
+        // repeating the mount and warning. Only inspect mount state after a
+        // failure or while a marker exists; the healthy path stays cheap.
+        $hasFailureMarker = is_file(self::homeMountFailureMarkerPath($user));
+        // Reading var.ini is only needed after a failure. Keep healthy state
+        // lookups free of an array-stop probe on every UI or supervisor poll.
+        $mountRefused = $hasFailureMarker ? self::homeMountRefusedByArrayStop() : false;
+        $previousFailure = $hasFailureMarker ? self::readHomeMountFailureState($user) : null;
+        $fingerprint = $hasFailureMarker ? self::homeMountFailureFingerprint($user, $config, $mountRefused) : '';
+        $backoffActive = $hasFailureMarker
+            && self::homeMountFailureBackoffActive($previousFailure, $fingerprint, self::homeMountBackoffNow());
+
+        // Ensure home is mounted so we write into the OverlayFS stack, not the underlying rootfs.
+        $ready = false;
+        $readiness = FileStorageReadiness::fromExit(1, null);
+        if (!$backoffActive) {
+            $readiness = self::homeReadiness($user);
+            $ready = $readiness->ok;
+            if (!$ready && !$mountRefused) {
+                // Check array-stop state after the first mount attempt fails.
+                // A stopped array cannot recover from an immediate retry.
+                $mountRefused = self::homeMountRefusedByArrayStop();
+            }
+            // Issue #761: while the array stops, the mount is refused on purpose. A retry cannot
+            // succeed, so do not wait for it. State still goes to the fallback below, which is
+            // outside the mount point: a refused mount never lets a write reach the bare folder.
+            if (!$ready && !$mountRefused) {
+                // The first mount can fail once (the mount point vanished between mkdir and mount, #692).
+                $pause = self::homeMountRetryPauseUs();
+                if ($pause > 0) usleep($pause);
+                $readiness = self::homeReadiness($user);
+                $ready = $readiness->ok;
+            }
         }
         if (!$ready) {
             $fallback = self::unmountedStatePath($user);
             self::refuseLiveStateInTests($fallback);
             // Issue #761: expected while the array is down. Log it only otherwise, so an open
             // page does not write one line a second to syslog.
-            if (!$mountRefused && !self::homeStorageDownWithArray($user)) {
-                LogService::log("getUserStatePath: home mount unavailable for '$user' — state goes to $fallback (outside the mount point) until the home mounts", LogService::LOG_WARN, "ConfigService");
+            $transientMoveDefer = $readiness->deferred && $readiness->deferReason === 'storage_move_active';
+            if (!$backoffActive && !$transientMoveDefer) {
+                if ($fingerprint === '') {
+                    $fingerprint = self::homeMountFailureFingerprint($user, $config, $mountRefused);
+                }
+                $logWarning = !$mountRefused && !self::homeStorageDownWithArray($user);
+                self::recordHomeMountFailure($user, $fingerprint, $previousFailure, $fallback, $logWarning);
             }
             self::ensureStateDirOwnedBy($fallback, $user);
             return $fallback;
         }
+
+        if ($hasFailureMarker) self::clearHomeMountFailureState($user);
 
         // #646: the state root is injectable (AICLI_STATE_ROOT); tests/bootstrap.php redirects it.
         $homeDir = SecretPaths::stateRoot() . "/work/$user/home";

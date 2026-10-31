@@ -29,10 +29,69 @@ class StorageMountService {
     /** The emergency home folder in RAM (the state root under test is the sandbox). */
     public static function emergencyHome(): string { return SecretPaths::stateRoot() . "/emergency_home"; }
 
+    /** @phpstan-impure The marker and migration status can change between checks. */
     public static function isMigrationInProgress() {
+        require_once __DIR__ . '/FileStorage.php';
+        if (FileStorage::isMigrationInProgress()) return true;
+        return self::isBackendMigrationInProgress();
+    }
+
+    /**
+     * The engine migration has a separate lock and marker from a path move.
+     * @phpstan-impure The lock and marker state can change between checks.
+     */
+    public static function isBackendMigrationInProgress(): bool {
         if (file_exists(self::migrationLock())) return true;
+        require_once __DIR__ . '/FileStorage.php';
         return class_exists(StorageBackendMigrationService::class)
-            && StorageBackendMigrationService::isMigrationInProgress();
+            ? StorageBackendMigrationService::isMigrationInProgress()
+            : FileStorage::isBackendMigrationInProgress();
+    }
+
+    /**
+     * Return a transient exit-2 result when an exclusive path move owns the marker.
+     * @phpstan-impure A move can start while a home mount waits for its lock.
+     */
+    private static function deferForPathMoveIfActive($user, int &$exit): bool {
+        require_once __DIR__ . '/FileStorage.php';
+        if (!FileStorage::isMigrationInProgress()) return false;
+        $exit = 2;
+        $safeUser = preg_replace('/[^a-zA-Z0-9_-]/', '_', (string)$user);
+        $marker = SecretPaths::stateRoot() . "/.bake_defer_reason_home_{$safeUser}";
+        @mkdir(dirname($marker), 0755, true);
+        @file_put_contents($marker, 'storage_move_active');
+        return true;
+    }
+
+    /**
+     * Acquire the same per-user lock that serializes home mounts.
+     * A caller that changes the home path must stop if it cannot acquire this lock.
+     *
+     * @return resource|false
+     */
+    public static function acquireHomeMountLock(string $user, ?float $waitS = null) {
+        $safeUser = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $user) ?: 'unknown';
+        $lockFile = rtrim(SecretPaths::stateRoot(), '/') . "/home_mount_{$safeUser}.lock";
+        $lock = @fopen($lockFile, 'c');
+        if ($lock === false) return false;
+
+        $waitS = $waitS ?? self::HOME_MOUNT_LOCK_WAIT_S;
+        $deadline = microtime(true) + max(0.0, $waitS);
+        while (!flock($lock, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $deadline) {
+                fclose($lock);
+                return false;
+            }
+            usleep(100000);
+        }
+        return $lock;
+    }
+
+    /** Release a lock returned by acquireHomeMountLock(). */
+    public static function releaseHomeMountLock($lock): void {
+        if (!is_resource($lock)) return;
+        flock($lock, LOCK_UN);
+        fclose($lock);
     }
 
     public static function isEmergencyMode() {
@@ -291,12 +350,11 @@ class StorageMountService {
     /**
      * 2026-09-25 (docs/specs/SIDE_BY_SIDE_AGENT_INSTALLS.md "a mount waits out
      * a short storage-lock hold"): mount deferrals that end by themselves within
-     * seconds. bake_lock_held = another storage operation holds the entity's
-     * lock; the supervisor's reconcile pass takes it for a few seconds per entity
-     * on every pass. A deferral for any other reason (target_not_mounted: the
-     * disk is not mounted) is not retried.
+     * seconds. bake_lock_held = another operation holds the entity lock;
+     * storage_move_active = an exclusive move owns the home path. Other deferrals
+     * such as target_not_mounted are not retried.
      */
-    public const TRANSIENT_MOUNT_DEFER_REASONS = ['bake_lock_held'];
+    public const TRANSIENT_MOUNT_DEFER_REASONS = ['bake_lock_held', 'storage_move_active'];
 
     /** Total time a mount call may spend on transient deferrals, retries included. */
     public const MOUNT_DEFER_BUDGET_S = 30;
@@ -349,6 +407,11 @@ class StorageMountService {
             $attempts++;
             $res = (int)$res;
             $reason = ($res === 2) ? self::mountDeferReason($out) : null;
+            if ($res === 2 && $reason === 'storage_move_active') {
+                // The move owns the global lock and will wait for this user's
+                // mount lock. Return now so the caller releases that lock.
+                return ['res' => $res, 'out' => $out, 'usable' => false, 'attempts' => $attempts, 'defer_reason' => $reason];
+            }
             $usable = self::mountResultIsUsable($res) && !($res === 2 && !$isMounted());
             if ($usable || $res !== 2 || !in_array($reason, self::TRANSIENT_MOUNT_DEFER_REASONS, true)) {
                 return ['res' => $res, 'out' => $out, 'usable' => $usable, 'attempts' => $attempts, 'defer_reason' => $reason];
@@ -377,6 +440,9 @@ class StorageMountService {
 
     /** exec one `storagectl mount` with the given lock wait; returns [exit, output lines]. */
     private static function execStoragectlMount(string $args, int $lockWaitS): array {
+        if (is_callable(self::$storagectlMountProbe)) {
+            return (self::$storagectlMountProbe)($args, $lockWaitS);
+        }
         $script = self::storagectlScript();
         $out = [];
         $res = 1;
@@ -384,6 +450,9 @@ class StorageMountService {
         exec(TraceContext::shellPrefix() . "AICLI_MOUNT_LOCK_WAIT_S=" . (int)$lockWaitS . " bash " . escapeshellarg($script) . " mount " . $args . " 2>&1", $out, $res);
         return [(int)$res, $out];
     }
+
+    /** @var (callable(string,int):array)|null Test seam for the storagectl mount command. */
+    public static $storagectlMountProbe = null;
 
     /**
      * Ensures the agent binary storage is mounted for a specific agent.
@@ -682,7 +751,7 @@ class StorageMountService {
     /** The body of ensureHomeMounted. Sets $path to the route taken (fast, lock or mount). */
     private static function ensureHomeMountedTraced($user, int &$exit, string &$path) {
         $exit = 1;
-        if (self::isMigrationInProgress()) return false;
+        if (self::deferForPathMoveIfActive($user, $exit) || self::isBackendMigrationInProgress()) return false;
 
         $workDir = UtilityService::getWorkDir($user);
         $mnt = "$workDir/home";
@@ -748,12 +817,22 @@ class StorageMountService {
                 }
                 usleep(100000); // 100ms
             }
+            if (self::deferForPathMoveIfActive($user, $exit) || self::isBackendMigrationInProgress()) {
+                self::releaseHomeMountLock($lock);
+                return false;
+            }
             if (!$writeFault && self::isMounted($mnt) && self::isHomeMountHealthy($user)) {
-                flock($lock, LOCK_UN);
-                fclose($lock);
+                self::releaseHomeMountLock($lock);
                 $exit = 0;
                 return true;
             }
+        }
+
+        // The migration marker can appear after this request's first check while
+        // it waits for the per-user lock. Refuse before the mount command starts.
+        if (self::deferForPathMoveIfActive($user, $exit) || self::isBackendMigrationInProgress()) {
+            self::releaseHomeMountLock($lock);
+            return false;
         }
 
         $persistPath = StoragePathResolver::homePersistPath($user);
@@ -762,7 +841,7 @@ class StorageMountService {
             if (!self::storageDownWithArray($persistPath)) {
                 LogService::log("Home mount skipped: storage path $persistPath is not accessible.", LogService::LOG_WARN, "StorageMountService");
             }
-            if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
+            self::releaseHomeMountLock($lock);
             return false;
         }
         $path = 'mount';
@@ -803,12 +882,17 @@ class StorageMountService {
         // an unmounted (tmpfs) home dir.
         $exit = (int)$res;
         $usable = self::mountResultIsUsable((int)$res);
+        $deferReason = ((int)$res === 2) ? self::mountDeferReason($out) : null;
         if ($usable && (int)$res === 2 && !self::isMounted($mnt)) {
             $usable = false;
             LogService::log("Home mount for $user deferred with NO live overlay (target not mounted yet?) — treating as unavailable.", LogService::LOG_WARN, "StorageMountService");
         }
         if (!$usable) {
-            LogService::log("Mount script FAILED for home $user: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
+            if ((int)$res === 2 && $deferReason === 'storage_move_active') {
+                LogService::log("Home mount for $user is deferred while a storage move owns the path; it will retry.", LogService::LOG_INFO, "StorageMountService");
+            } else {
+                LogService::log("Mount script FAILED for home $user: " . implode("\n", $out), LogService::LOG_ERROR, "StorageMountService");
+            }
         } elseif ((int)$res === 2) {
             LogService::log("Home mount for $user deferred (busy) — live mount kept; lower refresh deferred to idle.", LogService::LOG_INFO, "StorageMountService");
         } elseif ($writeFault) {
@@ -816,7 +900,7 @@ class StorageMountService {
             LogService::log("Home $user write-fault repair completed after a safe overlay refresh.", LogService::LOG_INFO, "StorageMountService");
         }
 
-        if ($lock !== false) { flock($lock, LOCK_UN); fclose($lock); }
+        self::releaseHomeMountLock($lock);
         return $usable;
     }
 

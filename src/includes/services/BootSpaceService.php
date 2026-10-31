@@ -356,8 +356,9 @@ class BootSpaceService
     }
 
     /**
-     * The "Left over" items: [{key,label,bytes,path}]. Most paths are inside $persist.
-     * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>, unfinished:<type>_<id>, backendarchive:<name>.
+     * The "Left over" items: [{key,label,bytes,path}]. Home archives can be on $home_persist
+     * or on an earlier home path recorded in the flash registry.
+     * Keys: graduated:<name>, retired:<hash>, homelayers:<user>, testhome:<id>, unfinished:<type>_<id>, backendarchive:<name>, homearchive:<name>.
      */
     public static function leftOverItems(string $persist, array $homes, callable $du, ?string $retiredList = null, array $ctx = []): array
     {
@@ -399,6 +400,24 @@ class BootSpaceService
                 'locked' => $locked,
                 'age_seconds' => $age,
             ];
+        }
+        // Path-move archives live outside passthrough/homes and _upper/homes, so
+        // home discovery and test-home cleanup never treat them as active homes.
+        $homeArchiveRoots = array_map(static fn(string $root): string => rtrim($root, '/') . '/_archive/homes',
+            self::homeArchiveBaseRoots($persist, $ctx));
+        foreach ($homeArchiveRoots as $homeArchiveRoot) {
+            if (is_link(dirname($homeArchiveRoot)) || is_link($homeArchiveRoot)) continue;
+            foreach (glob($homeArchiveRoot . '/*', GLOB_ONLYDIR | GLOB_NOSORT) ?: [] as $archive) {
+                if (is_link($archive)) continue;
+                $name = basename($archive);
+                if (preg_match('/^[A-Za-z0-9_.-]{1,128}-\\d{8}T\\d{6}Z-[a-f0-9]{8}$/D', $name) !== 1) continue;
+                $items[] = [
+                    'key' => 'homearchive:' . $name,
+                    'label' => 'Archived home data (' . $name . ')',
+                    'bytes' => $du($archive),
+                    'path' => $archive,
+                ];
+            }
         }
         $list = $retiredList ?? self::retiredListPath();
         $seen = [];
@@ -445,10 +464,86 @@ class BootSpaceService
         $ent = array_key_exists('manifest_entities', $seams)
             ? $seams['manifest_entities']
             : ((isset($seams['du']) || isset($seams['persist'])) ? null : self::manifestEntities());
-        $ctx = ['layer_dirs' => array_values(array_unique([$persist, $homePersist ?: $persist]))];
+        $ctx = [
+            'layer_dirs' => array_values(array_unique([$persist, $homePersist ?: $persist])),
+            'home_persist' => $homePersist ?: $persist,
+        ];
         if (is_array($ent)) $ctx['manifest_entities'] = $ent;
-        foreach (['used_files', 'in_use', 'now'] as $k) if (isset($seams[$k])) $ctx[$k] = $seams[$k];
+        foreach (['used_files', 'in_use', 'now', 'home_archive_roots', 'home_archive_roots_file'] as $k) {
+            if (isset($seams[$k])) $ctx[$k] = $seams[$k];
+        }
         return $ctx;
+    }
+
+    /** The persistent index makes archives on an old custom home path visible after a move. */
+    private static function homeArchiveRegistryPath(?string $override = null): string
+    {
+        return $override !== null && $override !== ''
+            ? $override
+            : SecretPaths::flashRoot() . '/home_archive_roots.json';
+    }
+
+    /** @return list<string> */
+    private static function readHomeArchiveRoots(string $path): array
+    {
+        if (is_link($path) || !is_file($path)) return [];
+        $data = json_decode((string)@file_get_contents($path), true);
+        if (!is_array($data) || !is_array($data['roots'] ?? null)) return [];
+        $roots = [];
+        foreach ($data['roots'] as $root) {
+            if (!is_string($root) || $root === '/' || $root === '' || $root[0] !== '/' || preg_match('#(^|/)\.\.(/|$)#', $root) === 1) continue;
+            $roots[] = rtrim($root, '/');
+        }
+        return array_values(array_unique($roots));
+    }
+
+    /** @return list<string> */
+    private static function homeArchiveBaseRoots(string $persist, array $ctx): array
+    {
+        $roots = [$persist, (string)($ctx['home_persist'] ?? $persist)];
+        if (isset($ctx['home_archive_roots']) && is_array($ctx['home_archive_roots'])) {
+            $roots = array_merge($roots, $ctx['home_archive_roots']);
+        } else {
+            $roots = array_merge($roots, self::readHomeArchiveRoots(self::homeArchiveRegistryPath(
+                isset($ctx['home_archive_roots_file']) ? (string)$ctx['home_archive_roots_file'] : null
+            )));
+        }
+        $roots = array_filter($roots, static fn($root): bool => is_string($root) && $root !== '' && $root[0] === '/');
+        $canonical = [];
+        foreach ($roots as $root) {
+            $real = @realpath($root);
+            if (is_string($real) && $real !== '/') $canonical[] = rtrim($real, '/');
+        }
+        return array_values(array_unique($canonical));
+    }
+
+    /** Register an earlier home path so its retained move archive appears in Settings. */
+    public static function registerHomeArchiveRoot(string $root, ?string $registryPath = null): bool
+    {
+        $realRoot = @realpath($root);
+        if (!is_string($realRoot) || $realRoot === '/') return false;
+        $path = self::homeArchiveRegistryPath($registryPath);
+        $roots = self::readHomeArchiveRoots($path);
+        if (!in_array($realRoot, $roots, true)) $roots[] = $realRoot;
+        require_once __DIR__ . '/AtomicWriteService.php';
+        $json = json_encode(['roots' => array_values($roots)], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        return is_string($json) && AtomicWriteService::write($path, $json, 0600);
+    }
+
+    /** Remove an old path from the index after its final archive is removed. */
+    private static function unregisterHomeArchiveRoot(string $root, ?string $registryPath = null): void
+    {
+        $path = self::homeArchiveRegistryPath($registryPath);
+        $realRoot = @realpath($root);
+        if (!is_string($realRoot)) $realRoot = rtrim($root, '/');
+        $roots = array_values(array_filter(self::readHomeArchiveRoots($path), static fn(string $entry): bool => $entry !== $realRoot));
+        if ($roots === []) {
+            if (!is_link($path)) @unlink($path);
+            return;
+        }
+        require_once __DIR__ . '/AtomicWriteService.php';
+        $json = json_encode(['roots' => $roots], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (is_string($json)) AtomicWriteService::write($path, $json, 0600);
     }
 
     /** @return array<string,mixed> */
@@ -1266,7 +1361,7 @@ class BootSpaceService
      */
     public static function removeLeftover(string $key, array $seams = []): array
     {
-        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished|backendarchive|superseded):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
+        if (preg_match('/^(graduated|retired|homelayers|testhome|unfinished|backendarchive|homearchive|superseded):[A-Za-z0-9._-]{1,128}$/D', $key) !== 1) {
             return ['status' => 'error', 'message' => 'This item is not valid.'];
         }
         $data = $seams['data'] ?? self::read();
@@ -1285,6 +1380,10 @@ class BootSpaceService
         }
 
         $persist = rtrim((string)($seams['persist'] ?? self::persistPath()), '/');
+        $homePersist = rtrim((string)($seams['home_persist'] ?? (isset($seams['persist'])
+            ? $persist
+            : StoragePathResolver::homePersistPathFromConfig(ConfigService::getConfig()))), '/');
+        if ($homePersist === '') $homePersist = $persist;
         // No measuring in a web request (#552): the freed size is the size that the last
         // measurement listed for the item.
         $listedBytes = 0;
@@ -1300,9 +1399,6 @@ class BootSpaceService
 
         // Re-check right before removal: find the item again with the live rules.
         $homes = self::discoverHomes($persist, $configUser, self::protectedHomeIds($configUser, $seams));
-        $homePersist = rtrim((string)($seams['home_persist'] ?? (isset($seams['persist'])
-            ? $persist
-            : StoragePathResolver::homePersistPathFromConfig(ConfigService::getConfig()))), '/');
         $live = self::leftOverItems($persist, $homes, static function () { return 0; }, $seams['retired_list'] ?? null,
             self::layerContext($seams, $persist, $homePersist));   // no du: the callable returns 0
         $item = null;
@@ -1356,6 +1452,25 @@ class BootSpaceService
             return ['status' => 'ok', 'freed_bytes' => $freed];
         }
 
+        $allowedRoot = $persist;
+        if ($type === 'homearchive') {
+            $path = (string)($item['path'] ?? '');
+            $safeName = preg_match('/^[A-Za-z0-9_.-]{1,128}-\\d{8}T\\d{6}Z-[a-f0-9]{8}$/D', $name) === 1;
+            $archiveFound = false;
+            foreach (self::homeArchiveBaseRoots($persist, self::layerContext($seams, $persist, $homePersist)) as $root) {
+                $archiveRoot = rtrim($root, '/') . '/_archive/homes';
+                if ($safeName && $path === $archiveRoot . '/' . $name && self::isInside($path, $archiveRoot)
+                    && !is_link(rtrim($root, '/') . '/_archive') && !is_link($archiveRoot)) {
+                    $allowedRoot = $archiveRoot;
+                    $archiveFound = true;
+                    break;
+                }
+            }
+            if (!$safeName || !$archiveFound || is_link($path) || !is_dir($path)) {
+                return ['status' => 'error', 'message' => 'This archived home data is no longer safe to remove.'];
+            }
+        }
+
         if ($type === 'superseded') {
             // R8 (#755): each file is checked again. The live list above already dropped a file that a
             // loop or a mount uses, a file with an open intent and a file that is no longer superseded.
@@ -1399,11 +1514,11 @@ class BootSpaceService
             self::logRemoved($key, $freed);
             return ['status' => 'ok', 'freed_bytes' => $freed];
         }
-        if (!self::isInside($path, $persist) || $path === $persist) {
+        if (!self::isInside($path, $allowedRoot) || $path === $allowedRoot) {
             return ['status' => 'error', 'message' => 'The item lies outside the persistence folder, so it was not removed.'];
         }
         $real = realpath($path);
-        $realRoot = realpath($persist);
+        $realRoot = realpath($allowedRoot);
         if ($real === false && is_link($path)) {
             // A dangling link: its target is gone, so realpath() cannot resolve the link. The link
             // itself is the item, so check the folder that holds the link instead.
@@ -1424,6 +1539,10 @@ class BootSpaceService
         @exec('rm -rf -- ' . escapeshellarg($path) . ' 2>&1', $out, $rc);
         if (file_exists($path) || is_link($path)) {
             return ['status' => 'error', 'message' => 'The item could not be removed completely.'];
+        }
+        if ($type === 'homearchive' && (glob($allowedRoot . '/*', GLOB_ONLYDIR | GLOB_NOSORT) ?: []) === []) {
+            self::unregisterHomeArchiveRoot(dirname(dirname($allowedRoot)), isset($seams['home_archive_roots_file'])
+                ? (string)$seams['home_archive_roots_file'] : null);
         }
         self::logRemoved($key, $freed);
         return ['status' => 'ok', 'freed_bytes' => $freed];

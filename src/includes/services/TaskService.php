@@ -135,6 +135,8 @@ class TaskService {
             case 'target_not_mounted':
                 // S-02 (#1352): UD devices can mount up to ~2 min after array start.
                 return 'Storage deferred: the persistence target\'s backing device is not mounted yet. Is the Unassigned Device attached? The operation will retry automatically.';
+            case 'storage_move_active':
+                return 'Home storage is moving to a new path. The mount will retry after the move.';
             case 'array_stopping':
                 // Issue #761: a mount is refused while the array stops, so the pool can unmount.
                 return 'Storage deferred: the array is stopping, so the plugin does not mount from it now. Nothing was lost. The mount works again after the array is started.';
@@ -263,6 +265,8 @@ class TaskService {
                 return 'Flushing pending writes first — it will continue automatically once this home is idle.';
             case 'sqlite_backup_deferred':
                 return 'A database backup deferred (the DB was busy) — it will retry automatically on the next cycle.';
+            case 'storage_move_active':
+                return 'Home storage is moving to a new path. The mount will retry after the move.';
             case 'fat32_size_cap':
                 return 'Refused: the layer is approaching the FAT32 4 GiB per-file limit on this device. Move storage to a pool (Storage tab).';
             case 'graduate_precondition':

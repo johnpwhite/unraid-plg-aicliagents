@@ -405,7 +405,7 @@ final class StorageBackendMigrationService
         $config = $config ?? ConfigService::getConfig();
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
-        $migrationLock = FileStorage::acquireMigrationLock();
+        $migrationLock = FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
         if ($migrationLock === null) {
             return ['status' => 'error', 'message' => 'Another storage migration is already running. Wait for it to finish, then try again.'];
         }
@@ -442,7 +442,7 @@ final class StorageBackendMigrationService
 
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
-        $migrationLock = FileStorage::acquireMigrationLock();
+        $migrationLock = FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
         if ($migrationLock === null) return ['status' => 'error', 'message' => 'Another storage operation is already running. Wait for it to finish, then try again.'];
         $launchLock = false;
         try {
@@ -517,7 +517,7 @@ final class StorageBackendMigrationService
     {
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
-        $migrationLock = FileStorage::acquireMigrationLock();
+        $migrationLock = FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
         if ($migrationLock === null) return ['status' => 'error', 'message' => 'Another storage operation is already running.'];
         $launchLock = false;
         try {
@@ -1014,7 +1014,7 @@ final class StorageBackendMigrationService
         $kind = StorageBackendPolicyService::normalizeKind($kind);
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
-        $migrationLock = FileStorage::acquireMigrationLock();
+        $migrationLock = FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
         if ($migrationLock === null) {
             return ['status' => 'error', 'message' => 'Another storage migration is already running. Wait for it to finish, then try again.', 'migrated' => []];
         }

@@ -161,21 +161,32 @@ class StoragePathMoveJobService
         }
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StorageBackendMigrationService.php';
-        $lock = isset($seams['lock']) ? ($seams['lock'])() : FileStorage::acquireMigrationLock();
+        // Probe the marker before taking the shared lock. If the lock is free,
+        // FileStorage clears the orphaned marker. Once this job owns the lock,
+        // a second marker probe would mistake this job's own lock for another move.
+        $inProgress = isset($seams['marker'])
+            ? (bool)($seams['marker'])()
+            : FileStorage::isMigrationInProgress();
+        if ($inProgress) {
+            return self::refuse($jobId, 'An earlier storage move is still running. Nothing was moved.', $seams);
+        }
+        $lock = isset($seams['lock']) ? ($seams['lock'])() : FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
         if ($lock === null || $lock === false) {
-            return self::refuse($jobId, 'Another storage move is already running. Nothing was moved.', $seams);
+            if (FileStorage::isMigrationInProgress()) {
+                return self::refuse($jobId, 'Another storage move is already running. Nothing was moved.', $seams);
+            }
+            if (FileStorage::isBackendMigrationInProgress() || StorageBackendMigrationService::isMigrationInProgress()) {
+                return self::refuse($jobId, 'A storage-engine migration is running. Wait for it to finish before moving storage.', $seams);
+            }
+            return self::refuse($jobId, 'Home storage is busy. Try again in a moment.', $seams);
         }
         $trayHandled = false;
         try {
             $backendInProgress = isset($seams['backend_active'])
                 ? (bool)($seams['backend_active'])()
                 : (FileStorage::isBackendMigrationInProgress() || StorageBackendMigrationService::isMigrationInProgress());
-            $inProgress = !$backendInProgress
-                && (isset($seams['marker']) ? (bool)($seams['marker'])() : FileStorage::isMigrationInProgress());
             if ($backendInProgress) {
                 $res = ['status' => 'error', 'message' => 'A storage-engine migration is running. Wait for it to finish before moving storage.'];
-            } elseif ($inProgress) {
-                $res = ['status' => 'error', 'message' => 'An earlier storage move did not finish. It must finish or resume first.'];
             } else {
                 $unfinished = self::unfinishedSaves((array)($opts['pre_jobs'] ?? []), $seams['get_job'] ?? null);
                 if ($unfinished !== []) {

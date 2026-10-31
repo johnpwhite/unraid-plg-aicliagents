@@ -2383,10 +2383,25 @@ class StorageHandler {
                 return ['status' => 'error', 'message' => 'The storage settings changed since this page was loaded. Reload the page and try again.'];
             }
         }
-        // The lock is held by the job while it copies. Here it is only probed.
-        $lock = \AICliAgents\Services\FileStorage::acquireMigrationLock();
-        if ($lock === null) {
+        // Check the marker before taking the lock. A free lock means the marker
+        // is crash residue; FileStorage clears it while holding the lock. Taking
+        // the lock first would make this request mistake its own lock for a live
+        // earlier move.
+        if (\AICliAgents\Services\FileStorage::isMigrationInProgress()) {
             return ['status' => 'error', 'message' => 'Another storage move is already running. Wait for it to finish.'];
+        }
+        // Share the admission lock with home mounts. The worker takes the exclusive
+        // lock before it copies, so only that path can block mounts.
+        $lock = \AICliAgents\Services\FileStorage::acquireMigrationSharedLock();
+        if ($lock === null) {
+            if (\AICliAgents\Services\FileStorage::isMigrationInProgress()) {
+                return ['status' => 'error', 'message' => 'Another storage move is already running. Wait for it to finish.'];
+            }
+            if (\AICliAgents\Services\FileStorage::isBackendMigrationInProgress()
+                || \AICliAgents\Services\StorageBackendMigrationService::isMigrationInProgress()) {
+                return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before moving storage.'];
+            }
+            return ['status' => 'error', 'message' => 'Home storage is busy. Try again in a moment.'];
         }
         try {
             if (self::blockedByBackendMigration('execute_migrate')) {
@@ -2395,13 +2410,10 @@ class StorageHandler {
             if (\AICliAgents\Services\FileStorage::isBackendMigrationInProgress()) {
                 return ['status' => 'error', 'reason' => 'storage_migration', 'message' => 'Wait for the storage migration to finish before moving storage.'];
             }
-            if (\AICliAgents\Services\FileStorage::isMigrationInProgress()) {
-                return ['status' => 'error', 'message' => 'An earlier storage move did not finish. It must finish or resume first.'];
-            }
             if (\AICliAgents\Services\StoragePathMoveJobService::hasPending()) {
                 return ['status' => 'error', 'message' => 'Another storage move is already queued. Wait for it to finish.'];
             }
-            // Keep the shared lock until queuePathMove() has created its claim.
+            // Keep the common migration lock until queuePathMove() has created its claim.
             // An engine migration then sees the pending move before it can queue.
             return self::queuePathMove($config, (string)($_GET['agent_storage_path'] ?? ''), (string)($_GET['home_storage_path'] ?? ''), $seams);
         } finally {
@@ -2601,7 +2613,8 @@ class StorageHandler {
         // path_drift discovery-halt + op_mount LEGACY_FOUND probing redundant.
         require_once __DIR__ . '/../services/FileStorage.php';
         $__migResult = null;
-        $__migWork = function () use (&$__migResult, $config, $oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath) {
+        $homeMoveLock = false;
+        $__migWork = function () use (&$__migResult, &$homeMoveLock, $config, $oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath) {
         // Issue #56: the mounts can change between the queue and the start. Recheck them
         // before the destination directories are created.
         foreach ([['agent', $newAgentPath, $oldAgentPath], ['home', $newHomePath, $oldHomePath]] as [$kind, $newPath, $oldPath]) {
@@ -2692,6 +2705,27 @@ class StorageHandler {
                 aicli_log("Storage Migration: Successfully copied $name", AICLI_LOG_INFO);
                 $done++;
             }
+
+            // A path move must carry the plain home and the disk upper/work
+            // directories too. The layer copy above does not release a live
+            // bind from the old path. Stop here if the real unmount stays busy;
+            // the old setting and source data remain in place for a safe retry.
+            $homeUser = (string)($config['user'] ?? 'root');
+            if ($homeUser === '') $homeUser = 'root';
+            // The FileStorage marker refuses new home mounts. This per-user
+            // lock drains a mount that passed its first marker check before the
+            // migration began, and keeps it out until the new setting is saved.
+            $homeMoveLock = \AICliAgents\Services\StorageMountService::acquireHomeMountLock($homeUser);
+            if ($homeMoveLock === false) {
+                $__migResult = ['status' => 'error', 'message' => 'Could not lock the home mount. The storage path did not change; close remaining sessions and retry.'];
+                return false;
+            }
+            $homeTreeMove = self::migrateHomeStorageTrees($oldHomePath, $newHomePath, $homeUser);
+            if (empty($homeTreeMove['ok'])) {
+                $__migResult = ['status' => 'error', 'message' => (string)($homeTreeMove['message'] ?? 'Could not move the home storage data safely.')];
+                aicli_log("Storage Migration: " . $__migResult['message'], AICLI_LOG_ERROR);
+                return false;
+            }
         }
 
         // 4. Save new config — read FRESH config (may have been modified by concurrent requests)
@@ -2705,6 +2739,10 @@ class StorageHandler {
 
         \AICliAgents\Services\ConfigService::writeConfigFile($freshConfig);
         self::$migrateSettingsSaved = true; // from here a failure leaves the setting on the NEW place
+
+        $archiveUser = (string)($config['user'] ?? 'root');
+        if ($archiveUser === '') $archiveUser = 'root';
+        self::finalizeSavedPathMove($oldAgentPath, $newAgentPath, $oldHomePath, $newHomePath, $archiveUser);
 
         // Final consolidation at the new location (skip if target is Flash — avoid unnecessary USB writes)
         $newAgentOnFlash = !empty($newAgentPath) && (strpos($newAgentPath, '/boot/') === 0 || strpos($newAgentPath, '/boot') === 0);
@@ -2796,21 +2834,6 @@ class StorageHandler {
             aicli_log("Storage Migration: Cleaned up $cleanedUp file(s) from old path(s).", AICLI_LOG_INFO);
         }
 
-        // F3 (WP#1327): re-point the manifest's recorded persistence paths to the NEW
-        // location IN-TRANSACTION (still under the migration marker), scoped per entity
-        // type. Without this the manifest keeps the OLD path and, once the marker
-        // clears, the supervisor/boot DISCOVERS the drift and false-halts path_drift on
-        // every successful migration — the >1-layer post-migrate consolidate that used
-        // to re-point fires for almost no entity (and is itself skipped once halted).
-        if ($newHomePath && $newHomePath !== $oldHomePath) {
-            $n = \AICliAgents\Services\FileStorage::repointManifestPaths($oldHomePath, $newHomePath, 'home/');
-            aicli_log("Storage Migration: re-pointed $n home manifest entr(ies) to $newHomePath", AICLI_LOG_INFO);
-        }
-        if ($newAgentPath && $newAgentPath !== $oldAgentPath) {
-            $n = \AICliAgents\Services\FileStorage::repointManifestPaths($oldAgentPath, $newAgentPath, 'agent/');
-            aicli_log("Storage Migration: re-pointed $n agent manifest entr(ies) to $newAgentPath", AICLI_LOG_INFO);
-        }
-
         self::migrateProgress('Migration complete!', 100, [], 'Moved');
         aicli_log("Storage Migration: Complete. Agent path: $newAgentPath, Home path: $newHomePath", AICLI_LOG_INFO);
 
@@ -2821,7 +2844,12 @@ class StorageHandler {
         // Run the proven copy flow under the crash-safe migration marker.
         $__migOld = $oldHomePath ?: $oldAgentPath;
         $__migNew = $newHomePath ?: $newAgentPath;
-        $__mig = \AICliAgents\Services\FileStorage::migratePath($__migOld, $__migNew, $__migWork);
+        try {
+            $__mig = \AICliAgents\Services\FileStorage::migratePath($__migOld, $__migNew, $__migWork);
+        } finally {
+            \AICliAgents\Services\StorageMountService::releaseHomeMountLock($homeMoveLock);
+            $homeMoveLock = false;
+        }
         $__ret = $__migResult ?? ['status' => $__mig->ok ? 'ok' : 'error', 'message' => $__mig->error ?? 'Migration failed.'];
         // T-08: single failure hook for every copy-flow error path — the activity
         // tray shows the migration as failed instead of frozen at the last step.
@@ -2836,6 +2864,392 @@ class StorageHandler {
             ]);
         }
         return $__ret;
+    }
+
+    /**
+     * Copy the home data before a home persist-path change. The caller runs
+     * under FileStorage's migration marker and holds the user's mount lock.
+     * A real unmount releases the old bind or overlay. If it stays busy, the
+     * copy and config change must not proceed. Stale target trees are archived.
+     *
+     * @param array<string,callable> $seams Test seams: mount_point and unmount.
+     * @return array{ok:bool,message?:string}
+     */
+    public static function migrateHomeStorageTrees(string $oldPath, string $newPath, string $user, array $seams = []): array {
+        if ($oldPath === $newPath) return ['ok' => true];
+        if ($oldPath === '' || $newPath === '' || $user === '.' || $user === '..' || preg_match('/^[a-zA-Z0-9_.-]+\z/', $user) !== 1) {
+            return ['ok' => false, 'message' => 'The home storage paths or user name are not valid. Nothing was moved.'];
+        }
+
+        $realOldPath = realpath($oldPath);
+        $realNewPath = realpath($newPath);
+        if (!is_string($realOldPath) || !is_string($realNewPath)
+            || $realOldPath === $realNewPath
+            || str_starts_with(rtrim($realNewPath, '/') . '/', rtrim($realOldPath, '/') . '/')
+            || str_starts_with(rtrim($realOldPath, '/') . '/', rtrim($realNewPath, '/') . '/')) {
+            return ['ok' => false, 'message' => 'The home storage paths must be separate existing folders. Nothing was moved.'];
+        }
+
+        $mountPoint = (string)($seams['mount_point'] ?? (\AICliAgents\Services\UtilityService::getWorkDir($user) . '/home'));
+        $unmount = $seams['unmount'] ?? static fn(string $path): bool =>
+            \AICliAgents\Services\StorageMountService::unmountReal($path);
+        if (!$unmount($mountPoint)) {
+            return ['ok' => false, 'message' => "The old home mount is still busy at $mountPoint. The storage path did not change; close any remaining sessions and retry."];
+        }
+
+        if (isset($seams['after_unmount']) && is_callable($seams['after_unmount'])) {
+            ($seams['after_unmount'])();
+        }
+
+        $oldUpper = rtrim($oldPath, '/') . "/_upper/homes/$user";
+        $oldPlainHome = rtrim($oldPath, '/') . "/passthrough/homes/$user";
+        $holderCheck = $seams['detached_holder'] ?? static fn(string $mount, string $upper, string $proc, string $plain): array =>
+            self::detachedHomeHolder($mount, $upper, $proc, $plain);
+        $holder = $holderCheck($mountPoint, $oldUpper, (string)($seams['proc_dir'] ?? '/proc'), $oldPlainHome);
+        if (!empty($holder['busy'])) {
+            $pid = (string)($holder['pid'] ?? 'unknown');
+            $reason = (string)($holder['reason'] ?? 'unknown');
+            return ['ok' => false, 'message' => "The old home is still in use by process $pid ($reason). The storage path did not change; close any remaining sessions and retry."];
+        }
+
+        $trees = [
+            'plain' => "passthrough/homes/$user",
+            'upper' => "_upper/homes/$user",
+        ];
+        $targetArchive = null;
+        foreach ($trees as $kind => $relative) {
+            $source = rtrim($oldPath, '/') . '/' . $relative;
+            $destination = rtrim($newPath, '/') . '/' . $relative;
+            $sourceExists = file_exists($source) || is_link($source);
+            $destinationExists = file_exists($destination) || is_link($destination);
+
+            if (!$sourceExists) {
+                // There is no source tree to replace this target data. Keep it
+                // active instead of moving the only copy out of the home.
+                continue;
+            }
+            if (is_link($source) || !is_dir($source)) {
+                return ['ok' => false, 'message' => "The home storage entry $source is not a plain directory. The storage path did not change."];
+            }
+
+            if ($destinationExists && is_dir($destination) && !is_link($destination)
+                && self::directoryTreeMatches($source, $destination, $seams)) {
+                continue;
+            }
+            if ($destinationExists && self::archiveHomeStorageTree($destination, $newPath, $user, $kind, $targetArchive) === false) {
+                return ['ok' => false, 'message' => "Could not archive stale home data at $destination. The storage path did not change."];
+            }
+
+            $parent = dirname($destination);
+            if (!is_dir($parent) && !@mkdir($parent, 0755, true) && !is_dir($parent)) {
+                return ['ok' => false, 'message' => "Could not create $parent. The old home data was kept and the storage path did not change."];
+            }
+            $out = [];
+            $command = sprintf('cp -a --preserve=xattr -- %s %s', escapeshellarg($source), escapeshellarg($destination));
+            exec($command, $out, $copyRc); // nosemgrep: php.lang.security.tainted-exec — both paths are escaped
+            if ($copyRc !== 0 || !self::directoryTreeMatches($source, $destination, $seams)) {
+                return ['ok' => false, 'message' => "Could not verify the copy of $relative, including OverlayFS metadata. The old home data was kept and the storage path did not change."];
+            }
+        }
+
+        // OverlayFS work directories must be empty when the next mount starts.
+        // Keep any old destination work tree as an archive, then create an empty one.
+        $workDir = rtrim($newPath, '/') . "/_work/homes/$user";
+        if (file_exists($workDir) || is_link($workDir)) {
+            $workEntries = is_dir($workDir) && !is_link($workDir) ? @scandir($workDir) : false;
+            $empty = is_array($workEntries) && count($workEntries) === 2;
+            if (!$empty && self::archiveHomeStorageTree($workDir, $newPath, $user, 'work', $targetArchive) === false) {
+                return ['ok' => false, 'message' => "Could not archive the existing OverlayFS work folder at $workDir. The storage path did not change."];
+            }
+        }
+        if (!is_dir($workDir) && !@mkdir($workDir, 0755, true) && !is_dir($workDir)) {
+            return ['ok' => false, 'message' => "Could not create an empty OverlayFS work folder at $workDir. The storage path did not change."];
+        }
+
+        aicli_log("Storage Migration: copied the home data and released the old home mount for $user", AICLI_LOG_INFO);
+        return ['ok' => true];
+    }
+
+    /** Move a tree under persist/_archive/homes without deleting any data. */
+    private static function archiveHomeStorageTree(string $path, string $persist, string $user, string $kind, string|false|null &$archiveDir): string|false|null {
+        if (!file_exists($path) && !is_link($path)) return null;
+        try {
+            if ($archiveDir === null) {
+                $archiveDir = self::newHomeArchiveDirectory($persist, $user);
+                if ($archiveDir === false) return false;
+                require_once __DIR__ . '/../services/BootSpaceService.php';
+                if (!\AICliAgents\Services\BootSpaceService::registerHomeArchiveRoot($persist)) return false;
+            }
+            $archive = $archiveDir . '/' . $kind;
+            if (file_exists($archive) || is_link($archive)) return false;
+            return @rename($path, $archive) ? $archive : false;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Create one unique archive folder outside the live home and upper trees. */
+    private static function newHomeArchiveDirectory(string $persist, string $user): string|false {
+        $root = rtrim($persist, '/') . '/_archive/homes';
+        if (!is_dir($root) && !@mkdir($root, 0755, true) && !is_dir($root)) return false;
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $name = $user . '-' . gmdate('Ymd\\THis\\Z') . '-' . bin2hex(random_bytes(4));
+            $directory = $root . '/' . $name;
+            if (@mkdir($directory, 0755)) return $directory;
+        }
+        return false;
+    }
+
+    /** Archive old home trees after the verified destination and new setting are active. */
+    public static function archiveMigratedHomeStorageSources(string $oldPath, string $user): array {
+        if ($oldPath === '' || $user === '.' || $user === '..' || preg_match('/^[a-zA-Z0-9_.-]+\\z/', $user) !== 1) {
+            return ['ok' => false, 'message' => 'The old home storage path or user name is not valid.'];
+        }
+        $archiveDir = null;
+        foreach ([
+            'plain' => "passthrough/homes/$user",
+            'upper' => "_upper/homes/$user",
+            'work' => "_work/homes/$user",
+        ] as $kind => $relative) {
+            $source = rtrim($oldPath, '/') . '/' . $relative;
+            if (!file_exists($source) && !is_link($source)) continue;
+            if (is_link($source) || !is_dir($source)) {
+                return ['ok' => false, 'message' => "The old home entry $source is not a plain directory. It was kept in place."];
+            }
+            if (self::archiveHomeStorageTree($source, $oldPath, $user, $kind, $archiveDir) === false) {
+                return ['ok' => false, 'message' => "Could not archive the old home data at $source. It was kept in place."];
+            }
+        }
+        if (is_string($archiveDir)) {
+            require_once __DIR__ . '/../services/BootSpaceService.php';
+            if (!\AICliAgents\Services\BootSpaceService::registerHomeArchiveRoot($oldPath)) {
+                return ['ok' => false, 'message' => 'The old home data is archived, but its archive path could not be saved for the Boot disk space list. Keep the archive and remove it by hand if needed.'];
+            }
+            aicli_log("Storage Migration: moved the old home data for $user to $archiveDir", AICLI_LOG_INFO);
+        }
+        return ['ok' => true, 'archive' => $archiveDir];
+    }
+
+    /**
+     * Re-point manifests after settings are saved. Old-home archival is
+     * best-effort because it must not leave saved settings and manifests split.
+     *
+     * @param array<string,callable> $seams Test seams: archive and repoint.
+     * @return array{ok:true,archive_ok:bool}
+     */
+    public static function finalizeSavedPathMove(
+        string $oldAgentPath,
+        string $newAgentPath,
+        string $oldHomePath,
+        string $newHomePath,
+        string $user,
+        array $seams = []
+    ): array {
+        $archiveOk = true;
+        if ($newHomePath !== '' && $newHomePath !== $oldHomePath) {
+            $archive = $seams['archive'] ?? [self::class, 'archiveMigratedHomeStorageSources'];
+            try {
+                $result = $archive($oldHomePath, $user);
+                $archiveOk = !empty($result['ok']);
+                $archiveMessage = (string)($result['message'] ?? 'unknown archive error');
+            } catch (\Throwable $e) {
+                $archiveOk = false;
+                $archiveMessage = 'archive call failed: ' . $e->getMessage();
+            }
+            if (!$archiveOk) {
+                aicli_log(
+                    "Storage Migration: the new home path is saved, but old home data could not be archived: "
+                    . $archiveMessage,
+                    AICLI_LOG_WARN
+                );
+            }
+        }
+
+        $repoint = $seams['repoint'] ?? static function (string $old, string $new, string $prefix): int {
+            return \AICliAgents\Services\FileStorage::repointManifestPaths($old, $new, $prefix);
+        };
+        if ($newHomePath !== '' && $newHomePath !== $oldHomePath) {
+            $count = $repoint($oldHomePath, $newHomePath, 'home/');
+            aicli_log("Storage Migration: re-pointed $count home manifest entr(ies) to $newHomePath", AICLI_LOG_INFO);
+        }
+        if ($newAgentPath !== '' && $newAgentPath !== $oldAgentPath) {
+            $count = $repoint($oldAgentPath, $newAgentPath, 'agent/');
+            aicli_log("Storage Migration: re-pointed $count agent manifest entr(ies) to $newAgentPath", AICLI_LOG_INFO);
+        }
+        return ['ok' => true, 'archive_ok' => $archiveOk];
+    }
+
+    /**
+     * Check for a process that still holds a detached home overlay or its upper.
+     * This mirrors op_mount's generation check and fails closed if /proc cannot
+     * be scanned, because copying a held upper can race live writes.
+     *
+     * @return array{busy:bool,reason?:string,pid?:string}
+     */
+    private static function detachedHomeHolder(string $mountPoint, string $upper, string $procDir, string $plainHome = ''): array {
+        if (!is_dir($procDir)) return ['busy' => true, 'reason' => 'process_scan_unavailable'];
+        $processes = glob(rtrim($procDir, '/') . '/[0-9]*', GLOB_ONLYDIR) ?: [];
+        if ($processes === []) return ['busy' => true, 'reason' => 'process_scan_unavailable'];
+        $scanned = 0;
+        foreach ($processes as $process) {
+            $mountinfo = $process . '/mountinfo';
+            if (!is_readable($mountinfo)) continue;
+            $lines = @file($mountinfo, FILE_IGNORE_NEW_LINES);
+            if (!is_array($lines)) continue;
+            $scanned++;
+            foreach ($lines as $line) {
+                $parts = explode(' - ', $line, 2);
+                if (count($parts) !== 2) continue;
+                $left = preg_split('/\\s+/', trim($parts[0])) ?: [];
+                if (!isset($left[4])) continue;
+                $mountedAt = self::unescapeMountInfoPath($left[4]);
+                $pid = basename($process);
+                if ($mountedAt === $mountPoint) {
+                    return ['busy' => true, 'reason' => 'private_mount_namespace_home', 'pid' => $pid];
+                }
+                $right = preg_split('/\\s+/', trim($parts[1])) ?: [];
+                if (($right[0] ?? '') !== 'overlay' || !isset($right[2])) continue;
+                foreach (explode(',', $right[2]) as $option) {
+                    if (str_starts_with($option, 'upperdir=')
+                        && self::unescapeMountInfoPath(substr($option, strlen('upperdir='))) === $upper) {
+                        return ['busy' => true, 'reason' => 'private_mount_namespace_upper', 'pid' => $pid];
+                    }
+                }
+            }
+        }
+        if ($scanned === 0) return ['busy' => true, 'reason' => 'mountinfo_scan_unavailable'];
+
+        foreach ($processes as $process) {
+            $refs = array_merge(glob($process . '/fd/*') ?: [], [$process . '/cwd', $process . '/root', $process . '/exe'], glob($process . '/map_files/*') ?: []);
+            foreach ($refs as $ref) {
+                if (!is_link($ref)) continue;
+                $target = @readlink($ref);
+                if (!is_string($target)) continue;
+                $target = preg_replace('/ \\(deleted\\)$/D', '', $target) ?? $target;
+                $holdsUpper = $target === $upper || str_starts_with($target, rtrim($upper, '/') . '/');
+                $holdsPlainHome = $plainHome !== ''
+                    && ($target === $plainHome || str_starts_with($target, rtrim($plainHome, '/') . '/'));
+                if ($holdsUpper || $holdsPlainHome) {
+                    return ['busy' => true, 'reason' => $holdsUpper ? 'open_upper_reference' : 'open_plain_home_reference', 'pid' => basename($process)];
+                }
+            }
+        }
+        return ['busy' => false];
+    }
+
+    /** Decode the octal escapes used by /proc/<pid>/mountinfo. */
+    private static function unescapeMountInfoPath(string $path): string {
+        return preg_replace_callback('/\\\\([0-7]{3})/', static fn(array $m): string => chr(octdec($m[1])), $path) ?? $path;
+    }
+
+    /** Compare the complete tree, OverlayFS xattrs, and special-device numbers. */
+    private static function directoryTreeMatches(string $source, string $destination, array $seams = []): bool {
+        try {
+            $sourceXattrs = self::overlayTreeXattrs($source, $seams);
+            $destinationXattrs = self::overlayTreeXattrs($destination, $seams);
+            if (!is_array($sourceXattrs) || !is_array($destinationXattrs) || $sourceXattrs !== $destinationXattrs) return false;
+            if (!self::storageEntryMetadataMatches($source, $destination, $seams)) return false;
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($source, \FilesystemIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::SELF_FIRST
+            );
+            $prefix = rtrim($source, '/') . '/';
+            $sourceEntries = [];
+            foreach ($iterator as $entry) {
+                $from = $entry->getPathname();
+                $relative = substr($from, strlen($prefix));
+                if ($relative === '') return false;
+                $sourceEntries[$relative] = true;
+                $to = rtrim($destination, '/') . '/' . $relative;
+                if (is_link($from)) {
+                    if (!is_link($to) || readlink($from) !== readlink($to)) return false;
+                } elseif (is_dir($from)) {
+                    if (!is_dir($to) || is_link($to)) return false;
+                } elseif (is_file($from)) {
+                    if (!is_file($to) || is_link($to)) return false;
+                    $fromHash = @hash_file('sha256', $from);
+                    $toHash = @hash_file('sha256', $to);
+                    if (!is_string($fromHash) || !is_string($toHash) || !hash_equals($fromHash, $toHash)) return false;
+                } elseif (@filetype($from) !== @filetype($to)) {
+                    return false;
+                }
+                if (!self::storageEntryMetadataMatches($from, $to, $seams)) return false;
+            }
+
+            $destIterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($destination, \FilesystemIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::SELF_FIRST
+            );
+            $destPrefix = rtrim($destination, '/') . '/';
+            foreach ($destIterator as $entry) {
+                $relative = substr($entry->getPathname(), strlen($destPrefix));
+                if ($relative === '' || !isset($sourceEntries[$relative])) return false;
+            }
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Compare inode types and special-device numbers without following links. */
+    private static function storageEntryMetadataMatches(string $source, string $destination, array $seams): bool {
+        $statReader = $seams['lstat'] ?? static fn(string $path) => @lstat($path);
+        $sourceStat = $statReader($source);
+        $destStat = $statReader($destination);
+        if (!is_array($sourceStat) || !is_array($destStat)) return false;
+        $sourceType = $sourceStat['mode'] & 0170000;
+        $destType = $destStat['mode'] & 0170000;
+        if ($sourceType !== $destType) return false;
+        if (in_array($sourceType, [0020000, 0060000], true)
+            && ($sourceStat['rdev'] ?? null) !== ($destStat['rdev'] ?? null)) return false;
+
+        return true;
+    }
+
+    /** Read every trusted.overlay.* attribute in one recursive process per tree. */
+    private static function overlayTreeXattrs(string $root, array $seams): ?array {
+        $reader = $seams['overlay_tree_xattrs'] ?? null;
+        if (is_callable($reader)) {
+            $tree = $reader($root);
+            if (!is_array($tree)) return null;
+            foreach ($tree as $relative => $attrs) {
+                if (!is_string($relative) || !is_array($attrs)) return null;
+                ksort($attrs, SORT_STRING);
+                $tree[$relative] = $attrs;
+            }
+            ksort($tree, SORT_STRING);
+            return $tree;
+        }
+        $out = [];
+        $rc = 0;
+        $command = 'getfattr -R -d -m '
+            . escapeshellarg('^trusted\.overlay\.') . ' --absolute-names --no-dereference --encoding=hex -- '
+            . escapeshellarg($root) . ' 2>/dev/null';
+        exec($command, $out, $rc);
+        if ($rc !== 0) return null;
+        $tree = [];
+        $relative = null;
+        $prefix = rtrim($root, '/') . '/';
+        foreach ($out as $line) {
+            if (str_starts_with($line, '# file: ')) {
+                $path = substr($line, 8);
+                if (strlen($path) >= 2 && $path[0] === '"' && substr($path, -1) === '"') {
+                    $path = stripcslashes(substr($path, 1, -1));
+                }
+                if ($path === $root) $relative = '';
+                elseif (str_starts_with($path, $prefix)) $relative = substr($path, strlen($prefix));
+                else return null;
+                $tree[$relative] ??= [];
+            } elseif (str_starts_with($line, 'trusted.overlay.')) {
+                if ($relative === null || !str_contains($line, '=')) return null;
+                [$name, $value] = explode('=', $line, 2);
+                $tree[$relative][$name] = $value;
+            }
+        }
+        foreach ($tree as &$attrs) ksort($attrs, SORT_STRING);
+        unset($attrs);
+        ksort($tree, SORT_STRING);
+        return $tree;
     }
 
     /**
@@ -2862,6 +3276,7 @@ class StorageHandler {
      * `storage_migrate` op (type `migrate`). progress>=100 finishes the activity.
      */
     private static function migrateProgress(string $step, int $progress, array $extra = [], ?string $trayStep = null): void {
+        \AICliAgents\Services\FileStorage::refreshMigrationMarker();
         \AICliAgents\Services\EventBus::publish('storage.migrate', [], array_merge(
             ['step' => $step, 'progress' => $progress], $extra
         ));

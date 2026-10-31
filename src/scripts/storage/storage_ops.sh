@@ -27,6 +27,36 @@ source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_path
 _SO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 [ -d "$_SO_DIR" ] || _SO_DIR="/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage"
 
+# Hold a shared path-move lock for a home mount. The PHP move worker holds the
+# exclusive form while it copies home trees and saves the new path. This also
+# protects remounts started by bake and consolidate.
+_path_move_home_mount_lock() {
+    [ "${TYPE:-}" = "home" ] || return 0
+    local marker="${MOUNT_ROOT}/.migration_inprogress.json" lock_path
+    lock_path="${marker}.lock"
+    { exec {_PATH_MOVE_MIGRATION_LOCK_FD}>"$lock_path"; } 2>/dev/null || return 1
+    local wait_s="${AICLI_PATH_MOVE_MOUNT_LOCK_WAIT_S:-2}"
+    case "$wait_s" in ''|*[!0-9]*) wait_s=2 ;; esac
+    [ "$wait_s" -le 5 ] || wait_s=2
+    if ! flock -s -w "$wait_s" "$_PATH_MOVE_MIGRATION_LOCK_FD"; then return 2; fi
+    if [ -f "$marker" ]; then
+        # Only an exclusive lock proves that no other reader is using the path.
+        # Drop the shared lock, clean the crash residue while exclusive, then
+        # take the shared lock again before this mount uses the path.
+        flock -u "$_PATH_MOVE_MIGRATION_LOCK_FD"
+        if flock -n "$_PATH_MOVE_MIGRATION_LOCK_FD"; then
+            if [ -f "$marker" ]; then
+                if ! rm -f -- "$marker"; then return 1; fi
+                declare -f cmn_log >/dev/null 2>&1 && cmn_log WARN MOUNT \
+                    "Removed an orphaned storage-move marker because its lock was free."
+            fi
+            flock -u "$_PATH_MOVE_MIGRATION_LOCK_FD"
+        fi
+        if ! flock -s -w "$wait_s" "$_PATH_MOVE_MIGRATION_LOCK_FD"; then return 2; fi
+    fi
+    return 0
+}
+
 # Use the same 10% size allowance and free-space margin as a normal layer bake.
 BACKEND_MIGRATION_BAKE_MARGIN_MB="${AICLI_LAYER_SPACE_MARGIN_MB:-64}"
 case "$BACKEND_MIGRATION_BAKE_MARGIN_MB" in
@@ -162,6 +192,91 @@ _gen_switch_blocked() {
     [ "$live_gen" != "$target_gen" ] || return 1
     [ -n "$live_upper" ] || return 0
     _dir_has_entries "$live_upper"
+}
+
+# _agent_generation_target_detached_busy <id> <live_gen> <target_gen> <target_mount> <upper> [proc_dir]
+# True when the mount is absent here but a process still holds the target
+# OverlayFS in a private mount namespace, or has an open reference into its
+# writable upper. A process that only names the generation in argv or PATH does
+# not hold the overlay and must not block a launch.
+_mountinfo_unescape() {
+    local value="${1:-}"
+    value="${value//\\040/$' '}"
+    value="${value//\\011/$'\t'}"
+    value="${value//\\012/$'\n'}"
+    value="${value//\\134/$'\\'}"
+    printf '%s' "$value"
+}
+
+_agent_process_mountinfo_holds_overlay() {
+    local target_mount="${1:-}" upper="${2:-}" proc_dir="${3:-/proc}"
+    local info line left right pid parent dev root mountpoint opts fstype source superopts option value scanned=0
+    local -a mount_opts=()
+    [ -d "$proc_dir" ] || return 2
+    for info in "$proc_dir"/[0-9]*/mountinfo; do
+        [ -r "$info" ] || continue
+        scanned=$((scanned + 1))
+        pid="${info#"$proc_dir"/}"; pid="${pid%%/*}"
+        while IFS= read -r line; do
+            case "$line" in *' - overlay '*) ;; *) continue ;; esac
+            left="${line%% - *}"
+            right="${line#* - }"
+            read -r _ parent dev root mountpoint opts _ <<< "$left"
+            read -r fstype source superopts _ <<< "$right"
+            [ "$fstype" = "overlay" ] || continue
+            mountpoint="$(_mountinfo_unescape "$mountpoint")"
+            IFS=',' read -r -a mount_opts <<< "$superopts"
+            for option in "${mount_opts[@]}"; do
+                case "$option" in
+                    upperdir=*)
+                        value="$(_mountinfo_unescape "${option#upperdir=}")"
+                        if { [ -n "$upper" ] && [ "$value" = "$upper" ]; } || [ "$mountpoint" = "$target_mount" ]; then
+                            _AGENT_DETACHED_BUSY_PID="$pid"
+                            _AGENT_DETACHED_BUSY_REASON="private_mount_namespace_overlay"
+                            return 0
+                        fi
+                        ;;
+                esac
+            done
+        done < "$info"
+    done
+    [ "$scanned" -gt 0 ] || return 2
+    return 1
+}
+
+_agent_process_has_open_upper_reference() {
+    local upper="${1:-}" proc_dir="${2:-/proc}" pid_dir ref target
+    [ -n "$upper" ] && [ -d "$proc_dir" ] || return 2
+    for pid_dir in "$proc_dir"/[0-9]*; do
+        [ -d "$pid_dir" ] || continue
+        for ref in "$pid_dir"/fd/* "$pid_dir"/cwd "$pid_dir"/root "$pid_dir"/exe "$pid_dir"/map_files/*; do
+            [ -L "$ref" ] || continue
+            target="$(readlink "$ref" 2>/dev/null)" || continue
+            target="${target% (deleted)}"
+            case "$target" in
+                "$upper"|"$upper"/*)
+                    _AGENT_DETACHED_BUSY_PID="${pid_dir##*/}"
+                    _AGENT_DETACHED_BUSY_REASON="open_upper_reference"
+                    return 0
+                    ;;
+            esac
+        done
+    done
+    return 1
+}
+
+_agent_generation_target_detached_busy() {
+    local id="${1:-}" live_gen="${2:-}" target_gen="${3:-}" target_mount="${4:-}" upper="${5:-}" proc_dir="${6:-/proc}" rc
+    _AGENT_DETACHED_BUSY_PID=""
+    _AGENT_DETACHED_BUSY_REASON=""
+    [ -n "$id" ] && [ -n "$target_gen" ] && [ -n "$target_mount" ] || return 1
+    [ "$live_gen" = "$target_gen" ] || return 1
+    mountpoint -q "$target_mount" 2>/dev/null && return 1
+    if _agent_process_mountinfo_holds_overlay "$target_mount" "$upper" "$proc_dir"; then return 0; else rc=$?; fi
+    [ "$rc" -eq 1 ] || { _AGENT_DETACHED_BUSY_REASON="mountinfo_unavailable"; return 0; }
+    if _agent_process_has_open_upper_reference "$upper" "$proc_dir"; then return 0; else rc=$?; fi
+    [ "$rc" -eq 1 ] || { _AGENT_DETACHED_BUSY_REASON="upper_reference_scan_unavailable"; return 0; }
+    return 1
 }
 
 # _upper_rebound_loses_data <baseline_upper> <current_upper>
@@ -363,6 +478,21 @@ PLUGIN_ROOT="/usr/local/emhttp/plugins/unraid-aicliagents"
 
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$_SO_DIR/common.sh"
+
+# Keep a home path stable while a home mount holds its shared lock. The
+# path-move worker needs the exclusive lock before it can change that path.
+if [ "$TYPE" = "home" ]; then
+    if _path_move_home_mount_lock; then
+        :
+    else
+        _move_lock_rc=$?
+        if [ "$_move_lock_rc" -eq 2 ]; then
+            _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_path_move_active" "storage_move_active" \
+                "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"reason\":\"storage_move_active\"}"
+        fi
+        _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_path_move_lock_unavailable" "storage_move_lock_unavailable"
+    fi
+fi
 
 # Source canonical path resolver and lifecycle log writer (Phase 1)
 source "$_SO_DIR/resolve_paths.sh" 2>/dev/null || true
@@ -704,14 +834,18 @@ fi
 # reclaim refresh (op_bake -> op_mount) and the post-consolidate remount
 # (op_consolidate -> op_mount) all pass through here, so one flock closes the
 # launch-vs-reclaim race that the home_mount_in_use defer leaves open. flock -w 30
-# bounds the wait so a wedged holder degrades to "proceed" rather than deadlocking
-# a user launch (30s >> any real remount). The fd is held until this op_mount
+# bounds the wait. A timeout defers the remount so it cannot race a raw prune.
+# The fd is held until this op_mount
 # subshell exits, covering the umount+mount below. (mount_op_lock_path is from
 # common.sh, sourced above.)
 if [ "$_MOUNT_LOCK_HELD" != "1" ]; then
     { exec {_MOUNT_OP_LOCK_FD}>"$(mount_op_lock_path "$TYPE" "$ID")"; } 2>/dev/null || _MOUNT_OP_LOCK_FD=""
-    if [ -n "${_MOUNT_OP_LOCK_FD:-}" ]; then
-        flock -w 30 "$_MOUNT_OP_LOCK_FD" || log "mount-op lock wait timed out after 30s — proceeding (possible wedged holder)"
+    if [ -z "${_MOUNT_OP_LOCK_FD:-}" ]; then
+        _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_lock_unavailable" "mount_op_lock_unavailable"
+    fi
+    if ! flock -w 30 "$_MOUNT_OP_LOCK_FD"; then
+        log "Mount deferred because the mount-op lock wait timed out after 30s."
+        _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_lock_wait_deferred" "mount_op_lock_timeout"
     fi
 fi
 
@@ -786,6 +920,23 @@ if [ -n "$_AGENT_GEN_ID" ]; then
     # the entire feature. An UNreferenced one is torn down so superseded
     # generations do not accumulate on a write-endurance-limited stick.
     _AGENT_OLD_GEN="$(agent_live_generation "$ID" 2>/dev/null || true)"
+
+    # A real umount removes its row from /proc/mounts, but a running process can
+    # keep the detached overlay superblock alive. A same-generation remount
+    # would then reuse that overlay's upper/work and can trigger the kernel's
+    # "in-use" warning. The mount-table guard below cannot see a detached
+    # mount, so check the process's private mount namespace and open upper refs.
+    _AGENT_TARGET_UPPER="$(agent_generation_state_get "$ID" "$_AGENT_GEN_ID" upper 2>/dev/null || true)"
+    [ -n "$_AGENT_TARGET_UPPER" ] || _AGENT_TARGET_UPPER="$(agent_generation_bound_upper "$ID" "$_AGENT_GEN_ID" 2>/dev/null || true)"
+    if [ -z "$_AGENT_TARGET_UPPER" ]; then
+        _AGENT_TARGET_UPPER="$(_entity_paths agent "$ID" "$PERSIST_PATH" "$_AGENT_GEN_ID"; printf '%s' "$UPPER_DIR")"
+    fi
+    if _agent_generation_target_detached_busy "$ID" "$_AGENT_OLD_GEN" "$_AGENT_GEN_ID" \
+            "$_AGENT_TARGET_MOUNT" "$_AGENT_TARGET_UPPER" "${AICLI_AGENT_PROC_SCAN_DIR:-/proc}"; then
+        log "Agent $ID generation $_AGENT_GEN_ID has a detached overlay reference (${_AGENT_DETACHED_BUSY_REASON:-unknown}, pid ${_AGENT_DETACHED_BUSY_PID:-unknown}) — deferring the writable-layer rebind."
+        _op_defer "$TYPE" "$ID" "mount_stack" "mount_stack_generation_detached_busy" "mount_busy" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\",\"mount_point\":\"$_AGENT_TARGET_MOUNT\",\"upper\":\"$_AGENT_TARGET_UPPER\",\"reason\":\"${_AGENT_DETACHED_BUSY_REASON:-unknown}\",\"pid\":\"${_AGENT_DETACHED_BUSY_PID:-unknown}\"}"
+    fi
 
     # Forgejo #296 (2026-09-23): a refresh-only caller (op_consolidate) must
     # never move the agent to another generation while the live generation's
@@ -1975,7 +2126,7 @@ if [ ! -d "$UPPER_DIR" ] || ! _bake_upper_has_content "$TYPE" "$UPPER_DIR"; then
     # upper once that upper is empty and nothing uses the home.
     if [ "$TYPE" = "home" ] && [ -z "$_UPPER_OVERRIDE" ] \
        && [ "${ENTITY_UPPER_MODE:-}" != "${ENTITY_POLICY_UPPER_MODE:-${ENTITY_UPPER_MODE:-}}" ]; then
-        _bake_prune_upper_if_idle "$TYPE" "$UPPER_DIR" "$MNT_POINT" || true
+        _bake_prune_upper_if_idle "$TYPE" "$UPPER_DIR" "$MNT_POINT" "$ID" || true
         _home_upper_converge "$ID" "$PERSIST_PATH" "$UPPER_DIR" || true
     fi
     exit 0
@@ -2433,8 +2584,8 @@ if [ "$_SKIP_UPPER_TRIM" = "0" ]; then
     if [ "$TYPE" = "agent" ] && declare -f agent_mount_real >/dev/null 2>&1; then
         _PRUNE_CHECK_MNT="$(agent_mount_real "$ID" 2>/dev/null || echo "$MNT_POINT")"
     fi
-    if ! _bake_prune_upper_if_idle "$TYPE" "$UPPER_DIR" "$_PRUNE_CHECK_MNT"; then
-        log "Mount $_PRUNE_CHECK_MNT is in use — keeping cache files in the writable layer (they are not in the layer)."
+    if ! _bake_prune_upper_if_idle "$TYPE" "$UPPER_DIR" "$_PRUNE_CHECK_MNT" "$ID"; then
+        log "Cache cleanup for $_PRUNE_CHECK_MNT was not safe — cache files stay in the writable layer."
     fi
 else
     CLEANUP_JSON='{"skipped":"superseded_generation"}'
@@ -2574,15 +2725,59 @@ _bake_prune_upper() {
     return 0
 }
 
-# _bake_prune_upper_if_idle <type> <upper> <mount>
-# Remove the excluded caches from <upper> only when home_mount_in_use says
-# that nothing uses <mount>. Return 1 (and remove nothing) when it is in use.
-# A mount check that is not available counts as "in use": fail safe.
+# _bake_prune_upper_if_idle <type> <upper> <mount> <id>
+# Prune through the merged OverlayFS when it is mounted. Prune the raw upper
+# only while unmounted, after taking the same mount-op lock as op_mount. The
+# process mountinfo and open-file checks cover detached mounts in private
+# namespaces. Any busy or unknown state skips cleanup.
 _bake_prune_upper_if_idle() {
-    local type="${1:-}" upper="${2:-}" mnt="${3:-}"
+    local type="${1:-}" upper="${2:-}" mnt="${3:-}" id="${4:-}" lock_path="" lock_fd="" rc=1 fstype="" proc_dir="${AICLI_AGENT_PROC_SCAN_DIR:-/proc}" scan_rc=0 mnt_rc=0
+    [ -n "$type" ] && [ -n "$upper" ] && [ -n "$mnt" ] && [ -n "$id" ] || return 1
     declare -f home_mount_in_use >/dev/null 2>&1 || return 1
-    home_mount_in_use "$mnt" && return 1
-    _bake_prune_upper "$type" "$upper"
+    declare -f mount_op_lock_path >/dev/null 2>&1 || return 1
+    lock_path="$(mount_op_lock_path "$type" "$id")"
+    [ -n "$lock_path" ] || return 1
+    { exec {lock_fd}>"$lock_path"; } 2>/dev/null || return 1
+    if ! flock -n "$lock_fd"; then
+        exec {lock_fd}>&-
+        return 1
+    fi
+
+    if ! home_mount_in_use "$mnt"; then
+        if mountpoint -q "$mnt" 2>/dev/null; then
+            fstype="$(findmnt --noheadings --output FSTYPE --target "$mnt" 2>/dev/null || true)"
+            if [ "$fstype" = "overlay" ]; then
+                _bake_prune_upper "$type" "$mnt" && rc=0
+            fi
+        else
+            mnt_rc=$?
+            if [ "$mnt_rc" -ne 32 ] || [ ! -d "$mnt" ]; then
+                scan_rc=1
+            else
+                if _agent_process_mountinfo_holds_overlay "" "$upper" "$proc_dir"; then
+                    scan_rc=1
+                else
+                    scan_rc=$?
+                    [ "$scan_rc" -eq 1 ] && scan_rc=0 || scan_rc=1
+                fi
+                if [ "$scan_rc" -eq 0 ]; then
+                    if _agent_process_has_open_upper_reference "$upper" "$proc_dir"; then
+                        scan_rc=1
+                    else
+                        scan_rc=$?
+                        [ "$scan_rc" -eq 1 ] && scan_rc=0 || scan_rc=1
+                    fi
+                fi
+                if [ "$scan_rc" -eq 0 ]; then
+                    _bake_prune_upper "$type" "$upper" && rc=0
+                fi
+            fi
+        fi
+    fi
+
+    flock -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
 }
 
 # ---- op_rebase_agent  (#338, 2026-09-26) --------------------------------------

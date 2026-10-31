@@ -83,7 +83,7 @@ The plugin does not block `/mnt/user`, because some servers have no other choice
 ### Move storage to another place
 
 > [!WARNING]
-> A move copies your data to the new place and then switches to it. The plugin saves and merges first, and it checks every file after the copy. It does not delete the old data until the copy is safe. A large home can take several minutes. Open workspaces on that home close during the move.
+> A move copies your home data to the new place and then switches to it. The plugin saves and merges first, and checks the copied data before it changes the path. When there is old home data to copy, different data already at the new place stays in an archive. After the new place is saved, the old home data also moves to an archive. The **Boot disk space** card lists these copies under **Left over**, where you can remove them, or you can remove them by hand. If there is no old data for a tree, data at the new place stays active. A large home can take several minutes. Open workspaces on that home close during the move.
 
 Wait for a **Home storage** or **Agent storage** conversion to finish before you move storage. The plugin refuses a move while the conversion is queued or running.
 
@@ -92,7 +92,7 @@ Wait for a **Home storage** or **Agent storage** conversion to finish before you
 3. Read the list. Each line shows a name, a path and small chips: the type of place, the free space, and warnings.
 4. Choose one line. Or choose **Custom path…** and type a path, for example one that starts with `/mnt/`. The **Browse** button next to the field opens a folder browser. The plugin checks a custom path when you leave the field. Expect: "Valid target", or a reason for the refusal.
 5. Press **Move storage here**. Expect: a confirmation titled **Migrate Storage?**. It shows the old and new paths and the list of files with their sizes.
-6. Press **Yes, Migrate**. Expect: your open workspaces close, and a message **Storage move started**. Press **OK**. The page reloads. The plugin copies the files in the background, so you can close the page. Watch the row **Moving storage to …** in the activity tray. The path setting changes when the copy is done.
+6. Press **Yes, Migrate**. Expect: your open workspaces close, and a message **Storage move started**. Press **OK**. The page reloads. The plugin copies the home data in the background, so you can close the page. Watch the row **Moving storage to …** in the Activity tray. The path setting changes after the copy passes its checks. If home mounts keep the path lock for five seconds, the Activity tray says "Home storage is busy. Try again in a moment." No data moves, and the old path stays active. Wait for the mounts to finish, then try again.
 
 Press **Cancel** in the confirmation to keep the old place. The path field goes back to the old value. On a phone, the picker and the halt cards (below) fit the screen, and the halt buttons fill a full row.
 
@@ -460,7 +460,7 @@ A button is grey when the action cannot run now. Hold the mouse over it to read 
 | **Home** *name*: **saved layers** | A home that uses layers: the saved layers and the writable layer. | **Close all and tidy up**. It merges the layers. See "Merge layers". |
 | **Agents: current versions** | The agents in use. A note names each agent and whether it uses layers or plain folders. | **Convert to plain folders**, when the plugin offers it. See "Convert agents to plain folders". |
 | **Agents: old versions** | The previous versions that are kept for a roll back, plain folders and layers. | **Remove old versions**. See "Remove old versions now". |
-| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, old layer images that a newer merged layer replaced (one item for each home or agent), and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. When old layer images are listed, also **Archive layer images…**. See "Archive old layer images". |
+| **Left over** | Old layers that a conversion moved aside (they stay for 14 days), an unfinished conversion copy, the layers of a home that no workspace uses, old layer images that a newer merged layer replaced (one item for each home or agent), archived home data from a storage move, and the test homes that the smoke tests left. A home of the configured user, or of an Unraid user, is never listed here, even when its name looks like a test name. Layers that an open conversion still needs are marked **needed to finish or roll back a conversion** and cannot be removed. | **Remove**. When old layer images are listed, also **Archive layer images…**. See "Archive old layer images". |
 | **Plugin files** | The rest of the plugin folder: program files, saved copies of earlier versions, settings and state. | None. |
 
 A home in plain folders has the first three **Home** lines. A home with layers has the line **saved layers**.
@@ -697,6 +697,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
+| "The old home mount is still busy" | A workspace or another process still uses the old home while the plugin tries to move it. The storage path did not change. | Close any remaining workspaces for that home. Then try **Move storage here** again. |
+| "Home storage is busy. Try again in a moment." | A home is mounting or remounting, so the storage move did not start. The old path stays active. | Wait for the home mount to finish. Then press **Move storage here** again. |
 | The card shows **OFFLINE** | The home is not mounted. | Press **Repair**. If it fails, check that the drive is present and press **Retry integrity check**. |
 | "Saving — waiting" for a long time | The home is in use, or it was saved less than 30 minutes ago. | Wait. The data is already on disk. Close the workspaces of that home to free the memory. |
 | The status word shows a large "MB volatile" and does not drop after a save | Open workspaces hold the old copy of the home in memory. | Close the workspaces, or press **Consolidate** at a quiet time. |
@@ -727,6 +729,7 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-11-01** — Moving a home also copies its plain home data and writable changes. The Activity tray tells you when mounts keep the path lock busy and when the move leaves the old path active. If the new place has different home data, the plugin keeps it in an archive, and it archives old home data after it saves the new place. The **Boot disk space** card lists the archives under **Left over**. Specs `docs/specs/STORAGE_TARGET_PICKER.md` and `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issues #871 and #875.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — The card **System memory** is now called **RAM disk**, because it shows the RAM disk of Unraid and not all memory. The row is called **Used space on Unraid's RAM disk**. The help says why a full RAM disk matters. Issue #789.
 - **2026-10-26** — When every home or agent already uses one form but the setting names the other, the drop-down shows the true form and the button **Apply: make new homes plain folders too** saves the setting. Nothing is converted. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #790.

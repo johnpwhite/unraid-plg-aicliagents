@@ -24,8 +24,9 @@ namespace AICliAgents\Services;
 
 /**
  * Result of ensureReady(): is the entity's storage usable right now?
- * Preserves the `exit 2 = deferred` lingua franca — a deferred mount kept the
- * live overlay (the upper holds all data), so it is OK (usable), just deferred.
+ * Preserves the `exit 2 = deferred` lingua franca. Most exit-2 mounts kept the
+ * live overlay, so they remain usable. A path-move defer has no live mount and
+ * stays deferred without being reported as a hard failure.
  */
 final class FileStorageReadiness
 {
@@ -48,6 +49,17 @@ final class FileStorageReadiness
         } else {
             $r->ok = false; $r->deferred = false; $r->state = 'unavailable';
         }
+        return $r;
+    }
+
+    /** A transient defer can be unavailable without being a failed mount. */
+    public static function unavailableDeferred(string $deferReason): self
+    {
+        $r = new self();
+        $r->exit = 2;
+        $r->deferred = true;
+        $r->deferReason = $deferReason;
+        $r->state = 'deferred';
         return $r;
     }
 }
@@ -218,6 +230,10 @@ final class FileStorageStatus
 
 final class FileStorage
 {
+    /** Ignore a path-move marker after the supervisor's 30-minute freshness window. */
+    public const MIGRATION_MARKER_MAX_AGE_S = 1800;
+    /** Maximum time a migration waits for short home-mount shared locks. */
+    public const MIGRATION_LOCK_WAIT_S = 5.0;
     private const STORAGECTL = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/storage/storagectl.sh';
 
     /**
@@ -590,10 +606,11 @@ final class FileStorage
         $ok = ($type === 'home')
             ? StorageMountService::ensureHomeMounted($id, $exit)
             : StorageMountService::ensureAgentMounted($id, $exit);
-        return FileStorageReadiness::fromExit(
-            $ok ? $exit : 1,
-            ($ok && $exit === 2) ? self::peekDeferReason($type, $id) : null
-        );
+        $reason = $exit === 2 ? self::peekDeferReason($type, $id) : null;
+        if (!$ok && $exit === 2 && $reason === 'storage_move_active') {
+            return FileStorageReadiness::unavailableDeferred($reason);
+        }
+        return FileStorageReadiness::fromExit($ok ? $exit : 1, ($ok && $exit === 2) ? $reason : null);
     }
 
     /**
@@ -1151,10 +1168,41 @@ final class FileStorage
         return ($env !== false && $env !== '') ? $env : self::defaultMigrationMarker();
     }
 
-    /** Is a migration currently in progress (crash-safe marker present)? */
+    /**
+     * Is a fresh path-move marker owned by a live migration process?
+     *
+     * @phpstan-impure The marker and lock state can change between checks.
+     */
     public static function isMigrationInProgress(): bool
     {
-        return is_file(self::markerPath());
+        $marker = self::markerPath();
+        if (!is_file($marker)) return false;
+
+        $lock = self::acquireMigrationLock();
+        if ($lock === null) {
+            // Home mounts hold a shared lock. A shared reader can coexist with
+            // them, so only a failed shared probe means an exclusive move may
+            // own the marker.
+            $shared = self::acquireMigrationSharedLock();
+            if ($shared !== null) {
+                self::releaseMigrationLock($shared);
+                return false;
+            }
+            $mtime = @filemtime($marker);
+            return $mtime === false || (time() - $mtime) <= self::MIGRATION_MARKER_MAX_AGE_S;
+        }
+
+        try {
+            // A killed worker releases flock but cannot remove its marker. The
+            // free lock proves that no move owns this marker, so remove the
+            // crash residue while holding the same lock used by every move.
+            if (@unlink($marker) && class_exists(LogService::class)) {
+                LogService::log('Removed an orphaned storage-move marker because its lock was free.', LogService::LOG_WARN, 'FileStorage');
+            }
+        } finally {
+            self::releaseMigrationLock($lock);
+        }
+        return false;
     }
 
     /** Is the global engine migration marker present? */
@@ -1173,19 +1221,45 @@ final class FileStorage
     }
 
     /**
-     * #652/#707: the shared exclusive lock for path and engine migrations. A
-     * non-blocking flock on one lock file prevents concurrent migration writes.
+     * #652/#707: the common exclusive lock for path and engine migrations.
+     * A non-blocking flock on one lock file prevents concurrent migration writes.
+     * Migration callers can wait for a short, bounded time for shared home mounts.
      * Returns the open lock handle (keep it until the request ends, then release it with
      * releaseMigrationLock()) or null when another migration holds it.
      * @return resource|null
      */
-    public static function acquireMigrationLock()
+    public static function acquireMigrationLock(float $waitSeconds = 0.0, ?callable $wait = null)
     {
         $path = self::markerPath() . '.lock';
         @mkdir(dirname($path), 0755, true);
         $fh = @fopen($path, 'c');
         if ($fh === false) return null;
-        if (!@flock($fh, LOCK_EX | LOCK_NB)) {
+        $deadline = microtime(true) + max(0.0, $waitSeconds);
+        do {
+            if (@flock($fh, LOCK_EX | LOCK_NB)) return $fh;
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0.0) {
+                @fclose($fh);
+                return null;
+            }
+            $pause = min(100000, max(1, (int)ceil($remaining * 1000000)));
+            if ($wait !== null) {
+                $wait($pause);
+            } else {
+                usleep($pause);
+            }
+        }
+        while (true);
+    }
+
+    /** Acquire the shared lock used by a home mount while it reads the path. */
+    public static function acquireMigrationSharedLock()
+    {
+        $path = self::markerPath() . '.lock';
+        @mkdir(dirname($path), 0755, true);
+        $fh = @fopen($path, 'c');
+        if ($fh === false) return null;
+        if (!@flock($fh, LOCK_SH | LOCK_NB)) {
             @fclose($fh);
             return null;
         }
@@ -1216,6 +1290,13 @@ final class FileStorage
         @mkdir(dirname($marker), 0755, true);
         $plan['ts'] = gmdate('c');
         @file_put_contents($marker, json_encode($plan));
+    }
+
+    /** Refresh the path-move marker age while a long migration reports progress. */
+    public static function refreshMigrationMarker(): bool
+    {
+        $marker = self::markerPath();
+        return is_file($marker) && @touch($marker);
     }
 
     private static function clearMigrationMarker(): void
