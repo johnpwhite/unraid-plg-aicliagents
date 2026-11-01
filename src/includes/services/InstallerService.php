@@ -86,6 +86,25 @@ class InstallerService {
     }
 
     /**
+     * #867: the command that makes an installed agent tree readable by every user.
+     * The tree is an overlay over the agent's current layer. On an overlay, a mode
+     * change copies the WHOLE file up into the writable layer and syncs it, so the
+     * old recursive chmod to 755 copied all ~27,000 files of a Nanocoder install
+     * (14 min on prod02) where npm had changed ~1,800. GNU chmod calls chmod(2) even
+     * when the mode is already right, so `find -perm` selects only the entries that
+     * lack a read bit for all (or, for a folder or an executable, an execute bit for
+     * all), and only those get `chmod a+rX`. Symlinks are never followed.
+     * Pure, so it is unit-testable without a real install.
+     */
+    public static function agentTreePermissionCommand(string $dir): string {
+        $words = array_map('escapeshellarg', explode(' ', self::AGENT_TREE_PERMISSION_FIND));
+        return 'find ' . escapeshellarg($dir) . ' ' . implode(' ', $words);
+    }
+
+    /** The find expression of agentTreePermissionCommand; tests/unit/agent_tree_permission_test.sh reads this line. */
+    public const AGENT_TREE_PERMISSION_FIND = '! -type l ( ( -type d ! -perm -0555 ) -o ( -type f ! -perm -0444 ) -o ( -type f -perm /0111 ! -perm -0111 ) ) -exec chmod a+rX {} +';
+
+    /**
      * #35: decide which version string to record after a successful install.
      * The on-disk probe is ground truth; but when it can't read a version and the
      * install was for an explicit target, that target IS what was installed — record
@@ -380,7 +399,7 @@ class InstallerService {
         // side-by-side install, the live mount otherwise. chmod'ing the live
         // mount here would both miss the new files and touch a version that is
         // running.
-        @exec("chmod -R 755 " . escapeshellarg(AgentRegistry::agentInstallPath($agentId)));
+        @exec(self::agentTreePermissionCommand(AgentRegistry::agentInstallPath($agentId)));
 
         setInstallStatus("Baking SquashFS delta...", 90, $agentId);
 
@@ -591,7 +610,7 @@ class InstallerService {
         // Set permissions
         setInstallStatus("Setting permissions...", 90, $agentId);
         if (isset($seams['chmod'])) $seams['chmod']($agentDir);
-        else exec("chmod -R 755 " . escapeshellarg($agentDir));
+        else exec(self::agentTreePermissionCommand($agentDir));
 
         // Mark as emergency-installed (so cleanup knows to remove it later)
         @touch($flagFile);
