@@ -472,6 +472,226 @@ aicli_gc_agent_generations() {
     # 2026-09-26 (#338): the layer files on flash, AFTER the mount release, so
     # a generation just released no longer counts as mounted.
     aicli_gc_agent_layers "$agent_id" "$persist" "$scan_dir"
+    # 2026-11-01 (#860): the writable layers on flash that no generation uses.
+    aicli_gc_agent_orphan_uppers "$agent_id" "$persist" "$scan_dir"
+    return 0
+}
+
+# ---- Writable layers that no generation uses (2026-11-01, #860) --------------
+# docs/specs/AGENT_VERSION_HEALTH.md. A generation's writable layer is
+# persist/_upper/agents/<id>@<generation> (work dir: persist/_work/agents/...).
+# The reap removes the layer a generation RECORDED. A layer that was never
+# recorded (adopted from the old shared name, then a crash before the record)
+# stays on flash for good: 36 MB on prod02 for Gemini CLI, 52 files on prod01
+# for Codex CLI. It can also hold un-baked install output, and a rename keeps
+# the old modification times, so no age rule can prove it is idle. The clean-up
+# therefore has TWO steps: an unused layer is first RENAMED to
+# "<name>.stale-<UTC time>" (nothing is lost); only a ".stale-" folder older than
+# seven days is removed. The "<id>.stale-<time>" folders from #859 follow the
+# same second step.
+
+# _aicli_orphan_upper_stale_epoch <name> — the UTC time in a ".stale-<stamp>"
+# name as epoch seconds, or nothing when the name has no readable stamp.
+_aicli_orphan_upper_stale_epoch() {
+    local stamp
+    stamp="$(printf '%s\n' "${1:-}" | sed -n 's/.*\.stale-\([0-9]\{8\}\)T\([0-9]\{6\}\)Z.*/\1 \2/p' | head -1)"
+    [ -n "$stamp" ] || return 0
+    set -- $stamp
+    date -u -d "${1:0:4}-${1:4:2}-${1:6:2} ${2:0:2}:${2:2:2}:${2:4:2}" +%s 2>/dev/null || true
+}
+
+# _aicli_path_has_mounts <path> — true when <path> is a mount point or a mount
+# sits below it, in this namespace (/proc/self/mountinfo; seam
+# AICLI_SELF_MOUNTINFO). An unreadable table counts as "has mounts": fail safe.
+_aicli_path_has_mounts() {
+    local p="${1:-}" info="${AICLI_SELF_MOUNTINFO:-/proc/self/mountinfo}"
+    [ -n "$p" ] || return 0
+    [ -r "$info" ] || return 0
+    mountpoint -q "$p" 2>/dev/null && return 0
+    awk -v p="$p" '$5 == p || index($5, p "/") == 1 { f = 1; exit } END { exit f ? 0 : 1 }' "$info"
+}
+
+# aicli_agent_orphan_uppers <agent_id> <persist> [scan_dir]
+# Set _OU_NAMES to one line per entry under persist/_upper/agents and
+# persist/_work/agents that belongs to this agent and that no keep rule protects:
+#   set_aside:<name>   an unused "<id>@<generation>" layer, to be renamed
+#   remove:<name>      a ".stale-" folder older than the grace time, to be removed
+# Removes and renames nothing. Sets _OU_STATUS: ok, or why nothing may be
+# decided: no_path_helpers, no_holder_checks, scan_untrustworthy.
+#
+# An entry "<id>@<generation>" is kept when ANY of these holds:
+#  - the generation is the active one, or a live process names it;
+#  - the generation has a state record, or another record names the same path;
+#  - the generation has a mount folder under agents/.versions/<id>/ (mounted,
+#    or half-mounted: the mounted-generation GC owns that case);
+#  - the suffix is "staging" (the side-by-side install writes there);
+#  - a process, in ANY mount namespace, has an overlay with upperdir=<path>, or
+#    holds a file, cwd or mapping inside it (the helpers of storage_ops.sh); a
+#    scan that cannot be read keeps the entry;
+#  - it changed in the last AICLI_ORPHAN_UPPER_MIN_AGE_S seconds (default 600).
+# An entry "<id>.stale-<time>" or "<id>@<gen>.stale-<time>" is listed for removal
+# once its stamp is older than AICLI_STALE_UPPER_GRACE_S seconds (default 604800,
+# seven days) and no process holds it, under its own name OR under its original
+# name (another mount namespace keeps showing the old upperdir path). A stamp
+# that cannot be read keeps the entry. The folder "<id>" itself (the old shared
+# layer) is never listed.
+aicli_agent_orphan_uppers() {
+    local id="${1:-}" persist="${2:-}" scan_dir="${3:-/proc}"
+    local active referenced name gen path stamp now min_age grace rcm rco orig action p
+    _OU_STATUS=""; _OU_NAMES=""
+    [ -n "$id" ] && [ -n "$persist" ] || { _OU_STATUS="no_path_helpers"; return 0; }
+    declare -f agent_live_generation >/dev/null 2>&1 \
+        && declare -f agent_generation_state_get >/dev/null 2>&1 \
+        && declare -f agent_versioned_mount >/dev/null 2>&1 \
+        && declare -f agent_generation_upper_is_shared >/dev/null 2>&1 || { _OU_STATUS="no_path_helpers"; return 0; }
+    declare -f _agent_process_mountinfo_holds_overlay >/dev/null 2>&1 \
+        && declare -f _agent_process_has_open_upper_reference >/dev/null 2>&1 || { _OU_STATUS="no_holder_checks"; return 0; }
+    [ -d "$persist/_upper/agents" ] || [ -d "$persist/_work/agents" ] || { _OU_STATUS="ok"; return 0; }
+
+    active="$(agent_live_generation "$id" 2>/dev/null || true)"
+    referenced="$(aicli_agent_referenced_generations "$id" "$scan_dir")"
+    if [ -z "$referenced" ] && aicli_agent_has_live_processes "$id" "$scan_dir"; then
+        _OU_STATUS="scan_untrustworthy"; return 0
+    fi
+    min_age="${AICLI_ORPHAN_UPPER_MIN_AGE_S:-600}"
+    grace="${AICLI_STALE_UPPER_GRACE_S:-604800}"
+    case "$min_age" in ''|*[!0-9]*) min_age=600 ;; esac
+    case "$grace" in ''|*[!0-9]*) grace=604800 ;; esac
+    now="$(date +%s)"
+
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case "$name" in "$id@"*|"$id.stale-"*) : ;; *) continue ;; esac
+        # The first existing twin (upper, else work) is the path to check.
+        path="$persist/_upper/agents/$name"
+        [ -e "$path" ] || path="$persist/_work/agents/$name"
+        [ -d "$path" ] && [ ! -L "$path" ] || continue
+
+        case "$name" in
+            *.stale-*)
+                stamp="$(_aicli_orphan_upper_stale_epoch "$name")"
+                [ -n "$stamp" ] || continue
+                [ $((now - stamp)) -ge "$grace" ] || continue
+                action="remove"
+                orig="${name%%.stale-*}"
+                ;;
+            *)
+                gen="${name#"$id"@}"
+                [ -n "$gen" ] || continue
+                [ "$gen" = "staging" ] && continue
+                [ "$gen" = "$active" ] && continue
+                _aicli_in_set "$gen" "$referenced" && continue
+                [ -e "$(agent_versioned_mount "$id" "$gen")" ] && continue
+                [ -n "$(agent_generation_state_get "$id" "$gen" upper 2>/dev/null || true)" ] && continue
+                [ -f "$(agent_generation_state_file "$id" "$gen" 2>/dev/null)" ] && continue
+                agent_generation_upper_is_shared "$id" "" "$persist/_upper/agents/$name" && continue
+                [ -z "$(find "$path" -mmin -$((min_age / 60 + 1)) -print -quit 2>/dev/null)" ] || continue
+                action="set_aside"
+                orig="$name"
+                ;;
+        esac
+        # Holders, in any mount namespace, under the name and under the original
+        # name. Anything but a clear "no" keeps it.
+        local held=0
+        for p in "$name" "$orig"; do
+            if _agent_process_mountinfo_holds_overlay "" "$persist/_upper/agents/$p" "$scan_dir"; then rcm=0; else rcm=$?; fi
+            [ "$rcm" -eq 1 ] || { held=1; break; }
+            if _agent_process_has_open_upper_reference "$persist/_upper/agents/$p" "$scan_dir"; then rco=0; else rco=$?; fi
+            [ "$rco" -eq 1 ] || { held=1; break; }
+            if [ -d "$persist/_work/agents/$p" ] && _agent_process_has_open_upper_reference "$persist/_work/agents/$p" "$scan_dir"; then
+                held=1; break
+            fi
+        done
+        [ "$held" -eq 0 ] || continue
+        _OU_NAMES="${_OU_NAMES:+$_OU_NAMES$'\n'}$action:$name"
+    done < <({ ls -1 "$persist/_upper/agents" 2>/dev/null; ls -1 "$persist/_work/agents" 2>/dev/null; } | sort -u)
+    _OU_STATUS="ok"
+    return 0
+}
+
+# aicli_gc_agent_orphan_uppers <agent_id> <persist> [scan_dir]
+# Act on what aicli_agent_orphan_uppers lists: RENAME an unused layer (and its
+# work dir) to "<name>.stale-<UTC time>", REMOVE a listed ".stale-" folder.
+# Runs only when the caller does not hold the agent's storage lock
+# (AICLI_AGENT_LAYER_LOCK_HELD) and the per-agent bake lock is free (taken
+# non-blocking); the list is made again under the lock. Needs the holder checks
+# of storage_ops.sh: where they are not loaded it does nothing. A removal uses
+# rm -rf --one-file-system and skips a folder that is, or holds, a mount point.
+# Never touches a home, and never a path outside persist/_upper/agents/<id>... or
+# persist/_work/agents/<id>... Prints a one-line summary only when it changed
+# something or refused. Always returns 0.
+aicli_gc_agent_orphan_uppers() {
+    local id="${1:-}" persist="${2:-}" scan_dir="${3:-/proc}"
+    [ -n "$id" ] && [ -n "$persist" ] || return 0
+    [ -d "$persist/_upper/agents" ] || [ -d "$persist/_work/agents" ] || return 0
+    local names line action name lock_id bk_fd renamed=0 removed=0 p dest stamp
+    aicli_agent_orphan_uppers "$id" "$persist" "$scan_dir"; names="$_OU_NAMES"
+    case "$_OU_STATUS" in
+        ok) : ;;
+        scan_untrustworthy)
+            printf 'gc_orphan_uppers(%s): ABORT — 0 referenced generations found but this agent is in use; refusing to change anything\n' "$id" >&2
+            return 0 ;;
+        *) return 0 ;;
+    esac
+    [ -n "$names" ] || return 0
+    if [ "${AICLI_AGENT_LAYER_LOCK_HELD:-0}" = "1" ]; then
+        printf 'gc_orphan_uppers(%s): an install holds the agent — nothing changed\n' "$id"; return 0
+    fi
+    lock_id="${id//[^a-zA-Z0-9_-]/_}"
+    if ! exec {bk_fd}>"${AICLI_LOCK_DIR:-/var/run}/aicli-bake-agent-${lock_id}.lock"; then
+        return 0
+    fi
+    if ! flock -n "$bk_fd"; then
+        exec {bk_fd}>&-
+        printf 'gc_orphan_uppers(%s): an install or bake holds the agent — nothing changed\n' "$id"; return 0
+    fi
+    aicli_agent_orphan_uppers "$id" "$persist" "$scan_dir"; names="$_OU_NAMES"
+    if [ "$_OU_STATUS" = "ok" ]; then
+        stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            action="${line%%:*}"; name="${line#*:}"
+            case "$name" in */*|.*|"") continue ;; esac
+            case "$name" in "$id@"*|"$id.stale-"*) : ;; *) continue ;; esac
+            case "$action" in
+                set_aside)
+                    case "$name" in *.stale-*) continue ;; esac
+                    for p in _upper _work; do
+                        [ -d "$persist/$p/agents/$name" ] && [ ! -L "$persist/$p/agents/$name" ] || continue
+                        dest="$persist/$p/agents/$name.stale-$stamp"
+                        [ ! -e "$dest" ] || dest="$dest-$$"
+                        mv -T "$persist/$p/agents/$name" "$dest" 2>/dev/null || true
+                    done
+                    if [ ! -e "$persist/_upper/agents/$name" ] && [ ! -e "$persist/_work/agents/$name" ]; then
+                        renamed=$((renamed + 1))
+                        if declare -f lifecycle_log >/dev/null 2>&1; then
+                            lifecycle_log "info" "generation" "agent_orphan_upper_set_aside" \
+                                "{\"agent\":\"$id\",\"entry\":\"$name\"}" 2>/dev/null || true
+                        fi
+                    fi
+                    ;;
+                remove)
+                    case "$name" in *.stale-*) : ;; *) continue ;; esac
+                    for p in "$persist/_upper/agents/$name" "$persist/_work/agents/$name"; do
+                        [ -d "$p" ] && [ ! -L "$p" ] || continue
+                        _aicli_path_has_mounts "$p" && continue
+                        rm -rf --one-file-system "${p:?}" 2>/dev/null || true
+                    done
+                    if [ ! -e "$persist/_upper/agents/$name" ] && [ ! -e "$persist/_work/agents/$name" ]; then
+                        removed=$((removed + 1))
+                        if declare -f lifecycle_log >/dev/null 2>&1; then
+                            lifecycle_log "info" "generation" "agent_orphan_upper_removed" \
+                                "{\"agent\":\"$id\",\"entry\":\"$name\"}" 2>/dev/null || true
+                        fi
+                    fi
+                    ;;
+            esac
+        done <<< "$names"
+    fi
+    exec {bk_fd}>&-
+    if [ "$renamed" -gt 0 ] || [ "$removed" -gt 0 ]; then
+        printf 'gc_orphan_uppers(%s): set aside %d unused writable layer(s) for seven days; removed %d older one(s)\n' "$id" "$renamed" "$removed"
+    fi
     return 0
 }
 

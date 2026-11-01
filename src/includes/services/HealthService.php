@@ -90,6 +90,7 @@ class HealthService {
             'push'           => function () { return self::collectPush(); },
             'pinned_layers'  => function () { return self::collectPinnedLayers(); },
             'home_upper'     => function () { return self::collectHomeUpper(); },
+            'agent_versions' => function () { return self::collectAgentVersions(); },
         ];
         $checks = [];
         foreach ($collectors as $name => $fn) {
@@ -690,6 +691,105 @@ class HealthService {
     /** Size of a folder in whole MB (du -sm); 0 when du fails. */
     public static function duMegabytes(string $path): int {
         return (int)trim((string)@shell_exec('du -sm ' . escapeshellarg($path) . ' 2>/dev/null | cut -f1'));
+    }
+
+    /**
+     * #860 (docs/specs/AGENT_VERSION_HEALTH.md): an agent whose running version differs from
+     * the recorded version. $mismatches is a list of {name, recorded, running}. Pure.
+     * ONE plain line: the agent, both versions, the way out.
+     *
+     * @param array<int,array{name:string,recorded:string,running:string}> $mismatches
+     */
+    public static function evalAgentVersions(array $mismatches): array {
+        if ($mismatches === []) {
+            return self::result(self::STATUS_OK, 'Every installed agent runs the version that is recorded for it');
+        }
+        $parts = [];
+        foreach (array_slice($mismatches, 0, 3) as $m) {
+            $parts[] = sprintf('%s runs version %s, which is older than version %s that the Agent Store shows',$m['name'], $m['running'], $m['recorded']);
+        }
+        $more = count($mismatches) - count($parts);
+        $line = implode('; ', $parts) . ($more > 0 ? sprintf(' (and %d more)', $more) : '');
+        return self::result(self::STATUS_WARN, $line
+            . '. An old writable layer can hide the new version. Choose Reinstall for the agent in the Agent Store. When the agent mounts the new version, the plugin sets the old writable layer aside and removes it after seven days.');
+    }
+
+    /** "v1.2.3" and "1.2.3" are the same version. */
+    private static function plainVersion(string $v): string {
+        $v = trim($v);
+        return ($v !== '' && ($v[0] === 'v' || $v[0] === 'V')) ? substr($v, 1) : $v;
+    }
+
+    /**
+     * #860: true when the activation of a newer layer is still to come, so a different running
+     * version is expected: the active generation does not start with the newest layer's name.
+     * An empty name (no versioned layout, or no layer) says nothing is pending. Pure.
+     */
+    public static function activationPending(string $activeGen, string $newestLayerStem): bool {
+        if ($activeGen === '' || $newestLayerStem === '') return false;
+        return strncmp($activeGen, $newestLayerStem, strlen($newestLayerStem)) !== 0;
+    }
+
+    /**
+     * #860: the agents whose mounted program folder holds an OLDER version than versions.json
+     * records. Only an npm agent has a cheap and reliable source: the package.json that the
+     * install itself reads for the record (a single-binary agent has none, so it is not checked).
+     * Reads one small file per agent. Changes nothing.
+     *
+     * @param array<string,array{name:string,package:string}> $agents id => name and npm package
+     * @param array<string,mixed> $versions  the content of versions.json
+     * @param string $base                   the folder with one folder per agent (agents/)
+     * @param array<int,string> $skip        agent ids whose activation or install is still to come
+     * @return array<int,array{name:string,recorded:string,running:string}>
+     */
+    public static function agentVersionMismatches(array $agents, array $versions, string $base, array $skip = []): array {
+        $out = [];
+        foreach ($agents as $id => $a) {
+            $pkg = (string)($a['package'] ?? '');
+            if ($pkg === '' || in_array($id, $skip, true)) continue;
+            $entry = $versions[$id] ?? null;
+            $recorded = is_array($entry) ? (string)($entry['installed'] ?? '') : (is_string($entry) ? $entry : '');
+            if (in_array($recorded, ['', '0.0.0', 'unknown', 'installed'], true)) continue;
+            $json = @file_get_contents(rtrim($base, '/') . "/$id/node_modules/$pkg/package.json");
+            $d = is_string($json) ? json_decode($json, true) : null;
+            $running = is_array($d) ? (string)($d['version'] ?? '') : '';
+            if ($running === '' || !AgentRegistry::isSafeVersionString($running)) continue;
+            // Only an OLDER running version is a fault. A newer one is an agent that updated itself
+            // (the version drift self-heal records it), and a staged install binds the new
+            // generation before it records the version.
+            if (version_compare(self::plainVersion($running), self::plainVersion($recorded), '>=')) continue;
+            $out[] = ['name' => (string)($a['name'] ?? $id), 'recorded' => $recorded, 'running' => $running];
+        }
+        return $out;
+    }
+
+    private static function collectAgentVersions(): array {
+        $agents = [];
+        foreach (AgentRegistry::getDefaultAgents() as $id => $agent) {
+            $pkg = VersionCheckService::npmPackageOf($agent);
+            if ($pkg !== '') $agents[(string)$id] = ['name' => (string)($agent['name'] ?? $id), 'package' => $pkg];
+        }
+        $persist = rtrim(StoragePathResolver::agentPersistPath(), '/');
+        $skip = [];
+        $installing = PendingAgentUpgradeService::runningInstallIds();
+        foreach (array_keys($agents) as $id) {
+            // An install or upgrade for this agent runs now (install-bg worker): the mount and the record move in steps.
+            if (in_array($id, $installing, true)) {
+                $skip[] = $id;
+                continue;
+            }
+            if (is_file(UpgradeRelaunchService::pendingActivationPath($id)) || PendingAgentUpgradeService::read($id) !== []) {
+                $skip[] = $id;
+                continue;
+            }
+            // A newer layer that is baked but not active yet: the running version is the older one on purpose.
+            $layers = glob($persist . '/agent_' . $id . '_*.sqsh') ?: [];
+            if ($layers === []) continue;
+            usort($layers, static fn($a, $b) => (@filemtime($b) ?: 0) <=> (@filemtime($a) ?: 0));
+            if (self::activationPending(AgentRegistry::activeGenerationOf($id), basename($layers[0], '.sqsh'))) $skip[] = $id;
+        }
+        return self::evalAgentVersions(self::agentVersionMismatches(
+            $agents, AgentRegistry::getVersions(), AgentRegistry::agentBase(), $skip));
     }
 
     private static function collectPinnedLayers(): array {
