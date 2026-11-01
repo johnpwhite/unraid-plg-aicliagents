@@ -1496,7 +1496,7 @@ class ConfigService {
         if (self::$workspacesLockDepth > 0) return $fn();
         $path = self::workspacesLockPath();
         if (!is_dir(dirname($path))) @mkdir(dirname($path), 0755, true);
-        $fh = @fopen($path, 'c');
+        $fh = @fopen($path, 'ce');
         if ($fh === false) return $fn();
         $deadline = microtime(true) + self::$workspacesLockWaitSeconds;
         while (!@flock($fh, LOCK_EX | LOCK_NB)) {
