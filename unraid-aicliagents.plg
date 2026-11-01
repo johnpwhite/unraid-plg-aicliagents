@@ -3,7 +3,12 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.10.31.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
-## 2026.10.31.01
+## 2026.10.31.02
+
+**Terminal speed and reliability**
+
+- **Improve: a terminal for a workspace that already runs opens much faster.** On a busy test server the server side of the connect dropped from about 6 seconds to about 0.2 seconds. The **Waking** screen now stays until the terminal shows its first text, so a slow connect no longer looks like a hung black screen.
+- **Fix: an install stops with a clear reason when a required program fails to download**, instead of finishing with a terminal that cannot start (thanks to aalencia, GitHub PR #34).
 
 **Script runs (new)**
 
@@ -33,6 +38,7 @@
 - **Fix: agent upgrades show real progress, pack about three times faster and survive a server restart.** An upgrade no longer waits for a home save that is not needed, or for old versions that no workspace uses.
 - **Fix: the Beta version list shows only the newest builds** and hides builds older than the stable release.
 - **Fix: Remove old versions finds every old version**, and a damaged cached install file is downloaded again.
+- **Fix: an Agent Store card on a phone keeps its height while an agent installs.**
 
 **Settings and Activity tray**
 
@@ -52,6 +58,8 @@
 - **Feat: the Boot disk space card can archive and restore old layer images and old session logs.** It warns at 80 % full and refuses large writes over 85 % full. Your saves are never held back.
 - **Feat: a home card shows the old layers kept after Convert to plain folders**, with their size, the date they are removed, and a **Remove old layers** button. Configuration shows **Home storage** and **Agent storage** separately.
 - **Fix: an array stop with plugin storage on a pool no longer leaves the pool busy** (thanks to Joly0, GitHub PR #30). **Up one level** in the folder picker works again (thanks to Joly0, GitHub PR #32).
+- **Fix: a change of the home storage folder moves each home safely**, so home mounts no longer fail and the system log no longer fills (GitHub #33).
+- **Fix: saving home changes no longer removes files from a home that is in use** (GitHub #21, #9).
 
 **Config Hub and Relay**
 
