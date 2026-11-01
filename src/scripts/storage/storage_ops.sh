@@ -1333,8 +1333,12 @@ current="$(readlink -f "$stable" 2>/dev/null || true)"
 # persist drive. Never START a stage that cannot fit — a write that fills the
 # flash failed antigravity's extraction and the settings saves with it.
 # Estimate: twice the version in service (the copy + the new version).
+# #883: measure the ALLOCATED size (du -sB1), not the apparent size (du -sb). On a
+# compressed flash (ZFS lz4) the version takes less room than its file sizes add up
+# to, and the apparent size refused an upgrade that fitted. The 10 % and 64 MB
+# margin in _layer_fits_space stays.
 local cur_bytes need_bytes
-cur_bytes="$(du -sb "$current" 2>/dev/null | awk '{print $1}')"
+cur_bytes="$(du -sB1 "$current" 2>/dev/null | awk '{print $1}')"
 case "$cur_bytes" in ''|*[!0-9]*) cur_bytes=0 ;; esac
 need_bytes=$(( cur_bytes * 2 ))
 # BOOT_DISK_SPACE.md R3: a FIRST install has no version in service to measure
