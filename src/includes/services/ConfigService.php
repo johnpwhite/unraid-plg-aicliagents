@@ -1388,12 +1388,15 @@ class ConfigService {
     public static function restoreManagedWorkspaceToDrawer(string $id): ?array {
         $rec = self::getManagedWorkspace($id);
         if ($rec === null) return null;
-        $file = self::getUserStatePath() . '/workspaces.json';
-        $ws = file_exists($file)
-            ? (json_decode((string)file_get_contents($file), true) ?: ['sessions' => [], 'activeId' => null])
-            : ['sessions' => [], 'activeId' => null];
-        [$ws, $restored] = self::withManagedWorkspaceRestored([$id => $rec], $ws, $id);
-        if ($restored) self::saveWorkspaces($ws);
+        // #884: read and save under one lock so a close in between is not undone.
+        self::withWorkspacesLock(static function () use ($id, $rec) {
+            $file = self::getUserStatePath() . '/workspaces.json';
+            $ws = file_exists($file)
+                ? (json_decode((string)file_get_contents($file), true) ?: ['sessions' => [], 'activeId' => null])
+                : ['sessions' => [], 'activeId' => null];
+            [$ws, $restored] = self::withManagedWorkspaceRestored([$id => $rec], $ws, $id);
+            if ($restored) self::saveWorkspaces($ws);
+        });
         return $rec;
     }
 
@@ -1452,6 +1455,69 @@ class ConfigService {
      */
     public static function saveWorkspaces($data, array $removedIds = [], bool $publish = true) {
         self::$lastWorkspaceSaveMessage = null;
+        // #884: one cross-process lock covers the whole read, merge and write. Without it,
+        // two overlapping saves each merge against the same old file and the later write
+        // drops the other's removal tombstone (a closed workspace comes back) or new row.
+        $busy = false;
+        $result = self::withWorkspacesLock(
+            static fn() => self::saveWorkspacesLocked($data, $removedIds, $publish),
+            $busy
+        );
+        if ($busy) {
+            // Deadline passed: the save is NOT done. Say so to the caller and the log.
+            LogService::log('saveWorkspaces NOT SAVED: the workspace list lock stayed busy for ' . self::$workspacesLockWaitSeconds . 's', LogService::LOG_ERROR, 'ConfigService');
+            self::$lastWorkspaceSaveMessage = 'The workspace list is busy with another save, so this change was not saved. Retry in a moment.';
+            return false;
+        }
+        return $result;
+    }
+
+    /** Seconds a save waits for the workspace list lock before it gives up (#884). Tests shorten it. */
+    public static float $workspacesLockWaitSeconds = 10.0;
+    private static int $workspacesLockDepth = 0;
+
+    /** Lock file for workspaces.json. In the RAM state root, never on /mnt/user or flash. */
+    public static function workspacesLockPath(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/workspaces.json.lock';
+    }
+
+    /**
+     * Run $fn while holding the workspaces.json lock (#884). LOCK_EX|LOCK_NB in a poll loop
+     * with a deadline, never a blocking flock. Re-entrant in one process. At the deadline $fn
+     * is NOT run and $busy is set true: the caller must report the lost save. When no lock
+     * file can be made, $fn runs without the lock (as the other tmpfs lockers do).
+     *
+     * @param callable $fn
+     * @param bool|null $busy set to true when the deadline passed
+     * @return mixed
+     */
+    public static function withWorkspacesLock(callable $fn, ?bool &$busy = null) {
+        $busy = false;
+        if (self::$workspacesLockDepth > 0) return $fn();
+        $path = self::workspacesLockPath();
+        if (!is_dir(dirname($path))) @mkdir(dirname($path), 0755, true);
+        $fh = @fopen($path, 'c');
+        if ($fh === false) return $fn();
+        $deadline = microtime(true) + self::$workspacesLockWaitSeconds;
+        while (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $deadline) {
+                @fclose($fh);
+                $busy = true;
+                return null;
+            }
+            usleep(10000);
+        }
+        self::$workspacesLockDepth++;
+        try {
+            return $fn();
+        } finally {
+            self::$workspacesLockDepth--;
+            @flock($fh, LOCK_UN);
+            @fclose($fh);
+        }
+    }
+
+    private static function saveWorkspacesLocked($data, array $removedIds, bool $publish) {
         $file = self::getUserStatePath() . "/workspaces.json";
         // #666 R-155: getWorkspaces() turns a file it cannot parse into the empty
         // default. Saving on top of that default would replace every workspace with
