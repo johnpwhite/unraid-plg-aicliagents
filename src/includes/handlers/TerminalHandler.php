@@ -1400,7 +1400,7 @@ class TerminalHandler {
      */
     public static function closeExitCommand(string $agentId): string {
         $cmd = (string)(\AICliAgents\Services\AgentRegistry::getRegistry()[$agentId]['exit_command'] ?? '');
-        return preg_match('~^/[A-Za-z][A-Za-z0-9_-]{0,31}$~', $cmd) ? $cmd : '';
+        return preg_match('~^/[A-Za-z][A-Za-z0-9_-]{0,31}$~D', $cmd) ? $cmd : '';
     }
 
     /**

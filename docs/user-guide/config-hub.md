@@ -170,6 +170,7 @@ When a file differs from what the Config Hub wrote, the card **Config drift dete
 | **Not managed by the hub yet** | The file already had an entry with this name, and the Config Hub did not write it. |
 | **Same name outside the hub's block** | You wrote an entry with the same name outside the block of the Config Hub. The Config Hub writes nothing, because the agent would refuse a file with two entries of one name. The row names the entry. |
 | **The hub could not write the file** | The Config Hub left the file alone. The row names the reason, for example that the file has comments or a trailing comma (the Config Hub cannot rewrite such a file without losing them), that a link points nowhere, or that a folder is not writable. |
+| **Linked folder, not written** | A skill or command folder (or the whole agent skills folder) is a link to another place, for example a link into a git repository. The Config Hub never writes, overwrites or deletes through a link, so the files behind it stay as they are. The row names the link and where it points. **Overwrite** shows the same reason and does nothing. The plugin's own skills (names that start with `aicli-`) are not affected when only the agent skills folder is a link. Replace the link with a real folder, then press **Apply to agents**. |
 
 Point at a button, or move to it with the Tab key, to read what it will do to that file. A button that does not work on a row is grey. It stays in its place, and its text says why and what to do instead. Press a grey button to read the reason again.
 
@@ -376,6 +377,7 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 <details>
 <summary>Change history</summary>
 
+- **2026-11-01** — New row state **Linked folder, not written**. The Config Hub no longer writes, overwrites or deletes a skill or command through a link. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #849.
 - **2026-10-28** — A first OpenCode 2 install selects OpenCode 2 wherever OpenCode is selected, and for Global Instructions. The Config Hub does not write an OpenCode 2 file that is a link out of its own folder. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issues #832 and #833.
 - **2026-10-27** — New row **OpenCode 2**. It has its own settings folder, so its MCP servers, instructions and commands are separate from OpenCode. It reads the shared skills folder. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issue #822.
 - **2026-10-27** — In **Global Instructions**, Claude Code and OpenCode show **covered** when they already read the instructions through `~/.claude`. A tick on them asks first. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #798.
