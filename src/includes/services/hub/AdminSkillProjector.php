@@ -936,6 +936,8 @@ lines move to `archive/agent-journal-<yyyy-mm>.md`. Nothing is deleted.
 MD;
 
     public function ledgerKey(): string { return parent::ledgerKey() . '#aicli-admin-skill'; }
+    /** #849: the plugin's own aicli-* skills may pass a linked vendor folder (~/.claude/skills links into claude-config, which git-ignores them). */
+    public function allowLinkedVendorDir(): bool { return true; }
 
     public function desired(array $servers): array {
         $cfg = [];

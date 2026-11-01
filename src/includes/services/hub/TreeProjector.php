@@ -120,16 +120,65 @@ class TreeProjector extends VendorProjector {
         foreach ($set as $key => $content) {
             $rel = self::safeRel((string)$key);
             if ($rel === null) { $ok = false; continue; }
+            // #849: never write through a link (the vendor folder or a folder inside it).
+            if ($this->linkReason($root, $rel) !== null) { $ok = false; continue; }
             if (!$this->atomicWrite("$root/$rel", (string)$content)) $ok = false;
         }
         foreach ($remove as $key) {
             $rel = self::safeRel((string)$key);
             if ($rel === null) continue;
+            if ($this->linkReason($root, $rel) !== null) { $ok = false; continue; } // #849
             $abs = "$root/$rel";
             if (is_file($abs) && !@unlink($abs)) { $ok = false; continue; }
             $this->pruneEmptyDirs($root, dirname($abs));
         }
         return $ok;
+    }
+
+    /**
+     * May this projector write below a vendor folder that is itself a link? False for hub
+     * user skills and commands. True for the plugin's own system skills (Relay, Admin): the
+     * fleet hosts link ~/.claude/skills into claude-config by design and that repo git-ignores
+     * aicli-*. The skill folder itself must still be a real folder (linkReason checks it).
+     */
+    public function allowLinkedVendorDir(): bool { return false; }
+
+    /**
+     * #849: why a managed path must not be written, or null when it is safe.
+     * A write or a delete must never follow a symlink out of the vendor folder:
+     * on the fleet hosts ~/.claude/skills is a link into the claude-config git
+     * repo, and a projected skill would land in that working tree.
+     * Refused: the vendor folder itself is a link (any target), or a folder or
+     * the file below it is a link whose real path leaves the vendor folder
+     * (or is broken). A link that stays inside the vendor folder is allowed.
+     * @param string $root absolute vendor DIRECTORY; $rel a safe managed key
+     */
+    public function linkReason(string $root, string $rel): ?string {
+        $root = rtrim($root, '/');
+        if (is_link($root) && !$this->allowLinkedVendorDir()) {
+            return self::linkText('folder', $root);
+        }
+        $rootReal = realpath($root);
+        $path = $root;
+        $segs = explode('/', $rel);
+        foreach ($segs as $i => $seg) {
+            $path .= '/' . $seg;
+            if (is_link($path)) {
+                $real = realpath($path);
+                if ($rootReal === false || $real === false || strpos($real, $rootReal . '/') !== 0) {
+                    return self::linkText($i === count($segs) - 1 ? 'file' : 'folder', $path);
+                }
+            } elseif (!file_exists($path)) {
+                break; // nothing below a missing part can be a link
+            }
+        }
+        return null;
+    }
+
+    private static function linkText(string $what, string $path): string {
+        return "Linked $what, not written: $path is a link to '" . (string)@readlink($path) . "'. "
+            . 'The Config Hub does not write through a link, so the files behind it stay as they are. '
+            . 'Replace the link with a real folder, then apply again';
     }
 
     /** Remove now-empty dirs from $dir up to (not including) $root. Never crosses $root. */

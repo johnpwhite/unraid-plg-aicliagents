@@ -82,6 +82,8 @@ on the server (every agent runs as root): keep to it.
 MD;
 
     public function ledgerKey(): string { return parent::ledgerKey() . '#aicli-relay-skill'; }
+    /** #849: the plugin's own aicli-* skills may pass a linked vendor folder (~/.claude/skills links into claude-config, which git-ignores them). */
+    public function allowLinkedVendorDir(): bool { return true; }
 
     public function desired(array $servers): array {
         return ['aicli-relay/SKILL.md' => self::SKILL];

@@ -1178,6 +1178,10 @@ class HubProjector {
                 return ['status' => 'ok', 'mode' => 'release'];
 
             case 'overwrite':
+                // #849: Overwrite never writes or deletes through a link.
+                if ($projector instanceof TreeProjector && ($linked = $projector->linkReason($abs, $key)) !== null) {
+                    return ['status' => 'error', 'message' => $linked];
+                }
                 $ok = ($want !== null)
                     ? $projector->write($abs, [$key => $want], [])
                     : $projector->write($abs, [], [$key]);
@@ -1686,6 +1690,27 @@ class HubProjector {
             }
         }
 
+        // #849: a skill or command path that sits behind a link is never written, overwritten
+        // or deleted. The row says so in plain words; the ledger stays as it was.
+        if ($projector instanceof TreeProjector) {
+            foreach (array_keys($set) as $key) {
+                if (($why = $projector->linkReason($abs, (string)$key)) === null) continue;
+                $drift[] = self::linkedRec($file, (string)$key, $agentId, $current[$key] ?? null, $desired[$key] ?? null, $why);
+                unset($set[$key]);
+            }
+            foreach ($remove as $i => $key) {
+                if (($why = $projector->linkReason($abs, (string)$key)) === null) continue;
+                $drift[] = self::linkedRec($file, (string)$key, $agentId, $current[$key] ?? null, null, $why);
+                unset($remove[$i]);
+            }
+            $remove = array_values($remove);
+            // Rows found above (a user file at a managed path) get the same reason.
+            foreach ($drift as $i => $rec) {
+                if (isset($rec['reason']) || $rec['kind'] === 'write_failed') continue;
+                if (($why = $projector->linkReason($abs, (string)$rec['key'])) !== null) $drift[$i]['reason'] = $why;
+            }
+        }
+
         $written = []; $removed = [];
         if ($write && (!empty($set) || !empty($remove))) {
             if ($projector->write($abs, $set, $remove)) {
@@ -1760,6 +1785,14 @@ class HubProjector {
             }, (string)$v);
         }
         return $env;
+    }
+
+    /** #849: a row for a path that sits behind a link, so it was not written. */
+    private static function linkedRec(string $file, string $key, string $agentId, $theirs, $ours, string $why): array {
+        $rec = self::driftRec($file, $key, $agentId, 'write_failed', $theirs, $ours);
+        $rec['reason'] = $why;
+        $rec['stateLabel'] = 'Linked folder, not written';
+        return $rec;
     }
 
     private static function driftRec(string $file, string $key, string $agentId, string $kind, $theirs, $ours): array {
