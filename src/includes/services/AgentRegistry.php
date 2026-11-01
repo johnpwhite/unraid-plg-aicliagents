@@ -890,6 +890,10 @@ class AgentRegistry {
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/factory.png',
                 'binary' => "$agentBase/factory-cli/node_modules/@factory/cli/bin/droid",
                 'resume_cmd' => "{binary} {args}",
+                // #837: droid ignores Ctrl-D and needs a quick double Ctrl-C; its documented exit is the
+                // /quit slash command (alias: exit). Official: https://docs.factory.com/cli/configuration/cli-reference
+                // (TerminalHandler::closeExitCommand types it + Enter before the generic exit keys).
+                'exit_command' => '/quit',
                 'resume_latest' => "{binary} {args}",
                 'env_prefix' => 'FACTORY',
                 // @factory/cli has no public release history — npm versions page.

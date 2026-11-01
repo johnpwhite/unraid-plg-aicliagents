@@ -1394,6 +1394,16 @@ class TerminalHandler {
     }
 
     /**
+     * #837: the agent's own documented exit command from the agent registry
+     * (`exit_command`, e.g. "/quit"), or '' when the agent has none. Only a plain
+     * slash command is accepted, so a bad registry value cannot type anything else.
+     */
+    public static function closeExitCommand(string $agentId): string {
+        $cmd = (string)(\AICliAgents\Services\AgentRegistry::getRegistry()[$agentId]['exit_command'] ?? '');
+        return preg_match('~^/[A-Za-z][A-Za-z0-9_-]{0,31}$~', $cmd) ? $cmd : '';
+    }
+
+    /**
      * Quiesce ONE agent inside its tmux session and capture + persist its resume
      * id. Shared verbatim by gracefulClose() (UI "close" button) and
      * AgentHandler::_closeSessionsForUpgrade() (pre-upgrade bulk close) so resume
@@ -1437,6 +1447,17 @@ class TerminalHandler {
         // lines in a way tmux's -J flag cannot always re-join cleanly.
         // Resizing here guarantees the full resume line fits on one row.
         @shell_exec("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
+
+        // #837: an agent that documents its own exit command (registry `exit_command`, e.g.
+        // Factory droid `/quit`) gets it typed first. The generic keys below stay as the fallback.
+        $exitCommand = self::closeExitCommand($agentId);
+        if ($exitCommand !== '') {
+            @shell_exec("$tmuxBin send-keys -t $escSess -l " . escapeshellarg($exitCommand) . " 2>/dev/null");
+            usleep(150000);
+            @shell_exec("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
+            usleep(300000);
+            aicli_log("captureResumeForClose: sent exit command '$exitCommand' (#837) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
+        }
 
         // Two Ctrl-Cs covers both single-press (opencode) and double-press
         // (claude/gemini/copilot/kilo) exit conventions. The second key on
