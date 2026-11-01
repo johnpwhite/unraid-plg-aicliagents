@@ -1853,6 +1853,42 @@ convert_cleanup_failed_copy() {
     return 0
 }
 
+# convert_discard_partial_copy <persist> <type> <id> <lock_id> <default_pt> — #882:
+# remove the half-made plain copy that a stopped layers-to-plain job left, and
+# keep the layers. It acts only on a staging marker (the job wrote it BEFORE the
+# copy and removes it only after the switch). The caller has checked that no
+# intent exists and that the layers are still in place. The marker names the copy:
+#   line 1 is an absolute path (a home or legacy agent copy), or empty (the copy is
+#   <default_pt>), or a version name (a side-by-side
+#   agent: the version folder and its stable link go).
+# 0 = the copy is gone (or there was none); 1 = it could not be removed or the
+# marker names a path that is not a copy of this item (nothing is removed then).
+convert_discard_partial_copy() {
+    local persist="${1%/}" type="$2" id="$3" lock_id="$4" default_pt="$5"
+    local marker="$persist/.graduate_staging_${type}_${lock_id}" copy="" gen="" first
+    [ -f "$marker" ] || return 0
+    first="$(sed -n 1p "$marker" 2>/dev/null)"
+    case "$first" in
+        /*) copy="$first" ;;
+        '') copy="$default_pt" ;;
+        *)
+            gen="$(printf '%s' "$first" | tr -cd 'a-zA-Z0-9_-')"
+            [ -n "$gen" ] && copy="$persist/passthrough/agents/.versions/$id/$gen"
+            ;;
+    esac
+    [ -n "$copy" ] || return 1
+    case "$copy" in *..*) return 1 ;; esac
+    case "$copy" in
+        "$persist"/passthrough/*|*"/${type}_${lock_id}") : ;;
+        *) return 1 ;;
+    esac
+    if [ -n "$gen" ]; then
+        # The stable link (made just before the intent) and the version folder go together.
+        agent_convert_unlink_layout "$persist" "$id" "$gen"
+    fi
+    convert_cleanup_failed_copy "$copy" "$marker"
+}
+
 # convert_acquire_graduate_bake_lock <type> <lock_id> <force_direct> — keep a
 # normal graduate non-blocking, but let a global migration wait briefly for a
 # supervisor pass that already owns the entity lock.

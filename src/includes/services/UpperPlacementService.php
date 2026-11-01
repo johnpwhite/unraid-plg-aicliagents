@@ -551,6 +551,13 @@ final class UpperPlacementService
         }
     }
 
+    /** #882: the plain sentence about homes after a failed move. Never claims that a home which moved is where it was. */
+    private static function movedHomesSentence(array $movedIds): string
+    {
+        if ($movedIds === []) return 'No home moved, so your data is where it was and nothing was deleted.';
+        return 'These homes had already moved and stay moved: ' . implode(', ', $movedIds) . '. The other homes are where they were, and nothing was deleted.';
+    }
+
     /**
      * Change the placement and move the data. When it ends, the setting matches the data: a failure puts the old value
      * back. A worker that DIES mid-move cannot do that itself; status() settles such a record and puts the old value back.
@@ -602,12 +609,14 @@ final class UpperPlacementService
                 return ['saved' => (bool)$r->saved || (bool)$r->ok, 'exit' => $r->exit, 'reason' => $r->deferReason];
             };
             $reasons = [];
+            $savedIds = [];
             try {
                 $doneCount = 0;
                 foreach ($moves as $h) {
                     $progress($doneCount, count($moves), (string)$h['id'], 'Saving and mounting the home of ' . $h['id'] . ' again.');
                     $r = $persist($h['id']);
                     if (empty($r['saved'])) $reasons[$h['id']] = ($r['reason'] ?? '') ?: ('save exit ' . ($r['exit'] ?? '?'));
+                    else $savedIds[] = (string)$h['id'];
                     $progress(++$doneCount, count($moves), (string)$h['id'], 'Saved the home of ' . $h['id'] . '.');
                 }
                 $after = self::homeStates($target, $config, $seams);
@@ -616,7 +625,7 @@ final class UpperPlacementService
                 // not leave it out of step with the data, so put the old value back.
                 $save(['storage_upper_mode' => $prev]);
                 LogService::log('Writable-layer move failed: ' . $e->getMessage(), LogService::LOG_ERROR, 'UpperPlacementService');
-                return ['status' => 'error', 'message' => 'The move stopped on an error. The setting is back to ' . self::label($prev) . '; your data is where it was and nothing was deleted.', 'moved' => []];
+                return ['status' => 'error', 'message' => 'The move stopped on an error. The setting is back to ' . self::label($prev) . '. ' . self::movedHomesSentence($savedIds), 'moved' => $savedIds];
             }
             $failed = [];
             foreach ($after as $h) {
@@ -626,7 +635,9 @@ final class UpperPlacementService
                 $save(['storage_upper_mode' => $prev]);
                 $list = [];
                 foreach ($failed as $id => $why) $list[] = "$id: $why";
-                return ['status' => 'error', 'message' => 'Not moved (' . implode('; ', $list) . '). The setting is back to ' . self::label($prev) . '; your data is where it was and nothing was deleted.', 'moved' => []];
+                // #882 (item 9): a home that moved before another one failed stays moved. Name it.
+                $movedIds = array_values(array_filter(array_map(static fn(array $h): string => (string)$h['id'], $moves), static fn(string $id): bool => !isset($failed[$id])));
+                return ['status' => 'error', 'message' => 'Not moved (' . implode('; ', $list) . '). The setting is back to ' . self::label($prev) . '. ' . self::movedHomesSentence($movedIds), 'moved' => $movedIds];
             }
             return ['status' => 'ok',
                 'message' => 'Moved ' . count($moves) . ' home' . (count($moves) === 1 ? '' : 's') . ' to ' . self::label($target) . '. Reopen your workspaces to continue.',

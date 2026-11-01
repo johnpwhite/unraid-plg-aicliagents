@@ -1650,6 +1650,16 @@ _backend_migration_mark_changed() {
 backend_migration_restore_archived_plain() {
     local base="$1" archive="$2" plain="$2/plain" link="$2/stable-link" link_target="" target_dir=""
     [ -d "$plain" ] || return 1
+    # #882 (item 7): `mv <plain> <existing folder>` would move the old copy INSIDE the
+    # folder as "plain". An empty folder (a mount point) is removed first; a folder or
+    # link with content is never touched: the caller refuses (rc 2).
+    if [ -L "$_BM_PT" ] || [ -e "$_BM_PT" ]; then
+        if [ -d "$_BM_PT" ] && [ ! -L "$_BM_PT" ] && [ -z "$(find "$_BM_PT" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+            rmdir -- "$_BM_PT" || return 2
+        else
+            return 2
+        fi
+    fi
     if [ -L "$link" ]; then
         link_target="$(readlink -- "$link" 2>/dev/null || true)"
         [ -n "$link_target" ] || return 1
@@ -1685,9 +1695,16 @@ if [ "$TARGET" = "passthrough" ]; then
         if [ -d "$_BM_ARCHIVE_ROOT" ]; then
             while IFS= read -r _bm_archive; do
                 [ -n "$_bm_archive" ] || continue
-                if backend_migration_restore_archived_plain "$_BM_AGENT_BASE" "$_bm_archive"; then
+                _bm_restore_rc=0
+                backend_migration_restore_archived_plain "$_BM_AGENT_BASE" "$_bm_archive" || _bm_restore_rc=$?
+                if [ "$_bm_restore_rc" -eq 0 ]; then
                     _BM_ARCHIVE_RESTORED=1
                     break
+                fi
+                if [ "$_bm_restore_rc" -eq 2 ]; then
+                    # #882: the plain folder is in use. Never move an old copy inside it.
+                    echo "[backend-migrate] $_BM_PT already exists, so the archived plain copy was not put back. Nothing was changed." >&2
+                    exit 1
                 fi
             done < <(find "$_BM_ARCHIVE_ROOT" -mindepth 1 -maxdepth 1 -type d -name "*_${TYPE}_${_BM_LOCK_ID}" -print | sort -r)
         fi
@@ -1720,30 +1737,82 @@ fi
 
 # layering target: a plain directory is the current authority. Keep it in place
 # until a verified layer and both manifest writes have succeeded.
+_BM_INTENT_PATH=""
+if declare -f _intent_path >/dev/null 2>&1; then
+    _BM_INTENT_PATH="$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")"
+fi
+
+# #882: a put back after a layers-to-plain job that stopped DURING the copy. The
+# staging marker exists and no intent exists, so no layer moved and the layers
+# are still the only true copy. The plain folder is a partial copy: remove it and
+# keep the layers. Baking it would make a partial home the only live layer. This
+# runs before the "no plain folder" exit because a side-by-side agent copy has no
+# stable link yet.
+if [ "$ROLLBACK" = "1" ] && [ -f "$PERSIST_PATH/.graduate_staging_${TYPE}_${_BM_LOCK_ID}" ] \
+    && [ ! -f "$_BM_INTENT_PATH" ] && [ "$(_entity_has_layers "$PERSIST_PATH" "$TYPE" "$ID")" = "1" ]; then
+    if ! convert_discard_partial_copy "$PERSIST_PATH" "$TYPE" "$ID" "$_BM_LOCK_ID" "$_BM_PT"; then
+        echo "[backend-migrate] The unfinished plain copy of $TYPE/$ID could not be removed. The layers were not changed." >&2
+        exit 1
+    fi
+    lifecycle_log "warn" "backend_migrate" "backend_migrate_rollback_dropped_partial_copy" \
+        "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+    exit 0
+fi
+
 if [ ! -d "$_BM_PT" ]; then
     exit 0
 fi
 
 # A layering rollback restores the exact layer set retained by the forward
 # graduation. Rename it back; do not bake the copied plain tree a second time.
-_BM_RETIRE="$PERSIST_PATH/.graduated/${TYPE}_${_BM_LOCK_ID}"
-_BM_INTENT_PATH=""
-if declare -f _intent_path >/dev/null 2>&1; then
-    _BM_INTENT_PATH="$(_intent_path "$PERSIST_PATH" "$TYPE" "$ID")"
-fi
-if [ -f "$_BM_INTENT_PATH" ] && command -v jq >/dev/null 2>&1; then
-    _BM_INTENT_RETIRE="$(jq -r '.retire // empty' "$_BM_INTENT_PATH" 2>/dev/null || true)"
-    if [ -n "$_BM_INTENT_RETIRE" ]; then
-        case "$_BM_INTENT_RETIRE" in
-            /*) _BM_INTENT_RETIRE_PATH="$_BM_INTENT_RETIRE" ;;
-            *) _BM_INTENT_RETIRE_PATH="$PERSIST_PATH/$_BM_INTENT_RETIRE" ;;
-        esac
-        case "$_BM_INTENT_RETIRE_PATH" in
-            "$PERSIST_PATH"/*) [ -d "$_BM_INTENT_RETIRE_PATH" ] && _BM_RETIRE="$_BM_INTENT_RETIRE_PATH" ;;
-        esac
+#
+# #882: ONLY a rollback (ROLLBACK=1) may use retired layers. A forward change back
+# to layers inside the 14-day retention window must bake the plain folder: the
+# retired layers are OLD, and convert_rollback deletes the plain folder, so using
+# them would throw away all work done since the first conversion.
+#
+# Two sources of a retire folder, in order of trust:
+#  1. The open intent of a job that stopped part way names its own retire folder.
+#     That job is the one being undone, so the folder is the right one.
+#  2. No intent (the job finished): the newest folder in .graduated for this item.
+#     A rollback of a job that ran later than that folder may find an OLDER folder
+#     (layers to plain, work, plain to layers, layers to plain, then put back). So
+#     the layers are used only when no plain file is newer than the folder. A newer
+#     file means work was done after the retirement; the folder is stale and the
+#     plain folder is baked instead, which keeps the data.
+_BM_RETIRE=""
+if [ "$ROLLBACK" = "1" ]; then
+    if [ -f "$_BM_INTENT_PATH" ] && command -v jq >/dev/null 2>&1; then
+        _BM_INTENT_RETIRE="$(jq -r '.retire // empty' "$_BM_INTENT_PATH" 2>/dev/null || true)"
+        if [ -n "$_BM_INTENT_RETIRE" ]; then
+            case "$_BM_INTENT_RETIRE" in
+                /*) _BM_INTENT_RETIRE_PATH="$_BM_INTENT_RETIRE" ;;
+                *) _BM_INTENT_RETIRE_PATH="$PERSIST_PATH/$_BM_INTENT_RETIRE" ;;
+            esac
+            case "$_BM_INTENT_RETIRE_PATH" in
+                "$PERSIST_PATH"/*) [ -d "$_BM_INTENT_RETIRE_PATH" ] && _BM_RETIRE="$_BM_INTENT_RETIRE_PATH" ;;
+            esac
+        fi
+    fi
+    if [ -n "$_BM_RETIRE" ] && ! compgen -G "$_BM_RETIRE/*.sqsh" >/dev/null; then _BM_RETIRE=""; fi
+    if [ -z "$_BM_RETIRE" ]; then
+        _BM_CAND=""
+        for _bm_c in "$PERSIST_PATH/.graduated/${TYPE}_${_BM_LOCK_ID}" "$PERSIST_PATH/.graduated/${TYPE}_${_BM_LOCK_ID}".*; do
+            [ -d "$_bm_c" ] && compgen -G "$_bm_c/*.sqsh" >/dev/null || continue
+            if [ -z "$_BM_CAND" ] || [ "$_bm_c" -nt "$_BM_CAND" ]; then _BM_CAND="$_bm_c"; fi
+        done
+        if [ -n "$_BM_CAND" ]; then
+            _BM_PLAIN_REAL="$(readlink -f -- "$_BM_PT" 2>/dev/null || true)"
+            if [ -n "$_BM_PLAIN_REAL" ] && [ -d "$_BM_PLAIN_REAL" ] \
+                && [ -z "$(find "$_BM_PLAIN_REAL" -type f -newer "$_BM_CAND" -print -quit 2>/dev/null)" ]; then
+                _BM_RETIRE="$_BM_CAND"
+            else
+                lifecycle_log "warn" "backend_migrate" "backend_migrate_rollback_stale_retire" \
+                    "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"retire\":\"$_BM_CAND\"}" 2>/dev/null || true
+            fi
+        fi
     fi
 fi
-if [ ! -d "$_BM_RETIRE" ] || ! compgen -G "$_BM_RETIRE/*.sqsh" >/dev/null; then _BM_RETIRE=""; fi
 if [ -n "$_BM_RETIRE" ]; then
     _entity_paths_live "$TYPE" "$ID" "$PERSIST_PATH"
     convert_rollback "$PERSIST_PATH" "$_BM_PT" "$_BM_RETIRE" "${UPPER_DIR:-}" || exit $?
