@@ -1304,7 +1304,7 @@ final class FileStorage
         @unlink(self::markerPath());
     }
 
-    private static function clearBackendMigrationMarker(): void
+    public static function clearBackendMigrationMarker(): void
     {
         @unlink(self::backendMigrationMarkerPath());
     }

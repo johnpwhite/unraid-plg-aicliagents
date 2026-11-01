@@ -200,7 +200,361 @@ final class UpperPlacementService
         }
     }
 
-    /** Change the placement and move the data. Never leaves the setting out of step with the data. */
+    // ---- The move as a background job (#880) ----------------------------------------------------
+    // docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md "Apply flow rules (#880)". The move used to hold a
+    // request open and a whole-screen overlay shut until it ended. It is now a job like the engine change
+    // of a kind: the request reserves a record under the migration lock, starts the detached worker with the
+    // shared launcher, and returns. The card polls the record. The tray item follows the record. While the job
+    // is queued or running, every other storage job, workspace start and storage action is refused
+    // (StorageBackendMigrationService::isMigrationInProgress() reads isJobActive()), and the worker holds the
+    // exclusive launch guard for the whole move, so no workspace can start after the close.
+
+    public const ACTIVITY_ID = 'storage_upper_move';
+    private const STALE_QUEUED_SECONDS = 60;
+    private const STALE_RUNNING_SECONDS = 90;
+    private const GUARD_WAIT_SECONDS = 60;
+
+    /** True only inside the move worker: its own process must not be held back by its own job. */
+    private static bool $selfWorker = false;
+
+    /** The job record in RAM (the state root under test is the sandbox). */
+    public static function statusPath(): string
+    {
+        $e = getenv('AICLI_UPPER_PLACEMENT_STATUS');
+        return ($e !== false && $e !== '') ? $e : SecretPaths::stateRoot() . '/upper-placement-status.json';
+    }
+
+    /** The in-flight copy on flash: it survives a reboot, so a move that died can be settled and the setting put back. */
+    public static function durablePath(): string
+    {
+        $e = getenv('AICLI_UPPER_PLACEMENT_DURABLE');
+        return ($e !== false && $e !== '') ? $e : SecretPaths::flashRoot() . '/upper-placement-status.json';
+    }
+
+    private static function readFile(string $path): ?array
+    {
+        $json = @file_get_contents($path);
+        $data = is_string($json) ? json_decode($json, true) : null;
+        return is_array($data) ? $data : null;
+    }
+
+    /** RAM record first; after a reboot the flash copy of a job that was in flight. */
+    private static function readRecord(): array
+    {
+        $ram = self::readFile(self::statusPath());
+        if ($ram !== null && (string)($ram['status'] ?? 'idle') !== 'idle') return $ram;
+        $durable = self::readFile(self::durablePath());
+        if ($durable !== null && in_array((string)($durable['status'] ?? ''), ['queued', 'running'], true)) return $durable;
+        return $ram ?? ['status' => 'idle'];
+    }
+
+    private static function writeFile(string $path, array $record): bool
+    {
+        $dir = dirname($path);
+        if (!is_dir($dir)) @mkdir($dir, 0755, true);
+        $tmp = $path . '.' . bin2hex(random_bytes(4)) . '.tmp';
+        $json = json_encode($record, JSON_UNESCAPED_SLASHES);
+        if ($json !== false && @file_put_contents($tmp, $json, LOCK_EX) !== false && @rename($tmp, $path)) return true;
+        @unlink($tmp);
+        return false;
+    }
+
+    private static function writeRecord(array $record, bool $durable = false): bool
+    {
+        $ok = self::writeFile(self::statusPath(), $record);
+        if ($durable) self::writeFile(self::durablePath(), $record);
+        return $ok;
+    }
+
+    private static function clearDurable(): void
+    {
+        $p = self::durablePath();
+        if (is_file($p)) @unlink($p);
+    }
+
+    /** True while a move is queued or running, except inside the move worker itself. */
+    public static function isJobActive(array $seams = []): bool
+    {
+        if (self::$selfWorker) return false;
+        return in_array((string)(self::status($seams)['status'] ?? 'idle'), ['queued', 'running'], true);
+    }
+
+    /** The job record: idle | queued | running | complete | error. A dead worker is settled here. */
+    public static function status(array $seams = []): array
+    {
+        $s = self::readRecord();
+        $state = (string)($s['status'] ?? 'idle');
+        if (!in_array($state, ['queued', 'running'], true)) return $s;
+        $pidAlive = static function (array $rec) use ($seams): bool {
+            $pid = (int)($rec['worker_pid'] ?? 0);
+            if ($pid < 1) return false;
+            return isset($seams['pid_alive']) ? (bool)$seams['pid_alive']($pid) : UtilityService::isPidRunning($pid);
+        };
+        $age = time() - (int)($s['updated_at'] ?? 0);
+        if ($state === 'queued' && $age > self::STALE_QUEUED_SECONDS && !$pidAlive($s)) {
+            return self::settle($s, 'The move of the writable layer did not start. Nothing was changed.', false, $seams);
+        }
+        if ($state === 'running' && (int)($s['worker_pid'] ?? 0) > 0) {
+            // The worker holds the exclusive launch guard for the whole move. A free guard together with a dead
+            // process (or an old record, which covers a recycled process id) means the worker is gone.
+            $guardFree = isset($seams['guard_free'])
+                ? (bool)$seams['guard_free']()
+                : (static function (): bool {
+                    $probe = StorageBackendMigrationService::acquireLaunchGuard(false);
+                    if ($probe === false) return false;
+                    StorageBackendMigrationService::releaseLaunchGuard($probe);
+                    return true;
+                })();
+            if ($guardFree && (!$pidAlive($s) || $age > self::STALE_RUNNING_SECONDS)) {
+                return self::settle($s, 'The move of the writable layer stopped before it finished. Nothing was deleted.', true, $seams);
+            }
+        }
+        return $s;
+    }
+
+    /**
+     * End a record as an error and fail its tray item in the same step. $restore puts the saved setting back to the
+     * value before the move: the worker saves the new value early, so a worker that died would leave the setting
+     * on a placement that the data does not have.
+     */
+    private static function settle(array $record, string $message, bool $restore, array $seams = []): array
+    {
+        if ($restore && isset($record['previous']) && in_array((string)$record['previous'], self::MODES, true)) {
+            $config = $seams['config'] ?? ConfigService::getConfig();
+            if (self::currentMode($config) !== (string)$record['previous']) {
+                $save = $seams['save_config'] ?? static fn(array $c): bool => (bool)ConfigService::saveConfig($c, false);
+                if ($save(['storage_upper_mode' => (string)$record['previous']])) {
+                    $message .= ' The setting is back to ' . self::label((string)$record['previous']) . '.';
+                }
+            }
+        }
+        $record['status'] = 'error';
+        $record['message'] = $message;
+        $record['current'] = '';
+        $record['updated_at'] = time();
+        self::writeRecord($record);
+        self::clearDurable();
+        self::trayFail($message);
+        return $record;
+    }
+
+    /** The plain refusal while a move is queued or running, or null. */
+    public static function jobRefusal(array $seams = []): ?array
+    {
+        $s = $seams['upper_status'] ?? (self::$selfWorker ? ['status' => 'idle'] : self::status($seams));
+        $state = (string)($s['status'] ?? 'idle');
+        if (!in_array($state, ['queued', 'running'], true)) return null;
+        return ['status' => 'error', 'reason' => 'storage_job_active',
+            'message' => 'A move of the writable layer is already ' . ($state === 'queued' ? 'waiting to start' : 'running') . '. Wait for it to finish, then press Apply again.'];
+    }
+
+    private static function trayUpdate(array $record): void
+    {
+        if (!class_exists(ActivityService::class)) return;
+        $total = max(0, (int)($record['total'] ?? 0));
+        $done = max(0, (int)($record['completed'] ?? 0));
+        ActivityService::update(self::ACTIVITY_ID, [
+            'type' => 'migrate',
+            'label' => 'Moving the writable layer to ' . ((string)($record['target'] ?? '') === 'disk' ? 'disk' : 'RAM'),
+            'status' => 'running',
+            'step' => (string)($record['message'] ?? 'Moving the writable layer.'),
+            'progress' => $total > 0 ? min(99, (int)floor(100 * $done / $total)) : 1,
+            'meta' => ['kind' => 'job'],
+        ]);
+    }
+
+    private static function trayFail(string $message): void
+    {
+        if (class_exists(ActivityService::class)) ActivityService::fail(self::ACTIVITY_ID, $message, 'Check the Storage card, then try again.', [
+            'type' => 'migrate', 'label' => 'Writable-layer move needs attention', 'meta' => ['kind' => 'notice'],
+        ]);
+    }
+
+    private static function trayFinish(string $step): void
+    {
+        if (class_exists(ActivityService::class)) ActivityService::finish(self::ACTIVITY_ID, $step);
+    }
+
+    /** The plain reason why a path move blocks this move, or null. Seam: path_move_active (bool). */
+    private static function pathMoveRefusal(array $seams): ?string
+    {
+        require_once __DIR__ . '/FileStorage.php';
+        require_once __DIR__ . '/StoragePathMoveJobService.php';
+        $active = isset($seams['path_move_active'])
+            ? (bool)$seams['path_move_active']
+            : (FileStorage::isMigrationInProgress() || StoragePathMoveJobService::hasPending());
+        return $active ? 'A storage path move is queued or running. Wait for it to finish before you move the writable layer.' : null;
+    }
+
+    /**
+     * Start the move in the background. Answers `saved` when no home has to move (only the setting changes),
+     * `accepted` when the worker runs, or an error with a plain reason. It never holds the request open.
+     *
+     * The reservation happens under FileStorage::acquireMigrationLock(), the lock that the engine change of a kind
+     * also takes, and the refusal is repeated after the slow check and just before the record is written, so the
+     * two job kinds cannot both start. Seams (tests): those of preflight()/migrate(), plus job_refusal (array|null),
+     * path_move_active, after_preflight (callable), spawn_detached, php, wait_worker (callable), worker_wait_seconds,
+     * clock, worker_sleep.
+     */
+    public static function startAsync(string $target, ?array $config = null, array $seams = []): array
+    {
+        $config = $config ?? ConfigService::getConfig();
+        require_once __DIR__ . '/FileStorage.php';
+        $lock = FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
+        if ($lock === null) {
+            return StorageBackendMigrationService::refusalFor(StorageBackendPolicyService::KIND_ALL, false, $seams)
+                ?? ['status' => 'error', 'message' => 'Another storage operation is already running. Wait for it to finish, then try again.'];
+        }
+        try {
+            $conflict = self::pathMoveRefusal($seams);
+            if ($conflict !== null) return ['status' => 'error', 'reason' => 'storage_job_active', 'message' => $conflict];
+            $check = self::preflight($target, $config, $seams);
+            if (($check['status'] ?? '') !== 'ok') return $check;
+            if (isset($seams['after_preflight']) && is_callable($seams['after_preflight'])) ($seams['after_preflight'])();
+            $refusal = array_key_exists('job_refusal', $seams)
+                ? $seams['job_refusal']
+                : StorageBackendMigrationService::refusalFor(StorageBackendPolicyService::KIND_ALL, false, $seams);
+            if ($refusal !== null) return $refusal;
+            if ((int)$check['moves'] === 0) {
+                // Only the setting changes: no job, no workspace is closed.
+                $save = $seams['save_config'] ?? static fn(array $c): bool => (bool)ConfigService::saveConfig($c, false);
+                if (!$save(['storage_upper_mode' => $target])) return ['status' => 'error', 'message' => 'The setting could not be saved.'];
+                return ['status' => 'saved', 'target' => $target, 'message' => 'Writable layer set to ' . self::label($target) . '. No home needed to move.'];
+            }
+            $now = time();
+            $jobId = bin2hex(random_bytes(6));
+            $record = [
+                'status' => 'queued', 'job_id' => $jobId, 'target' => $target, 'previous' => self::currentMode($config),
+                'started_at' => $now, 'updated_at' => $now, 'worker_pid' => 0,
+                'completed' => 0, 'total' => (int)$check['moves'], 'current' => '',
+                'message' => 'The move is queued. The open workspaces are closed when it starts.',
+            ];
+            if (!self::writeRecord($record, true)) return ['status' => 'error', 'message' => 'The move could not be saved. Nothing was changed.'];
+            if (class_exists(ActivityService::class)) ActivityService::dismiss(self::ACTIVITY_ID); // a finished item of an earlier move must not carry over
+            self::trayUpdate($record);
+        } finally {
+            FileStorage::releaseMigrationLock($lock);
+        }
+        $script = (string)($seams['worker_script'] ?? dirname(__DIR__, 2) . '/scripts/storage-upper-move.php');
+        $pid = UtilityService::launchPhpWorker($script, [$target, $jobId], self::statusPath() . '.log', $seams);
+        $started = $pid > 0 && (
+            isset($seams['wait_worker']) && is_callable($seams['wait_worker'])
+                ? (bool)$seams['wait_worker']()
+                : UtilityService::awaitWorkerStart(static function (): bool {
+                    $r = self::readRecord();
+                    return (int)($r['worker_pid'] ?? 0) > 0 || (string)($r['status'] ?? 'queued') !== 'queued';
+                }, $seams)
+        );
+        if (!$started) {
+            $message = 'The move of the writable layer did not start. Nothing was changed. Check the Debug Console, then try again.';
+            self::settle($record, $message, false, $seams);
+            return ['status' => 'error', 'message' => $message];
+        }
+        return ['status' => 'accepted', 'target' => $target, 'worker_pid' => $pid,
+            'message' => 'The move started. Your open workspaces are closed, then each home is saved and mounted again.'];
+    }
+
+    /** Claim the queued record for this worker under a short lock (same rule as the engine change). */
+    private static function claim(string $jobId): ?array
+    {
+        $fh = @fopen(self::statusPath() . '.claim', 'c');
+        $locked = false;
+        if ($fh !== false) {
+            $deadline = microtime(true) + 3.0;
+            while (!($locked = @flock($fh, LOCK_EX | LOCK_NB)) && microtime(true) < $deadline) usleep(50000);
+        }
+        try {
+            if (!$locked) return null;
+            $record = self::readFile(self::statusPath()) ?? self::readRecord();
+            if ((string)($record['status'] ?? '') !== 'queued') return null;
+            if ($jobId !== '' && (string)($record['job_id'] ?? '') !== $jobId) return null;
+            $record['status'] = 'running';
+            $record['worker_pid'] = getmypid();
+            $record['updated_at'] = time();
+            $record['message'] = 'Waiting for workspace starts to finish.';
+            self::writeRecord($record, true);
+            return $record;
+        } finally {
+            if ($fh !== false) { if ($locked) @flock($fh, LOCK_UN); @fclose($fh); }
+        }
+    }
+
+    /**
+     * The detached worker: claim the queued record, hold the exclusive launch guard for the whole move, run the
+     * move, and keep the record and the tray item in step. A late worker, or one that meets a newer job, stops.
+     */
+    public static function runQueuedMove(string $target, array $seams = [], string $jobId = ''): array
+    {
+        $record = self::claim($jobId);
+        if ($record === null) {
+            return ['status' => 'error', 'message' => 'The queued move is no longer waiting, so this worker stopped without changing anything.'];
+        }
+        self::$selfWorker = true;
+        $guard = false;
+        try {
+            self::trayUpdate($record);
+            $conflict = self::pathMoveRefusal($seams);
+            if ($conflict !== null) {
+                self::settle($record, $conflict . ' Nothing was changed.', false, $seams);
+                return ['status' => 'error', 'message' => $conflict];
+            }
+            // No workspace may start between the close and the remount: hold the exclusive guard, as the engine change does.
+            $acquire = $seams['acquire_guard'] ?? static fn() => StorageBackendMigrationService::acquireLaunchGuard(true);
+            $wait = $seams['guard_wait'] ?? static function (int $microseconds): void { usleep($microseconds); };
+            $started = microtime(true);
+            while (($guard = $acquire()) === false) {
+                if (microtime(true) - $started >= (float)($seams['guard_wait_seconds'] ?? self::GUARD_WAIT_SECONDS)) {
+                    $message = 'A workspace start did not finish in time. Nothing was changed. Try again.';
+                    self::settle($record, $message, false, $seams);
+                    return ['status' => 'error', 'message' => $message];
+                }
+                $wait(100000);
+            }
+            $record['message'] = 'Checking the homes.';
+            $record['updated_at'] = time();
+            self::writeRecord($record, true);
+            self::trayUpdate($record);
+            $seams['progress'] = $seams['progress'] ?? static function (int $done, int $total, string $current, string $message) use (&$record): void {
+                $record['completed'] = $done;
+                $record['total'] = $total;
+                $record['current'] = $current;
+                $record['message'] = $message;
+                $record['updated_at'] = time();
+                self::writeRecord($record);
+                self::trayUpdate($record);
+            };
+            try {
+                $result = self::migrate($target, $seams['config'] ?? null, $seams);
+            } catch (\Throwable $e) {
+                self::settle($record, 'The move stopped on an error. Nothing was deleted. Check the Debug Console.', true, $seams);
+                throw $e;
+            }
+            $record['updated_at'] = time();
+            $record['message'] = (string)($result['message'] ?? '');
+            $record['current'] = '';
+            if (($result['status'] ?? '') === 'ok') {
+                $record['status'] = 'complete';
+                $record['completed'] = (int)($record['total'] ?? 0);
+                self::writeRecord($record);
+                self::clearDurable();
+                self::trayFinish('Writable layer moved to ' . self::label($target) . '.');
+            } else {
+                $record['status'] = 'error';
+                self::writeRecord($record);
+                self::clearDurable();
+                self::trayFail($record['message']);
+            }
+            return $result;
+        } finally {
+            if ($guard !== false && $guard !== null) StorageBackendMigrationService::releaseLaunchGuard($guard);
+            self::$selfWorker = false;
+        }
+    }
+
+    /**
+     * Change the placement and move the data. When it ends, the setting matches the data: a failure puts the old value
+     * back. A worker that DIES mid-move cannot do that itself; status() settles such a record and puts the old value back.
+     */
     public static function migrate(string $target, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
@@ -234,6 +588,8 @@ final class UpperPlacementService
                 }
                 ProcessManager::evictAll();
             };
+            $progress = $seams['progress'] ?? static function (int $done, int $total, string $current, string $message): void {};
+            $progress(0, count($moves), '', 'Closing the open workspaces.');
             $evict();
 
             // The bake decides the layer of the remount from the saved policy, so save it first
@@ -247,9 +603,12 @@ final class UpperPlacementService
             };
             $reasons = [];
             try {
+                $doneCount = 0;
                 foreach ($moves as $h) {
+                    $progress($doneCount, count($moves), (string)$h['id'], 'Saving and mounting the home of ' . $h['id'] . ' again.');
                     $r = $persist($h['id']);
                     if (empty($r['saved'])) $reasons[$h['id']] = ($r['reason'] ?? '') ?: ('save exit ' . ($r['exit'] ?? '?'));
+                    $progress(++$doneCount, count($moves), (string)$h['id'], 'Saved the home of ' . $h['id'] . '.');
                 }
                 $after = self::homeStates($target, $config, $seams);
             } catch (\Throwable $e) {

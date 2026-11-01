@@ -220,6 +220,7 @@ $stSubagents = $cardOnOff($config['spawn_enabled'] ?? null, '0') . ' · up to ' 
                             </select>
                             <?=$storageApply('homes')?>
                             <div id="aicli-kind-state-homes" data-testid="storage-kind-state-homes" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;"></div>
+                            <div id="aicli-kind-orphans-homes" data-testid="storage-kind-orphans-homes" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:4px; opacity:0.85;"></div>
                             <?=aicli_help_panel('storage-backend-homes')?>
                         </dd>
 
@@ -317,6 +318,7 @@ $stSubagents = $cardOnOff($config['spawn_enabled'] ?? null, '0') . ' · up to ' 
                             </select>
                             <?=$storageApply('upper')?>
                             <div id="aicli-kind-state-upper" data-testid="storage-kind-state-upper" role="status" aria-live="polite" style="font-size:12px; margin-top:4px;"></div>
+                            <div id="aicli-upper-move-status" data-testid="storage-upper-move-status" data-aicli-warns-card="storage" role="status" aria-live="polite" hidden style="font-size:12px; margin-top:8px; padding:8px 10px; border:1px solid var(--border-color, #aaa); border-radius:4px;"></div>
                             <?=aicli_help_panel('storage-upper-mode')?>
                         </dd>
 

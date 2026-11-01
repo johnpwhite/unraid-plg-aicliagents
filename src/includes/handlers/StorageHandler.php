@@ -102,6 +102,7 @@ class StorageHandler {
             case 'preflight_migrate':           return self::preflightMigrate();
             case 'get_storage_kind_state':     return \AICliAgents\Services\StorageBackendMigrationService::kindStates();
             case 'storage_backend_migration_status': return \AICliAgents\Services\StorageBackendMigrationService::status();
+            case 'upper_mode_status':     return \AICliAgents\Services\UpperPlacementService::status();   // #880: the writable-layer move job, read-only
             case 'storage_backend_migration_recovery': $result = \AICliAgents\Services\StorageBackendMigrationService::recoverInterruptedAsync((string)($_REQUEST['operation'] ?? ''), getAICliConfig()); break;
             case 'execute_migrate':             $result = self::executeMigrateExclusive(); break;
             case 'execute_storage_backend':     $result = self::executeStorageBackend(); break;
@@ -132,7 +133,7 @@ class StorageHandler {
     /** Actions handled by this handler. */
     public static function actions() {
         return ['get_storage_status', 'get_boot_integrity_status', 'get_supervisor_status', 'get_force_reclaim_state', 'get_task_status',
-                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'get_storage_kind_state', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode',
+                'storage_job_status', 'storage_jobs_active', 'enumerate_storage_targets', 'get_array_stop_impact', 'preflight_storage_backend', 'get_storage_kind_state', 'storage_backend_migration_status', 'storage_backend_migration_recovery', 'preflight_upper_mode', 'upper_mode_status',
                 'restore_from_sibling', 'list_halts', 'clear_halt', 'auto_heal_agent_install',
                 'persist_agent', 'persist_home',
                 'consolidate_storage', 'convert_storage', 'agent_old_versions', 'agent_footprint', 'remove_old_versions', 'clear_home_caches', 'get_home_cache_status', 'agent_convert_estimate', 'convert_agents', 'get_home_sessions', 'graduate_targets', 'graduate_storage',
@@ -2331,20 +2332,28 @@ class StorageHandler {
         $mode = (string)($_GET['mode'] ?? 'layering');
         // kind = homes or agents: the two storage settings on the Configuration tab.
         $kind = (string)($_GET['kind'] ?? '');
+        // #880: one storage job at a time. The refusal comes first, with a plain reason the card shows inline.
+        $refusal = \AICliAgents\Services\StorageBackendMigrationService::refusalFor($kind);
+        if ($refusal !== null) return $refusal;
         return \AICliAgents\Services\StorageBackendMigrationService::preflight($mode, getAICliConfig(), [], $kind);
     }
 
     /** #456: read-only — what moving the homes' writable layer to ?mode= would do, and whether it is allowed. */
     private static function preflightUpperMode(): array {
         require_once __DIR__ . '/../services/UpperPlacementService.php';
-        return \AICliAgents\Services\UpperPlacementService::preflight((string)($_GET['mode'] ?? ''), getAICliConfig());
+        $pre = \AICliAgents\Services\UpperPlacementService::preflight((string)($_GET['mode'] ?? ''), getAICliConfig());
+        if (($pre['status'] ?? '') !== 'ok') return $pre;
+        // #880: a running job of either sort refuses the next one, with a plain reason.
+        return \AICliAgents\Services\StorageBackendMigrationService::refusalFor(\AICliAgents\Services\StorageBackendPolicyService::KIND_ALL) ?? $pre;
     }
 
-    /** #456: change the placement and move the data (closes workspaces; saves, remounts, verifies). */
+    /**
+     * #456, #880: change the placement. A setting-only change answers `saved`. A move starts as a background job
+     * (closes workspaces; saves, remounts, verifies) and answers `accepted` at once; the card polls upper_mode_status.
+     */
     private static function executeUpperMode(): array {
-        set_time_limit(1800);
         require_once __DIR__ . '/../services/UpperPlacementService.php';
-        return \AICliAgents\Services\UpperPlacementService::migrate((string)($_GET['mode'] ?? ''), getAICliConfig());
+        return \AICliAgents\Services\UpperPlacementService::startAsync((string)($_GET['mode'] ?? ''), getAICliConfig());
     }
 
     private static function executeStorageBackend(): array {
@@ -2352,7 +2361,9 @@ class StorageHandler {
         $mode = (string)($_GET['mode'] ?? 'layering');
         $ack = ((string)($_GET['ack_wear'] ?? '0') === '1');
         $kind = (string)($_GET['kind'] ?? '');
-        return \AICliAgents\Services\StorageBackendMigrationService::startAsync($mode, $ack, getAICliConfig(), [], $kind);
+        // #880: save_only=1 is a setting-only Apply. It never starts a job, even when the server finds items to convert.
+        $saveOnly = ((string)($_GET['save_only'] ?? '0') === '1');
+        return \AICliAgents\Services\StorageBackendMigrationService::startAsync($mode, $ack, getAICliConfig(), [], $kind, $saveOnly);
     }
 
     /**

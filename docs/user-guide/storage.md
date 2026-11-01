@@ -183,7 +183,9 @@ A drop-down never starts a conversion by itself. When you choose another value, 
 
 Choose the first value again to cancel the change. The orange border, the button and the light go away. When you leave the page and come back, the drop-downs show the current state. The plugin does not keep a pending choice.
 
-Sometimes every home (or every agent) already uses one form, but the setting names the other form. This can happen after you convert homes by hand. New homes would then use the other form. The drop-down shows the form that is true now, and the button reads, for example, **Apply: make new homes plain folders too**. Press it to save the setting. The plugin converts nothing.
+Sometimes every home (or every agent) already uses one form, but the setting names the other form. This can happen after you convert homes by hand. New homes would then use the other form. The drop-down shows the form that is true now, and the button reads, for example, **Apply: make new homes plain folders too**. Press it to save the setting. The plugin saves it at once. No dialog opens, no job starts, no workspace closes and nothing is locked. The line under the drop-down says **Saved. New homes will use plain folders.** (or **Saved. New agents will use compressed layers.**). The plugin converts nothing.
+
+The plugin counts the same items on the card and when it converts. A stored home that has no matching user on this server is not counted as a home and the plugin does not convert it. A line under **Home storage** names it, for example **One stored home has no matching user on this server (aicliagent). The card does not count it and Apply does not convert it.** The plugin looks for the user among the accounts of the server, the users of your saved workspaces, the terminal user in the settings and the homes that are mounted now. If the plugin cannot read the list of accounts, it counts every stored home and names none as unmatched.
 
 When a kind is mixed, the drop-down shows the entry **Mixed: 1 plain, 2 compressed** in orange. You cannot choose that entry again after you leave it. Choose **Plain folders** or **Compressed layers**, then press **Apply**. The plugin converts only the items that are not on that choice yet.
 
@@ -207,7 +209,9 @@ If this page stays open while another tab changes a setting, the next save uses 
 
 If the server stops during conversion, Configuration and **Boot disk space** show the changed items. Press **Continue** to finish the change. Press **Put back** to restore the changed items to the saved choice. Workspaces and storage actions stay paused until recovery ends.
 
-**Dismiss** hides only the result for that conversion. A later conversion appears and disables both settings while it runs.
+**Dismiss** hides only the result for that conversion. A later conversion appears again while it runs. Only the setting of the kind that converts is switched off: while homes convert, **Agent storage** stays usable, and the other way round. If you press **Apply** for the other kind while a conversion runs, the plugin does not start a second job. A line under that drop-down says why, for example **A home storage change is already running. Wait for it to finish, then press Apply again.**
+
+If a conversion never starts (for example because the background program did not start), the status says **The home storage change did not start. Nothing was changed.** (or **The agent storage change did not start. Nothing was changed.**). The plugin says this only when nothing happened: no item was touched and no workspace was closed. It removes the saved record, the Activity tray entry shows the failure, and the status has only the button **Dismiss**. If a conversion stopped after it touched an item, or after it closed your workspaces, the status offers **Continue** and **Put back**. An item that was being converted counts as changed, because it can be half converted. The plugin refuses any new change until you choose one of them. **Put back** with no item changed closes no workspace. It only opens again the workspaces that the conversion had closed.
 
 You can open another page while the conversion runs. The **Boot disk space** card also shows the progress and says which kind converts. It disables actions that could change storage during the conversion. Automatic workspace launches wait until the conversion ends. Return to **Configuration** or **Storage** to see the same status. The page does not block navigation.
 
@@ -237,17 +241,19 @@ The setting applies when **Home storage** is **Compressed layers**. Homes in **P
 ### Switch the setting
 
 > [!WARNING]
-> A change moves data. The plugin closes your open workspaces, saves each home into a checked layer, and mounts the home again. This can take several minutes for a large home. Do not reload the page and do not restart the server during the move. The plugin deletes nothing. The old writable layer holds only what the checked save already contains.
+> A change moves data. The plugin closes your open workspaces, saves each home into a checked layer, and mounts the home again. This can take several minutes for a large home. Do not restart the server during the move. If the server restarts anyway, or the move stops, the plugin puts the setting back to the earlier place and the box says so. Open the Storage card, check where the homes are, and press **Apply** again. The plugin deletes nothing. The old writable layer holds only what the checked save already contains.
 
 1. Open the **Configuration** tab.
 2. Choose the other value in **Where unsaved changes are kept**. Expect: an orange border and the button **Apply: move the writable layer to RAM** (or **to disk**). Nothing moves yet.
 3. Press **Apply**. Expect: a check runs, then a warning titled **Move the writable layer to RAM?** or **Move the writable layer to disk?**
 4. Read the warning. It lists each home on its own line, for example "root: now on disk, will move (1880 MB)". A yellow box says "Your open workspaces will be closed while the data moves." when something must move.
-5. Press **Close workspaces and move**. If nothing needs to move, the button reads **Save setting**. Expect: a screen "Moving writable layers to RAM..." (or "disk...") with a bar.
-6. Wait for **Writable layer changed**. The page reloads.
+5. Press **Close workspaces and move**. If nothing needs to move, the button reads **Save setting** and the plugin only saves the setting. Expect: the dialog closes at once and no screen blocks the page. A box under the drop-down says **Moving the writable layer to RAM** (or **to disk**), names the home it works on and shows a bar. The move runs in the background: you can leave the page. The Activity tray shows the same progress. Only this drop-down is switched off while it runs.
+6. Wait for **The writable layer moved to RAM** (or **to disk**) in that box. Press **Dismiss** to hide it.
 7. Open your workspaces again. The plugin saved each workspace's place, so **Resume** brings the conversation back.
 
 **Cancel** and the Escape key close the warning and move nothing. Your choice stays in the drop-down and the button **Apply** stays lit. Choose the first value again to cancel the change. A click outside the warning does not close it.
+
+While the move runs, the plugin keeps everything else away from the homes. Your workspaces stay closed and cannot open, and the plugin refuses actions that change storage (restore, delete, wipe, merge, save, move storage). The Activity tray and the box show the work. Wait for the box to say that the move ended. If the move cannot start, or stops, the box says **The writable layer did not move** with the reason and the button **Dismiss**. A storage move to another place also waits, and the move waits for it. Only one storage job runs at a time: while a conversion of homes or agents runs, the plugin refuses the move with a line under the drop-down, and the other way round.
 
 If a home cannot move, the plugin puts the setting back. It shows **Not moved** with the name of the home and the reason, for example that the home is in use or that there is no room. If the old writable layer still holds changes that the save did not capture, the reason says so. A chat file that the save stored in a layer no longer blocks the move. Your data stays where it was.
 
@@ -729,6 +735,8 @@ The plugin saves the writable layer with a method that keeps databases safe. Man
 <details>
 <summary>Change history</summary>
 
+- **2026-11-01** — While the writable-layer move runs, workspaces, storage actions and storage moves wait, and the move holds the homes alone. A move that stops, or a restart during it, puts the setting back. A stopped conversion that touched an item or closed workspaces offers **Continue** and **Put back**; it is never called "did not start". The unmatched-home line says "has no matching user on this server". Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #880.
+- **2026-11-01** — A setting-only **Apply** saves at once with no dialog. The card and the conversion count the same homes, and stored homes that have no matching user on this server are named in one line and never converted. Only the setting of the kind that converts is switched off, and another running job is named under the drop-down. A conversion that never starts is cleared with **The home storage change did not start. Nothing was changed.** and **Dismiss**. The move of **Where unsaved changes are kept** runs in the background with a box and a bar. Spec `docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md`, issue #880.
 - **2026-11-01** — Moving a home also copies its plain home data and writable changes. The Activity tray tells you when mounts keep the path lock busy and when the move leaves the old path active. If the new place has different home data, the plugin keeps it in an archive, and it archives old home data after it saves the new place. The **Boot disk space** card lists the archives under **Left over**. Specs `docs/specs/STORAGE_TARGET_PICKER.md` and `docs/specs/HOME_STORAGE_LIFECYCLE.md`, issues #871 and #875.
 - **2026-10-26** — The card order list names the card **RAM disk**, and the hub texts say "every agent that supports it". Issue #789.
 - **2026-10-26** — The card **System memory** is now called **RAM disk**, because it shows the RAM disk of Unraid and not all memory. The row is called **Used space on Unraid's RAM disk**. The help says why a full RAM disk matters. Issue #789.

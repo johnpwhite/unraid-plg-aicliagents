@@ -135,6 +135,72 @@ class UtilityService {
     }
 
     /**
+     * #880: the command-line PHP for a detached worker or a git filter.
+     *
+     * Inside the web server PHP_BINARY is php-fpm, not a command-line PHP. A worker started
+     * with it prints the php-fpm usage text and exits, and no job ever runs. The command
+     * line PHP of the host is /usr/bin/php (AutoLaunchService launches its worker the same way).
+     * Only a command-line process may use its own PHP_BINARY, and only when that is not an fpm binary.
+     *
+     * Seams (tests): sapi, binary, usr_bin_executable (bool).
+     */
+    public static function cliPhpBinary(array $seams = []): string {
+        $cli = '/usr/bin/php';
+        $sapi = (string)($seams['sapi'] ?? PHP_SAPI);
+        $binary = (string)($seams['binary'] ?? PHP_BINARY);
+        $usrBin = array_key_exists('usr_bin_executable', $seams) ? (bool)$seams['usr_bin_executable'] : is_executable($cli);
+        if ($usrBin) return $cli;
+        if ($sapi === 'cli' && $binary !== '' && stripos(basename($binary), 'fpm') === false) return $binary;
+        return $cli;
+    }
+
+    /**
+     * #880: the one launcher of a detached PHP worker (the storage engine change and the writable-layer move).
+     * It runs the script with the command-line PHP and returns the process id, or 0 when nothing started.
+     * Seams (tests): php (see cliPhpBinary), spawn_detached (callable(array argv, string log, bool truncate): int).
+     *
+     * @param list<string> $args
+     */
+    public static function launchPhpWorker(string $script, array $args, string $log, array $seams = []): int {
+        $argv = array_merge([self::cliPhpBinary((array)($seams['php'] ?? [])), $script], array_map('strval', $args));
+        $spawn = $seams['spawn_detached'] ?? static fn(array $a, string $l, bool $t): int => self::spawnDetached($a, $l, $t);
+        return (int)$spawn($argv, $log, true);
+    }
+
+    /**
+     * #880: wait up to 20 seconds (a loaded host reached load 188; a longer wait avoids a false failure) until $started() is true. A detached worker that exits at once never
+     * records that it runs, and the caller then marks its job as failed. Seams (tests): worker_wait_seconds,
+     * clock (callable(): float), worker_sleep (callable(int microseconds)).
+     */
+    public static function awaitWorkerStart(callable $started, array $seams = []): bool {
+        $seconds = (float)($seams['worker_wait_seconds'] ?? 20.0);
+        $clock = $seams['clock'] ?? static fn(): float => microtime(true);
+        $sleep = $seams['worker_sleep'] ?? static function (int $microseconds): void { usleep($microseconds); };
+        $deadline = $clock() + $seconds;
+        do {
+            if ($started()) return true;
+            if ($clock() >= $deadline) break;
+            $sleep(200000);
+        } while (true);
+        return (bool)$started();
+    }
+
+    /**
+     * #880 review: every account name in /etc/passwd whatever its UID, or [] when the file cannot be read.
+     * @return list<string>
+     */
+    public static function getAllPasswdUsers(): array {
+        $passwd = @file_get_contents('/etc/passwd');
+        if (!is_string($passwd) || $passwd === '') return [];
+        $users = [];
+        foreach (explode("\n", $passwd) as $line) {
+            $name = strstr($line, ':', true);
+            if ($name !== false && $name !== '' && $line[0] !== '#') $users[] = $name;
+        }
+        return $users;
+    }
+
+    /**
      * Checks if a specific PID is still running on the system.
      */
     public static function isPidRunning($pid) {

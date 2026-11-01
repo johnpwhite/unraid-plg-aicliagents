@@ -301,6 +301,8 @@ function aicliChangeUpperMode(target, previous, form) {
     // new value with its warning, and the Apply button stays lit, so the person can apply or change back.
     var restore = function () { window._aicliUpperBusy = false; aicliSyncStorageControls(); };
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_upper_mode&mode=' + encodeURIComponent(target) + '&csrf_token=' + csrf, function(pf) {
+        // #880: a job that already runs is not an error dialog: the reason shows under the drop-down.
+        if (pf.status !== 'ok' && pf.reason) { restore(); aicliJobNotice('upper', pf.message || 'Another storage job is running.'); return; }
         if (pf.status !== 'ok') { restore(); swal("Cannot change the writable layer", pf.message || "Check failed", "error"); return; }
         var rows = '';
         $.each(pf.homes || [], function(i, h) {
@@ -311,36 +313,47 @@ function aicliChangeUpperMode(target, previous, form) {
         var html = '<div style="text-align:left; line-height:1.5;">' + esc(pf.message || '') +
             (pf.moves > 0 ? '<div style="margin-top:10px; padding:8px 10px; border-radius:4px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.4); font-size:12px;">' +
                 '<i class="fa fa-exclamation-triangle"></i> <b>Your open workspaces will be closed</b> while the data moves. This can take several minutes for a large home. ' +
-                'Do not reload this page or restart the server meanwhile.</div>' : '') +
+                'The move runs in the background: you can leave this page, and the Activity tray shows the progress.</div>' : '') +
             (rows ? '<div style="max-height:160px; overflow:auto; margin-top:10px; font-size:13px;" data-testid="upper-mode-homes">' + rows + '</div>' : '') + '</div>';
         aicliGuardedSwal({ title: "Move the writable layer to " + (target === 'zram' ? 'RAM' : 'disk') + "?", text: html, html: true, type: "warning",
                showCancelButton: true, confirmButtonText: pf.moves > 0 ? "Close workspaces and move" : "Save setting", cancelButtonText: "Cancel", closeOnConfirm: false }, restore, function() {
             swal.close();
-            showMigrateOverlay();
-            updateMigrateOverlay('Moving writable layers to ' + (target === 'zram' ? 'RAM' : 'disk') + '...', 5, 'Workspaces are being closed, then each home is saved and mounted again.');
+            // #880: no whole-screen block. The request answers at once; the move runs in the background and the card shows its progress.
             aicliAjax('execute_upper_mode', { mode: target }, function(r) {
-                hideMigrateOverlay();
-                if (r.status === 'ok') {
+                window._aicliUpperBusy = false;
+                if (r.status === 'accepted') {
+                    window._aicliUpperStartedHere = true;
+                    sessionStorage.removeItem('aicli_upper_move_dismissed');
+                    renderUpperMoveStatus({ status: 'queued', target: target, message: r.message || 'The move is starting.' });
+                    updateUpperMoveStatus();
+                } else if (r.status === 'saved' || r.status === 'ok') {
                     window._aicliCurrentUpper = target;
-                    swal({ title: "Writable layer changed", text: r.message || "Done.", type: "success", confirmButtonText: "OK" }, function() { safeReload(); });
+                    window._aicliKindNotice.upper = r.message || 'Saved.';
+                    aicliSyncStorageControls();
+                } else if (r.reason) {
+                    aicliJobNotice('upper', r.message || 'Another storage job is running.');
                 } else {
-                    restore();
+                    aicliSyncStorageControls();
                     swal("Not moved", r.message || "Check debug.log", "error");
                 }
             }).fail(function() {
-                hideMigrateOverlay();
-                swal("Move failed", "The server did not answer. Reload the page to see where the data is before you try again.", "error");
+                window._aicliUpperBusy = false;
+                aicliSyncStorageControls();
+                window._aicliKindNotice.upper = 'The server did not answer. Reload the page to see where the data is before you try again.';
+                aicliSyncStorageControls();
             });
         });
     }).fail(function() { restore(); swal("Error", "Could not check the change. Try again.", "error"); });
 }
 
 // ---- Home storage, Agent storage and the writable layer: a change waits for Apply (#790) ----
-// docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md "Pending change and Apply (#790)".
+// docs/specs/GLOBAL_STORAGE_BACKEND_MIGRATION.md "Pending change and Apply (#790)" and "Apply flow rules (#880)".
 // Each of the three drop-downs shows the CURRENT state. A change away from it is only a pending choice:
 // the drop-down turns the warning colour and the Apply button under it lights up with the spark border.
 // Only Apply starts the move (aicliChangeStorageKind or aicliChangeUpperMode, with their check and confirm
 // dialogs). A change back to the current state clears the warning. Nothing is kept across a page load.
+// #880: a save-only Apply (the setting differs, every item is already on the target) only saves the setting:
+// no dialog, no job, no lock. Storage work runs in the background, and only the kind that changes is locked.
 var AICLI_MIXED = '__mixed';
 var AICLI_STORAGE_CONTROLS = ['homes', 'agents', 'upper'];
 // The saved value of each kind. The page value is the start; a finished migration moves it.
@@ -351,7 +364,12 @@ window._aicliCurrentStorage = window._aicliCurrentStorage || {
 window._aicliCurrentUpper = window._aicliCurrentUpper || '<?= addslashes($config['storage_upper_mode'] ?? 'zram') ?>';
 // The REAL state of each kind (from get_storage_kind_state), once it has been read.
 window._aicliKindReal = window._aicliKindReal || {};
-window._aicliStorageLocked = false; // true while a migration runs: the selects and the Apply buttons are off
+// #880: one lock and one busy flag for each control. A job of one kind never locks the other kind.
+window._aicliStorageLocked = { homes: false, agents: false, upper: false }; // true while a job of that control runs: its select and Apply button are off
+window._aicliEngineBusy = { homes: false, agents: false };                   // an Apply of that kind is being checked or sent
+window._aicliKindNoticeJob = {};                                             // which notices came from a running job: they go when the job ends
+window._aicliKindNotice = window._aicliKindNotice || {};                    // a plain sentence under a drop-down (a refusal or "Saved")
+window._aicliKindOrphans = [];                                               // stored homes of users that do not exist
 function aicliCurrentStorageMode(kind) { return window._aicliCurrentStorage[kind] || 'layering'; }
 function aicliStorageSelects() { return $('select[name="storage_backend_homes"], select[name="storage_backend_agents"]'); }
 function aicliKindSelect(kind) { return $('select[name="storage_backend_' + kind + '"]'); }
@@ -359,6 +377,24 @@ function aicliStorageSelect(ctl) { return ctl === 'upper' ? $('select[name="stor
 function aicliKindWord(kind) { return kind === 'agents' ? 'agent storage' : 'home storage'; }
 function aicliKindModeLabel(mode) { return mode === 'passthrough' ? 'Plain folders' : 'Compressed layers'; }
 function aicliUpperWord(mode) { return mode === 'zram' ? 'RAM' : 'disk'; }
+function aicliIsLocked(ctl) { return !!(window._aicliStorageLocked && window._aicliStorageLocked[ctl]); }
+function aicliKindBusy(kind) { return !!(window._aicliEngineBusy && window._aicliEngineBusy[kind]); }
+function aicliSetKindBusy(kind, on) { window._aicliEngineBusy[kind] = !!on; }
+// The reasons the server gives for "another job runs" or "an earlier change waits for Continue or Put back".
+// They show under the drop-down, as a sentence: never as an error dialog, never as a lock on the other kind.
+// A refusal because a job runs shows under the drop-down and goes when the job ends (#880 review).
+function aicliJobNotice(ctl, message) {
+    window._aicliKindNotice[ctl] = message;
+    window._aicliKindNoticeJob[ctl] = true;
+    aicliSyncStorageControls();
+}
+function aicliClearJobNotices() {
+    if (aicliIsLocked('homes') || aicliIsLocked('agents') || aicliIsLocked('upper') || window._aicliJobWaiting) return;
+    Object.keys(window._aicliKindNoticeJob).forEach(function (ctl) { delete window._aicliKindNotice[ctl]; });
+    window._aicliKindNoticeJob = {};
+    aicliSyncStorageControls();
+}
+function aicliIsJobReason(r) { return !!(r && (r.reason === 'storage_job_active' || r.reason === 'storage_change_interrupted' || r.reason === 'storage_migration' || r.reason === 'storage_items_differ')); }
 
 // The value the drop-down shows when nothing is pending: the real state, not only the saved setting.
 // A kind with some items in each form shows the read-only "Mixed" entry.
@@ -441,25 +477,40 @@ function aicliSyncStorageControls() {
         // The Mixed entry cannot be chosen again once the person has left it.
         mixedOpt.prop('disabled', String(sel.val()) !== AICLI_MIXED);
         sel.toggleClass('aicli-pending', !!target).toggleClass('aicli-mixed', !target && String(sel.val()) === AICLI_MIXED);
-        var busy = ctl === 'upper' ? !!window._aicliUpperBusy : !!window._aicliEngineBusy;
+        // #880: only the control whose job runs is locked. The other kind stays usable.
+        var locked = aicliIsLocked(ctl);
+        sel.prop('disabled', locked);
+        var busy = ctl === 'upper' ? !!window._aicliUpperBusy : aicliKindBusy(ctl);
         var btn = $('#aicli-apply-' + ctl);
-        btn.prop('hidden', !target).toggleClass('aicli-spark', !!target).prop('disabled', window._aicliStorageLocked || busy);
+        btn.prop('hidden', !target).toggleClass('aicli-spark', !!target).prop('disabled', locked || busy);
         if (target) btn.text(aicliApplyLabel(ctl, target));
-        $('#aicli-kind-state-' + ctl).text(aicliPendingNote(ctl, target, base));
+        // A plain sentence from the server (a refusal, or "Saved") wins over the pending note until the person changes the drop-down.
+        $('#aicli-kind-state-' + ctl).text(window._aicliKindNotice[ctl] || aicliPendingNote(ctl, target, base));
     });
 }
-function aicliStorageChanged() { aicliSyncStorageControls(); }
+function aicliStorageChanged(ctl) {
+    if (ctl) { delete window._aicliKindNotice[ctl]; delete window._aicliKindNoticeJob[ctl]; }
+    aicliSyncStorageControls();
+}
 // The Apply button: start the move for the pending choice, through the check and confirm dialogs of the move.
+// A save-only choice (every item is on the target, only the setting differs) saves the setting at once: no dialog, no job.
 function aicliApplyStorage(ctl) {
     var target = aicliPendingTarget(ctl);
     if (!target) { aicliSyncStorageControls(); return; }
+    delete window._aicliKindNotice[ctl];
     var form = document.getElementById('aicli-settings-form');
     if (ctl === 'upper') aicliChangeUpperMode(target, window._aicliCurrentUpper, form);
+    else if (target === aicliStorageBaseline(ctl) && aicliSaveOnly(ctl)) aicliSaveStorageSetting(ctl, target);
     else aicliChangeStorageKind(ctl, target, aicliCurrentStorageMode(ctl), form);
 }
-function aicliSetStorageLocked(on) {
-    window._aicliStorageLocked = !!on;
-    aicliStorageSelects().prop('disabled', !!on);
+// Lock the controls of the kinds in `kinds` (a list of "homes" and "agents") and unlock the other kind.
+// The writable layer ("upper") has its own lock (aicliSetUpperLocked).
+function aicliSetKindLocks(kinds) {
+    ['homes', 'agents'].forEach(function (k) { window._aicliStorageLocked[k] = kinds.indexOf(k) !== -1; });
+    aicliSyncStorageControls();
+}
+function aicliSetUpperLocked(on) {
+    window._aicliStorageLocked.upper = !!on;
     aicliSyncStorageControls();
 }
 function aicliInitStorageControls() {
@@ -497,7 +548,20 @@ function aicliRenderKindState(r) {
         // The server's saved value is the truth for "saved" (another tab may have changed it).
         if (r[kind].saved === 'layering' || r[kind].saved === 'passthrough') window._aicliCurrentStorage[kind] = r[kind].saved;
     });
+    window._aicliKindOrphans = (r && Array.isArray(r.orphans)) ? r.orphans : [];
+    aicliRenderOrphans();
     aicliSyncStorageControls();
+}
+// #880: stored homes of users that do not exist are not items. One plain line says so; nothing converts them.
+function aicliRenderOrphans() {
+    var box = $('#aicli-kind-orphans-homes');
+    if (!box.length) return;
+    var ids = (window._aicliKindOrphans || []).map(function (o) { return String(o.id); });
+    if (!ids.length) { box.prop('hidden', true).text(''); return; }
+    box.text(ids.length === 1
+        ? 'One stored home has no matching user on this server (' + ids[0] + '). The card does not count it and Apply does not convert it.'
+        : ids.length + ' stored homes have no matching user on this server (' + ids.join(', ') + '). The card does not count them and Apply does not convert them.');
+    box.prop('hidden', false);
 }
 function aicliLoadKindState() {
     if (!$('#aicli-kind-state-homes').length) return;
@@ -505,17 +569,45 @@ function aicliLoadKindState() {
         .done(aicliRenderKindState);
 }
 
+// #880: save only the setting of one kind. Every item is on the target already, so nothing converts: no job,
+// no lock, no dialog about converting or closing workspaces. The server answers "saved" or gives a reason.
+function aicliSaveStorageSetting(kind, mode) {
+    if (aicliKindBusy(kind)) return;
+    aicliSetKindBusy(kind, true);
+    aicliSyncStorageControls();
+    var word = kind === 'agents' ? 'agent' : 'home';
+    aicliAjax('execute_storage_backend', { mode: mode, kind: kind, ack_wear: 0, save_only: 1 }, function(r) {
+        aicliSetKindBusy(kind, false);
+        if (r.status === 'saved') {
+            window._aicliCurrentStorage[kind] = mode;
+            delete window._aicliKindReal[kind]; // the saved value is the state until the real state is read again
+            window._aicliKindNotice[kind] = 'Saved. New ' + word + 's will use ' + aicliKindModeLabel(mode).toLowerCase() + '.';
+            aicliSyncStorageControls();
+            aicliLoadKindState();
+        } else {
+            window._aicliKindNotice[kind] = r.message || 'The setting could not be saved. Try again.';
+            aicliSyncStorageControls();
+        }
+    }).fail(function() {
+        aicliSetKindBusy(kind, false);
+        window._aicliKindNotice[kind] = 'The server did not answer. Reload the page and check the setting.';
+        aicliSyncStorageControls();
+    });
+}
+
 // Convert one kind (homes or agents) to newMode. Only the Apply button calls it. The kind may be mixed: then only
 // the items that are not on newMode yet convert.
 function aicliChangeStorageKind(kind, newMode, curMode, form) {
-    if (window._aicliEngineBusy) return;
-    window._aicliEngineBusy = true;
+    if (aicliKindBusy(kind)) return;
+    aicliSetKindBusy(kind, true);
     aicliSyncStorageControls();
     // Cancel, Escape and a failed check keep the pending choice (warning and spark stay); the person can apply or change back.
-    var restoreEngine = function () { window._aicliEngineBusy = false; aicliSyncStorageControls(); };
+    var restoreEngine = function () { aicliSetKindBusy(kind, false); aicliSyncStorageControls(); };
     var word = aicliKindWord(kind);
     var q = '&mode=' + encodeURIComponent(newMode) + '&kind=' + encodeURIComponent(kind);
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend' + q + '&csrf_token=' + csrf, function(pf) {
+        // #880: "another job runs" is a sentence under the drop-down, not an error dialog.
+        if (pf.status !== 'ok' && aicliIsJobReason(pf)) { restoreEngine(); aicliJobNotice(kind, pf.message); return; }
         if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage check failed", "error"); return; }
         var msg = pf.message || ('This will convert ' + word + ' to ' + aicliKindModeLabel(newMode).toLowerCase() + '.');
         aicliGuardedSwal({ title: "Change " + word + "?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: kind === 'agents' ? "Convert agents" : "Convert homes", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
@@ -524,17 +616,24 @@ function aicliChangeStorageKind(kind, newMode, curMode, form) {
             aicliAjax('execute_storage_backend', { mode: newMode, kind: kind, ack_wear: 1 }, function(r) {
                 if (r.status === 'accepted') {
                     window._aicliBackendMigrationStartedHere = true;
+                    // The record on the server now holds the lock of this kind; the page reads it from there.
+                    aicliSetKindBusy(kind, false);
                     if (typeof swal.close === 'function') swal.close();
                     updateBackendMigrationStatus();
                 } else if (r.status === 'saved') {
                     // Every item was on the new kind already: only the setting changed.
                     window._aicliCurrentStorage[kind] = newMode;
                     delete window._aicliKindReal[kind]; // the saved value is the state until the real state is read again
-                    window._aicliEngineBusy = false;
-                    aicliSyncStorageControls();
+                    aicliSetKindBusy(kind, false);
                     renderBackendMigrationStatus({ status: 'idle' });
                     if (typeof swal.close === 'function') swal.close();
                     aicliLoadKindState();
+                } else if (aicliIsJobReason(r)) {
+                    // Another job runs, or an earlier change waits: say so under the drop-down. The real record stays on screen.
+                    restoreEngine();
+                    if (typeof swal.close === 'function') swal.close();
+                    if (r.reason === 'storage_items_differ') { window._aicliKindNotice[kind] = r.message; aicliSyncStorageControls(); } else aicliJobNotice(kind, r.message);
+                    updateBackendMigrationStatus();
                 } else {
                     restoreEngine();
                     renderBackendMigrationStatus({ status: 'error', kind: kind, from: curMode, target: newMode, message: r.message || 'Storage migration failed.' });
@@ -544,6 +643,7 @@ function aicliChangeStorageKind(kind, newMode, curMode, form) {
                 // A response can be lost after the detached worker starts.
                 // Close the prompt and use the saved state as the source of truth.
                 window._aicliBackendMigrationStartedHere = true;
+                aicliSetKindBusy(kind, false);
                 if (typeof swal.close === 'function') swal.close();
                 updateBackendMigrationStatus();
             });
@@ -582,25 +682,40 @@ function renderBackendMigrationStatus(s) {
     if (!box.length) return;
     if (!s || !s.status || s.status === 'idle') {
         box.prop('hidden', true).empty();
+        // #880: no job on the server, so no kind stays locked.
+        aicliSetKindLocks([]);
+        window._aicliJobWaiting = false;
+        aicliClearJobNotices();
         return;
     }
     var dismissedStartedAt = Number(sessionStorage.getItem('aicli_backend_migration_dismissed') || 0);
     var statusStartedAt = Number(s.started_at || 0);
-    if (dismissedStartedAt > 0 && statusStartedAt > 0 && statusStartedAt <= dismissedStartedAt) {
+    var interrupted = s.status === 'interrupted';
+    // An interrupted record WITH changed items waits for Continue or Put back and keeps the kind locked.
+    // One with NO changed items did not start and changed nothing (the server clears it): it is a finished record with Dismiss.
+    // The server marks a record "recoverable" when items changed, an item may be half converted, or workspaces were closed.
+    var hasChanged = s.recoverable === true || (Array.isArray(s.migrated) && s.migrated.length > 0);
+    var waiting = interrupted && hasChanged;
+    var running = s.status === 'running' || s.status === 'queued' || waiting;
+    // Say which kind converts: homes, agents, or (an older request) both.
+    var kindWord = s.kind === 'homes' ? 'Home storage' : (s.kind === 'agents' ? 'Agent storage' : 'Storage');
+    var kindNames = s.kind === 'homes' ? ['homes'] : (s.kind === 'agents' ? ['agents'] : ['homes', 'agents']);
+    // Only the kind of this record is locked (#880). The record decides, also when the person has dismissed the box.
+    aicliSetKindLocks(running ? kindNames : []);
+    window._aicliJobWaiting = running;
+    if (!running) aicliClearJobNotices();
+    if (dismissedStartedAt > 0 && statusStartedAt > 0 && statusStartedAt <= dismissedStartedAt && !running) {
         box.prop('hidden', true).empty();
         return;
     }
     if (dismissedStartedAt > 0 && statusStartedAt > dismissedStartedAt) sessionStorage.removeItem('aicli_backend_migration_dismissed');
     box.prop('hidden', false).empty();
-    var interrupted = s.status === 'interrupted';
-    var running = s.status === 'running' || s.status === 'queued' || interrupted;
-    // Say which kind converts: homes, agents, or (an older request) both.
-    var kindWord = s.kind === 'homes' ? 'Home storage' : (s.kind === 'agents' ? 'Agent storage' : 'Storage');
-    var kindNames = s.kind === 'homes' ? ['homes'] : (s.kind === 'agents' ? ['agents'] : ['homes', 'agents']);
+    if (waiting) kindNames.forEach(function (k) { aicliSetKindBusy(k, false); }); // the job is not in flight: nothing is being sent
     var title = s.status === 'queued' ? kindWord + ' migration starting'
         : (s.phase === 'rolling_back' ? 'Restoring ' + kindWord.toLowerCase() + ' after a conversion problem'
-        : (interrupted ? kindWord + ' migration stopped' : (running ? kindWord + ' migration in progress'
-        : (s.status === 'complete' ? kindWord + ' migration complete' : kindWord + ' migration needs attention'))));
+        : (waiting ? kindWord + ' migration stopped' : (running ? kindWord + ' migration in progress'
+        : (interrupted ? kindWord + ' change did not start'
+        : (s.status === 'complete' ? kindWord + ' migration complete' : kindWord + ' migration needs attention')))));
     var target = s.target === 'passthrough' ? 'Plain folders' : (s.target === 'layering' ? 'Compressed layers' : '');
     $('<strong>').text(title).appendTo(box);
     $('<div>').text((target ? 'Target: ' + target + '. ' : '') + (s.message || '')).appendTo(box);
@@ -608,16 +723,14 @@ function renderBackendMigrationStatus(s) {
         var current = s.current ? 'Current item: ' + s.current + '. ' : '';
         $('<div>').text(current + Number(s.completed || 0) + ' of ' + Number(s.total) + ' complete.').appendTo(box);
         $('<progress>').attr({ max: Number(s.total), value: Number(s.completed || 0), 'aria-label': 'Storage migration progress' }).css({ width: '100%', marginTop: '6px' }).appendTo(box);
-        aicliSetStorageLocked(true);
     } else if (running) {
-        aicliSetStorageLocked(true);
         $('<div>').text(s.message || 'Workspaces cannot open until the migration finishes.').appendTo(box);
-        if (interrupted) {
-            $('<button type="button">').text('Continue').css({ marginTop: '6px', marginRight: '6px' }).on('click', function() { aicliRecoverBackendMigration('continue'); }).appendTo(box);
-            $('<button type="button">').text('Put back').css({ marginTop: '6px' }).on('click', function() { aicliRecoverBackendMigration('rollback'); }).appendTo(box);
-        }
-    } else {
-        aicliSetStorageLocked(false);
+    }
+    if (waiting) {
+        $('<button type="button">').text('Continue').css({ marginTop: '6px', marginRight: '6px' }).on('click', function() { aicliRecoverBackendMigration('continue'); }).appendTo(box);
+        $('<button type="button">').text('Put back').css({ marginTop: '6px' }).on('click', function() { aicliRecoverBackendMigration('rollback'); }).appendTo(box);
+    }
+    if (!running) {
         // Set the select(s) of the migrated kind from a finished record ONCE per record, not on
         // every poll: a later poll must not move a select back while the person picks a new
         // value and its confirmation is open.
@@ -625,8 +738,9 @@ function renderBackendMigrationStatus(s) {
         // first reply arrives (the 400 ms save delay, the check, the open warning): the
         // record then moves only the baseline that Cancel restores (#702).
         var recordKey = String(s.started_at || '') + ':' + String(s.status || '');
-        var choosing = !!window._aicliEngineBusy;
+        var choosing = false;
         kindNames.forEach(function (k) {
+            if (aicliKindBusy(k)) choosing = true;
             if (aicliPendingTarget(k)) choosing = true; // a pending choice (#790) is never moved by a status record
         });
         var firstSeen = !choosing && window._aicliBackendStatusApplied !== recordKey;
@@ -634,11 +748,10 @@ function renderBackendMigrationStatus(s) {
         kindNames.forEach(function (k) {
             if (firstSeen && s.status === 'complete' && target) aicliKindSelect(k).val(s.target);
             if (s.status === 'complete' && s.target) { window._aicliCurrentStorage[k] = s.target; delete window._aicliKindReal[k]; }
-            if ((s.status === 'error' || s.status === 'interrupted') && s.from) { window._aicliCurrentStorage[k] = s.from; delete window._aicliKindReal[k]; }
-            if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) aicliKindSelect(k).val(s.from);
+            if ((s.status === 'error' || interrupted) && s.from) { window._aicliCurrentStorage[k] = s.from; delete window._aicliKindReal[k]; }
+            if (firstSeen && (s.status === 'error' || interrupted) && s.from) aicliKindSelect(k).val(s.from);
+            if (firstSeen && (s.status === 'error' || interrupted || s.status === 'complete')) aicliSetKindBusy(k, false);
         });
-        if (firstSeen && (s.status === 'error' || s.status === 'interrupted') && s.from) window._aicliEngineBusy = false;
-        if (s.status === 'complete') window._aicliEngineBusy = false;
         aicliSyncStorageControls();
         // Read the real state once for each finished record, also when a pending choice kept the drop-down from moving.
         if (s.status !== 'queued' && window._aicliBackendStateLoaded !== recordKey) { window._aicliBackendStateLoaded = recordKey; aicliLoadKindState(); }
@@ -655,6 +768,12 @@ function renderBackendMigrationStatus(s) {
 
 function aicliRecoverBackendMigration(operation) {
     aicliAjax('storage_backend_migration_recovery', { operation: operation }, function(r) {
+        if (r && r.status === 'cleared') {
+            // Nothing was changed, so nothing is put back and no workspace closes (#880).
+            updateBackendMigrationStatus();
+            aicliLoadKindState();
+            return;
+        }
         if (!r || r.status !== 'accepted') {
             if (typeof window.swal === 'function') window.swal('Storage recovery did not start', (r && r.message) || 'Try again after you check the storage status.', 'error');
             return;
@@ -671,6 +790,56 @@ function updateBackendMigrationStatus() {
     if (!$('#aicli-backend-migration-status').length) return;
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=storage_backend_migration_status&csrf_token=' + encodeURIComponent(csrf))
         .done(renderBackendMigrationStatus);
+}
+
+// #880: the move of the writable layer is a background job. This box shows its progress under the drop-down; only the
+// writable-layer control is locked while it runs. A finished or failed move shows its result with Dismiss.
+function renderUpperMoveStatus(s) {
+    var box = $('#aicli-upper-move-status');
+    if (!box.length) return;
+    if (!s || !s.status || s.status === 'idle') {
+        box.prop('hidden', true).empty();
+        aicliSetUpperLocked(false);
+        aicliClearJobNotices();
+        return;
+    }
+    var running = s.status === 'queued' || s.status === 'running';
+    aicliSetUpperLocked(running);
+    if (!running) aicliClearJobNotices();
+    var dismissed = Number(sessionStorage.getItem('aicli_upper_move_dismissed') || 0);
+    var startedAt = Number(s.started_at || 0);
+    if (!running && dismissed > 0 && startedAt > 0 && startedAt <= dismissed) { box.prop('hidden', true).empty(); return; }
+    var where = s.target === 'disk' ? 'disk' : 'RAM';
+    box.prop('hidden', false).empty();
+    $('<strong>').text(running ? 'Moving the writable layer to ' + where
+        : (s.status === 'complete' ? 'The writable layer moved to ' + where : 'The writable layer did not move')).appendTo(box);
+    $('<div>').text(s.message || '').appendTo(box);
+    if (running && Number(s.total) > 0) {
+        $('<div>').text((s.current ? 'Current home: ' + s.current + '. ' : '') + Number(s.completed || 0) + ' of ' + Number(s.total) + ' complete.').appendTo(box);
+        $('<progress>').attr({ max: Number(s.total), value: Number(s.completed || 0), 'aria-label': 'Writable layer move progress' }).css({ width: '100%', marginTop: '6px' }).appendTo(box);
+    }
+    if (!running) {
+        if (s.status === 'complete' && s.target) window._aicliCurrentUpper = s.target;
+        // A failed move leaves the setting on the earlier placement: that is the real setting, also after a reload.
+        if (s.status === 'error' && (s.previous === 'zram' || s.previous === 'disk')) window._aicliCurrentUpper = s.previous;
+        // The server puts the old setting back when a home did not move: the drop-down shows the setting again.
+        var recordKey = String(s.started_at || '') + ':' + String(s.status || '');
+        if (window._aicliUpperStatusApplied !== recordKey && !aicliPendingTarget('upper')) {
+            window._aicliUpperStatusApplied = recordKey;
+            aicliStorageSelect('upper').val(window._aicliCurrentUpper);
+        }
+        aicliSyncStorageControls();
+        $('<button type="button">').text('Dismiss').css({ marginTop: '6px' }).on('click', function() {
+            sessionStorage.setItem('aicli_upper_move_dismissed', String(Number(s.started_at || Date.now())));
+            box.prop('hidden', true).empty();
+        }).appendTo(box);
+    }
+}
+
+function updateUpperMoveStatus() {
+    if (!$('#aicli-upper-move-status').length) return;
+    $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=upper_mode_status&csrf_token=' + encodeURIComponent(csrf))
+        .done(renderUpperMoveStatus);
 }
 
 // The shared folder browser. HOME_BACKUP.md "2026-09-24 follow-up": it has a
@@ -916,9 +1085,10 @@ $(function() {
     resetStatsTimer();
     aicliInitStorageControls();
     updateBackendMigrationStatus();
+    updateUpperMoveStatus();
     aicliLoadKindState();
     setInterval(function() {
-        if (document.visibilityState === 'visible') updateBackendMigrationStatus();
+        if (document.visibilityState === 'visible') { updateBackendMigrationStatus(); updateUpperMoveStatus(); }
     }, 2500);
     // EVENT_FIRST_RECONCILIATION.md fact table: the debug log tail has no push
     // behind it (low value to push) — poll only while the tab is actually

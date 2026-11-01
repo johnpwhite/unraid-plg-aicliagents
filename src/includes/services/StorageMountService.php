@@ -22,6 +22,9 @@ class StorageMountService {
     // duplicate AgentRegistry::AGENT_BASE's literal value under a different name.
     // Removed in favour of AgentRegistry::agentPath() at both call sites below —
     // one fewer place that would have needed updating for a version-aware path.
+    /** Tests only: a mount table text that isMounted() and isHomeMountHealthy() read instead of /proc/mounts. Production never sets it. */
+    public static ?string $mountTableForTests = null;
+
     /** The migration lock file in RAM (the state root under test is the sandbox). */
     public static function migrationLock(): string { return SecretPaths::stateRoot() . "/migration.lock"; }
     /** The emergency-mode flag in RAM (the state root under test is the sandbox). */
@@ -45,6 +48,29 @@ class StorageMountService {
         require_once __DIR__ . '/FileStorage.php';
         return class_exists(StorageBackendMigrationService::class)
             ? StorageBackendMigrationService::isMigrationInProgress()
+            : FileStorage::isBackendMigrationInProgress();
+    }
+
+    /**
+     * #880: does an engine change of the HOMES kind (or the older one-engine path) own the storage now?
+     * A change of the agents kind does not. This blocks only a NEW home mount: a home that is already
+     * mounted and healthy keeps working (see homeMountBlockedResult()).
+     * @phpstan-impure The lock and status can change between checks.
+     */
+    public static function homeMountBlockedByBackendMigration(): bool {
+        if (file_exists(self::migrationLock())) return true;
+        require_once __DIR__ . '/FileStorage.php';
+        return class_exists(StorageBackendMigrationService::class)
+            ? StorageBackendMigrationService::isMigrationInProgress(StorageBackendPolicyService::KIND_HOMES)
+            : FileStorage::isBackendMigrationInProgress();
+    }
+
+    /** #880: the same for the AGENTS kind. @phpstan-impure */
+    public static function agentMountBlockedByBackendMigration(): bool {
+        if (file_exists(self::migrationLock())) return true;
+        require_once __DIR__ . '/FileStorage.php';
+        return class_exists(StorageBackendMigrationService::class)
+            ? StorageBackendMigrationService::isMigrationInProgress(StorageBackendPolicyService::KIND_AGENTS)
             : FileStorage::isBackendMigrationInProgress();
     }
 
@@ -519,9 +545,15 @@ class StorageMountService {
     // unaffected.
     public static function ensureAgentMounted($agentId, int &$exit = 0) {
         $exit = 1;
-        if (self::isMigrationInProgress()) return false;
+        require_once __DIR__ . '/FileStorage.php';
+        if (FileStorage::isMigrationInProgress()) return false;
 
         $mnt = AgentRegistry::agentPath($agentId);
+        if (self::agentMountBlockedByBackendMigration()) {
+            // #880: an engine change of the agents kind blocks only a NEW agent mount. A mounted, healthy agent keeps working.
+            if (self::isMounted($mnt) && self::isAgentMountHealthy($agentId)) { $exit = 0; return true; }
+            return false;
+        }
 
         if (self::isMounted($mnt)) {
             if (self::isAgentMountHealthy($agentId)) {
@@ -751,10 +783,16 @@ class StorageMountService {
     /** The body of ensureHomeMounted. Sets $path to the route taken (fast, lock or mount). */
     private static function ensureHomeMountedTraced($user, int &$exit, string &$path) {
         $exit = 1;
-        if (self::deferForPathMoveIfActive($user, $exit) || self::isBackendMigrationInProgress()) return false;
+        if (self::deferForPathMoveIfActive($user, $exit)) return false;
 
         $workDir = UtilityService::getWorkDir($user);
         $mnt = "$workDir/home";
+        // #880: an engine change of the homes kind blocks only a NEW home mount. A home that is already mounted and
+        // healthy stays available: it must never look unavailable (state would go to state_unmounted) because a job is queued.
+        if (self::homeMountBlockedByBackendMigration()) {
+            if (self::isMounted($mnt) && self::isHomeMountHealthy($user) && !self::hasHomeWriteFault($user)) { $exit = 0; return true; }
+            return false;
+        }
 
         // Bug #1054 self-heal: when the OverlayFS upperdir has the wrong
         // owner (mounted by an older plugin version, or pre-upgrade state),
@@ -817,8 +855,14 @@ class StorageMountService {
                 }
                 usleep(100000); // 100ms
             }
-            if (self::deferForPathMoveIfActive($user, $exit) || self::isBackendMigrationInProgress()) {
+            if (self::deferForPathMoveIfActive($user, $exit)) {
                 self::releaseHomeMountLock($lock);
+                return false;
+            }
+            if (self::homeMountBlockedByBackendMigration()) {
+                $keep = self::isMounted($mnt) && self::isHomeMountHealthy($user) && !self::hasHomeWriteFault($user);
+                self::releaseHomeMountLock($lock);
+                if ($keep) { $exit = 0; return true; }
                 return false;
             }
             if (!$writeFault && self::isMounted($mnt) && self::isHomeMountHealthy($user)) {
@@ -830,8 +874,14 @@ class StorageMountService {
 
         // The migration marker can appear after this request's first check while
         // it waits for the per-user lock. Refuse before the mount command starts.
-        if (self::deferForPathMoveIfActive($user, $exit) || self::isBackendMigrationInProgress()) {
+        if (self::deferForPathMoveIfActive($user, $exit)) {
             self::releaseHomeMountLock($lock);
+            return false;
+        }
+        if (self::homeMountBlockedByBackendMigration()) {
+            $keep = self::isMounted($mnt) && self::isHomeMountHealthy($user) && !self::hasHomeWriteFault($user);
+            self::releaseHomeMountLock($lock);
+            if ($keep) { $exit = 0; return true; }
             return false;
         }
 
@@ -1057,7 +1107,7 @@ class StorageMountService {
         ?string $persistPath = null
     ): bool {
         $mnt = rtrim($mountPath ?? (UtilityService::getWorkDir($user) . "/home"), '/');
-        $mounts = $mountsText ?? (file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '');
+        $mounts = $mountsText ?? self::$mountTableForTests ?? (file_exists('/proc/mounts') ? (string)file_get_contents('/proc/mounts') : '');
         if (self::overlayMountedAt($mounts, $mnt)) {
             return true;
         }
@@ -1179,7 +1229,7 @@ class StorageMountService {
         if ($resolved !== false) {
             $path = $resolved;
         }
-        $mounts = file_exists('/proc/mounts') ? file_get_contents('/proc/mounts') : '';
+        $mounts = self::$mountTableForTests ?? (file_exists('/proc/mounts') ? file_get_contents('/proc/mounts') : '');
         // D-324: Exact path match to prevent matching /agents when checking /agents/gh-copilot.
         // R-128 (#662): the table's octal escapes (\040 for a space) are decoded first.
         return self::mountTableHasTarget((string)$mounts, $path);

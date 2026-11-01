@@ -92,10 +92,16 @@ final class StorageBackendMigrationService
      * plain folders"), the counts and the saved setting (`saved`). The label comes from the
      * storage status, not from the saved setting. A caller may pass the status (tests).
      *
+     * #880: the items counted are the items of itemLists(), the same list the migration converts, so the
+     * card and the server never disagree. The storage status only tells the backend of each item; an item
+     * the status does not know counts as being on the saved setting (as entitiesForTarget() counts it).
+     * `orphans` lists stored homes of users that do not exist: they are not items and never convert.
+     *
      * @param array<string,mixed>|null $status storage status, or null to read it
      * @param list<string>|null $installedAgentIds installed agent ids, or null to read them
+     * @param array<string,mixed> $seams see itemLists(); `entities` replaces the whole list
      */
-    public static function kindStates(?array $status = null, ?array $installedAgentIds = null, ?array $config = null): array
+    public static function kindStates(?array $status = null, ?array $installedAgentIds = null, ?array $config = null, array $seams = []): array
     {
         $config = $config ?? ConfigService::getConfig();
         $status = $status ?? StorageMetricsService::getStatus();
@@ -107,12 +113,26 @@ final class StorageBackendMigrationService
                 }
             }
         }
+        $lists = isset($seams['entities'])
+            ? ['items' => $seams['entities'], 'orphans' => (array)($seams['orphans'] ?? [])]
+            : self::itemLists($config, $seams + ['installed_agents' => $installedAgentIds]);
         $real = StorageBackendPolicyService::realStates($status, $installedAgentIds);
         $out = ['status' => 'ok'];
-        foreach (['homes', 'agents'] as $kind) {
-            unset($real[$kind]['backends']);
-            $out[$kind] = $real[$kind] + ['saved' => StorageBackendPolicyService::kindMode($config, $kind)];
+        foreach (['homes' => 'home', 'agents' => 'agent'] as $kind => $type) {
+            $saved = StorageBackendPolicyService::kindMode($config, $kind);
+            $fallback = $saved === StorageBackendPolicyService::PASSTHROUGH ? 'passthrough' : 'flash';
+            $backends = [];
+            foreach ($lists['items'] as $item) {
+                if (($item['type'] ?? '') !== $type) continue;
+                $id = (string)$item['id'];
+                $backends[$id] = (string)($real[$kind]['backends'][$id] ?? $fallback);
+            }
+            $out[$kind] = StorageBackendPolicyService::kindState($backends, $kind) + ['saved' => $saved];
         }
+        $out['orphans'] = array_values(array_map(
+            static fn(array $o): array => ['kind' => 'homes', 'id' => (string)$o['id']],
+            array_filter((array)$lists['orphans'], static fn($o): bool => is_array($o) && isset($o['id']))
+        ));
         return $out;
     }
 
@@ -361,12 +381,69 @@ final class StorageBackendMigrationService
         @fclose($lock);
     }
 
-    /** True while a queued or active global migration owns the storage policy. */
-    public static function isMigrationInProgress(): bool
+    /**
+     * True while a queued or active migration, or an interrupted one with changed items, owns the storage policy.
+     * #880: a caller that cares about one kind passes it ("homes" or "agents"). The answer is then true only
+     * when the job changes that kind (a job of the older one-engine path, kind "all", changes both).
+     * A mount of a home that is already mounted and healthy never needs this check.
+     */
+    public static function isMigrationInProgress(?string $kind = null): bool
     {
         $status = self::status();
-        if (in_array((string)($status['status'] ?? ''), ['queued', 'running'], true)) return true;
-        return ($status['status'] ?? '') === 'interrupted' && !empty($status['migrated']);
+        $state = (string)($status['status'] ?? '');
+        $active = in_array($state, ['queued', 'running'], true)
+            || ($state === 'interrupted' && self::hasWork($status));
+        if (!$active) {
+            // #880 review: a move of the writable layer closes workspaces and remounts homes, so it holds back the same
+            // work as a homes job (workspace starts, storage actions, path moves). The move worker itself is exempt.
+            if ($kind === null || StorageBackendPolicyService::normalizeKind($kind) !== StorageBackendPolicyService::KIND_AGENTS) {
+                return class_exists(UpperPlacementService::class) && UpperPlacementService::isJobActive();
+            }
+            return false;
+        }
+        if ($kind === null) return true;
+        $jobKind = StorageBackendPolicyService::normalizeKind((string)($status['kind'] ?? ''));
+        return $jobKind === StorageBackendPolicyService::KIND_ALL
+            || $jobKind === StorageBackendPolicyService::normalizeKind($kind);
+    }
+
+    /**
+     * #880: the plain reason why a new change of $kind cannot start now, or null when it can.
+     * One storage job runs at a time (an engine change of either kind, or a writable-layer move).
+     * An interrupted change with changed items blocks every new change until the person chooses
+     * Continue or Put back. With $sameKindOnly (a save-only Apply) only a job that changes the same
+     * kind conflicts, because the save touches only the setting of that kind.
+     *
+     * @return array{status:string,reason:string,message:string}|null
+     */
+    public static function refusalFor(string $kind, bool $sameKindOnly = false, array $seams = []): ?array
+    {
+        $kind = StorageBackendPolicyService::normalizeKind($kind);
+        $s = $seams['job_status'] ?? self::status();
+        $state = (string)($s['status'] ?? 'idle');
+        $interruptedWithChanges = $state === 'interrupted' && self::hasWork($s);
+        if (in_array($state, ['queued', 'running'], true) || $interruptedWithChanges) {
+            $jobKind = StorageBackendPolicyService::normalizeKind((string)($s['kind'] ?? ''));
+            $overlap = $jobKind === StorageBackendPolicyService::KIND_ALL
+                || $kind === StorageBackendPolicyService::KIND_ALL
+                || $jobKind === $kind;
+            if ($sameKindOnly && !$overlap) return null;
+            $name = self::changeName($jobKind);
+            if ($interruptedWithChanges) {
+                return ['status' => 'error', 'reason' => 'storage_change_interrupted',
+                    'message' => 'An earlier ' . $name . ' did not finish: ' . count(self::changedItems($s))
+                        . ' items are already changed or may be half converted. Choose Continue or Put back on the Storage card first.'];
+            }
+            return ['status' => 'error', 'reason' => 'storage_job_active',
+                'message' => 'A ' . $name . ' is already ' . ($state === 'queued' ? 'waiting to start' : 'running')
+                    . '. Wait for it to finish, then press Apply again.'];
+        }
+        if ($sameKindOnly) return null;
+        if (class_exists(UpperPlacementService::class)) {
+            $upper = UpperPlacementService::jobRefusal($seams);
+            if ($upper !== null) return $upper;
+        }
+        return null;
     }
 
     /** Plain server refusal shared by agent install, removal and upgrade paths. */
@@ -395,11 +472,13 @@ final class StorageBackendMigrationService
         ];
         if (isset($check['capacity']) && is_array($check['capacity'])) $state['capacity'] = $check['capacity'];
         self::writeStatus($state);
+        // #880: the tray item follows the record. A worker that is refused here has an open item.
+        self::failOpenMigrationActivity($state['message']);
         return $check;
     }
 
     /** Reserve the shared migration right, then start the worker without holding the page open. */
-    public static function startAsync(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = [], string $kind = StorageBackendPolicyService::KIND_ALL): array
+    public static function startAsync(string $target, bool $acknowledgeWear = false, ?array $config = null, array $seams = [], string $kind = StorageBackendPolicyService::KIND_ALL, bool $saveOnly = false): array
     {
         $kind = StorageBackendPolicyService::normalizeKind($kind);
         $config = $config ?? ConfigService::getConfig();
@@ -407,12 +486,13 @@ final class StorageBackendMigrationService
         require_once __DIR__ . '/StoragePathMoveJobService.php';
         $migrationLock = FileStorage::acquireMigrationLock(FileStorage::MIGRATION_LOCK_WAIT_S);
         if ($migrationLock === null) {
-            return ['status' => 'error', 'message' => 'Another storage migration is already running. Wait for it to finish, then try again.'];
+            return self::refusalFor($kind, $saveOnly, $seams)
+                ?? ['status' => 'error', 'message' => 'Another storage migration is already running. Wait for it to finish, then try again.'];
         }
         try {
             $conflict = self::pathMoveConflictMessage();
             if ($conflict !== null) return ['status' => 'error', 'message' => $conflict];
-            return self::startAsyncWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock, $kind);
+            return self::startAsyncWithMigrationLock($target, $acknowledgeWear, $config, $seams, $migrationLock, $kind, $saveOnly);
         } finally {
             FileStorage::releaseMigrationLock($migrationLock);
         }
@@ -435,6 +515,11 @@ final class StorageBackendMigrationService
         $target = StorageBackendPolicyService::normalizeMode((string)($prior['target'] ?? 'layering'));
         $migrated = is_array($prior['migrated'] ?? null) ? array_values(array_unique(array_map('strval', $prior['migrated']))) : [];
         if ($from === $target) return ['status' => 'error', 'message' => 'The interrupted engine change has no valid target. Check storage before you continue.'];
+        if ($operation === 'rollback' && $migrated === [] && !self::hasWork($prior)) {
+            // #880: nothing was changed, so nothing is put back and no workspace is closed.
+            self::settleDidNotStart($prior);
+            return ['status' => 'cleared', 'message' => 'Nothing was changed, so there is nothing to put back.'];
+        }
         if ($operation === 'continue') {
             $check = self::preflight($target, $config, $seams, $kind);
             if (($check['status'] ?? '') !== 'ok') return $check;
@@ -460,6 +545,7 @@ final class StorageBackendMigrationService
             } while (true);
 
             $now = time();
+            $jobId = bin2hex(random_bytes(6));
             $entities = $operation === 'continue' ? self::entitiesForTarget($seams['entities'] ?? self::entities($config, $seams), $target, $kind, $from, self::realBackendMap($seams)) : array_map(static function (string $key): array {
                 [$type, $id] = explode('/', $key, 2);
                 return ['type' => $type, 'id' => $id];
@@ -467,7 +553,7 @@ final class StorageBackendMigrationService
             $state = [
                 'status' => 'queued', 'phase' => 'queued', 'kind' => $kind, 'from' => $from, 'target' => $target,
                 'operation' => $operation, 'started_at' => $now, 'updated_at' => $now,
-                'completed' => 0, 'total' => count($entities), 'current' => '', 'worker_pid' => 0,
+                'completed' => 0, 'total' => count($entities), 'current' => '', 'worker_pid' => 0, 'job_id' => $jobId,
                 'migrated' => $migrated, 'entities' => self::entityJournal($entities, $from, $target),
                 'sessions_to_resume' => self::safeSessionIds((array)($prior['sessions_to_resume'] ?? [])),
                 'message' => $operation === 'continue' ? 'Continuing the interrupted engine change.' : 'Putting back the items changed by the interrupted engine change.',
@@ -479,24 +565,12 @@ final class StorageBackendMigrationService
             $migrationLock = null;
             self::releaseLaunchGuard($launchLock);
             $launchLock = false;
-            $spawn = $seams['spawn_recovery'] ?? static function (string $targetMode, string $action) use ($kind): int {
-                require_once __DIR__ . '/UtilityService.php';
-                $script = dirname(__DIR__, 2) . '/scripts/storage-backend-migrate.php';
-                return UtilityService::spawnDetached(
-                    [PHP_BINARY, $script, $targetMode, '0', $action, $kind],
-                    self::statusPath() . '.log',
-                    true
-                );
-            };
+            $spawn = $seams['spawn_recovery'] ?? static fn(string $targetMode, string $action): int
+                => self::spawnWorker($targetMode, false, $action, $kind, $seams, $jobId);
             $pid = (int)$spawn($operation === 'rollback' ? $from : $target, $operation);
-            if ($pid < 1) {
-                $state['status'] = 'error';
-                $state['phase'] = 'error';
-                $state['message'] = 'The recovery worker did not start. No storage was changed.';
-                $state['updated_at'] = time();
-                self::writeStatus($state);
-                self::writeDurableStatus($state);
-                return ['status' => 'error', 'message' => $state['message']];
+            if ($pid < 1 || !self::workerStartConfirmed($seams, isset($seams['spawn_recovery']))) {
+                // The earlier record had changed items: it stays interrupted, so Continue and Put back stay possible.
+                return self::failLaunch($state, 'The recovery worker did not start. Nothing more was changed.', $migrated !== [] ? 'interrupted' : 'error');
             }
             $current = self::readStatus();
             if (($current['status'] ?? '') === 'queued') {
@@ -513,7 +587,7 @@ final class StorageBackendMigrationService
     }
 
     /** Restore only the entities recorded as changed by the interrupted migration. */
-    public static function restoreInterrupted(array $seams = []): array
+    public static function restoreInterrupted(array $seams = [], string $jobId = ''): array
     {
         require_once __DIR__ . '/FileStorage.php';
         require_once __DIR__ . '/StoragePathMoveJobService.php';
@@ -528,6 +602,36 @@ final class StorageBackendMigrationService
             if (($prior['operation'] ?? '') !== 'rollback' || $from === $target) {
                 return ['status' => 'error', 'message' => 'The put-back request does not match the saved recovery record.'];
             }
+            // #880 review: only the queued record this worker was started for may run. A late worker (the launcher gave
+            // up on it, or a newer job took the record) stops here and changes nothing.
+            if (($prior['status'] ?? '') !== 'queued' || ($jobId !== '' && (string)($prior['job_id'] ?? '') !== $jobId)) {
+                return ['status' => 'error', 'message' => 'The queued put-back is no longer waiting, so this worker stopped without changing anything.'];
+            }
+            // Record the process id BEFORE the wait for the launch guard (up to 60 s), so the launcher sees the start.
+            $prior['worker_pid'] = getmypid();
+            $prior['updated_at'] = time();
+            self::writeStatus($prior);
+            self::writeDurableStatus($prior);
+            if ($migrated === []) {
+                // #880: no item was changed, so nothing is put back and no workspace is closed.
+                if (self::safeSessionIds((array)($prior['sessions_to_resume'] ?? [])) === []) {
+                    self::settleDidNotStart($prior);
+                    return ['status' => 'ok', 'message' => 'Nothing was changed, so there is nothing to put back.', 'migrated' => []];
+                }
+                // Workspaces were closed for the job: open them again.
+                $prior['status'] = 'complete';
+                $prior['phase'] = 'complete';
+                $prior['message'] = 'Nothing was changed. Your workspaces open again.';
+                $prior['updated_at'] = time();
+                self::writeStatus($prior);
+                self::writeDurableStatus($prior);
+                self::finishMigrationActivity('Nothing was changed.');
+                self::releaseLaunchGuard($launchLock);
+                FileStorage::releaseMigrationLock($migrationLock);
+                $migrationLock = null;
+                self::resumeMigrationSessions((array)($prior['sessions_to_resume'] ?? []), $seams);
+                return ['status' => 'ok', 'message' => $prior['message'], 'migrated' => []];
+            }
             $guardWait = $seams['launch_guard_wait'] ?? static function (int $microseconds): void { usleep($microseconds); };
             $waitStartedAt = microtime(true);
             do {
@@ -540,6 +644,7 @@ final class StorageBackendMigrationService
             } while (true);
 
             $state = $prior;
+            $state['worker_pid'] = getmypid();
             $state['status'] = 'running';
             $state['phase'] = 'rolling_back';
             $state['updated_at'] = time();
@@ -619,7 +724,7 @@ final class StorageBackendMigrationService
     }
 
     /** @param resource|null $migrationLock */
-    private static function startAsyncWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock, string $kind = StorageBackendPolicyService::KIND_ALL): array
+    private static function startAsyncWithMigrationLock(string $target, bool $acknowledgeWear, array $config, array $seams, &$migrationLock, string $kind = StorageBackendPolicyService::KIND_ALL, bool $saveOnly = false): array
     {
         $kind = StorageBackendPolicyService::normalizeKind($kind);
         $target = StorageBackendPolicyService::normalizeMode($target);
@@ -633,6 +738,9 @@ final class StorageBackendMigrationService
         }
         if ($entities === [] && !isset($seams['preflight'])) {
             // Every item of this kind is on the target already. Save the setting; nothing converts.
+            // #880: this is not a job. Only a job that changes the same kind can conflict with it.
+            $refusal = self::refusalFor($kind, true, $seams);
+            if ($refusal !== null) return $refusal;
             $saver = $seams['save_kind'] ?? static fn(string $k, string $mode): bool => (bool)ConfigService::saveConfig(self::settingsToSave($k, $mode), false);
             if (!$saver($kind, $target)) {
                 return ['status' => 'error', 'message' => 'The setting could not be saved. Try again.'];
@@ -640,6 +748,15 @@ final class StorageBackendMigrationService
             return ['status' => 'saved', 'kind' => $kind, 'target' => $target,
                 'message' => ucfirst(self::kindNoun($kind)) . ' were already on ' . strtolower(StorageBackendPolicyService::kindLabel($target)) . '. The setting is saved.'];
         }
+        if ($saveOnly) {
+            // #880: the card thought every item was on the target, the server finds items to convert.
+            // A save-only request never starts a job and never closes a workspace.
+            return ['status' => 'error', 'reason' => 'storage_items_differ',
+                'message' => count($entities) . ' of the ' . self::kindNoun($kind) . ' are not on ' . strtolower(StorageBackendPolicyService::kindLabel($target))
+                    . ' yet, so this is not only a setting. Reload the page, then choose the change again.'];
+        }
+        $refusal = self::refusalFor($kind, false, $seams);
+        if ($refusal !== null) return $refusal;
         $check = $seams['preflight'] ?? self::preflight($target, $config, $seams, $kind);
         if (($check['status'] ?? '') !== 'ok') {
             return self::recordPreflightFailure($check, $target, $config, $entities, $kind);
@@ -654,9 +771,11 @@ final class StorageBackendMigrationService
             return ['status' => 'error', 'message' => 'A storage-engine migration or workspace start is already running. Wait for it to finish, then try again.'];
         }
         try {
-            if ((self::readStatus()['status'] ?? '') === 'queued') {
-                return ['status' => 'error', 'message' => 'A storage-engine migration is already queued. Wait for it to finish, then try again.'];
-            }
+            // #880 review: repeat the refusal after the slow check, just before the queued record is written. Both job
+            // kinds reserve under the migration lock, so a job that was written meanwhile is seen here.
+            if (isset($seams['after_preflight']) && is_callable($seams['after_preflight'])) ($seams['after_preflight'])();
+            $late = self::refusalFor($kind, false, $seams);
+            if ($late !== null) return $late;
             $activeInstalls = self::activeInstallIds($seams);
             $busy = self::busyEntities($entities);
             if ($busy !== [] && $activeInstalls === []) {
@@ -664,6 +783,7 @@ final class StorageBackendMigrationService
             }
 
             $waitingForInstalls = $activeInstalls !== [];
+            $jobId = bin2hex(random_bytes(6));
             $state = [
                 'status' => 'queued', 'kind' => $kind, 'from' => $from, 'target' => $target,
                 'started_at' => time(), 'updated_at' => time(), 'completed' => 0,
@@ -673,6 +793,7 @@ final class StorageBackendMigrationService
                     ? 'The migration is queued and waiting for agent installation to finish: ' . implode(', ', $activeInstalls) . '.'
                     : 'The migration is queued. Workspaces cannot open until it finishes.',
                 'worker_pid' => 0,
+                'job_id' => $jobId,
                 'migrated' => [],
                 'sessions_to_resume' => [],
                 'entities' => self::entityJournal($entities, $from, $target),
@@ -688,6 +809,8 @@ final class StorageBackendMigrationService
                 self::writeStatus($state);
                 return ['status' => 'error', 'message' => $state['message']];
             }
+            // A finished item of an earlier job (its label says "needs attention") must not carry over to this job.
+            if (class_exists(ActivityService::class)) ActivityService::dismiss(self::ACTIVITY_ID);
             self::updateMigrationActivity($state);
             // The queued state now refuses path moves. Free the shared lock
             // before spawning so the worker can take it on its first attempt.
@@ -697,42 +820,78 @@ final class StorageBackendMigrationService
             // records that it owns the storage policy.
             self::releaseLaunchGuard($lock);
             $lock = false;
-            $spawn = $seams['spawn'] ?? static function (string $mode, bool $ack) use ($kind): int {
-                require_once __DIR__ . '/UtilityService.php';
-                $script = dirname(__DIR__, 2) . '/scripts/storage-backend-migrate.php';
-                return UtilityService::spawnDetached(
-                    [PHP_BINARY, $script, $mode, $ack ? '1' : '0', 'continue', $kind],
-                    self::statusPath() . '.log',
-                    true
-                );
-            };
+            $spawn = $seams['spawn'] ?? static fn(string $mode, bool $ack): int
+                => self::spawnWorker($mode, $ack, 'continue', $kind, $seams, $jobId);
             try {
                 $pid = (int)$spawn($target, $acknowledgeWear);
             } catch (\Throwable $e) {
-                $state['status'] = 'error';
-                $state['phase'] = 'error';
-                $state['message'] = 'The migration worker did not start. No storage was changed.';
-                $state['updated_at'] = time();
-                self::writeStatus($state);
-                self::writeDurableStatus($state);
-                self::failMigrationActivity($state['message']);
-                return ['status' => 'error', 'message' => $state['message']];
+                return self::failLaunch($state, 'The migration worker did not start. No storage was changed.');
             }
-            if ($pid < 1) {
-                $state['status'] = 'error';
-                $state['phase'] = 'error';
-                $state['message'] = 'The migration worker did not start. No storage was changed.';
-                $state['updated_at'] = time();
-                self::writeStatus($state);
-                self::writeDurableStatus($state);
-                self::failMigrationActivity($state['message']);
-                return ['status' => 'error', 'message' => $state['message']];
+            // #880: the launch only counts when the worker records its process id. A worker that
+            // exits at once (a wrong PHP, a syntax error) leaves the record queued for ever otherwise.
+            if ($pid < 1 || !self::workerStartConfirmed($seams, isset($seams['spawn']))) {
+                return self::failLaunch($state, 'The migration worker did not start. No storage was changed. Check the Debug Console, then try again.');
             }
             return ['status' => 'accepted', 'message' => 'Migration started. Workspaces stay closed until it finishes.', 'worker_pid' => $pid];
         } finally {
             self::releaseLaunchGuard($lock);
         }
     }
+
+    /**
+     * The command that starts the detached worker. The command-line PHP runs it, never the PHP of
+     * the web server (#880). The same launcher serves the writable-layer move.
+     *
+     * @return list<string>
+     */
+    public static function workerArgv(string $mode, bool $acknowledgeWear, string $operation, string $kind, array $seams = [], string $jobId = ''): array
+    {
+        $script = (string)($seams['worker_script'] ?? dirname(__DIR__, 2) . '/scripts/storage-backend-migrate.php');
+        return array_merge([UtilityService::cliPhpBinary((array)($seams['php'] ?? []))], [$script, $mode, $acknowledgeWear ? '1' : '0', $operation, $kind], $jobId !== '' ? [$jobId] : []);
+    }
+
+    /** Start the detached worker and return its process id (0 when it did not start). */
+    private static function spawnWorker(string $mode, bool $acknowledgeWear, string $operation, string $kind, array $seams, string $jobId = ''): int
+    {
+        require_once __DIR__ . '/UtilityService.php';
+        $argv = self::workerArgv($mode, $acknowledgeWear, $operation, $kind, $seams, $jobId);
+        // $argv[0] is the command-line PHP, $argv[1] the worker script. The shared launcher builds the command.
+        return UtilityService::launchPhpWorker((string)$argv[1], array_slice($argv, 2), self::statusPath() . '.log', $seams);
+    }
+
+    /**
+     * Wait a few seconds until the worker has recorded that it runs: its process id is in the record,
+     * or the record has moved on from "queued". A caller that supplies its own spawn seam skips the
+     * wait unless it also supplies a wait seam (the older tests do not run a worker).
+     */
+    private static function workerStartConfirmed(array $seams, bool $customSpawn): bool
+    {
+        if (isset($seams['wait_worker']) && is_callable($seams['wait_worker'])) return (bool)($seams['wait_worker'])();
+        if ($customSpawn && !isset($seams['worker_wait_seconds'])) return true;
+        require_once __DIR__ . '/UtilityService.php';
+        return UtilityService::awaitWorkerStart(static function (): bool {
+            $s = self::readStatus();
+            return (int)($s['worker_pid'] ?? 0) > 0 || (string)($s['status'] ?? 'queued') !== 'queued';
+        }, $seams);
+    }
+
+    /**
+     * Mark a job whose worker did not start. The default end state is "error". A recovery that had
+     * changed items goes back to "interrupted", so Continue and Put back stay possible. The tray item follows.
+     */
+    private static function failLaunch(array $state, string $message, string $status = 'error'): array
+    {
+        $state['status'] = $status;
+        $state['phase'] = $status;
+        $state['current'] = '';
+        $state['message'] = $message;
+        $state['updated_at'] = time();
+        self::writeStatus($state);
+        self::writeDurableStatus($state);
+        self::failMigrationActivity($message);
+        return ['status' => 'error', 'message' => $message];
+    }
+
 
     /** Refuse the engine change while a path move is queued or still has its marker. */
     private static function pathMoveConflictMessage(): ?string
@@ -746,15 +905,42 @@ final class StorageBackendMigrationService
         return null;
     }
 
-    /** Run the accepted worker job and record a failure that happened before conversion began. */
-    public static function runQueuedMigration(string $target, bool $acknowledgeWear, string $kind = StorageBackendPolicyService::KIND_ALL): array
+    /**
+     * #880 review: claim the queued record for THIS worker under a short lock. It succeeds only while the record is
+     * "queued" and (when the worker was given a job id) carries the same job id. A late worker, or one that meets a
+     * newer job, gets null and must change nothing. The claim records the worker's process id.
+     */
+    private static function claimQueuedJob(string $jobId): ?array
     {
-        $state = self::readStatus();
-        if (($state['status'] ?? '') === 'queued') {
+        $fh = @fopen(self::lockPath() . '.claim', 'c');
+        $locked = false;
+        if ($fh !== false) {
+            $deadline = microtime(true) + 3.0;
+            while (!($locked = @flock($fh, LOCK_EX | LOCK_NB)) && microtime(true) < $deadline) usleep(50000);
+        }
+        try {
+            if (!$locked) return null;
+            $state = self::readStatus();
+            if (($state['status'] ?? '') !== 'queued') return null;
+            if ($jobId !== '' && (string)($state['job_id'] ?? '') !== $jobId) return null;
             $state['worker_pid'] = getmypid();
             $state['updated_at'] = time();
             self::writeStatus($state);
             self::writeDurableStatus($state);
+            return $state;
+        } finally {
+            if ($fh !== false) { if ($locked) @flock($fh, LOCK_UN); @fclose($fh); }
+        }
+    }
+
+    /** Run the accepted worker job and record a failure that happened before conversion began. */
+    public static function runQueuedMigration(string $target, bool $acknowledgeWear, string $kind = StorageBackendPolicyService::KIND_ALL, string $jobId = ''): array
+    {
+        $state = self::claimQueuedJob($jobId);
+        if ($state === null) {
+            // #880: the launcher gave up on this worker (it did not record its start in time), or a
+            // person dismissed the job. A late worker must not change storage for a job that is gone.
+            return ['status' => 'error', 'message' => 'The queued storage change is no longer waiting, so this worker stopped without changing anything.'];
         }
         try {
             $result = self::migrate($target, $acknowledgeWear, ConfigService::getConfig(), [], $kind);
@@ -767,6 +953,7 @@ final class StorageBackendMigrationService
                 $state['updated_at'] = time();
                 self::writeStatus($state);
                 self::writeDurableStatus($state);
+                self::failMigrationActivity($state['message']);
             }
             throw $e;
         }
@@ -778,6 +965,11 @@ final class StorageBackendMigrationService
             $state['updated_at'] = time();
             self::writeStatus($state);
             self::writeDurableStatus($state);
+            if ($state['status'] === 'complete') {
+                self::finishMigrationActivity(ucfirst(self::activityName((string)($state['kind'] ?? ''))) . ' changed.');
+            } else {
+                self::failMigrationActivity($state['message']);
+            }
         }
         return $result;
     }
@@ -833,19 +1025,15 @@ final class StorageBackendMigrationService
                     $probe = self::acquireLaunchGuard(false);
                     if ($probe !== false) {
                         self::releaseLaunchGuard($probe);
-                        $status['status'] = 'interrupted';
-                        $status['message'] = self::interruptedMessage($status);
+                        $status = self::markInterrupted($status);
                     }
                 } elseif ($durableState === 'queued'
                     && time() - (int)($durable['updated_at'] ?? 0) > 60
                     && !self::workerPidIsRunning($durable)) {
-                    $status['status'] = 'interrupted';
-                    $status['message'] = self::interruptedMessage($status);
-                }
-                if (($status['status'] ?? '') === 'interrupted') {
-                    $status['updated_at'] = time();
+                    $status = self::markInterrupted($status);
+                } elseif ($durableState === 'interrupted') {
+                    // Copy the flash record back to RAM so every reader sees one state.
                     self::writeStatus($status);
-                    self::writeDurableStatus($status);
                 }
             }
         }
@@ -855,35 +1043,105 @@ final class StorageBackendMigrationService
         if (($status['status'] ?? '') === 'queued'
             && time() - (int)($status['updated_at'] ?? 0) > 60
             && !self::workerPidIsRunning($status)) {
-            $status['status'] = 'interrupted';
-            $status['message'] = self::interruptedMessage($status);
-            $status['updated_at'] = time();
-            self::writeStatus($status);
-            self::writeDurableStatus($status);
+            $status = self::markInterrupted($status);
         }
         if (($status['status'] ?? '') === 'running') {
             $probe = self::acquireLaunchGuard(false);
             if ($probe !== false) {
                 self::releaseLaunchGuard($probe);
-                $status['status'] = 'interrupted';
-                $status['message'] = self::interruptedMessage($status);
-                $status['updated_at'] = time();
-                self::writeStatus($status);
-                self::writeDurableStatus($status);
+                $status = self::markInterrupted($status);
             }
         }
+        if (($status['status'] ?? '') === 'interrupted' && !self::hasWork($status)) {
+            // #880: a record from before this rule, or a race. Nothing changed, so nothing waits for Continue or Put back.
+            $status = self::settleDidNotStart($status);
+        }
+        if (($status['status'] ?? '') === 'interrupted') $status['recoverable'] = true;
         return $status;
+    }
+
+    /** @return list<string> the items the job changed ("type/id"), from the saved record */
+    private static function changedItems(array $status): array
+    {
+        return is_array($status['migrated'] ?? null) ? array_values(array_unique(array_map('strval', $status['migrated']))) : [];
+    }
+
+    /**
+     * #880 review: does a stopped job hold work that must be recovered? True when an item is recorded as
+     * changed, when any item has left "pending" (a conversion may be half done), or when workspaces were
+     * closed for the job (they must open again). Only a record with none of these "did not start".
+     */
+    private static function hasWork(array $status): bool
+    {
+        if (self::changedItems($status) !== []) return true;
+        if (self::safeSessionIds((array)($status['sessions_to_resume'] ?? [])) !== []) return true;
+        foreach ((array)($status['entities'] ?? []) as $entry) {
+            if (is_array($entry) && (string)($entry['status'] ?? 'pending') !== 'pending') return true;
+        }
+        return false;
+    }
+
+    /**
+     * A job whose worker is gone. With work to recover it becomes "interrupted" (Continue or Put back); an item
+     * that was being converted counts as changed, because it may be half done. With none it is cleared as
+     * "did not start" (#880). The tray item follows, and the stale engine marker is removed in both cases.
+     */
+    private static function markInterrupted(array $status): array
+    {
+        FileStorage::clearBackendMigrationMarker();
+        if (!self::hasWork($status)) return self::settleDidNotStart($status);
+        $migrated = self::changedItems($status);
+        foreach ((array)($status['entities'] ?? []) as $key => $entry) {
+            if (is_array($entry) && in_array((string)($entry['status'] ?? ''), ['converting', 'waiting', 'rolling_back'], true) && !in_array((string)$key, $migrated, true)) {
+                $migrated[] = (string)$key;
+            }
+        }
+        $status['migrated'] = $migrated;
+        $status['status'] = 'interrupted';
+        $status['message'] = self::interruptedMessage($status);
+        $status['updated_at'] = time();
+        self::writeStatus($status);
+        self::writeDurableStatus($status);
+        self::failMigrationActivity($status['message']);
+        return $status;
+    }
+
+    /**
+     * #880: an interrupted job with no work to recover did not start and changed nothing. The record becomes a
+     * plain "error" record in RAM (the card shows it with Dismiss), the flash copy is removed so it does not
+     * return after a restart, the engine marker is removed, and the tray item fails with the same words.
+     */
+    private static function settleDidNotStart(array $status): array
+    {
+        FileStorage::clearBackendMigrationMarker();
+        $status['status'] = 'error';
+        $status['phase'] = 'error';
+        $status['current'] = '';
+        $status['migrated'] = [];
+        $status['message'] = 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not start. Nothing was changed.';
+        $status['updated_at'] = time();
+        self::writeStatus($status);
+        self::clearDurableStatus();
+        self::failMigrationActivity($status['message']);
+        return $status;
+    }
+
+    private static function clearDurableStatus(): void
+    {
+        $path = self::durableStatusPath();
+        if (is_file($path)) @unlink($path);
     }
 
     private static function interruptedMessage(array $status): string
     {
-        $migrated = is_array($status['migrated'] ?? null) ? $status['migrated'] : [];
+        $migrated = self::changedItems($status);
         $total = max(0, (int)($status['total'] ?? 0));
-        if ($migrated !== []) {
-            $engine = ($status['target'] ?? '') === StorageBackendPolicyService::PASSTHROUGH ? 'plain folders' : 'compressed layers';
-            return 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not finish: ' . count($migrated) . ' of ' . $total . ' items are ' . $engine . '. Continue or put them back.';
+        $engine = ($status['target'] ?? '') === StorageBackendPolicyService::PASSTHROUGH ? 'plain folders' : 'compressed layers';
+        $name = self::changeName((string)($status['kind'] ?? ''));
+        if ($migrated === []) {
+            return 'The ' . $name . ' stopped after your workspaces were closed. No item was changed. Continue, or put back to open the workspaces again.';
         }
-        return 'The ' . self::changeName((string)($status['kind'] ?? '')) . ' did not finish. No items changed. Continue or put them back.';
+        return 'The ' . $name . ' did not finish: ' . count($migrated) . ' of ' . $total . ' items are ' . $engine . ' or may be half converted. Continue or put them back.';
     }
 
     /** Name of the change in a message: "home storage change", "agent storage change" or "storage change". */
@@ -920,7 +1178,7 @@ final class StorageBackendMigrationService
     private static function writeDurableStatus(array $status): bool
     {
         $record = [];
-        foreach (['status', 'phase', 'kind', 'from', 'target', 'migrated', 'sessions_to_resume', 'total', 'completed', 'current', 'message', 'worker_pid', 'operation', 'started_at', 'updated_at'] as $key) {
+        foreach (['status', 'phase', 'kind', 'from', 'target', 'migrated', 'sessions_to_resume', 'entities', 'job_id', 'total', 'completed', 'current', 'message', 'worker_pid', 'operation', 'started_at', 'updated_at'] as $key) {
             if (array_key_exists($key, $status)) $record[$key] = $status[$key];
         }
         if (!isset($record['migrated']) || !is_array($record['migrated'])) $record['migrated'] = [];
@@ -975,6 +1233,15 @@ final class StorageBackendMigrationService
     private static function finishMigrationActivity(string $step = ''): void
     {
         if (class_exists(ActivityService::class)) ActivityService::finish(self::ACTIVITY_ID, $step);
+    }
+
+    /** Fail the tray item only when one is open (a refused start has none and needs no notice). */
+    private static function failOpenMigrationActivity(string $error): void
+    {
+        if (!class_exists(ActivityService::class)) return;
+        $entry = ActivityService::get(self::ACTIVITY_ID);
+        if ($entry === null || !in_array((string)($entry['status'] ?? ''), ['running', 'stalled', 'queued'], true)) return;
+        self::failMigrationActivity($error);
     }
 
     private static function failMigrationActivity(string $error, string $recovery = 'Check Configuration and the Boot disk space card before you try again.'): void
@@ -1282,6 +1549,9 @@ final class StorageBackendMigrationService
                     $state['entities'][$key]['status'] = 'converting';
                     $state['updated_at'] = time();
                     self::writeStatus($state);
+                    // #880 review: the durable record says "converting" BEFORE the conversion starts. A crash or a
+                    // reboot during the conversion then leaves a record that never claims "nothing was changed".
+                    self::writeDurableStatus($state);
                     self::updateMigrationActivity($state);
                     $retry = 0;
                     do {
@@ -1418,21 +1688,40 @@ final class StorageBackendMigrationService
         }
     }
 
-    /** Enumerate only candidate entities; the shell remains authoritative about presence. */
+    /**
+     * Enumerate only candidate entities; the shell remains authoritative about presence.
+     * #880: this is the items list of itemLists(), the one list the Storage card and the migration share.
+     */
     public static function entities(array $config, array $seams = []): array
+    {
+        return self::itemLists($config, $seams)['items'];
+    }
+
+    /**
+     * #880: THE list of storage items, one for each kind. The Storage card (kindStates) and the migration
+     * (entities) both read it, so the card never counts differently from the server.
+     *
+     * - `items`: `{type: agent|home, id}`. A home is an item only when its user exists (a Unix account or a
+     *   user of a saved workspace) and it has stored data (a layer file or a non-empty plain folder) or a workspace.
+     * - `orphans`: homes that have stored data for a user that does not exist (for example a layer file of a
+     *   deleted account). They are not items: nothing converts them, and the card reports them in one line.
+     *
+     * Seams (tests): manifest_entities, workspace_users, passwd_users, home_layer_files, plain_home_has_data,
+     * installed_agents (list of ids, instead of the agent registry).
+     *
+     * @return array{items:list<array{type:string,id:string}>,orphans:list<array{type:string,id:string}>}
+     */
+    public static function itemLists(array $config, array $seams = []): array
     {
         $paths = [
             'agent' => (string)($config['agent_storage_path'] ?? ''),
             'home' => (string)($config['home_storage_path'] ?? ''),
         ];
-        $out = [];
-        $seen = [];
-        $add = static function (string $type, string $id) use (&$out, &$seen): void {
+        $agents = [];
+        $homeCandidates = [];
+        $add = static function (string $type, string $id) use (&$agents, &$homeCandidates): void {
             if (!preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $id) || $id === '.' || $id === '..') return;
-            $key = $type . '/' . $id;
-            if (isset($seen[$key])) return;
-            $seen[$key] = true;
-            $out[] = ['type' => $type, 'id' => $id];
+            if ($type === 'agent') $agents[$id] = true; else $homeCandidates[$id] = true;
         };
         $manifestEntities = $seams['manifest_entities'] ?? LayerManifestService::getAllEntities();
         foreach ($manifestEntities as $entity => $_entry) {
@@ -1442,7 +1731,11 @@ final class StorageBackendMigrationService
         foreach ($paths as $type => $path) {
             if (trim($path) === '') continue;
             foreach (glob(rtrim($path, '/') . '/' . $type . '_*.sqsh') ?: [] as $file) {
-                if (preg_match('/^' . $type . '_(.+?)_(?:v\d+_)?(?:vol1|delta|consolidated)/', basename($file), $m)) $add($type, $m[1]);
+                if ($type === 'agent' && ($agentId = StorageMetricsService::agentIdFromLayerFilename(basename($file))) !== null) {
+                    $add($type, $agentId);
+                } elseif (preg_match('/^' . $type . '_(.+?)_(?:v\d+_)?(?:vol1|delta|consolidated)/', basename($file), $m)) {
+                    $add($type, $m[1]);
+                }
             }
             foreach (glob(rtrim($path, '/') . '/passthrough/' . $type . 's/*') ?: [] as $dir) {
                 $id = basename($dir);
@@ -1451,21 +1744,39 @@ final class StorageBackendMigrationService
                 $add($type, $id);
             }
         }
-        if (class_exists(AgentRegistry::class)) {
+        if (isset($seams['installed_agents'])) {
+            foreach ((array)$seams['installed_agents'] as $id) $add('agent', (string)$id);
+        } elseif (class_exists(AgentRegistry::class)) {
             foreach (AgentRegistry::getRegistry() as $id => $agent) {
                 if (!empty($agent['is_installed'])) $add('agent', (string)$id);
             }
         }
-        foreach (($seams['workspace_users'] ?? self::workspaceHomeUsers()) as $user) {
-            $add('home', (string)$user);
+        $workspaceUsers = array_map('strval', $seams['workspace_users'] ?? self::workspaceHomeUsers());
+        foreach ($workspaceUsers as $user) {
+            $add('home', $user);
         }
-        $passwdUsers = $seams['passwd_users'] ?? (class_exists(UtilityService::class) ? UtilityService::getUnraidUsers() : []);
+        $passwdUsers = array_map('strval', $seams['passwd_users'] ?? (class_exists(UtilityService::class) ? UtilityService::getUnraidUsers() : []));
         foreach ($passwdUsers as $user) {
-            $user = (string)$user;
             if (self::homeHasStorage($user, (string)$paths['home'], $seams)) $add('home', $user);
         }
-        usort($out, static fn(array $a, array $b): int => strcmp($a['type'] . '/' . $a['id'], $b['type'] . '/' . $b['id']));
-        return $out;
+        // #880 review: a user has an account whatever its UID (a service account outside 0 and 1000-59999 still has one),
+        // is the configured terminal user, or has a home that is mounted now. When the account list is empty or cannot
+        // be read, nothing can be called an orphan: every candidate is an item.
+        $allAccounts = array_map('strval', $seams['all_passwd_users'] ?? (isset($seams['passwd_users']) ? $passwdUsers : (class_exists(UtilityService::class) ? UtilityService::getAllPasswdUsers() : [])));
+        $realUsers = array_fill_keys(array_merge($workspaceUsers, $passwdUsers, $allAccounts, [(string)($config['user'] ?? '')]), true);
+        $accountListKnown = $allAccounts !== [] || $passwdUsers !== [];
+        $isMountedHome = $seams['is_mounted_home'] ?? static fn(string $user): bool => class_exists(StorageMountService::class) && StorageMountService::isMounted(UtilityService::getWorkDir($user) . '/home');
+        $items = [];
+        $orphans = [];
+        foreach (array_keys($agents) as $id) $items[] = ['type' => 'agent', 'id' => (string)$id];
+        foreach (array_keys($homeCandidates) as $id) {
+            if (!$accountListKnown || isset($realUsers[(string)$id]) || $isMountedHome((string)$id)) $items[] = ['type' => 'home', 'id' => (string)$id];
+            else $orphans[] = ['type' => 'home', 'id' => (string)$id];
+        }
+        $byKey = static fn(array $a, array $b): int => strcmp($a['type'] . '/' . $a['id'], $b['type'] . '/' . $b['id']);
+        usort($items, $byKey);
+        usort($orphans, $byKey);
+        return ['items' => $items, 'orphans' => $orphans];
     }
 
     /** A user record counts only when a layer, non-empty plain home, or workspace exists. */

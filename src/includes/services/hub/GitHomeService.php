@@ -247,7 +247,7 @@ class GitHomeService {
      * @return string[]
      */
     private static function hardeningArgs(): array {
-        $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(self::filterScriptPath());
+        $cmd = escapeshellarg(\AICliAgents\Services\UtilityService::cliPhpBinary()) . ' ' . escapeshellarg(self::filterScriptPath());
         $f = 'filter.' . self::SECRET_FILTER;
         $c = 'filter.' . self::SECRET_FILTER_CLEAN_ONLY;
         return [
@@ -591,10 +591,10 @@ class GitHomeService {
     /**
      * Register the clean/smudge filter in THIS repo's .git/config (local, never committed).
      * `required=true` makes git ABORT if the filter errors — it can never fall back to the
-     * raw secret-bearing blob. Uses PHP_BINARY so the same interpreter resolves on the CLI.
+     * raw secret-bearing blob. Uses the command-line PHP (#880): inside the web server PHP_BINARY is php-fpm, which cannot run a filter.
      */
     private static function configureSecretFilter(): void {
-        $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(self::filterScriptPath());
+        $cmd = escapeshellarg(\AICliAgents\Services\UtilityService::cliPhpBinary()) . ' ' . escapeshellarg(self::filterScriptPath());
         self::git(['config', 'filter.' . self::SECRET_FILTER . '.clean',  $cmd . ' clean']);
         self::git(['config', 'filter.' . self::SECRET_FILTER . '.smudge', $cmd . ' smudge']);
         self::git(['config', 'filter.' . self::SECRET_FILTER . '.required', 'true']);
