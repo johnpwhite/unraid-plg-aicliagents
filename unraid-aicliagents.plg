@@ -3,6 +3,26 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.11.01.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.11.01.02
+
+**Storage: please read if you change the storage engine**
+
+- **Fix: changing a home from plain folders back to compressed layers keeps all your work.** Before, a change back within 14 days of the first change could delete the plain folder and still report success. If you changed a home to plain folders and back in that time, check its contents.
+- **Fix: an interrupted storage change can always be continued or put back.** Before, a restart during a change could leave the page stuck, or **Put back** could make a half-copied home the live one.
+- **Fix: Storage Apply does only what you asked.** A change that only saves the setting now only saves it, with no dialog. The work runs in the background, only the kind that changes is locked, and workspaces and storage actions wait during a move.
+- **Improve: a stored home with no matching user on the server is reported** on the Storage card. It is not counted and it is not converted.
+
+**Agents**
+
+- **Improve: changing an agent's version takes a few minutes** instead of 16 to 21 on a busy server.
+- **Fix: closing Factory saves its state.**
+- **Fix: Config Hub never writes through a linked folder.**
+
+**Terminal and Health**
+
+- **Fix: a slow terminal keeps clickable paths and the clipboard.**
+- **Feat: Health warns when an agent runs an older version than the Agent Store shows.** Writable layers that no version uses are set aside and removed after seven days.
+
 ## 2026.10.31.02
 
 **Terminal speed and reliability**
