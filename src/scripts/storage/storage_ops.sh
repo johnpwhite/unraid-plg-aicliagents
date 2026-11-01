@@ -194,77 +194,127 @@ _gen_switch_blocked() {
     _dir_has_entries "$live_upper"
 }
 
+# _mountinfo_escape <path>
+# Print the path in the form that the kernel writes into mountinfo: space, tab,
+# newline and backslash become \040 \011 \012 \134. The scanners escape the path
+# once and compare it with the raw rows. This avoids one subshell per row.
+_mountinfo_escape() {
+    local value="${1:-}"
+    value="${value//\\/\\134}"
+    value="${value// /\\040}"
+    value="${value//$'\t'/\\011}"
+    value="${value//$'\n'/\\012}"
+    printf '%s' "$value"
+}
+
+# _agent_process_mountinfo_holds_overlay <target_mount> <upper> [proc_dir]
+# Return 0 when a process has an overlay mounted at <target_mount> or with
+# upperdir=<upper> in its mount namespace. Return 1 when none has. Return 2 when
+# no mountinfo file can be read. One awk process reads every file, so the cost
+# does not grow with the number of forks.
+_agent_process_mountinfo_holds_overlay() {
+    local target_mount="${1:-}" upper="${2:-}" proc_dir="${3:-/proc}"
+    local info readable=0 found
+    [ -d "$proc_dir" ] || return 2
+    for info in "$proc_dir"/[0-9]*/mountinfo; do
+        if [ -r "$info" ]; then readable=1; break; fi
+    done
+    [ "$readable" -eq 1 ] || return 2
+    found="$(AICLI_SCAN_TARGET="$(_mountinfo_escape "$target_mount")" \
+        AICLI_SCAN_UPPER="$(_mountinfo_escape "$upper")" \
+        awk '
+        BEGIN {
+            t = ENVIRON["AICLI_SCAN_TARGET"]
+            u = ENVIRON["AICLI_SCAN_UPPER"]
+            want = (u != "") ? ",upperdir=" u "," : ""
+        }
+        {
+            n = index($0, " - ")
+            if (n == 0) next
+            split(substr($0, n + 3), r, " ")
+            if (r[1] != "overlay") next
+            split(substr($0, 1, n - 1), l, " ")
+            if ((t != "" && l[5] == t) || (want != "" && index("," r[3] ",", want) > 0)) {
+                k = split(FILENAME, p, "/")
+                print p[k - 1]
+                exit
+            }
+        }' "$proc_dir"/[0-9]*/mountinfo 2>/dev/null)"
+    if [ -n "$found" ]; then
+        _AGENT_DETACHED_BUSY_PID="$found"
+        _AGENT_DETACHED_BUSY_REASON="private_mount_namespace_overlay"
+        return 0
+    fi
+    return 1
+}
+
+# _agent_process_has_open_upper_reference <upper> [proc_dir]
+# Return 0 when a process holds a file, directory, cwd, root, exe or mapping
+# inside <upper>. Return 1 when none does. One find process checks every link.
+# A process can exit during the scan, so find errors are ignored.
+_agent_process_has_open_upper_reference() {
+    local upper="${1:-}" proc_dir="${2:-/proc}" pattern hit pid
+    [ -n "$upper" ] && [ -d "$proc_dir" ] || return 2
+    # Escape the characters that -lname treats as pattern syntax.
+    pattern="${upper//\\/\\\\}"
+    pattern="${pattern//\*/\\*}"
+    pattern="${pattern//\?/\\?}"
+    pattern="${pattern//\[/\\[}"
+    hit="$(find "$proc_dir"/[0-9]* -mindepth 1 -maxdepth 2 \
+        \( -lname "$pattern" -o -lname "$pattern/*" \
+           -o -lname "$pattern (deleted)" -o -lname "$pattern/* (deleted)" \) \
+        -print -quit 2>/dev/null)"
+    [ -n "$hit" ] || return 1
+    pid="${hit#"$proc_dir"/}"; pid="${pid%%/*}"
+    _AGENT_DETACHED_BUSY_PID="$pid"
+    _AGENT_DETACHED_BUSY_REASON="open_upper_reference"
+    return 0
+}
+
+# _agent_upper_holders_text <upper> [proc_dir]
+# Print the processes that hold <upper>, for the in-use warning after a mount.
+# Format: "pid=N (reason) cmd=<first 80 chars of cmdline>". The text is safe
+# inside a JSON string: no double quote, no backslash, at most 600 characters.
+_agent_upper_holders_text() {
+    local upper="${1:-}" proc_dir="${2:-/proc}" pid cmd hit text="" seen=" "
+    local -a hits=()
+    _AGENT_DETACHED_BUSY_PID=""
+    if _agent_process_has_open_upper_reference "$upper" "$proc_dir"; then
+        hits+=("$_AGENT_DETACHED_BUSY_PID:$_AGENT_DETACHED_BUSY_REASON")
+    fi
+    # The new overlay is in this namespace's table now, so look only at the
+    # processes of OTHER mount namespaces. One find lists them.
+    local self_ns pid_dir other_dir
+    self_ns="$(readlink "$proc_dir/self/ns/mnt" 2>/dev/null || true)"
+    other_dir="$(mktemp -d 2>/dev/null)" || other_dir=""
+    if [ -n "$self_ns" ] && [ -n "$other_dir" ]; then
+        while IFS= read -r pid_dir; do
+            pid_dir="${pid_dir%/ns/mnt}"
+            mkdir -p "$other_dir/${pid_dir##*/}" 2>/dev/null \
+                && ln -s "$pid_dir/mountinfo" "$other_dir/${pid_dir##*/}/mountinfo" 2>/dev/null
+        done < <(find "$proc_dir"/[0-9]*/ns/mnt -maxdepth 0 ! -lname "${self_ns//[/\\[}" 2>/dev/null)
+        _AGENT_DETACHED_BUSY_PID=""
+        if _agent_process_mountinfo_holds_overlay "" "$upper" "$other_dir"; then
+            hits+=("$_AGENT_DETACHED_BUSY_PID:$_AGENT_DETACHED_BUSY_REASON")
+        fi
+    fi
+    [ -n "$other_dir" ] && rm -rf "$other_dir"
+    for hit in "${hits[@]}"; do
+        pid="${hit%%:*}"
+        case "$seen" in *" $pid "*) continue ;; esac
+        seen="$seen$pid "
+        cmd="$(tr '\0' ' ' < "$proc_dir/$pid/cmdline" 2>/dev/null | cut -c1-80)"
+        text="${text:+$text; }pid=$pid (${hit#*:}) cmd=${cmd:-unknown}"
+    done
+    [ -n "$text" ] || text='none visible (the previous overlay is pinned by a reference that /proc does not show)'
+    printf '%s' "$text" | tr '\n\t' '  ' | sed 's/["\\]/ /g' | cut -c1-600
+}
+
 # _agent_generation_target_detached_busy <id> <live_gen> <target_gen> <target_mount> <upper> [proc_dir]
 # True when the mount is absent here but a process still holds the target
 # OverlayFS in a private mount namespace, or has an open reference into its
 # writable upper. A process that only names the generation in argv or PATH does
 # not hold the overlay and must not block a launch.
-_mountinfo_unescape() {
-    local value="${1:-}"
-    value="${value//\\040/$' '}"
-    value="${value//\\011/$'\t'}"
-    value="${value//\\012/$'\n'}"
-    value="${value//\\134/$'\\'}"
-    printf '%s' "$value"
-}
-
-_agent_process_mountinfo_holds_overlay() {
-    local target_mount="${1:-}" upper="${2:-}" proc_dir="${3:-/proc}"
-    local info line left right pid parent dev root mountpoint opts fstype source superopts option value scanned=0
-    local -a mount_opts=()
-    [ -d "$proc_dir" ] || return 2
-    for info in "$proc_dir"/[0-9]*/mountinfo; do
-        [ -r "$info" ] || continue
-        scanned=$((scanned + 1))
-        pid="${info#"$proc_dir"/}"; pid="${pid%%/*}"
-        while IFS= read -r line; do
-            case "$line" in *' - overlay '*) ;; *) continue ;; esac
-            left="${line%% - *}"
-            right="${line#* - }"
-            read -r _ parent dev root mountpoint opts _ <<< "$left"
-            read -r fstype source superopts _ <<< "$right"
-            [ "$fstype" = "overlay" ] || continue
-            mountpoint="$(_mountinfo_unescape "$mountpoint")"
-            IFS=',' read -r -a mount_opts <<< "$superopts"
-            for option in "${mount_opts[@]}"; do
-                case "$option" in
-                    upperdir=*)
-                        value="$(_mountinfo_unescape "${option#upperdir=}")"
-                        if { [ -n "$upper" ] && [ "$value" = "$upper" ]; } || [ "$mountpoint" = "$target_mount" ]; then
-                            _AGENT_DETACHED_BUSY_PID="$pid"
-                            _AGENT_DETACHED_BUSY_REASON="private_mount_namespace_overlay"
-                            return 0
-                        fi
-                        ;;
-                esac
-            done
-        done < "$info"
-    done
-    [ "$scanned" -gt 0 ] || return 2
-    return 1
-}
-
-_agent_process_has_open_upper_reference() {
-    local upper="${1:-}" proc_dir="${2:-/proc}" pid_dir ref target
-    [ -n "$upper" ] && [ -d "$proc_dir" ] || return 2
-    for pid_dir in "$proc_dir"/[0-9]*; do
-        [ -d "$pid_dir" ] || continue
-        for ref in "$pid_dir"/fd/* "$pid_dir"/cwd "$pid_dir"/root "$pid_dir"/exe "$pid_dir"/map_files/*; do
-            [ -L "$ref" ] || continue
-            target="$(readlink "$ref" 2>/dev/null)" || continue
-            target="${target% (deleted)}"
-            case "$target" in
-                "$upper"|"$upper"/*)
-                    _AGENT_DETACHED_BUSY_PID="${pid_dir##*/}"
-                    _AGENT_DETACHED_BUSY_REASON="open_upper_reference"
-                    return 0
-                    ;;
-            esac
-        done
-    done
-    return 1
-}
-
 _agent_generation_target_detached_busy() {
     local id="${1:-}" live_gen="${2:-}" target_gen="${3:-}" target_mount="${4:-}" upper="${5:-}" proc_dir="${6:-/proc}" rc
     _AGENT_DETACHED_BUSY_PID=""
@@ -1170,10 +1220,9 @@ if mount -t overlay overlay -o lowerdir="$LOWERS",upperdir="$UPPER_DIR",workdir=
     _INUSE_AFTER=$(_dmesg_inuse_count)
     if [ "${_INUSE_AFTER:-0}" -gt "${_INUSE_BEFORE:-0}" ]; then
         _STACKED=$(awk -v m="$MNT_POINT" '$5==m{c++} END{print c+0}' /proc/self/mountinfo 2>/dev/null)
-        _HOLDERS=""
-        if command -v fuser >/dev/null 2>&1; then
-            _HOLDERS=$(fuser -vm "$UPPER_DIR" 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/["\\]/ /g' | cut -c1-600)
-        fi
+        # Scan /proc for this upper only. "fuser -m" names every user of the
+        # whole filesystem (/boot), so it listed unrelated processes.
+        _HOLDERS=$(_agent_upper_holders_text "$UPPER_DIR")
         log "WARNING: kernel logged 'upperdir/workdir is in-use' for this bind (was_mounted=$_WAS_MOUNTED arbiter_rc=$_TEARDOWN_RC mounts_at_path=$_STACKED). holders of $UPPER_DIR: ${_HOLDERS:-none}"
         lifecycle_log "warn" "mount_stack" "overlay_inuse_warning_after_mount" \
             "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"mount_point\":\"$MNT_POINT\",\"was_mounted\":$_WAS_MOUNTED,\"arbiter_rc\":$_TEARDOWN_RC,\"mounts_at_path\":${_STACKED:-0},\"layer_count\":$LAYER_COUNT,\"holders\":\"${_HOLDERS:-none}\"}" 2>/dev/null || true
