@@ -152,8 +152,8 @@ MD;
         $names = [];
         $san = (string)($info['extensions']['subjectAltName'] ?? '');
         foreach (preg_split('/\s*,\s*/', $san, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $entry) {
-            if (preg_match('/^DNS:(.+)$/i', $entry, $m)) $names[] = strtolower(trim($m[1]));
-            elseif (preg_match('/^IP(?: Address)?:(.+)$/i', $entry, $m)) $names[] = strtolower(trim($m[1]));
+            if (preg_match('/^DNS:(.+)$/iD', $entry, $m)) $names[] = strtolower(trim($m[1]));
+            elseif (preg_match('/^IP(?: Address)?:(.+)$/iD', $entry, $m)) $names[] = strtolower(trim($m[1]));
         }
         if ($names === [] && isset($info['subject']['CN'])) $names[] = strtolower((string)(is_array($info['subject']['CN']) ? $info['subject']['CN'][0] : $info['subject']['CN']));
         return array_values(array_unique($names));
