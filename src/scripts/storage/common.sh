@@ -870,6 +870,70 @@ _copy_dir_skeleton() {
     cp -a "$from/." "$to/" 2>/dev/null
 }
 
+# _renew_empty_agent_layer <upper> <work> — give an agent overlay fresh, empty
+# writable-layer folders when its upper holds nothing (#878, GH #9).
+#
+# The kernel warns "upperdir/workdir is in-use as upperdir/workdir of another
+# mount" when it finds its in-use mark on the INODE of the upper or work folder.
+# On prod02 the mark outlived the previous overlay of an agent layer that had
+# been mounted for a long time (the boot mount, or a mount that served a
+# session): no mount table, no /proc link and no mount namespace showed a second
+# overlay, yet the next bind on the same folders warned on every remount. Only
+# agents whose generation did not change warned; an agent with a fresh
+# generation has a fresh upper and never did. The mark sits on the inode, so a
+# bind on a NEW empty folder at the same path cannot meet it. An upper with no
+# entry has nothing to lose, and the work folder is scratch space that the
+# kernel formats at each mount, so renewing both is safe. Call it only when the
+# mount table shows no overlay on these folders (_upper_still_bound is false).
+#
+# Order matters for a crash: the new folders are made first, they are swapped in
+# by rename, and the old ones are removed last. Any failure leaves the old
+# folders in place and returns non-zero; the caller then binds on them as before.
+# Returns 0 when both were renewed, 1 when nothing changed (the upper holds an
+# entry, a folder is a link or a mount point, or a step failed).
+_renew_empty_agent_layer() {
+    local upper="${1:-}" work="${2:-}" tag new_up new_wk old_up old_wk
+    [ -n "$upper" ] && [ -n "$work" ] || return 1
+    [ -d "$upper" ] && [ -d "$work" ] || return 1
+    if [ -L "$upper" ] || [ -L "$work" ]; then return 1; fi
+    if mountpoint -q "$upper" 2>/dev/null || mountpoint -q "$work" 2>/dev/null; then return 1; fi
+    # Anything inside the upper (a file, a folder, a whiteout) is data: keep it.
+    [ -z "$(find "$upper" -mindepth 1 -print -quit 2>/dev/null)" ] || return 1
+    tag="renew.$$.${RANDOM:-0}"
+    new_up="${upper}.${tag}"; new_wk="${work}.${tag}"
+    old_up="${upper}.old.${tag}"; old_wk="${work}.old.${tag}"
+    mkdir "$new_up" 2>/dev/null || return 1
+    if ! mkdir "$new_wk" 2>/dev/null; then rmdir "$new_up" 2>/dev/null; return 1; fi
+    # Same mode, owner, times and attributes as the folders they replace.
+    if ! { cp -a "$upper/." "$new_up/" 2>/dev/null && cp -a "$work/." "$new_wk/" 2>/dev/null; }; then
+        rmdir "$new_up" "$new_wk" 2>/dev/null
+        return 1
+    fi
+    # The work folder content is kernel scratch space: the new one starts empty.
+    find "$new_wk" -mindepth 1 -delete 2>/dev/null || true
+    if ! mv -T "$upper" "$old_up" 2>/dev/null; then rmdir "$new_up" "$new_wk" 2>/dev/null; return 1; fi
+    if ! mv -T "$new_up" "$upper" 2>/dev/null; then
+        mv -T "$old_up" "$upper" 2>/dev/null
+        rmdir "$new_up" "$new_wk" 2>/dev/null
+        return 1
+    fi
+    if ! mv -T "$work" "$old_wk" 2>/dev/null; then
+        # Put the old upper back so the pair stays as it was.
+        mv -T "$upper" "$new_up" 2>/dev/null && mv -T "$old_up" "$upper" 2>/dev/null
+        rmdir "$new_up" "$new_wk" 2>/dev/null
+        return 1
+    fi
+    if ! mv -T "$new_wk" "$work" 2>/dev/null; then
+        mv -T "$old_wk" "$work" 2>/dev/null
+        mv -T "$upper" "$new_up" 2>/dev/null && mv -T "$old_up" "$upper" 2>/dev/null
+        rmdir "$new_up" "$new_wk" 2>/dev/null
+        return 1
+    fi
+    rmdir "$old_up" 2>/dev/null || true
+    rm -rf -- "$old_wk" 2>/dev/null || true
+    return 0
+}
+
 # home_mount_in_use <mount_point>
 # True (0) if a LIVE INTERACTIVE agent/terminal session is using this home mount
 # — i.e. one a umount/remount would disrupt with ENOENT. Used to gate the

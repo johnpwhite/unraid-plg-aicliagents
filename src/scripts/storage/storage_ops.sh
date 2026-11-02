@@ -1188,6 +1188,18 @@ if _upper_still_bound "$UPPER_DIR" "$WORK_DIR"; then
     done
     exit 1
 fi
+# #878 (GH #9): an agent layer that holds nothing in its upper binds on NEW empty
+# upper/work folders. The kernel's in-use mark sits on the folder inode and can
+# outlive the previous overlay of a long-mounted agent generation without any
+# mount or process showing it; a bind on the same inode then warns on each
+# remount. The mount table is clean here (checked above), so the swap is safe.
+if [ "$TYPE" = "agent" ] && [ "$_AGENT_VERSIONED" = "1" ]; then
+    if _renew_empty_agent_layer "$UPPER_DIR" "$WORK_DIR"; then
+        log "Agent $ID: the writable layer of generation $_AGENT_GEN_ID holds nothing, so the overlay binds on new empty folders."
+        lifecycle_log "info" "mount_stack" "agent_empty_layer_renewed" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"generation\":\"$_AGENT_GEN_ID\",\"upper\":\"$UPPER_DIR\"}" 2>/dev/null || true
+    fi
+fi
 # Claude Code and other package managers finalize directory caches with rename(2).
 # A directory originating in a SquashFS lower otherwise returns EXDEV; redirect_dir
 # copies up its metadata and preserves the atomic rename contract.
