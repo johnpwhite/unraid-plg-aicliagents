@@ -45,6 +45,10 @@ class HealthService {
     /** debug.log tail window scanned for client errors (bytes — bounded read). */
     private const CLIENT_ERROR_TAIL_BYTES = 262144;
     private const NOTIFY_SCRIPT = '/usr/local/emhttp/plugins/dynamix/scripts/notify';
+    /** Name of the "test run active" marker in the runtime dir (#892). Only the smoke harness writes it. */
+    public const TEST_RUN_MARKER = 'test-run-active';
+    /** Longest time a marker can lie in the future and still count (seconds). Caps how long a bad marker can soften a mounts drift. */
+    public const TEST_RUN_MAX_S = 7200;
 
     // ==================================================================
     // Public surface
@@ -194,7 +198,13 @@ class HealthService {
      */
     public static function maybeNotify(array $result): bool {
         $path = self::notifiedPath();
+        // #892: a check flagged test_run is not a degradation. Judge the rest.
+        $hadSoftened = self::hasSoftenedCheck($result);
+        $result = self::withoutSoftenedChecks($result);
         $overall = (string)($result['overall'] ?? self::STATUS_OK);
+        if ($overall === self::STATUS_OK && $hadSoftened) {
+            return false; // only a softened check: no notify, no fingerprint change
+        }
         if ($overall === self::STATUS_OK) {
             if (is_file($path)) {
                 @unlink($path); // recovery: re-arm the notifier
@@ -217,8 +227,26 @@ class HealthService {
         return true;
     }
 
-    /** Stable id of a degradation: overall + sorted non-ok check names/statuses. Pure. */
+    /** True when any check carries the test_run flag (#892). Pure. */
+    private static function hasSoftenedCheck(array $result): bool {
+        foreach (($result['checks'] ?? []) as $c) {
+            if (is_array($c) && !empty($c['test_run'])) return true;
+        }
+        return false;
+    }
+
+    /** The result without test_run checks; overall is worked out again from the rest (#892). Pure. */
+    private static function withoutSoftenedChecks(array $result): array {
+        if (!self::hasSoftenedCheck($result)) return $result;
+        $checks = array_filter($result['checks'] ?? [], function ($c) { return !(is_array($c) && !empty($c['test_run'])); });
+        $result['checks'] = $checks;
+        $result['overall'] = self::aggregate($checks);
+        return $result;
+    }
+
+    /** Stable id of a degradation: overall + sorted non-ok check names/statuses. Pure. A test_run check does not count (#892). */
     public static function fingerprint(array $result): string {
+        $result = self::withoutSoftenedChecks($result);
         $parts = [];
         foreach (($result['checks'] ?? []) as $name => $c) {
             $s = is_array($c) ? ($c['status'] ?? '') : '';
@@ -293,8 +321,10 @@ class HealthService {
      *
      * @param array<string,bool> $mounted   entity => has persisted layer files
      * @param string[]           $manifestEntities manifest entity keys
+     * @param bool               $testRunActive true while a valid test-run marker exists (#892):
+     *                           a drift then gives WARN (labelled), never FAIL. Nothing else changes.
      */
-    public static function evalMounts(array $mounted, array $manifestEntities): array {
+    public static function evalMounts(array $mounted, array $manifestEntities, bool $testRunActive = false): array {
         if ($mounted === []) {
             return self::result(self::STATUS_OK, 'no active entity mounts');
         }
@@ -303,6 +333,10 @@ class HealthService {
             if ($hasLayers && !in_array($entity, $manifestEntities, true)) {
                 $drift[] = $entity;
             }
+        }
+        if ($drift !== [] && $testRunActive) {
+            // test_run = true: the notifier ignores this check (#892). health.json still shows it.
+            return self::result(self::STATUS_WARN, 'test run active, so this is not counted as a fault: mounted with layers but not in manifest: ' . implode(', ', $drift)) + ['test_run' => true];
         }
         if ($drift !== []) {
             return self::result(self::STATUS_FAIL, 'mounted with layers but not in manifest: ' . implode(', ', $drift));
@@ -571,7 +605,26 @@ class HealthService {
                 $mounted[$entity] = self::hasLayers('agent', (string)$user, StoragePathResolver::agentPersistPath());
             }
         }
-        return self::evalMounts($mounted, array_keys(LayerManifestService::getAllEntities()));
+        return self::evalMounts($mounted, array_keys(LayerManifestService::getAllEntities()), self::testRunActive());
+    }
+
+    /**
+     * True when a valid test-run marker exists (#892). The file holds one number: the
+     * Unix time at which the marker expires. Pure: the file content and the clock are inputs.
+     * A missing, empty, non-numeric, past or too-far-future value counts as no marker.
+     */
+    public static function evalTestRunMarker(?string $content, int $now): bool {
+        if ($content === null) return false;
+        $v = trim($content);
+        if ($v === '' || !ctype_digit($v)) return false;
+        $expires = (int)$v;
+        return $expires > $now && $expires <= $now + self::TEST_RUN_MAX_S;
+    }
+
+    /** Reads the marker file. An unreadable file counts as no marker. */
+    public static function testRunActive(): bool {
+        $raw = @file_get_contents(self::runtimeDir() . '/' . self::TEST_RUN_MARKER);
+        return self::evalTestRunMarker($raw === false ? null : $raw, time());
     }
 
     /** Path of the kernel mount table. AICLI_PROC_MOUNTS is a test-only hook (a fixture file). */
