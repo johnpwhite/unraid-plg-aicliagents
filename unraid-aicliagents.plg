@@ -3,6 +3,19 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.11.02.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.11.02.02
+
+**Scheduled jobs: please make a backup or check your schedule after this update**
+
+- **Fix: scheduled jobs now really run.** The automatic home backup, the daily agent update check and the health check never fired on any server, because the schedule was written to a place the server does not read. Your backup schedule starts to work after this update with no change from you. Check the time of your last backup on the backup screen, and make one by hand if it is old.
+- **Feat: each scheduled job can report its result** to a command you choose (setting `job_report_command`). With the setting empty, jobs run as normal.
+
+**Workspaces and agents**
+
+- **Fix: saving workspaces from two places at once can no longer lose a change.** If a save cannot start within 10 seconds, it fails with a message.
+- **Fix: the space check before an agent update counts real disk use.** On a compressed flash drive it no longer refuses an update that fits.
+- **Fix: remounting an agent with no saved changes no longer writes a kernel warning** ("upperdir is in-use") to the system log.
+
 ## 2026.11.01.02
 
 **Storage: please read if you change the storage engine**
