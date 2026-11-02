@@ -57,6 +57,9 @@ require_once __DIR__ . '/SettingsCard.php'; // aicli_card_open: the shared card 
             to your workspaces as a contact. Paste the token into the remote agent's MCP configuration as a
             bearer token, and it can read its inbox, list contacts, and send direct messages.
           </span>
+          <span style="font-size:12px;opacity:.7;">
+            To connect an agent on another computer, press Copy setup prompt and paste the line into that agent.
+          </span>
           <div id="relay-remotes" style="display:grid;gap:4px;"><span style="opacity:.7;font-size:12px;">Loading remotes…</span></div>
           <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:4px;">
             <label style="display:grid;gap:3px;font-size:12px;">New remote name

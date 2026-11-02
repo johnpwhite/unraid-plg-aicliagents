@@ -56,6 +56,17 @@ class RelayHttpService {
         return self::reply($status, $payload);
     }
 
+    /** A short plain-text reply for the setup route. Never cached. */
+    private static function setupText(int $status, string $body): array {
+        return ['status'=>$status, 'body'=>$body, 'headers'=>['Content-Type'=>'text/plain; charset=utf-8', 'Cache-Control'=>'no-store']];
+    }
+
+    /** A setup code that is unknown, used, expired or badly formed: 410, counted against the address, no detail. */
+    private static function setupGone(string $peer): array {
+        self::recordFailure($peer);
+        return self::setupText(410, RelayRemoteSetup::expiredPage());
+    }
+
     private static function reply(int $status, array $payload): array {
         return ['status'=>$status, 'body'=>json_encode($payload, JSON_UNESCAPED_SLASHES)];
     }
@@ -85,6 +96,37 @@ class RelayHttpService {
         }
         // The address check precedes authentication on purpose (see addressBlocked).
         if (self::addressBlocked($peer)) return self::reply(429, ['error'=>'rate limited']);
+        // RELAY_REMOTE_SETUP_LINK.md: the one-time setup link. The code in the path is the
+        // credential, so this route needs no bearer token. A GET spends nothing (link previews and
+        // scanners send GETs); a POST uses the link. A bad code counts as a failure on both verbs.
+        $verb = strtoupper($method);
+        if (($verb === 'GET' || $verb === 'POST') && strpos($path, '/setup/') === 0) {
+            // The steps page holds no secret and no code. Anyone may read it; it is not a failure of the limiter.
+            if ($verb === 'GET' && $path === '/setup/steps') {
+                $h = RelayRemoteSetup::cleanHost((string)($headers['host'] ?? ''));
+                if ($h === null) return self::setupText(400, "The Host header is missing or not valid.\n");
+                return ['status'=>200, 'body'=>RelayRemoteSetup::stepsPage('https://' . $h . '/'), 'headers'=>['Content-Type'=>'text/markdown; charset=utf-8', 'Cache-Control'=>'no-store']];
+            }
+            if (!preg_match('#^/setup/([a-f0-9]{64})$#D', $path, $sm)) return self::setupGone($peer);
+            // The Host header decides the address on the steps page. Check it before the code is touched.
+            $host = RelayRemoteSetup::cleanHost((string)($headers['host'] ?? ''));
+            if ($host === null) return self::setupText(400, "The Host header is missing or not valid.\n");
+            if ($verb === 'GET') {
+                if (!RelayRemoteSetup::isLive($sm[1])) return self::setupGone($peer);
+                return self::setupText(200, RelayRemoteSetup::instructionPage());
+            }
+            if (strlen($body) > self::MAX_BODY_BYTES) return self::refuse($peer, 413, ['error'=>'request too large']);
+            $redeemed = RelayRemoteSetup::redeem($sm[1], $host, $peer);
+            if ($redeemed === null) return self::setupGone($peer);
+            if (!empty($redeemed['busy'])) {
+                $r = self::setupText(503, "The Relay is busy. Try the same command again in a moment.\n");
+                $r['headers']['Retry-After'] = '2';
+                return $r;   // not counted: the code is still unused
+            }
+            if (!empty($redeemed['failed'])) return self::setupText(500, "Setup failed. Ask for a new link.\n");
+            // The body is the token and nothing else. The command writes it to a private file with `curl -o`.
+            return self::setupText(200, (string)$redeemed['token']);
+        }
         if (strtoupper($method) !== 'POST') return self::refuse($peer, 405, ['error'=>'POST required']);
         if (strlen($body) > self::MAX_BODY_BYTES) return self::refuse($peer, 413, ['error'=>'request too large']);
 

@@ -167,6 +167,7 @@ require_once __DIR__ . '/services/BackupCronService.php'; // HOME_BACKUP.md R1 �
 // note in the same section.
 require_once __DIR__ . '/services/EventSubscriptionStore.php';
 require_once __DIR__ . '/services/RelayHttpService.php'; // #113 — plugin-owned HTTP listener request handling
+require_once __DIR__ . '/services/RelayRemoteSetup.php'; // RELAY_REMOTE_SETUP_LINK.md — one-time setup links for remotes (after AgentRelayService, ActivityService)
 // Config Hub (OP #1362 / H-01 phase 1 — canonical MCP store + per-vendor projectors)
 require_once __DIR__ . '/services/hub/HubStore.php';
 require_once __DIR__ . '/services/hub/McpConnectionTester.php';

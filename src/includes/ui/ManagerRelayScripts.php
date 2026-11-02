@@ -91,24 +91,31 @@ function relaySaveMcpEnabled() { relayPost('relay_set_mcp_enabled',{enabled:$('#
 // The endpoint is the plugin-owned listener, NOT the AICliAjax URL this used to
 // advertise: Unraid's web interface requires a login, so a bearer-only client
 // was always redirected there and could never connect (#113).
-var relayHttpListener={enabled:false,port:8237,bind:'0.0.0.0'};
+var relayHttpListener={enabled:false,port:8237,bind:'0.0.0.0'}, relayHttpRunning=false, relaySetupInfo={host:'',note:''};
 function relayHttpEndpointUrl() { return 'https://'+window.location.hostname+':'+relayHttpListener.port+'/'; }
 function relayRenderHttpEndpoint() {
   $('#relay-http-enabled').prop('checked', !!relayHttpListener.enabled);
   $('#relay-http-port').val(relayHttpListener.port);
   $('#relay-http-bind').val(relayHttpListener.bind);
   $('#relay-http-endpoint').text(relayHttpListener.enabled ? 'Endpoint: '+relayHttpEndpointUrl() : 'The external endpoint is off. External clients cannot reach Relay.');
+  if (typeof relayRenderRemotes === 'function' && typeof relayRemotes !== 'undefined' && relayRemotes.length) relayRenderRemotes();   // the setup button follows the endpoint
 }
-function relayLoadHttpListener() {
-  $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_http_listener&csrf_token='+encodeURIComponent(csrf), function(r) {
-    if (r.status === 'ok' && r.listener) { relayHttpListener=r.listener; relayRenderHttpEndpoint(); }
+var relayListenerRetryTimer = null;
+// A listener that was just started may need a few seconds before it answers. Sample again, a few times,
+// so that the setup button does not stay disabled until the page is loaded again.
+function relayLoadHttpListener(retries) {
+  $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=relay_get_http_listener&page_host='+encodeURIComponent(window.location.hostname)+'&csrf_token='+encodeURIComponent(csrf), function(r) {
+    if (r.status === 'ok' && r.listener) { relayHttpListener=r.listener; relayHttpRunning=!!r.running; relaySetupInfo=r.setup||{host:'',note:''}; relayRenderHttpEndpoint();
+      clearTimeout(relayListenerRetryTimer);
+      if (relayHttpListener.enabled && !relayHttpRunning && retries > 0) relayListenerRetryTimer = setTimeout(function () { relayLoadHttpListener(retries - 1); }, 2000);
+    }
   });
 }
 function relaySaveHttpListener() {
   relayPost('relay_set_http_listener',{enabled:$('#relay-http-enabled').is(':checked')?'1':'0',port:$('#relay-http-port').val(),bind:$('#relay-http-bind').val()},function(r){
-    if (r.status==='ok') { relayHttpListener={enabled:!!r.enabled,port:r.port,bind:r.bind}; relayRenderHttpEndpoint();
+    if (r.status==='ok') { relayHttpListener={enabled:!!r.enabled,port:r.port,bind:r.bind}; relayHttpRunning=false; if (!r.enabled) relaySetupState={}; relayRenderHttpEndpoint(); relayLoadHttpListener(8);
       swal(r.enabled ? 'External Relay endpoint enabled' : 'External Relay endpoint disabled', r.enabled ? 'Clients can connect at '+relayHttpEndpointUrl()+' using a bearer token.' : 'The listener has been stopped.','success');
-    } else { relayLoadHttpListener(); swal('Endpoint setting not saved', r.message || 'Could not update the external Relay endpoint.','error'); }
+    } else { relayLoadHttpListener(0); swal('Endpoint setting not saved', r.message || 'Could not update the external Relay endpoint.','error'); }
   }).fail(function(xhr){ var msg=(xhr.responseJSON && xhr.responseJSON.message) || 'The Relay request failed. Check the Debug Console and retry.'; swal('Endpoint setting not saved',msg,'error'); });
 }
 // ---------- remotes (RELAY_REMOTE_CLIENTS.md) ----------
@@ -141,13 +148,16 @@ function relayRenderRemotes() {
       + '<span class="relay-remote-actions" style="display:flex;gap:4px;flex-wrap:wrap;">'
       + '<button type="button" class="aicli-btn-slim relay-remote-perm" data-id="' + relayEsc(c.id) + '" title="' + relayEsc('Permissions: ' + (c.grants_summary || '')) + '">Permissions</button>'
       + '<button type="button" class="aicli-btn-slim relay-remote-copy"' + copyId + ' data-id="' + relayEsc(c.id) + '" title="Copy this remote\'s token to the clipboard" aria-label="Copy access token"' + (c.has_token ? '' : ' disabled') + '><i class="fa fa-clipboard" aria-hidden="true"></i> Copy</button>'
+      + '<button type="button" class="aicli-btn-slim relay-remote-setup" data-id="' + relayEsc(c.id) + '" aria-label="Copy setup prompt" title="' + relayEsc(!relayHttpListener.enabled ? 'Turn on \'Allow other machines to connect\' first.' : (!relayHttpRunning ? 'The Relay endpoint is switched on but is not running. Apply the setting again.' : (!relaySetupInfo.host ? (relaySetupInfo.note || 'No address that another computer can use was found.') : 'Copy one line to paste into an agent on another computer. It works once, for 15 minutes.'))) + '"' + ((relayHttpListener.enabled && relayHttpRunning && relaySetupInfo.host) ? '' : ' disabled') + '><i class="fa fa-link" aria-hidden="true"></i> Copy setup prompt</button>'
       + '<button type="button" class="aicli-btn-slim relay-remote-rotate" data-id="' + relayEsc(c.id) + '" title="Replace this remote\'s token; the current one stops working">Rotate</button>'
       + '<button type="button" class="aicli-btn-slim relay-remote-rename" data-id="' + relayEsc(c.id) + '" data-name="' + relayEsc(c.name) + '" title="Rename this remote">Rename</button>'
       + '<button type="button" class="aicli-btn-slim relay-remote-remove" data-id="' + relayEsc(c.id) + '" title="Remove this remote; its token stops working">Remove</button>'
       + '</span>'
       + '<span class="relay-remote-grants" style="grid-column:1/-1;font-size:11px;opacity:.75;">' + relayEsc(c.grants_summary || '') + '</span>'
+      + '<span class="relay-setup-note" data-id="' + relayEsc(c.id) + '" style="grid-column:1/-1;font-size:11px;opacity:.75;"></span>'
       + '</div>';
     box.append(row);
+    relaySetupShowNote(c.id);
   });
 }
 function relayLoadHttpClient() {
@@ -175,6 +185,50 @@ function relayCopyToken(id, btn) {
     }
   });
 }
+// RELAY_REMOTE_SETUP_LINK.md: one line with a one-time link and a certificate pin. It never holds a token.
+// The server makes the line, so the address, the port and the pin come from the listener, not from this page.
+var relaySetupState = {};   // remote id -> {text, line, until}; it survives a redraw of the table
+function relaySetupDefaultNote() {
+  var base = 'Copy setup prompt works once, for 15 minutes. It sends a setup page and replaces this remote\'s token, so a machine that uses this remote now must be set up again.';
+  return (relaySetupInfo && relaySetupInfo.note ? relaySetupInfo.note + ' ' : '') + base;
+}
+function relaySetupShowNote(id) {
+  var st = relaySetupState[id];
+  var box = $('.relay-setup-note[data-id="' + id + '"]');
+  if (!box.length) return;
+  box.empty().append($('<span>').text(st && st.text ? st.text : relaySetupDefaultNote()));
+  if (st && st.line) {
+    var ta = $('<textarea class="relay-setup-line" readonly rows="3" aria-label="Setup prompt" style="display:block;width:100%;margin-top:4px;font-size:11px;"></textarea>').val(st.line);
+    box.append(ta);
+    ta.on('focus click', function () { this.select(); });
+  }
+}
+function relayCopySetupPrompt(id, btn) {
+  if (!relayHttpListener.enabled || !relayHttpRunning) return;
+  var original = btn.html();
+  relayPost('relay_create_setup_link', {id: id, page_host: window.location.hostname}, function (r) {
+    if (r.status !== 'ok' || !r.line) { swal('Setup prompt not made', r.message || 'Could not make the setup link.', 'error'); return; }
+    var line = r.line;
+    var where = 'The line uses the address ' + r.address + '. ' + (r.note ? r.note + ' ' : '');
+    var done = function (ok) {
+      btn.html(ok ? '<i class="fa fa-check"></i> Copied' : '<i class="fa fa-link"></i> Copy setup prompt');
+      if (ok) {
+        relaySetupState[id] = {text: where + 'Setup prompt copied. It works once, for 15 minutes. Using it replaces this remote\'s token.', line: ''};
+      } else {
+        // The browser refused the copy. Show the line in a field the person can select and copy by hand.
+        relaySetupState[id] = {text: where + 'The browser did not allow the copy. Select the line below and copy it. It works once, for 15 minutes.', line: line};
+      }
+      relaySetupShowNote(id);
+      if (!ok) { var f = $('.relay-setup-note[data-id="' + id + '"] .relay-setup-line'); if (f.length) { f[0].focus(); f[0].select(); } }
+      setTimeout(function () { btn.html(original); }, 2500);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(line).then(function () { done(true); }, function () { relayCopyFallback(line, done); });
+    } else {
+      relayCopyFallback(line, done);
+    }
+  }).fail(relayRemoteFail('Setup prompt not made'));
+}
 function relayCopyFallback(text, done) {
   var ta = $('<textarea>').css({position:'fixed',top:'-1000px',opacity:0}).val(text).appendTo('body');
   ta[0].select();
@@ -192,10 +246,10 @@ function relayAddRemote() {
   }).fail(relayRemoteFail('Remote not added'));
 }
 function relayRotateRemote(id, name) {
-  swal({title:'Replace the token for ' + name + '?', text:'The current token stops working immediately. The machine using it will need the new one.', type:'warning', showCancelButton:true, confirmButtonText:'Replace token'}, function (ok) {
+  swal({title:'Replace the token for ' + name + '?', text:'The current token stops working immediately. The machine using it will need the new one. An unused setup prompt for this remote stops working too.', type:'warning', showCancelButton:true, confirmButtonText:'Replace token'}, function (ok) {
     if (!ok) return;
     relayPost('relay_rotate_http_client', {id: id}, function (r) {
-      if (r.status === 'ok') { relayLoadHttpClient(); swal('Token replaced', 'Use the Copy button on that row to put the new token on your clipboard.', 'success'); }
+      if (r.status === 'ok') { delete relaySetupState[id]; relayLoadHttpClient(); swal('Token replaced', 'Use the Copy button on that row to put the new token on your clipboard.', 'success'); }
       else swal('Token not replaced', r.message || 'Could not rotate the token.', 'error');
     }).fail(relayRemoteFail('Token not replaced'));
   });
@@ -219,6 +273,7 @@ function relayRemoveRemote(id, name) {
   });
 }
 $(document).on('click', '.relay-remote-perm', function () { relayPermOpenRemote(String($(this).data('id'))); });
+$(document).on('click', '.relay-remote-setup', function () { relayCopySetupPrompt(String($(this).data('id')), $(this)); });
 $(document).on('click', '.relay-remote-copy', function () { relayCopyToken($(this).data('id'), $(this)); });
 $(document).on('click', '.relay-remote-rotate', function () { var id=$(this).data('id'); var c=relayRemotes.filter(function(x){return x.id===id;})[0]||{}; relayRotateRemote(id, c.name||id); });
 $(document).on('click', '.relay-remote-rename', function () { relayRenameRemote($(this).data('id'), $(this).data('name')); });
@@ -473,7 +528,7 @@ function relayLoadStatus() {
 $(relayLoadStatus);
 $(relayLoadTopics);
 $(relayLoadTopicActors);
-$(relayLoadHttpListener);
+$(function () { relayLoadHttpListener(3); });
 $(relayLoadHttpClient);
 $(relayLoadHistory);
 // Live-refresh the owner table + status while the Relay tab is visible, so a

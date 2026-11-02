@@ -200,7 +200,31 @@ You can let a program on another computer join the Relay. The program is called 
 3. Under **Remotes**, type a **New remote name**, for example "John's laptop". Press **Add remote**. Expect: a new row with a masked token.
 4. Press **Copy** on the row. Paste the token into the other program's tool settings as a bearer token (a secret that the program sends with each request).
 
-Nothing listens on the network until you do step 2. A fresh install makes no listener and no token.
+### Connect an agent on another computer
+
+Use **Copy setup prompt** when the agent on the other computer is Claude Code, Codex or a similar program. You do not type the endpoint or the token by hand. The token does not appear in the chat of that agent: it goes into a private file that only that computer user can read.
+
+1. Make sure **Allow other machines to connect** is on and that the endpoint runs. The button is dimmed while the endpoint is off, and also while it is on but does not run. The hover text tells you which. If you press **Apply** again and the endpoint does not start, the setting goes back to its earlier value.
+2. Read the note under the row. If the line uses an address that is not the address of this page, the note says which address it uses. This happens when the endpoint listens on one fixed address, or when you reach this page through a proxy or a tunnel. Check that the other computer can reach that address.
+3. Press **Copy setup prompt** on the row of the remote. Expect: the button shows "Copied" and the note says the prompt was copied. If your browser does not allow the copy, a text field shows the line already selected. Copy it by hand.
+4. Paste the line into the agent on the other computer. The line holds a one-time code and a certificate check of this server, not a token. A self-signed certificate works, and a different server is refused.
+5. The agent runs the command. The command writes the new token into the file `~/.aicli-relay-token` and prints nothing secret. Then it shows a page of steps. The steps add the Relay as an MCP server, install the Relay skill, delete the token file, and call `relay_list_contacts` as a test. Expect: the agent lists the workspaces of this Unraid server by name.
+
+Opening the link in a browser, or a tool that only reads it, spends nothing. The link works one time and ends after 15 minutes. When the agent runs the command, the token of the remote is replaced, and the old token stops working. A computer that already uses this remote must be set up again.
+
+If the connection drops after the command ran, the agent may not have received the new token. The old token is already dead. Press **Copy setup prompt** again and paste the new line. The Activity tray says "Setup page sent", because this server cannot know whether the page arrived.
+
+If the page of steps does not appear but the command did not fail before it, ask the agent to run only the second command of the line again. It needs no code and you can run it as often as you like. Do not run the whole line again: its code works once. If the agent cannot write the private file, the command stops before it uses the code, and the same line still works after the fault is fixed.
+
+You can set up the same computer again. The steps remove the older Relay entry first. If adding the new entry fails, the agent keeps the token file and tells you, so that nothing is lost.
+
+If the note under the row says the certificate does not name the address in the line, a program that checks names, such as Node, refuses the connection even though the first command worked. Open this page with a name that the certificate has, or install a certificate for the address. The button stays dimmed when the endpoint listens only on this server itself (127.0.0.1), because no other computer can reach it.
+
+A link stops working at once when you press **Rotate** on the same remote, when you remove the remote, or when you turn **Allow other machines to connect** off. If the command runs twice, or is too old, the agent sees "This setup link was used or has expired". Press **Copy setup prompt** again.
+
+On the other computer, the steps keep the token in the configuration of the agent. On Claude Code, the token is visible to other users of that computer for a moment while the `claude` command runs. Use a computer that only you use.
+
+Nothing listens on the network until you do step 1. A fresh install makes no listener and no token.
 
 Each row has these buttons:
 
@@ -208,7 +232,8 @@ Each row has these buttons:
 | :-- | :-- |
 | **Permissions** | Opens the permissions dialog (see below). |
 | **Copy** | Copies this remote's token to the clipboard. The token is fetched only when you press the button. |
-| **Rotate** | Makes a new token. The old token stops working at once. Other remotes are not affected. |
+| **Copy setup prompt** | Copies one line that you paste into an agent on another computer. The line holds a one-time code and a certificate check, not a token. The link works once, for 15 minutes, and replaces the token of the remote when the command runs. The agent receives the token in a private file and never sees it printed. Opening the link only shows a short text and spends nothing. The button is dimmed while **Allow other machines to connect** is off or the endpoint does not run. |
+| **Rotate** | Makes a new token. The old token stops working at once, and an unused setup prompt of this remote stops working too. Other remotes are not affected. |
 | **Rename** | Changes the name that your workspaces see. |
 | **Remove** | Deletes the remote. Its token stops working at once and it leaves the contact lists. Past messages stay. |
 
@@ -296,6 +321,9 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-11-02** — **Copy setup prompt** second review: the line proves that the private file can be written before it uses the code, the steps can be fetched alone again, a re-setup of the same computer removes the old entry first, the address is checked against the names in the certificate, a loopback listener gives no line, a changed port or address ends unused links, and a failed Apply says truly whether the earlier setting was put back. Spec `docs/specs/RELAY_REMOTE_SETUP_LINK.md`, issue #845.
+- **2026-11-02** — **Copy setup prompt** now keeps the token out of the chat of the other agent: the command writes it to a private file, the steps page holds no secret, and the line checks the certificate of this server. The note under the row names the address when it differs from this page. Rotating a remote, removing it, or turning the endpoint off ends an unused link. A failed save puts the old token back. Spec `docs/specs/RELAY_REMOTE_SETUP_LINK.md`, issue #845.
+- **2026-10-31** — Each remote has a **Copy setup prompt** button. The line it copies holds a one-time link that sets up the agent on another computer. Spec `docs/specs/RELAY_REMOTE_SETUP_LINK.md`, issue #845.
 - **2026-10-27** — The Relay command has a `help` action. An empty unread inbox tells the agent how to reach messages it has already read. Spec `docs/specs/AGENT_RELAY_POC.md`, issue #773.
 - **2026-10-26** — The Topic owners table no longer lists agent.message and the notification topic, which take no owner; a note under the table says so. Issue #803.
 - **2026-10-26** — The page opens with what you gain from the feature, the same as the card help text (the (i) button). Issue #789.

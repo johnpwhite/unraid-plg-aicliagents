@@ -69,11 +69,15 @@ function relayHttpResponse(array $result): string {
     $payload = (string)$result['body'];
     // Linked-box responses carry a signature header (RELAY_LINKED_BOXES.md §3).
     $extra = '';
+    $type = "Content-Type: application/json\r\n";
     foreach ((array)($result['headers'] ?? []) as $hk => $hv) {
-        if (preg_match('/^[A-Za-z0-9-]{1,64}$/D', (string)$hk) && preg_match('/^[\x20-\x7E]{0,256}$/D', (string)$hv)) $extra .= "$hk: $hv\r\n";
+        if (!preg_match('/^[A-Za-z0-9-]{1,64}$/D', (string)$hk) || !preg_match('/^[\x20-\x7E]{0,256}$/D', (string)$hv)) continue;
+        // A handler may set its own content type (the setup page is Markdown); never send two.
+        if (strcasecmp((string)$hk, 'Content-Type') === 0) { $type = "$hk: $hv\r\n"; continue; }
+        $extra .= "$hk: $hv\r\n";
     }
     return "HTTP/1.1 {$result['status']}\r\n"
-        . "Content-Type: application/json\r\n"
+        . $type
         . $extra
         . "Content-Length: " . strlen($payload) . "\r\n"
         . "Connection: close\r\n\r\n" . $payload;

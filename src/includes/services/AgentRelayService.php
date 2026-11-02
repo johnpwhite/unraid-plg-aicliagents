@@ -204,10 +204,36 @@ class AgentRelayService {
             $settings['http_listener_enabled'] = false;
             $settings['http_listener_consent'] = false;
             $settings['http_listener_migration_pending'] = true;
-            AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+            self::withSettingsLock(static fn(): bool => AtomicWriteService::writeJson(self::path('settings.json'), $settings), false, 0.5);
         }
         return $settings;
     }
+    /**
+     * RELAY_REMOTE_SETUP_LINK.md: RelayRemoteSetup keeps its one-time links in settings.json.
+     * These three methods give it the settings document and the lock, and nothing else.
+     * The callback runs under the 'settings' lock. The lock is re-entrant inside one process.
+     */
+    private static int $settingsLockDepth = 0;
+    /**
+     * Every read-modify-write of settings.json runs under this one lock (RELAY_REMOTE_SETUP_LINK.md).
+     * It is re-entrant inside one process: a callback that calls another settings writer runs it
+     * at once and does not wait for its own lock. $wait (seconds) shortens the deadline for one
+     * call; $busy is returned when the lock was not free in time.
+     */
+    public static function withSettingsLock(callable $fn, $busy = null, ?float $wait = null) {
+        if (self::$settingsLockDepth > 0) return $fn();
+        $old = self::$lockWait; if ($wait !== null) self::$lockWait = $wait;
+        try {
+            return self::locked('settings', function () use ($fn) {
+                self::$settingsLockDepth++;
+                try { return $fn(); } finally { self::$settingsLockDepth--; }
+            }, $busy);
+        } finally { self::$lockWait = $old; }
+    }
+    /** @return array<string,mixed> */
+    public static function settingsDocument(): array { return self::settings(); }
+    /** @param array<string,mixed> $settings */
+    public static function saveSettingsDocument(array $settings): bool { return AtomicWriteService::writeJson(self::path('settings.json'), $settings); }
     /** Mirroring is on or off; the destination is fixed (see NOTIFICATION_TOPIC). */
     public static function notificationsMirrored(): bool {
         $s = self::settings();
@@ -221,10 +247,14 @@ class AgentRelayService {
     /** Destination when mirroring is on, else '' — keeps existing callers working. */
     public static function notificationTopic(): string { return self::notificationsMirrored() ? self::NOTIFICATION_TOPIC : ''; }
     public static function setNotificationsMirrored(bool $enabled): array {
-        $settings=self::settings(); $settings['notifications_mirrored']=$enabled;
-        unset($settings['notification_topic']);   // retire the old free-choice key
-        return AtomicWriteService::writeJson(self::path('settings.json'), $settings)
-            ? ['status'=>'ok','enabled'=>$enabled,'topic'=>self::NOTIFICATION_TOPIC]
+        $saved = self::withSettingsLock(static function () use ($enabled): bool {
+            $settings=self::settings(); $settings['notifications_mirrored']=$enabled;
+            unset($settings['notification_topic']);   // retire the old free-choice key
+            return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        }, null);
+        if ($saved === null) return self::busy();
+        return $saved
+            ?['status'=>'ok','enabled'=>$enabled,'topic'=>self::NOTIFICATION_TOPIC]
             : ['status'=>'error','message'=>'Could not save the notification mirroring setting.'];
     }
     public static function mcpEnabled(): bool { return !empty(self::settings()['mcp_enabled']); }
@@ -243,8 +273,12 @@ class AgentRelayService {
         if ($enabled && !self::httpListenerConsented()) {
             return ['status'=>'error','message'=>'Turn on "Allow other machines to connect" and apply it first. Linked boxes use the same listener.'];
         }
-        $settings = self::settings(); $settings['peer_links_enabled'] = $enabled;
-        if (!AtomicWriteService::writeJson(self::path('settings.json'), $settings)) return ['status'=>'error','message'=>'Could not save the linked-boxes setting.'];
+        $saved = self::withSettingsLock(static function () use ($enabled): bool {
+            $settings = self::settings(); $settings['peer_links_enabled'] = $enabled;
+            return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        }, null);
+        if ($saved === null) return self::busy();
+        if (!$saved) return ['status'=>'error','message'=>'Could not save the linked-boxes setting.'];
         if ($enabled) RelayPeerStore::boxId();   // mint the box identity at first use (spec §1)
         return ['status'=>'ok','enabled'=>$enabled];
     }
@@ -266,8 +300,10 @@ class AgentRelayService {
     }
     /** Persist the tools preference only. Use setMcpEnabled() to also (de)register and project. */
     public static function setMcpEnabledSetting(bool $enabled): bool {
-        $settings=self::settings(); $settings['mcp_enabled']=$enabled;
-        return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        return (bool)self::withSettingsLock(static function () use ($enabled): bool {
+            $settings=self::settings(); $settings['mcp_enabled']=$enabled;
+            return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        }, false);
     }
     /**
      * Always-on guarantee: a fresh install has `mcp_enabled` true by default,
@@ -370,7 +406,12 @@ class AgentRelayService {
         }
         return $out;
     }
+    /** Test seam (never set in production): returns false to make the remote row save fail. */
+    public static $rowSaveHook = null;
+    /** Test seam (never set in production): runs just before the vault is written, as another writer would. */
+    public static $beforeVaultWriteHook = null;
     private static function saveHttpClientRows(array $settings, array $rows): bool {
+        if (self::$rowSaveHook !== null && !(self::$rowSaveHook)()) return false;
         $settings['http_clients'] = array_values($rows);
         unset($settings['http_session_id'], $settings['http_token_hash']); // migrated into the table
         return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
@@ -399,32 +440,63 @@ class AgentRelayService {
     }
     /** Add a remote (token returned once, stored only in the vault); with $rotateId, rotate that remote's token instead. */
     public static function createHttpClient(string $name = '', string $rotateId = ''): array {
+        return self::withSettingsLock(fn(): array => self::createHttpClientUnlocked($name, $rotateId), self::busy());
+    }
+    private static function createHttpClientUnlocked(string $name, string $rotateId): array {
         if (!self::httpListenerConsented()) {
             return ['status' => 'error', 'message' => 'Enable the external Relay endpoint before creating an access token.'];
         }
-        $settings = self::settings(); $rows = self::httpClientRows($settings); $vaultSet = [];
+        $settings = self::settings(); $rows = self::httpClientRows($settings);
         $token = bin2hex(random_bytes(32)); $rotateId = self::cleanId($rotateId);
         if ($rotateId !== '') {
-            $found = false;
+            $found = false; $key = '';
             foreach ($rows as $i => $r) {
                 if ($r['id'] !== $rotateId) continue;
-                $rows[$i]['token_hash'] = hash('sha256', $token); $vaultSet[$r['vault_key']] = $token; $found = true; break;
+                $rows[$i]['token_hash'] = hash('sha256', $token); $key = $r['vault_key']; $found = true; break;
             }
             if (!$found) return ['status' => 'error', 'message' => 'Unknown remote.'];
             $id = $rotateId;
+            // A rotated remote has a new token, so its unused setup links are void (RELAY_REMOTE_SETUP_LINK.md).
+            RelayRemoteSetup::revokeIn($settings, $id);
         } else {
             if (count($rows) >= self::HTTP_CLIENT_MAX) return ['status' => 'error', 'message' => 'Too many remotes (max ' . self::HTTP_CLIENT_MAX . '). Remove one first.'];
             $id = 'remote_' . bin2hex(random_bytes(6)); $key = self::remoteVaultKey($id);
             $rows[] = ['id' => $id, 'name' => self::cleanRemoteName($name, 'Remote ' . (count($rows) + 1)), 'token_hash' => hash('sha256', $token), 'vault_key' => $key, 'created_at' => gmdate('c'), 'last_seen_at' => '',
                 'grants' => RelayGrants::defaults(RelayGrants::KIND_REMOTE), 'rate_per_min' => RelayGrants::defaultRate(RelayGrants::KIND_REMOTE)];
-            $vaultSet[$key] = $token;
         }
-        // #890: the vault changes under the secret lock; only the key of this remote is touched.
-        if (!SecretService::updateAgentSecrets(static fn(array $vault) => array_merge($vault, $vaultSet)) || !self::saveHttpClientRows($settings, $rows)) return ['status' => 'error', 'message' => 'Could not save the Relay remote.'];
+        // Order: vault first, then the rows. A failed row save puts the old vault value back, so the old token
+        // and its hash stay a working pair. The vault changes under the secret lock (#890, see vaultSetKey).
+        if (self::$beforeVaultWriteHook !== null) (self::$beforeVaultWriteHook)();
+        $old = self::vaultSetKey($key, $token);
+        if ($old === false) return ['status' => 'error', 'message' => 'Could not save the Relay remote.'];
+        if (!self::saveHttpClientRows($settings, $rows)) {
+            if (self::vaultSetKey($key, $old) === false) {
+                LogService::log('Relay remote ' . $id . ': the row save failed and the old token could not be put back in the vault.', LogService::LOG_ERROR, 'AgentRelayService');
+            }
+            return ['status' => 'error', 'message' => 'Could not save the Relay remote.'];
+        }
         return ['status' => 'ok', 'id' => $id, 'session_id' => $id, 'token' => $token];
+    }
+    /**
+     * Set (or, with null, remove) one key of the agent vault, under the secret lock (#890), so only this key
+     * changes. Returns the old value of the key (null when it had none), or false when the write failed.
+     * @param string|null $value
+     * @return string|null|false
+     */
+    private static function vaultSetKey(string $key, $value) {
+        $old = null;
+        $saved = SecretService::updateAgentSecrets(static function (array $vault) use ($key, $value, &$old): array {
+            $old = array_key_exists($key, $vault) ? (string)$vault[$key] : null;
+            if ($value === null) unset($vault[$key]); else $vault[$key] = (string)$value;
+            return $vault;
+        });
+        return $saved ? $old : false;
     }
     public static function rotateHttpClient(string $id): array { return self::createHttpClient('', $id); }
     public static function renameHttpClient(string $id, string $name): array {
+        return self::withSettingsLock(fn(): array => self::renameHttpClientUnlocked($id, $name), self::busy());
+    }
+    private static function renameHttpClientUnlocked(string $id, string $name): array {
         $id = self::cleanId($id); $name = self::cleanRemoteName($name);
         if ($id === '' || $name === '') return ['status' => 'error', 'message' => 'A remote needs a name (letters, digits, spaces, . _ -).'];
         $settings = self::settings(); $rows = self::httpClientRows($settings); $found = false;
@@ -434,16 +506,26 @@ class AgentRelayService {
     }
     public static function deleteHttpClient(string $id): array {
         $id = self::cleanId($id); if ($id === '') return ['status' => 'error', 'message' => 'Unknown remote.'];
-        $settings = self::settings(); $rows = self::httpClientRows($settings); $vaultDrop = []; $kept = []; $found = false;
-        foreach ($rows as $r) { if ($r['id'] === $id) { $found = true; $vaultDrop[] = $r['vault_key']; continue; } $kept[] = $r; }
-        if (!$found) return ['status' => 'error', 'message' => 'Unknown remote.'];
-        $dropVault = static function (array $vault) use ($vaultDrop) { foreach ($vaultDrop as $dk) unset($vault[$dk]); return $vault; };
-        if (!SecretService::updateAgentSecrets($dropVault) || !self::saveHttpClientRows($settings, $kept)) return ['status' => 'error', 'message' => 'Could not remove the remote.'];
+        $res = self::withSettingsLock(static function () use ($id): array {
+            $settings = self::settings(); $rows = self::httpClientRows($settings); $kept = []; $found = false; $key = '';
+            foreach ($rows as $r) { if ($r['id'] === $id) { $found = true; $key = $r['vault_key']; continue; } $kept[] = $r; }
+            if (!$found) return ['status' => 'error', 'message' => 'Unknown remote.'];
+            RelayRemoteSetup::revokeIn($settings, $id);
+            $old = self::vaultSetKey($key, null);
+            if ($old === false) return ['status' => 'error', 'message' => 'Could not remove the remote.'];
+            if (!self::saveHttpClientRows($settings, $kept)) {
+                if ($old !== null && self::vaultSetKey($key, $old) === false) LogService::log('Relay remote ' . $id . ': the row save failed and the token could not be put back in the vault.', LogService::LOG_ERROR, 'AgentRelayService');
+                return ['status' => 'error', 'message' => 'Could not remove the remote.'];
+            }
+            return ['status' => 'ok', 'kept' => count($kept)];
+        }, self::busy());
+        if (($res['status'] ?? '') !== 'ok') return $res;
+        $remaining = (int)$res['kept'];
         // Phase 2 (#299): a removed remote has no authority left, so its open
         // requests stop at once instead of keeping an actor busy.
         $cancelled = self::cancelOpenRequests($id, null, 'remote_removed');
         if ($cancelled !== []) self::remoteAudit($id, 'requests_cancelled', ['reason' => 'remote_removed', 'requests' => $cancelled]);
-        return ['status' => 'ok', 'id' => $id, 'remaining' => count($kept), 'cancelled_requests' => count($cancelled)];
+        return ['status' => 'ok', 'id' => $id, 'remaining' => $remaining, 'cancelled_requests' => count($cancelled)];
     }
 
     /**
@@ -454,6 +536,9 @@ class AgentRelayService {
      * that topic (RELAY_LINKED_BOXES.md, security review threat 3).
      */
     public static function setRemoteGrants(string $id, array $grants, $rate): array {
+        return self::withSettingsLock(fn(): array => self::setRemoteGrantsUnlocked($id, $grants, $rate), self::busy());
+    }
+    private static function setRemoteGrantsUnlocked(string $id, array $grants, $rate): array {
         $id = self::cleanId($id); if ($id === '') return ['status' => 'error', 'message' => 'Unknown remote.'];
         $settings = self::settings(); $rows = self::httpClientRows($settings); $index = null;
         foreach ($rows as $i => $r) if ($r['id'] === $id) { $index = $i; break; }
@@ -525,7 +610,19 @@ class AgentRelayService {
             if ($r['token_hash'] === '' || !hash_equals($r['token_hash'], $hash)) continue;
             // Last-used stamp, at most once a minute — keeps the hot path cheap.
             $seen = $r['last_seen_at'] !== '' ? (strtotime($r['last_seen_at']) ?: 0) : 0;
-            if (time() - $seen >= 60) { $rows[$i]['last_seen_at'] = gmdate('c'); self::saveHttpClientRows($settings, $rows); }
+            if (time() - $seen >= 60) {
+                // One try, no wait: a busy lock skips the stamp, so a signed-in request is never slowed.
+                // The row is read again under the lock; a changed token hash is not stamped.
+                self::withSettingsLock(static function () use ($hash): bool {
+                    $fresh = self::settings(); $freshRows = self::httpClientRows($fresh);
+                    foreach ($freshRows as $j => $fr) {
+                        if ($fr['token_hash'] === '' || !hash_equals($fr['token_hash'], $hash)) continue;
+                        $freshRows[$j]['last_seen_at'] = gmdate('c');
+                        return self::saveHttpClientRows($fresh, $freshRows);
+                    }
+                    return false;
+                }, false, 0.0);
+            }
             return RelayGrants::principal(RelayGrants::KIND_REMOTE, $r);
         }
         return null;
@@ -639,6 +736,23 @@ class AgentRelayService {
             'bind' => self::validBind($s['http_listener_bind'] ?? null) ?? '0.0.0.0',
         ];
     }
+    /**
+     * Real state: true when a TLS server answers on the listener's address and port now. The saved `enabled`
+     * switch can be on while no listener runs (a failed start, a crash). A TCP connect alone would pass for any
+     * process on the port, so this finishes a TLS handshake. Limit: it cannot prove that the server is OUR
+     * listener. A foreign TLS server on the port passes, but then the setup POST fails and the link is not spent.
+     */
+    public static function httpListenerRunning(): bool {
+        $s = self::httpListenerSettings();
+        if (!$s['enabled']) return false;
+        $host = ($s['bind'] === '0.0.0.0' || $s['bind'] === '') ? '127.0.0.1' : (($s['bind'] === '::') ? '::1' : $s['bind']);
+        $ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true]]);
+        $errno = 0; $err = '';
+        $sock = @stream_socket_client('ssl://' . (strpos($host, ':') !== false ? '[' . $host . ']' : $host) . ':' . $s['port'], $errno, $err, 1.5, STREAM_CLIENT_CONNECT, $ctx);
+        if ($sock === false) return false;
+        @fclose($sock);
+        return true;
+    }
     /** True only after the administrator has explicitly enabled the endpoint. */
     public static function httpListenerConsented(): bool {
         return !empty(self::settings()['http_listener_consent']);
@@ -652,6 +766,8 @@ class AgentRelayService {
     public static function httpEndpointUrl(string $host): string {
         return 'https://' . $host . ':' . self::httpListenerSettings()['port'] . '/';
     }
+    /** Test seam (never set in production): runs after a failed start, before the earlier setting is put back. */
+    public static $beforeRestoreHook = null;
     /** Persist listener settings, then bring the listener into the requested state. */
     public static function saveHttpListener(bool $enabled, int $port, string $bind): array {
         $validPort = self::validPort($port);
@@ -659,22 +775,56 @@ class AgentRelayService {
         if ($validPort === null) return ['status'=>'error','message'=>'Choose a port between 1024 and 65535. Ports below 1024 are reserved for the Unraid web interface.'];
         if ($validBind === null) return ['status'=>'error','message'=>'Enter a valid IP address to listen on, or 0.0.0.0 for every interface.'];
 
-        $settings = self::settings();
-        $settings['http_listener_enabled'] = $enabled;
-        $settings['http_listener_consent'] = $enabled;
-        $settings['http_listener_port'] = $validPort;
-        $settings['http_listener_bind'] = $validBind;
-        if (!AtomicWriteService::writeJson(self::path('settings.json'), $settings)) return ['status'=>'error','message'=>'Could not save the Relay HTTP listener setting.'];
+        $previous = [];
+        $mine = ['http_listener_enabled' => $enabled, 'http_listener_consent' => $enabled, 'http_listener_port' => $validPort, 'http_listener_bind' => $validBind];
+        $saved = self::withSettingsLock(static function () use ($enabled, $validPort, $validBind, $mine, &$previous): bool {
+            $settings = self::settings();
+            $old = self::httpListenerSettings();
+            foreach ($mine as $k => $_) $previous[$k] = $settings[$k] ?? null;
+            foreach ($mine as $k => $v) $settings[$k] = $v;
+            // An unused setup link names the old switch, port and address. It must not work after any of them changes
+            // (RELAY_REMOTE_SETUP_LINK.md R12).
+            if (!$enabled || $old['port'] !== $validPort || $old['bind'] !== $validBind) RelayRemoteSetup::revokeIn($settings);
+            return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        }, null);
+        if ($saved === null) return self::busy();
+        if (!$saved) return ['status'=>'error','message'=>'Could not save the Relay HTTP listener setting.'];
 
-        // Never bring the endpoint up without a credential to reach it.
+        // Never bring the endpoint up without a credential to reach it. If a step fails, the saved setting must
+        // not say "on" while no listener runs: put the earlier values back (only if nobody saved a newer setting
+        // meanwhile) and say truly what happened.
+        $fail = null;
         if ($enabled) {
             $client = self::ensureHttpClient();
-            if (($client['status'] ?? '') !== 'ok') return $client;
+            if (($client['status'] ?? '') !== 'ok') $fail = $client;
         }
+        if ($fail === null) {
+            $applied = self::applyHttpListener();
+            if (($applied['status'] ?? '') !== 'ok') $fail = $applied;
+        }
+        if ($fail === null) return ['status'=>'ok','enabled'=>$enabled,'port'=>$validPort,'bind'=>$validBind];
 
-        $applied = self::applyHttpListener();
-        if (($applied['status'] ?? '') !== 'ok') return $applied;
-        return ['status'=>'ok','enabled'=>$enabled,'port'=>$validPort,'bind'=>$validBind];
+        if (self::$beforeRestoreHook !== null) (self::$beforeRestoreHook)();
+        $restore = self::withSettingsLock(static function () use ($mine, $previous): string {
+            $settings = self::settings();
+            foreach ($mine as $k => $v) if (($settings[$k] ?? null) !== $v) return 'newer';
+            foreach ($previous as $k => $v) { if ($v === null) unset($settings[$k]); else $settings[$k] = $v; }
+            return AtomicWriteService::writeJson(self::path('settings.json'), $settings) ? 'ok' : 'failed';
+        }, 'busy');
+        $text = (string)($fail['message'] ?? 'The Relay HTTP listener setting was not applied.');
+        if ($restore === 'ok') {
+            $again = self::applyHttpListener();
+            $text .= ' The earlier setting was put back.' . (($again['status'] ?? '') === 'ok' ? '' : ' The earlier listener state could not be brought up again: ' . (string)($again['message'] ?? 'see the plugin log.'));
+        } elseif ($restore === 'newer') {
+            $text .= ' A newer setting was saved meanwhile, so the earlier one was not put back.';
+        } elseif ($restore === 'busy') {
+            $text .= ' The earlier setting could not be put back because the Relay was busy. Check the setting.';
+        } else {
+            $text .= ' The earlier setting could not be put back. Check the setting.';
+        }
+        $fail['message'] = $text;
+        $fail['restore'] = $restore;
+        return $fail;
     }
     /** Start or stop the listener to match the stored settings. Idempotent. */
     public static function applyHttpListener(): array {
@@ -761,8 +911,12 @@ class AgentRelayService {
     }
     /** Register the fixed local Relay MCP server through the global Config Hub. */
     public static function setMcpEnabled(bool $enabled): array {
-        $settings=self::settings(); $settings['mcp_enabled']=$enabled;
-        if (!AtomicWriteService::writeJson(self::path('settings.json'), $settings)) return ['status'=>'error','message'=>'Could not save Relay MCP setting.'];
+        $saved = self::withSettingsLock(static function () use ($enabled): bool {
+            $settings=self::settings(); $settings['mcp_enabled']=$enabled;
+            return AtomicWriteService::writeJson(self::path('settings.json'), $settings);
+        }, null);
+        if ($saved === null) return self::busy();
+        if (!$saved) return ['status'=>'error','message'=>'Could not save Relay MCP setting.'];
         $name='aicli-relay'; $mcp=\AICliAgents\Services\Hub\HubStore::getMcp();
         if ($enabled) {
             $errors=[]; $definition=['transport'=>'stdio','command'=>'php','args'=>[self::mcpScriptPath()],'env'=>[],'enabledFor'=>array_keys(\AICliAgents\Services\Hub\HubProjector::supportedVendors()),'toolsApprovalMode'=>'auto'];

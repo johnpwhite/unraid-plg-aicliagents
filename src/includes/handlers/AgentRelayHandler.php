@@ -57,6 +57,8 @@ class AgentRelayHandler {
             case 'relay_rotate_http_client': return AgentRelayService::rotateHttpClient((string)($_POST['id'] ?? ''));
             case 'relay_rename_http_client': return AgentRelayService::renameHttpClient((string)($_POST['id'] ?? ''), (string)($_POST['name'] ?? ''));
             case 'relay_delete_http_client': return AgentRelayService::deleteHttpClient((string)($_POST['id'] ?? ''));
+            // RELAY_REMOTE_SETUP_LINK.md: a one-time setup link for one remote (POST, CSRF-gated like the rest).
+            case 'relay_create_setup_link': return \AICliAgents\Services\RelayRemoteSetup::createLink((string)($_POST['id'] ?? ''), \AICliAgents\Services\HumanIdentity::name(), null, (string)($_POST['page_host'] ?? ''), $_SERVER);
             case 'relay_get_http_client': return ['status'=>'ok','client'=>AgentRelayService::httpClientPreview()];
             // Returns the secret itself, for the Manager's copy action only (row one when no id).
             case 'relay_reveal_http_token': return AgentRelayService::httpClientToken((string)($_REQUEST['id'] ?? ''));
@@ -82,7 +84,12 @@ class AgentRelayHandler {
                 return RelayPeerService::setGrants((string)($_POST['id'] ?? ''), is_array($g) ? $g : [], $_POST['rate_per_min'] ?? null);
             }
             case 'relay_get_status': return ['status'=>'ok','relay'=>AgentRelayService::statusSummary()];
-            case 'relay_get_http_listener': return ['status'=>'ok','listener'=>AgentRelayService::httpListenerSettings()];
+            case 'relay_get_http_listener': {
+                // `running` is real state (a connect test), not the saved switch. `setup` is the address the setup line will use, with the note the person must see.
+                $l = AgentRelayService::httpListenerSettings();
+                $setup = \AICliAgents\Services\RelayRemoteSetup::lineAddress((string)($_REQUEST['page_host'] ?? ''), $_SERVER);
+                return ['status'=>'ok','listener'=>$l,'running'=>$l['enabled'] && \AICliAgents\Services\RelayRemoteSetup::listenerRunning(),'setup'=>$setup];
+            }
             case 'relay_set_http_listener': return AgentRelayService::saveHttpListener(
                 ($_POST['enabled'] ?? '0') === '1',
                 (int)($_POST['port'] ?? AgentRelayService::HTTP_LISTENER_DEFAULT_PORT),

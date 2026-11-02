@@ -295,7 +295,7 @@ aicli_detach --log "$LOG" --pidfile "$PIDFILE" -- php "$SERVER" "$BIND" "$PORT" 
 
 # Confirm it survived startup rather than reporting a pid that already exited
 # (a bad cert or a taken port fails immediately).
-for _ in $(seq 1 15); do
+for _ in $(seq 1 25); do
     _alive || break
     if tail -c +"$((LOG_OFFSET + 1))" "$LOG" 2>/dev/null | grep -q "listening on"; then exit 0; fi
     sleep 0.2
