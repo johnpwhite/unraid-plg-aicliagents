@@ -34,7 +34,12 @@ if [ "${1:-}" = "--frequent" ]; then frequent=(--frequent); shift; fi
 [ "${1:-}" = "--" ] && shift
 [ "$#" -gt 0 ] || { echo "cron-run.sh: no command given" >&2; exit 2; }
 
-CFG="${AICLI_FLASH_ROOT:-/boot/config/plugins/unraid-aicliagents}/unraid-aicliagents.cfg"
+# The shared resolver names the flash root. If it cannot load, the job runs as before.
+set +u
+# shellcheck source=/dev/null
+source "$(dirname "$SELF")/storage/resolve_paths.sh" 2>/dev/null || exec "$@"
+set -u
+CFG="${AICLI_FLASH_ROOT:-}/unraid-aicliagents.cfg"
 reporter_line=""
 if [ -r "$CFG" ]; then
     reporter_line="$(sed -n 's/^job_report_command="\(.*\)"[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -n1)"
