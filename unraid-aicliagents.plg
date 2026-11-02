@@ -8,7 +8,7 @@
 **Scheduled jobs: please make a backup or check your schedule after this update**
 
 - **Fix: scheduled jobs now really run.** The automatic home backup, the daily agent update check and the health check never fired on any server, because the schedule was written to a place the server does not read. Your backup schedule starts to work after this update with no change from you. Check the time of your last backup on the backup screen, and make one by hand if it is old.
-- **Feat: each scheduled job can report its result** to a command you choose (setting `job_report_command`). With the setting empty, jobs run as normal.
+- **Feat: each scheduled job can report its result** to a command you choose (setting `job_report_command`). With the setting empty, jobs run as normal. The backup job reports when the backup is queued, not when it ends, so check the backup screen for the result of the backup.
 
 **Workspaces and agents**
 
