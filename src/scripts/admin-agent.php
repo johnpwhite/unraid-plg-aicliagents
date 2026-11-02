@@ -460,7 +460,7 @@ const ADMIN_AGENT_USAGE = [
     'boot-space' => 'boot-space -- the Boot disk space lines that can be archived or removed, from the last measurement (nothing is measured)',
     'archive-boot-data' => 'archive-boot-data <quarantine|opencode_orphans|codex_sessions|agent_sessions|superseded_layers> <user> --folder=<existing folder inside a pool> -- PROPOSES ONLY; a human must approve in the Manager UI',
     'remove-boot-data' => 'remove-boot-data <quarantine|opencode_orphans|codex_sessions|agent_sessions|superseded_layers> <user> -- PROPOSES ONLY; removes for good once a human approves in the Manager UI',
-    'backup-home' => 'backup-home <user> [--quiesce=cold|warm] [--target=<path>] [--scheduled] -- PROPOSES ONLY unless --scheduled (the operator\'s own cron; do not pass it yourself); --scheduled refuses from inside an agent workspace',
+    'backup-home' => 'backup-home <user> [--quiesce=cold|warm] [--target=<path>] [--scheduled] -- PROPOSES ONLY unless --scheduled (the operator\'s own cron; do not pass it yourself; it waits for the backup to end and exits with its result); --scheduled refuses from inside an agent workspace',
     'list-backups' => 'list-backups <user>',
     'restore-home' => 'restore-home <user> --snapshot=<path|latest> [--mode=replace|merge] [--no-safety-snapshot] --yes -- the OPERATOR\'s own command; without --yes prints the plan and exits 2; --yes refuses from inside an agent workspace; an agent must use aicli_restore_home instead',
     'artefacts' => 'artefacts [--area=<a>] [--type=<t>] [--tag=<t>] [--text=<word>] [--made-by=<name>] [--since=<iso>] [--global] -- the Notebook list',
@@ -1000,6 +1000,11 @@ try {
                 if (!class_exists('\AICliAgents\Handlers\StorageHandler')) { require_once __DIR__ . '/../includes/handlers/StorageHandler.php'; }
                 \AICliAgents\Services\AgentActionAudit::record('cli', 'backup-home', 'destructive', ['user' => $bhUser], 'attempt');
                 $result = \AICliAgents\Handlers\StorageHandler::backupHome($bhUser, $bhOpts);
+                // #891: backupHome() only queues the job. Wait for the job to end, so the cron
+                // wrapper and the job reporter get the real exit code. Interactive paths do not wait.
+                if (($result['status'] ?? '') === 'ok' && (string)($result['jobId'] ?? '') !== '') {
+                    $result = array_merge($result, \AICliAgents\Services\BackupCronService::awaitResult($bhUser, (string)$result['jobId']));
+                }
                 $outcome = (($result['status'] ?? '') === 'ok') ? 'ok' : 'error';
                 \AICliAgents\Services\AgentActionAudit::record('cli', 'backup-home', 'destructive', ['user' => $bhUser], $outcome, (string)($result['message'] ?? ''), $result);
                 // The cron line sends stdout to /dev/null, so a failed scheduled

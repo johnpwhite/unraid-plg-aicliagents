@@ -161,4 +161,58 @@ class BackupCronService {
         }
         return $lines;
     }
+
+    /** #891: the longest a scheduled backup run waits for its job: 6 hours, so a very large home can finish. */
+    public const WAIT_DEADLINE_SEC = 21600;
+    /** #891: seconds between two looks at the job and its result record. */
+    public const WAIT_POLL_SEC = 5;
+
+    /**
+     * #891: wait for the queued backup job of $user to end, and answer its real result.
+     * The result is the last-run record (backup-last-<user>.json) of THIS job: its
+     * data.job_id equals $jobId. A record with no job id counts only when it is newer
+     * than the job's queue time. A job that ended with no record is an error. At the
+     * deadline the answer is an error that says the job is still running.
+     * No lock: it reads files, sleeps, and reads again.
+     *
+     * @param (callable(int):void)|null $sleep Injected in tests; default sleep().
+     * @param (callable():int)|null $clock Injected in tests; default time().
+     * @return array{status:string,message:string}
+     */
+    public static function awaitResult(string $user, string $jobId, int $deadlineSec = self::WAIT_DEADLINE_SEC, int $pollSec = self::WAIT_POLL_SEC, ?callable $sleep = null, ?callable $clock = null): array {
+        require_once __DIR__ . '/SupervisorService.php';
+        $sleep = $sleep ?? static function (int $s): void { sleep($s); };
+        $clock = $clock ?? static fn(): int => time();
+        $safeUser = (string)preg_replace('/[^A-Za-z0-9._-]/', '', $user);
+        $dir = getenv('AICLI_BACKUP_LAST_DIR') ?: SecretPaths::flashRoot();
+        $path = rtrim((string)$dir, '/') . "/backup-last-$safeUser.json";
+        $end = $clock() + max(0, $deadlineSec);
+        while (true) {
+            $job = SupervisorService::getJob($jobId);
+            $ended = is_array($job) && !SupervisorService::isJobActive($job);
+            $rec = is_file($path) ? json_decode((string)@file_get_contents($path), true) : null;
+            if (is_array($rec)) {
+                $data = is_array($rec['data'] ?? null) ? $rec['data'] : [];
+                $recJob = (string)($data['job_id'] ?? '');
+                $at = (int)strtotime((string)($rec['at'] ?? ''));
+                $mine = $recJob === $jobId
+                    || ($recJob === '' && $ended && $at >= (int)($job['queued_at'] ?? 0));
+                if ($mine) {
+                    $summary = trim((string)($rec['summary'] ?? ''));
+                    if (!empty($rec['ok'])) {
+                        return ['status' => 'ok', 'message' => $summary !== '' ? $summary : "home backup of $user finished"];
+                    }
+                    return ['status' => 'error', 'message' => $summary !== '' ? $summary : "home backup of $user failed"];
+                }
+            }
+            if ($ended) {
+                $code = (int)($job['exit'] ?? 0);
+                return ['status' => 'error', 'message' => "The backup job of $user ended (state " . (string)($job['state'] ?? '?') . ", exit code $code) and left no result record."];
+            }
+            if ($clock() >= $end) {
+                return ['status' => 'error', 'message' => "Timed out after {$deadlineSec} s: the backup job $jobId of $user has not ended."];
+            }
+            $sleep(max(1, $pollSec));
+        }
+    }
 }

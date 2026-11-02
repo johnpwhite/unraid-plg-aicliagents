@@ -106,7 +106,7 @@ The checkbox **Tell an agent to continue if it was working when the backup start
 | Day (weekly only) | Sunday to Saturday | Sunday |
 | Time (daily and weekly) | A time of day | 02:00 |
 
-The plugin owns one scheduled job for each home that has a schedule. A home with **Off** has none. The schedule runs the same backup as **Back up now**, with the mode you chose. If a scheduled backup fails, the plugin writes the reason to the log.
+The plugin owns one scheduled job for each home that has a schedule. A home with **Off** has none. The schedule runs the same backup as **Back up now**, with the mode you chose. The scheduled job waits until the backup ends, and then reports the real result: it shows as failed when the backup fails. A backup of a very large home can take hours. The job gives up and reports a failure after 6 hours. If a scheduled backup fails, the plugin writes the reason to the log.
 
 The Health check for backups warns when the last snapshot of a home is older than twice the schedule interval. Without a schedule, it warns after 7 days. The text reads, for example, "root's last home backup was 3.2 day(s) ago". See [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
