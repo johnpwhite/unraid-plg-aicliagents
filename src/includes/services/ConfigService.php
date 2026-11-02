@@ -79,6 +79,8 @@ class ConfigService {
             'version_check_months' => '3',
             // R-09 (Feature #1372): plugin health check cron — empty disables.
             'health_check_schedule' => '*/30 * * * *',
+            // CRON_JOB_REPORTING.md: optional command that reports each plugin cron job. Empty = no reporting.
+            'job_report_command' => '',
             // T-08 follow-on (ACTIVITY_TRAY.md): per-session graceful-close poll
             // budget in seconds. Default matches the historical hardcoded 3s.
             'graceful_close_timeout' => '3',
@@ -735,8 +737,45 @@ class ConfigService {
         return $schedule;
     }
 
+    /** CRON_JOB_REPORTING.md: the one script every plugin cron line goes through. */
+    public const CRON_RUN_SCRIPT = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/cron-run.sh';
+
+    /**
+     * The command part of a plugin cron line: the job goes through cron-run.sh, which reports it
+     * when the server has a job reporter and runs it as before when it has none.
+     */
+    public static function cronRunCommand(string $job, string $command, bool $frequent = false): string {
+        return '/bin/bash ' . self::CRON_RUN_SCRIPT . ' ' . $job . ($frequent ? ' --frequent' : '') . ' -- ' . $command;
+    }
+
+    /**
+     * Where a plugin cron file lives. Unraid's update_cron joins every
+     * /boot/config/plugins/<plugin>/*.cron file into the system crontab. A file in /etc/cron.d
+     * named like the plugin is NOT read: that folder holds one crontab per Unix user (#885).
+     */
+    public static function pluginCronPath(string $name): string {
+        return SecretPaths::flashRoot() . '/' . $name . '.cron';
+    }
+
+    /** Remove the old, inert /etc/cron.d file of a job (#885). AICLI_CRON_DIR redirects the folder for tests. */
+    public static function removeLegacyCronFile(string $name): void {
+        $dir = getenv('AICLI_CRON_DIR');
+        @unlink((($dir !== false && $dir !== '') ? rtrim($dir, '/') : '/etc/cron.d') . '/unraid-aicliagents.' . $name);
+    }
+
+    /** Write a plugin cron file and drop the old inert one. Returns true when the file landed whole. */
+    public static function writePluginCron(string $name, string $content): bool {
+        $written = @file_put_contents(self::pluginCronPath($name), $content);
+        self::removeLegacyCronFile($name);
+        return $written !== false && $written === strlen($content);
+    }
+
+    public static function removePluginCron(string $name): void {
+        @unlink(self::pluginCronPath($name));
+        self::removeLegacyCronFile($name);
+    }
+
     public static function updateVersionCheckCron(string $schedule): void {
-        $cronFile = '/etc/cron.d/unraid-aicliagents.agent-check';
         $script = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/agentcheck';
 
         if ($schedule !== '' && self::safeCronSchedule($schedule) === '') {
@@ -746,10 +785,10 @@ class ConfigService {
 
         if (empty($schedule)) {
             // Disabled — remove cron file
-            @unlink($cronFile);
+            self::removePluginCron('agent-check');
         } else {
-            $content = "# AICliAgents: Agent version check schedule\n$schedule $script &> /dev/null\n";
-            @file_put_contents($cronFile, $content);
+            $content = "# AICliAgents: Agent version check schedule\n$schedule " . self::cronRunCommand('aicli-agent-check', $script) . " &> /dev/null\n";
+            self::writePluginCron('agent-check', $content);
         }
         exec("/usr/local/sbin/update_cron 2>/dev/null");
         LogService::log("Version check cron updated: " . ($schedule ?: 'disabled'), LogService::LOG_INFO, "ConfigService");
@@ -760,7 +799,6 @@ class ConfigService {
      * Mirrors updateVersionCheckCron — empty schedule removes the cron file.
      */
     public static function updateHealthCheckCron(string $schedule): void {
-        $cronFile = '/etc/cron.d/unraid-aicliagents.health-check';
         $script = '/usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/healthcheck.php';
 
         if ($schedule !== '' && self::safeCronSchedule($schedule) === '') {
@@ -770,10 +808,10 @@ class ConfigService {
 
         if (empty($schedule)) {
             // Disabled — remove cron file
-            @unlink($cronFile);
+            self::removePluginCron('health-check');
         } else {
-            $content = "# AICliAgents: plugin health check schedule\n$schedule /usr/bin/php $script &> /dev/null\n";
-            @file_put_contents($cronFile, $content);
+            $content = "# AICliAgents: plugin health check schedule\n$schedule " . self::cronRunCommand('aicli-health-check', "/usr/bin/php $script", true) . " &> /dev/null\n";
+            self::writePluginCron('health-check', $content);
         }
         exec("/usr/local/sbin/update_cron 2>/dev/null");
         LogService::log("Health check cron updated: " . ($schedule ?: 'disabled'), LogService::LOG_INFO, "ConfigService");

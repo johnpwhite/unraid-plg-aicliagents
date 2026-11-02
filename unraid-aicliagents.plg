@@ -793,7 +793,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.11.01.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
-<SHA256>864771ef1f3c31d03e3bea24d33de2b6085445dcac438be3b633020bd68676ac</SHA256>
+<SHA256>dc97cf42f1495d73945800bf4c22cab035d21388c89805b564ff29920b02f18d</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.11.01.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
@@ -817,7 +817,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-uninstaller-2026.11.01.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/uninstaller/uninstall-engine.sh</URL>
-<SHA256>c791c93fef3ac3f6017d99947a7fe0c59484fd1b014a514259d28bebfcc3917e</SHA256>
+<SHA256>aa1d39cf1ec4db68b8a9ba9c8d4eccfe607a7ebd0fb1532f44610ea5fda4dd49</SHA256>
 </FILE>
 
 <!-- MAIN INSTALL ENGINE -->

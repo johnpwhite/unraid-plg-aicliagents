@@ -111,7 +111,14 @@ log_ok "Services initialized. Plugin updated to v$VERSION."
 
 # --- Agent Version Check Cron ---
 log_step "Registering agent version check schedule..."
-CRON_FILE="/etc/cron.d/unraid-aicliagents.agent-check"
+# #885: Unraid's update_cron reads /boot/config/plugins/<plugin>/*.cron. A file named like the
+# plugin in /etc/cron.d is never read (that folder holds one crontab per Unix user), so the
+# old files are removed and the lines go to *.cron files. Every line goes through cron-run.sh,
+# which reports the job when the optional job_report_command setting names a reporter.
+CRON_FILE="${PLUGIN_BASE}/agent-check.cron"
+CRON_RUN="$EMHTTP_DEST/src/scripts/cron-run.sh"
+chmod 755 "$CRON_RUN" 2>/dev/null
+rm -f /etc/cron.d/unraid-aicliagents.agent-check /etc/cron.d/unraid-aicliagents.health-check /etc/cron.d/unraid-aicliagents.backup-home
 AGENT_CHECK_SCRIPT="$EMHTTP_DEST/src/scripts/agentcheck"
 chmod 755 "$AGENT_CHECK_SCRIPT" 2>/dev/null
 # Read schedule from config, default to daily at 6am
@@ -119,14 +126,14 @@ SCHEDULE=$(grep -oP 'version_check_schedule="\K[^"]+' "${PLUGIN_BASE}/unraid-aic
 [ -z "$SCHEDULE" ] && SCHEDULE="0 6 * * *"
 cat > "$CRON_FILE" <<CRON
 # AICliAgents: Agent version check schedule
-$SCHEDULE $AGENT_CHECK_SCRIPT &> /dev/null
+$SCHEDULE /bin/bash $CRON_RUN aicli-agent-check -- $AGENT_CHECK_SCRIPT &> /dev/null
 CRON
 /usr/local/sbin/update_cron 2>/dev/null || true
 log_ok "Agent version check scheduled ($SCHEDULE)."
 
 # --- Plugin Health Check Cron (R-09, Feature #1372) ---
 log_step "Registering plugin health check schedule..."
-HEALTH_CRON_FILE="/etc/cron.d/unraid-aicliagents.health-check"
+HEALTH_CRON_FILE="${PLUGIN_BASE}/health-check.cron"
 HEALTH_SCRIPT="$EMHTTP_DEST/src/scripts/healthcheck.php"
 # Key absent -> default every 30 min; key present but EMPTY -> user disabled it
 # (mirrors ConfigService::updateHealthCheckCron semantics).
@@ -138,7 +145,7 @@ fi
 if [ -n "$HEALTH_SCHEDULE" ]; then
     cat > "$HEALTH_CRON_FILE" <<CRON
 # AICliAgents: plugin health check schedule
-$HEALTH_SCHEDULE /usr/bin/php $HEALTH_SCRIPT &> /dev/null
+$HEALTH_SCHEDULE /bin/bash $CRON_RUN aicli-health-check --frequent -- /usr/bin/php $HEALTH_SCRIPT &> /dev/null
 CRON
     log_ok "Plugin health check scheduled ($HEALTH_SCHEDULE)."
 else

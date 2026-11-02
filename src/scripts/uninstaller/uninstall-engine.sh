@@ -131,6 +131,9 @@ fi
 log_status "[4/5] Removing cron, shell, command, event, and nginx integrations..."
 rm -f "$CRON_DIR/unraid-aicliagents.agent-check"
 rm -f "$CRON_DIR/unraid-aicliagents.health-check"
+rm -f "$CRON_DIR/unraid-aicliagents.backup-home"
+# #885: the live cron files sit next to the config. update_cron stops reading them once the plugin is gone.
+rm -f "$CONFIG_DIR/agent-check.cron" "$CONFIG_DIR/health-check.cron" "$CONFIG_DIR/backup-home.cron"
 if [ "${AICLI_SKIP_SERVICE_RELOADS:-0}" != "1" ] && [ -x /usr/local/sbin/update_cron ]; then
     /usr/local/sbin/update_cron >/dev/null 2>&1 || true
 fi

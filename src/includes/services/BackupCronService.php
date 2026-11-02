@@ -27,16 +27,14 @@
 namespace AICliAgents\Services;
 
 class BackupCronService {
-    /** One file, like the health-check and agent-check crons. */
-    private const CRON_FILE = '/etc/cron.d/unraid-aicliagents.backup-home';
-
     /**
-     * The cron file path. AICLI_BACKUP_CRON_FILE is a test-only override, so a test
-     * never writes the system cron folder. Production never sets it.
+     * The cron file path: backup-home.cron next to the plugin config, where Unraid's update_cron
+     * reads it, like the health-check and agent-check crons (#885). AICLI_BACKUP_CRON_FILE is a
+     * test-only override. Production never sets it.
      */
     private static function cronFile(): string {
         $e = getenv('AICLI_BACKUP_CRON_FILE');
-        return ($e !== false && $e !== '') ? $e : self::CRON_FILE;
+        return ($e !== false && $e !== '') ? $e : ConfigService::pluginCronPath('backup-home');
     }
 
     /** The CLI entry point every cron line calls — never a proposal, per HOME_BACKUP.md's Tier row: `--scheduled` is the operator's own schedule, not an agent action. */
@@ -106,6 +104,7 @@ class BackupCronService {
         });
 
         if (empty($lines)) {
+            ConfigService::removePluginCron('backup-home');
             @unlink(self::cronFile());
             LogService::log('Home backup schedule: no home has a schedule — cron not installed.', LogService::LOG_INFO, 'BackupCronService');
             @exec('/usr/local/sbin/update_cron 2>/dev/null');
@@ -129,6 +128,7 @@ class BackupCronService {
     public static function writeCronFile(array $lines, string $file): bool {
         $content = "# AICliAgents: home backup schedule (one line per home, each with its own schedule)\n" . implode('', $lines);
         $written = @file_put_contents($file, $content);
+        ConfigService::removeLegacyCronFile('backup-home'); // the old inert file (#885)
         return $written !== false && $written === strlen($content);
     }
 
@@ -156,7 +156,8 @@ class BackupCronService {
                 }
                 continue;
             }
-            $lines[] = "$cronExpr /usr/bin/php " . self::ADMIN_AGENT_SCRIPT . " backup-home --user=$user --scheduled &> /dev/null\n";
+            $job = $user === 'root' ? 'aicli-backup-home' : 'aicli-backup-home-' . $user;
+            $lines[] = "$cronExpr " . ConfigService::cronRunCommand($job, '/usr/bin/php ' . self::ADMIN_AGENT_SCRIPT . " backup-home --user=$user --scheduled") . " &> /dev/null\n";
         }
         return $lines;
     }
