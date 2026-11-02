@@ -1960,7 +1960,10 @@ class ConfigService {
         }
 
         $file = self::getEnvFilePath($path, $agentId);
-        $ok = AtomicWriteService::writeJson($file, $envs);
+        // #890: this is the same file EnvService::updateWorkspaceEnvs() changes, so it takes the same lock.
+        $ok = false;
+        $busy = false;
+        EnvService::withLock(static function () use ($file, $envs, &$ok) { $ok = AtomicWriteService::writeJson($file, $envs); }, $busy);
 
         if ($ok) {
             LogService::log("Successfully updated environment variables for $agentId. Added: $added, Modified: $modified, Removed: $removed.", LogService::LOG_INFO, "ConfigService");

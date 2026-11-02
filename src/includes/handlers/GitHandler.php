@@ -117,15 +117,22 @@ class GitHandler
             if (preg_match('/[\x00-\x1f\x7f]/', $token) || strlen($token) > 512) {
                 return ['status' => 'error', 'message' => 'invalid token value'];
             }
-            $vault = SecretService::getAgentSecrets();
-            $vault[GitHomeService::TOKEN_KEY] = $token;
-            if (!SecretService::saveAgentSecrets($vault)) {
-                return ['status' => 'error', 'message' => 'remote saved but storing the token failed'];
-            }
-            $free = SecretService::getFreeformKeys();
-            if (!in_array(GitHomeService::TOKEN_KEY, $free, true)) {
-                $free[] = GitHomeService::TOKEN_KEY;
-                SecretService::setFreeformKeys($free);
+            // #890: the vault and the free-form list change under one lock.
+            $stored = false;
+            SecretService::withLock(static function () use ($token, &$stored) {
+                $stored = SecretService::updateAgentSecrets(static function (array $vault) use ($token) {
+                    $vault[GitHomeService::TOKEN_KEY] = $token;
+                    return $vault;
+                });
+                if (!$stored) return;
+                SecretService::updateFreeformKeys(static function (array $free) {
+                    if (in_array(GitHomeService::TOKEN_KEY, $free, true)) return null;
+                    $free[] = GitHomeService::TOKEN_KEY;
+                    return $free;
+                });
+            });
+            if (!$stored) {
+                return ['status' => 'error', 'message' => 'remote saved but storing the token failed. ' . (SecretService::lastUpdateMessage() ?? '')];
             }
         }
         $out = ['status' => 'ok'];

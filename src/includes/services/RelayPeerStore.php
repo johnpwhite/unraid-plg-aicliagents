@@ -182,16 +182,21 @@ class RelayPeerStore {
 
     /** Set the current key; $keepOld keeps the previous key as _OLD (rekey grace). */
     public static function setLinkKey(string $id, string $keyHex, bool $keepOld = false): bool {
-        $vault = SecretService::getAgentSecrets(); $k = self::vaultKey($id);
-        if ($keepOld && isset($vault[$k])) $vault[$k . '_OLD'] = $vault[$k]; else unset($vault[$k . '_OLD']);
-        $vault[$k] = $keyHex;
-        return SecretService::saveAgentSecrets($vault);
+        $k = self::vaultKey($id);
+        // #890: read, change and write under the secret lock.
+        return SecretService::updateAgentSecrets(static function (array $vault) use ($k, $keyHex, $keepOld) {
+            if ($keepOld && isset($vault[$k])) $vault[$k . '_OLD'] = $vault[$k]; else unset($vault[$k . '_OLD']);
+            $vault[$k] = $keyHex;
+            return $vault;
+        });
     }
 
     public static function deleteLinkKeys(string $id): bool {
-        $vault = SecretService::getAgentSecrets(); $k = self::vaultKey($id);
-        unset($vault[$k], $vault[$k . '_OLD']);
-        return SecretService::saveAgentSecrets($vault);
+        $k = self::vaultKey($id);
+        return SecretService::updateAgentSecrets(static function (array $vault) use ($k) {
+            unset($vault[$k], $vault[$k . '_OLD']);
+            return $vault;
+        });
     }
 
     public static function pairingSecret(): string {
@@ -200,9 +205,10 @@ class RelayPeerStore {
     }
 
     public static function setPairingSecret(?string $hex): bool {
-        $vault = SecretService::getAgentSecrets();
-        if ($hex === null) unset($vault[self::PAIRING_VAULT_KEY]); else $vault[self::PAIRING_VAULT_KEY] = $hex;
-        return SecretService::saveAgentSecrets($vault);
+        return SecretService::updateAgentSecrets(static function (array $vault) use ($hex) {
+            if ($hex === null) unset($vault[self::PAIRING_VAULT_KEY]); else $vault[self::PAIRING_VAULT_KEY] = $hex;
+            return $vault;
+        });
     }
 
     // ---- per-peer runtime files -----------------------------------------------------

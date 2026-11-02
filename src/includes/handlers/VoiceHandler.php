@@ -404,25 +404,34 @@ class VoiceHandler
             return null;
         }
         if ($key === '__clear__') {
-            $vault = SecretService::getAgentSecrets();
-            unset($vault[$tokenKey]);
-            if (!SecretService::saveAgentSecrets($vault)) {
-                return ['status' => 'error', 'message' => "Settings saved, but clearing the $engineLabel key failed."];
+            // #890: read, change and write under the secret lock.
+            if (!SecretService::updateAgentSecrets(static function (array $vault) use ($tokenKey) {
+                unset($vault[$tokenKey]);
+                return $vault;
+            })) {
+                return ['status' => 'error', 'message' => "Settings saved, but clearing the $engineLabel key failed. " . (SecretService::lastUpdateMessage() ?? '')];
             }
             return null;
         }
         if (preg_match('/[\x00-\x1f\x7f]/', $key) || strlen($key) > 512) {
             return ['status' => 'error', 'message' => 'invalid API key value'];
         }
-        $vault = SecretService::getAgentSecrets();
-        $vault[$tokenKey] = $key;
-        if (!SecretService::saveAgentSecrets($vault)) {
-            return ['status' => 'error', 'message' => "Settings saved, but storing the $engineLabel key failed."];
-        }
-        $free = SecretService::getFreeformKeys();
-        if (!in_array($tokenKey, $free, true)) {
-            $free[] = $tokenKey;
-            SecretService::setFreeformKeys($free);
+        // #890: the vault and the free-form list change under one lock.
+        $stored = false;
+        SecretService::withLock(static function () use ($tokenKey, $key, &$stored) {
+            $stored = SecretService::updateAgentSecrets(static function (array $vault) use ($tokenKey, $key) {
+                $vault[$tokenKey] = $key;
+                return $vault;
+            });
+            if (!$stored) return;
+            SecretService::updateFreeformKeys(static function (array $free) use ($tokenKey) {
+                if (in_array($tokenKey, $free, true)) return null;
+                $free[] = $tokenKey;
+                return $free;
+            });
+        });
+        if (!$stored) {
+            return ['status' => 'error', 'message' => "Settings saved, but storing the $engineLabel key failed. " . (SecretService::lastUpdateMessage() ?? '')];
         }
         return null;
     }

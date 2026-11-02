@@ -10,6 +10,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/FileLock.php';
+
 class SecretService {
 
     // ---------- Paths ----------
@@ -55,9 +57,13 @@ class SecretService {
         ConfigService::refuseLiveStateInTests($file);
         $dir = dirname($file);
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        $ok = \AICliAgents\Services\AtomicWriteService::writeJson($file, $unique);
-        if ($ok) @chmod($file, 0600);
-        return $ok;
+        $ok = false;
+        $busy = false;
+        self::withLock(static function () use ($file, $unique, &$ok) {
+            $ok = \AICliAgents\Services\AtomicWriteService::writeJson($file, $unique);
+            if ($ok) @chmod($file, 0600);
+        }, $busy);
+        return !$busy && $ok;
     }
 
     // ---------- Raw reads (server-side only — for launch-time env injection) ----------
@@ -88,11 +94,18 @@ class SecretService {
      * UtilityHandler::saveVault path merges via placeholder resolution before
      * calling here).
      *
+     * #890: this REPLACES the vault with no read. A caller that starts from the
+     * stored map (read, change, write back) must use updateAgentSecrets() instead,
+     * or two saves at once can lose a key. A guard test pins that.
+     *
      * Map shape: ['UPPER_SNAKE_KEY' => 'value', ...]. Keys not matching the
      * shape are silently dropped — defence in depth against a corrupt POST.
      */
     public static function saveAgentSecrets(array $map): bool {
-        return self::writeVault(self::getAgentSecretsPath(), $map);
+        $ok = false;
+        $busy = false;
+        self::withLock(static function () use ($map, &$ok) { $ok = self::writeVault(self::getAgentSecretsPath(), $map); }, $busy);
+        return !$busy && $ok;
     }
 
     /**
@@ -101,11 +114,137 @@ class SecretService {
      */
     public static function saveWorkspaceSecrets(string $path, string $agentId, array $map): bool {
         $file = self::getWorkspaceSecretsPath($path, $agentId);
-        if (empty($map)) {
-            if (file_exists($file)) @unlink($file);
-            return true;
+        $ok = false;
+        $busy = false;
+        self::withLock(static function () use ($file, $map, &$ok) {
+            if (empty($map)) {
+                if (file_exists($file)) @unlink($file);
+                $ok = true;
+                return;
+            }
+            $ok = self::writeVault($file, $map);
+        }, $busy);
+        return !$busy && $ok;
+    }
+
+    // ---------- Locked read-modify-write (#890) ----------
+    // Every writer that starts from the stored map goes through updateAgentSecrets(),
+    // updateWorkspaceSecrets() or updateFreeformKeys(). One lock covers the vault, the
+    // workspace secret files and the free-form key list, so two saves at once cannot lose a key.
+
+    /** Seconds an update waits for the secret lock before it gives up. Tests shorten it. */
+    public static float $lockWaitSeconds = 10.0;
+    private static ?string $lastUpdateMessage = null;
+    private static ?string $lastUpdateNotice = null;
+
+    /** Lock file for the secret store. In the RAM state root, never on flash or /mnt/user. */
+    public static function lockPath(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/secrets.lock';
+    }
+
+    /** Plain-words reason the last update failed in this process, or null. Show it to the person. */
+    public static function lastUpdateMessage(): ?string {
+        return self::$lastUpdateMessage;
+    }
+
+    /**
+     * Run $fn while holding the secret lock. LOCK_EX|LOCK_NB in a poll loop with a deadline,
+     * never a blocking flock. Re-entrant in one process. At the deadline, or when no lock file
+     * can be opened, $fn is NOT run and $busy is true: the caller must report the lost save.
+     * (The vault differs from the workspace list here: with no lock we do not write.)
+     *
+     * @param bool|null $busy set to true when the lock was not taken
+     * @return mixed
+     */
+    public static function withLock(callable $fn, ?bool &$busy = null, string $what = 'secret store') {
+        $busy = false;
+        $path = self::lockPath();
+        if (!FileLock::isHeld($path)) {
+            self::$lastUpdateMessage = null;
+            self::$lastUpdateNotice = null;
         }
-        return self::writeVault($file, $map);
+        $result = FileLock::run($path, self::$lockWaitSeconds, $fn, $busy);
+        if ($busy) self::busyMessage($what);
+        return $result;
+    }
+
+    /** A message for the person after a save that WORKED but needs their attention (a damaged file was set aside), or null. */
+    public static function lastUpdateNotice(): ?string {
+        return self::$lastUpdateNotice;
+    }
+
+    /**
+     * Change the agent vault under the lock. $fn gets the current map and returns the new
+     * map to write, or null for "no change" (nothing is written, the result is true).
+     * False means nothing was written: the lock stayed busy, the vault cannot be read, or the
+     * write failed. lastUpdateMessage() then says why. A damaged file is copied to <file>.corrupt-* (#636) and the update goes on with an empty map; lastUpdateNotice() then tells the person.
+     *
+     * @param callable(array):(?array) $fn
+     */
+    public static function updateAgentSecrets(callable $fn): bool {
+        return self::updateFile(self::getAgentSecretsPath(), $fn, 'secret vault');
+    }
+
+    /** Same as updateAgentSecrets for the secrets of one workspace and agent. An empty new map removes the file. */
+    public static function updateWorkspaceSecrets(string $path, string $agentId, callable $fn): bool {
+        return self::updateFile(self::getWorkspaceSecretsPath($path, $agentId), $fn, 'workspace secrets', true);
+    }
+
+    /** Change the free-form key list under the lock. $fn gets the list and returns the new list, or null for no change. */
+    public static function updateFreeformKeys(callable $fn): bool {
+        $ok = false;
+        $busy = false;
+        self::withLock(static function () use ($fn, &$ok) {
+            $next = $fn(self::getFreeformKeys());
+            $ok = $next === null ? true : self::setFreeformKeys($next);
+        }, $busy, 'free-form key list');
+        if ($busy) return false;
+        if (!$ok) self::$lastUpdateMessage = 'The list of free-form secret names could not be saved.';
+        return $ok;
+    }
+
+    private static function busyMessage(string $what): void {
+        self::$lastUpdateMessage = 'The ' . $what . ' is busy with another save, so this change was not saved. Retry in a moment.';
+        LogService::log('Secret store: NOT SAVED: the lock stayed busy for ' . self::$lockWaitSeconds . 's (' . $what . ')', LogService::LOG_ERROR, 'SecretService');
+    }
+
+    private static function updateFile(string $file, callable $fn, string $what, bool $emptyRemoves = false): bool {
+        ConfigService::refuseLiveStateInTests($file);
+        $ok = false;
+        $busy = false;
+        self::withLock(static function () use ($file, $fn, $what, $emptyRemoves, &$ok) {
+            // Read INSIDE the lock, strictly.
+            $current = self::readIniStrict($file);
+            $damaged = $current === null;
+            if ($damaged) $current = [];
+            $next = $fn($current);
+            if ($next === null) {
+                $ok = true;
+                if ($damaged) self::$lastUpdateNotice = 'The ' . $what . ' file is damaged and could not be read. Nothing was changed. The next save sets it aside as a copy and starts a new file.';
+                return;
+            }
+            // #636: a file that exists but cannot be parsed is never replaced or removed unseen.
+            // Keep a copy first, then go on, so one damaged file never blocks every save.
+            if ($damaged) {
+                $copy = FileLock::keepCorruptCopy($file);
+                if ($copy === null) {
+                    self::$lastUpdateMessage = 'The ' . $what . ' file is damaged and a copy of it could not be made, so nothing was saved. Check the disk, then retry.';
+                    LogService::log('Secret store: the damaged file ' . basename($file) . ' could not be copied; nothing was saved.', LogService::LOG_ERROR, 'SecretService');
+                    return;
+                }
+                self::$lastUpdateNotice = 'The ' . $what . ' file was damaged and could not be read. It is kept as ' . $copy . ' next to it. Your change is saved in a new file. To get back an older value, open the copy in an editor and enter the value again.';
+                LogService::log('Secret store: the existing file could not be parsed; a copy was kept at ' . $copy, LogService::LOG_WARN, 'SecretService');
+            }
+            if ($emptyRemoves && empty($next)) {
+                if (file_exists($file)) @unlink($file);
+                $ok = true;
+                return;
+            }
+            $ok = self::writeVault($file, $next, $damaged);
+            if (!$ok) self::$lastUpdateMessage = 'The ' . $what . ' could not be written.';
+        }, $busy, $what);
+        if ($busy) return false;
+        return $ok;
     }
 
     // ---------- Internal ----------
@@ -156,7 +295,7 @@ class SecretService {
      * whole file unreadable. A vault that exists but cannot be parsed is copied to
      * <file>.corrupt-<time> first, so the replacement never destroys it unseen.
      */
-    private static function writeVault(string $file, array $map): bool {
+    private static function writeVault(string $file, array $map, bool $copyKept = false): bool {
         // #646: a test never writes a vault under a live root.
         ConfigService::refuseLiveStateInTests($file);
         // Pre-create parent 0700. AtomicWriteService::write would create it 0755
@@ -184,10 +323,9 @@ class SecretService {
             return false;
         }
 
-        if (file_exists($file) && self::readIniStrict($file) === null) {
-            $copy = $file . '.corrupt-' . date('Ymd-His');
-            if (@copy($file, $copy)) @chmod($copy, 0600);
-            LogService::log('Secret store: the existing file could not be parsed; a copy was kept at ' . basename($copy), LogService::LOG_WARN, 'SecretService');
+        if (!$copyKept && file_exists($file) && self::readIniStrict($file) === null) {
+            $copy = FileLock::keepCorruptCopy($file);
+            LogService::log('Secret store: the existing file could not be parsed; a copy was kept at ' . ($copy ?? '(no copy could be made)'), LogService::LOG_WARN, 'SecretService');
         }
 
         // 0600 from the first byte: the temp file is never group- or world-readable.

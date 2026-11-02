@@ -1780,7 +1780,7 @@ function av2SaveSecrets(form, event) {
         method: 'POST', data: payload, dataType: 'json',
         success: function(r) {
             if (r && r.status === 'ok') {
-                if (typeof swal === 'function') swal({title: 'Saved', text: 'Secrets updated for ' + agentId, type: 'success', timer: 1300, showConfirmButton: false});
+                if (typeof swal === 'function') swal(r.notice ? {title: 'Saved, with a note', text: r.notice, type: 'warning'} : {title: 'Saved', text: 'Secrets updated for ' + agentId, type: 'success', timer: 1300, showConfirmButton: false});
                 // #463: a save that changed nothing needs no restart notice.
                 if (r.changed !== false && typeof av2OfferRestart === 'function') av2OfferRestart(agentId);
             } else {
@@ -1986,7 +1986,7 @@ function av2FfSave(form, event, action, agentId, label) {
         dataType: 'json',
         success: function(r) {
             if (r && r.status === 'ok') {
-                if (typeof swal === 'function') swal({ title: 'Saved', text: label + ' updated for ' + agentId, type: 'success', timer: 1300, showConfirmButton: false });
+                if (typeof swal === 'function') swal(r.notice ? { title: 'Saved, with a note', text: r.notice, type: 'warning' } : { title: 'Saved', text: label + ' updated for ' + agentId, type: 'success', timer: 1300, showConfirmButton: false });
                 // #463: a save that changed nothing needs no restart notice.
                 if (r.changed !== false) av2OfferRestart(agentId);
             } else {

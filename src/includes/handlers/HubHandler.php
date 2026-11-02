@@ -273,20 +273,34 @@ class HubHandler
         if (!preg_match(HubStore::NAME_RE, $name)) return ['status' => 'error', 'message' => 'invalid server name'];
         $stored = HubStore::getServer($name);
         if ($stored === null) return ['status' => 'error', 'message' => 'unknown server'];
-        $vault = \AICliAgents\Services\SecretService::getAgentSecrets();
-        $moved = HubStore::moveRawSecretsOut($name, $stored, $vault);
-        if (empty($moved['fields'])) return ['status' => 'ok', 'moved' => [], 'keys' => [], 'message' => 'Nothing to move: this server holds no typed secret.'];
-
         $errors = [];
-        // Check the new definition first, so the vault is not changed for a server that still would not save.
-        if (HubStore::normalizeServer($moved['def'], $errors) === null) {
-            return ['status' => 'error', 'message' => 'The server still cannot be saved: ' . implode('; ', $errors)];
-        }
-        if (!\AICliAgents\Services\SecretService::saveAgentSecrets(array_merge($vault, $moved['secrets']))) {
-            return ['status' => 'error', 'message' => 'The secrets vault could not be written. Nothing was changed.'];
-        }
-        $freeform = \AICliAgents\Services\SecretService::getFreeformKeys();
-        \AICliAgents\Services\SecretService::setFreeformKeys(array_values(array_unique(array_merge($freeform, array_keys($moved['secrets'])))));
+        $moved = null;
+        $result = null;
+        // #890: the vault and the free-form list change under one lock. The new key names are
+        // chosen against the vault as read inside the lock, so two moves cannot take one name.
+        \AICliAgents\Services\SecretService::withLock(static function () use ($name, $stored, &$errors, &$moved, &$result) {
+            $saved = \AICliAgents\Services\SecretService::updateAgentSecrets(static function (array $vault) use ($name, $stored, &$errors, &$moved, &$result) {
+                $moved = HubStore::moveRawSecretsOut($name, $stored, $vault);
+                if (empty($moved['fields'])) {
+                    $result = ['status' => 'ok', 'moved' => [], 'keys' => [], 'message' => 'Nothing to move: this server holds no typed secret.'];
+                    return null;
+                }
+                // Check the new definition first, so the vault is not changed for a server that still would not save.
+                if (HubStore::normalizeServer($moved['def'], $errors) === null) {
+                    $result = ['status' => 'error', 'message' => 'The server still cannot be saved: ' . implode('; ', $errors)];
+                    return null;
+                }
+                return array_merge($vault, $moved['secrets']);
+            });
+            if (!$saved) {
+                $result = ['status' => 'error', 'message' => 'The secrets vault could not be written. Nothing was changed. ' . (\AICliAgents\Services\SecretService::lastUpdateMessage() ?? '')];
+                return;
+            }
+            if ($result !== null) return;
+            $keys = array_keys($moved['secrets']);
+            \AICliAgents\Services\SecretService::updateFreeformKeys(static fn(array $freeform) => array_values(array_unique(array_merge($freeform, $keys))));
+        });
+        if ($result !== null) return $result;
         if (!HubStore::saveServer($name, $moved['def'], $errors)) {
             return ['status' => 'error', 'message' => 'The secrets are in the vault, but the server could not be saved: ' . implode('; ', $errors)];
         }

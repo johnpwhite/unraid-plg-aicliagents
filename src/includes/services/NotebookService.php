@@ -2619,13 +2619,20 @@ class NotebookService {
         return SecretService::getWorkspaceSecrets('notebook:' . $ctx['notebookId'], 'notebook');
     }
 
-    private static function vaultSave(array $ctx, array $map): bool {
+    /**
+     * #890: change the notebook vault under the secret lock. $fn gets the stored map and returns
+     * the new map, or null for "no change". False means nothing was written.
+     * @param callable(array):(?array) $fn
+     */
+    private static function vaultUpdate(array $ctx, callable $fn): bool {
         if (self::$vaultStub !== null) {
-            if ($map === []) unset(self::$vaultStub[$ctx['notebookId']]); else self::$vaultStub[$ctx['notebookId']] = $map;
+            $next = $fn(self::$vaultStub[$ctx['notebookId']] ?? []);
+            if ($next === null) return true;
+            if ($next === []) unset(self::$vaultStub[$ctx['notebookId']]); else self::$vaultStub[$ctx['notebookId']] = $next;
             return true;
         }
         if (defined('AICLI_TEST_TMP')) return false; // never the real vault under test
-        return SecretService::saveWorkspaceSecrets('notebook:' . $ctx['notebookId'], 'notebook', $map);
+        return SecretService::updateWorkspaceSecrets('notebook:' . $ctx['notebookId'], 'notebook', $fn);
     }
 
     /** @return ?string error */
@@ -2637,13 +2644,19 @@ class NotebookService {
             return 'This value looks like a live production key. Production keys are blocked unless "allow production secrets" is turned on in the plugin settings.';
         }
         $key = self::vaultKey($artefactId, $field);
-        $map = self::vaultLoad($ctx);
-        $before = $map;
-        $map[$key] = $value;
-        if (!self::vaultSave($ctx, $map)) return 'The vault could not be written, so the secret was not stored.';
+        $had = null;
+        $stored = self::vaultUpdate($ctx, static function (array $map) use ($key, $value, &$had) {
+            $had = $map[$key] ?? null;
+            $map[$key] = $value;
+            return $map;
+        });
+        if (!$stored) return 'The vault could not be written, so the secret was not stored.';
         $check = self::vaultLoad($ctx);
         if (($check[$key] ?? null) !== $value) {
-            self::vaultSave($ctx, $before);
+            self::vaultUpdate($ctx, static function (array $map) use ($key, $had) {
+                if ($had === null) unset($map[$key]); else $map[$key] = $had;
+                return $map;
+            });
             return 'The vault cannot store this value exactly (it has characters the vault format cannot hold). Nothing was stored.';
         }
         return null;
@@ -2652,10 +2665,12 @@ class NotebookService {
     /** @return ?string error */
     private static function vaultClear(array $ctx, string $artefactId, string $field): ?string {
         $key = self::vaultKey($artefactId, $field);
-        $map = self::vaultLoad($ctx);
-        if (!isset($map[$key])) return null;
-        unset($map[$key]);
-        return self::vaultSave($ctx, $map) ? null : 'The vault could not be written.';
+        $ok = self::vaultUpdate($ctx, static function (array $map) use ($key) {
+            if (!isset($map[$key])) return null;
+            unset($map[$key]);
+            return $map;
+        });
+        return $ok ? null : 'The vault could not be written.';
     }
 
     // ======================================================================

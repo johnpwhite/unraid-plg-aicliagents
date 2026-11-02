@@ -402,13 +402,13 @@ class AgentRelayService {
         if (!self::httpListenerConsented()) {
             return ['status' => 'error', 'message' => 'Enable the external Relay endpoint before creating an access token.'];
         }
-        $settings = self::settings(); $rows = self::httpClientRows($settings); $vault = SecretService::getAgentSecrets();
+        $settings = self::settings(); $rows = self::httpClientRows($settings); $vaultSet = [];
         $token = bin2hex(random_bytes(32)); $rotateId = self::cleanId($rotateId);
         if ($rotateId !== '') {
             $found = false;
             foreach ($rows as $i => $r) {
                 if ($r['id'] !== $rotateId) continue;
-                $rows[$i]['token_hash'] = hash('sha256', $token); $vault[$r['vault_key']] = $token; $found = true; break;
+                $rows[$i]['token_hash'] = hash('sha256', $token); $vaultSet[$r['vault_key']] = $token; $found = true; break;
             }
             if (!$found) return ['status' => 'error', 'message' => 'Unknown remote.'];
             $id = $rotateId;
@@ -417,9 +417,10 @@ class AgentRelayService {
             $id = 'remote_' . bin2hex(random_bytes(6)); $key = self::remoteVaultKey($id);
             $rows[] = ['id' => $id, 'name' => self::cleanRemoteName($name, 'Remote ' . (count($rows) + 1)), 'token_hash' => hash('sha256', $token), 'vault_key' => $key, 'created_at' => gmdate('c'), 'last_seen_at' => '',
                 'grants' => RelayGrants::defaults(RelayGrants::KIND_REMOTE), 'rate_per_min' => RelayGrants::defaultRate(RelayGrants::KIND_REMOTE)];
-            $vault[$key] = $token;
+            $vaultSet[$key] = $token;
         }
-        if (!SecretService::saveAgentSecrets($vault) || !self::saveHttpClientRows($settings, $rows)) return ['status' => 'error', 'message' => 'Could not save the Relay remote.'];
+        // #890: the vault changes under the secret lock; only the key of this remote is touched.
+        if (!SecretService::updateAgentSecrets(static fn(array $vault) => array_merge($vault, $vaultSet)) || !self::saveHttpClientRows($settings, $rows)) return ['status' => 'error', 'message' => 'Could not save the Relay remote.'];
         return ['status' => 'ok', 'id' => $id, 'session_id' => $id, 'token' => $token];
     }
     public static function rotateHttpClient(string $id): array { return self::createHttpClient('', $id); }
@@ -433,10 +434,11 @@ class AgentRelayService {
     }
     public static function deleteHttpClient(string $id): array {
         $id = self::cleanId($id); if ($id === '') return ['status' => 'error', 'message' => 'Unknown remote.'];
-        $settings = self::settings(); $rows = self::httpClientRows($settings); $vault = SecretService::getAgentSecrets(); $kept = []; $found = false;
-        foreach ($rows as $r) { if ($r['id'] === $id) { $found = true; unset($vault[$r['vault_key']]); continue; } $kept[] = $r; }
+        $settings = self::settings(); $rows = self::httpClientRows($settings); $vaultDrop = []; $kept = []; $found = false;
+        foreach ($rows as $r) { if ($r['id'] === $id) { $found = true; $vaultDrop[] = $r['vault_key']; continue; } $kept[] = $r; }
         if (!$found) return ['status' => 'error', 'message' => 'Unknown remote.'];
-        if (!SecretService::saveAgentSecrets($vault) || !self::saveHttpClientRows($settings, $kept)) return ['status' => 'error', 'message' => 'Could not remove the remote.'];
+        $dropVault = static function (array $vault) use ($vaultDrop) { foreach ($vaultDrop as $dk) unset($vault[$dk]); return $vault; };
+        if (!SecretService::updateAgentSecrets($dropVault) || !self::saveHttpClientRows($settings, $kept)) return ['status' => 'error', 'message' => 'Could not remove the remote.'];
         // Phase 2 (#299): a removed remote has no authority left, so its open
         // requests stop at once instead of keeping an actor busy.
         $cancelled = self::cancelOpenRequests($id, null, 'remote_removed');

@@ -406,6 +406,8 @@ The plugin saves the values of a workspace in files that belong to the pair of a
 | The viewer shows "Read only", or "Truncated at 5 MB on read — save disabled". | The file is under `/tmp`, or it is larger than 5 MB. | Copy the file, or edit it with another tool. |
 | A favourite card is dimmed. | The agent is not installed. | Install it in the Agent Store. |
 | **Secrets** says the home folder is not mounted. | The array is stopped, or the session has no home. | Start the array and try again. |
+| A save of secrets or variables says the store is busy. | Another save is still running. | Wait a few seconds and press save again. Nothing was saved, and the old values stay as they were. |
+| A save works and shows a note that a file was damaged. | The file could not be read. The plugin kept it as a copy with `.corrupt-` in its name and saved your change in a new file. | Open the copy in an editor and enter again any value that is now missing. |
 | The import shows an error. | The file is not a bundle from this plugin, or it is larger than 1 MB. | Export a bundle again from the plugin. |
 | The key icon is a clipboard. | SSH is off in Unraid, or no key is registered. | Turn SSH on and add a key. |
 | A workspace did not return after a restart. | You closed it with **Close**. Or **Restart all saved workspaces** is off. Or no conversation exists and **Start fresh if no resume** is off. Or an upgrade of the agent waits. | Use a favourite, or check the switches on the **Terminal** chip. |
@@ -432,6 +434,7 @@ If the problem remains, see [Health, Activity and troubleshooting](health-and-tr
 <details>
 <summary>Change history</summary>
 
+- **2026-11-02** — Two saves of secrets at the same time can no longer lose a key. A save that cannot run says the secret store is busy and keeps the old secrets. A secrets file that cannot be read is kept as a copy next to it, and the save goes on with a note. Spec `docs/specs/SECRET_VAULT_LOCK.md`, issue #890.
 - **2026-10-24** — The secrets folder in the picker lists its files, and a tap opens one. On a phone, the **Reveal** button shows its whole word. An empty value gets a clear message. Spec `docs/specs/FILE_VIEWER_SECRET_DROP.md`, issue #764.
 - **2026-10-23** — The Agent Store chips are called **Variables** and **Start options** in this guide (they were **Envs** and **Args**). The tabs of the dialog **Manage Session** keep the names **ENV**, **tmux** and **Args**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — The Configuration tab has new cards. The continue settings, your patterns and the Terminal input safety rules are in the card **Automatic continue** (the last two in its part **Advanced**). The switch **Let agents manage the plugin** is in **General**, part **Advanced**. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.

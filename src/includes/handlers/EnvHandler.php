@@ -64,11 +64,15 @@ class EnvHandler {
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
-        $before = EnvService::getAgentEnvs($agentId);
-        $ok = EnvService::saveAgentEnvs($agentId, $clean);
+        // #890: the changed flag is taken from the map read inside the env lock.
+        $before = [];
+        $ok = EnvService::updateAgentEnvs($agentId, static function (array $cur) use ($clean, &$before) {
+            $before = $cur;
+            return $clean;
+        });
         return $ok
-            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($before, $clean)]
-            : ['status' => 'error', 'message' => 'Write failed'];
+            ? self::withNotice(['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($before, $clean)])
+            : ['status' => 'error', 'message' => EnvService::lastUpdateMessage() ?? 'Write failed'];
     }
 
     // ---------- General — workspace ----------
@@ -98,10 +102,10 @@ class EnvHandler {
             return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
         }
 
-        $ok = EnvService::saveWorkspaceEnvs($path, $agentId, $clean);
+        $ok = EnvService::updateWorkspaceEnvs($path, $agentId, static fn(array $cur) => $clean);
         return $ok
-            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected]
-            : ['status' => 'error', 'message' => 'Write failed'];
+            ? self::withNotice(['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected])
+            : ['status' => 'error', 'message' => EnvService::lastUpdateMessage() ?? 'Write failed'];
     }
 
     // ---------- Secret — agent (free-form sub-section) ----------
@@ -125,66 +129,86 @@ class EnvHandler {
      */
     private const MASKED_PLACEHOLDER = '••••••••';
 
+    /** #636/#890: a save that worked but set a damaged file aside carries a notice for the person. */
+    private static function withNotice(array $reply): array {
+        $n = SecretService::lastUpdateNotice() ?? EnvService::lastUpdateNotice();
+        if ($n !== null) $reply['notice'] = $n;
+        return $reply;
+    }
+
     private static function saveAgentSecrets(): array {
         $payload = self::decodeMapPayload();
-        $current = SecretService::getAgentSecrets();
-        // Secret key shape matches the existing vault: UPPER_SNAKE.
+        $schemaKeys = self::collectAllSchemaSecretKeys();
+        $result = null;   // set by the locked step; an error array stops the save
         $clean = [];
-        $emptied = [];
-        $rejected = [];
-        foreach ($payload as $k => $v) {
-            $k = (string)$k; $v = (string)$v;
-            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $k)) {
-                $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
-                continue;
-            }
-            if (EnvService::isReservedKey($k)) {
-                $rejected[] = [$k, 'reserved name (managed by the plugin runtime)'];
-                continue;
-            }
-            // The UI renders a set value as the masked placeholder. If the user
-            // didn't retype it, "keep existing" — carry the current value forward.
-            if ($v === self::MASKED_PLACEHOLDER) {
-                if (isset($current[$k]) && (string)$current[$k] !== '') $clean[$k] = (string)$current[$k];
-                continue;
-            }
-            // An empty value clears the stored value (#669). Without this a schema key,
-            // which is never free-form, could not be cleared by this save at all.
-            if ($v === '') { $emptied[] = $k; continue; }
-            $clean[$k] = EnvService::sanitiseValue($v);
-        }
-        if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
-            return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
-        }
-
-        $freeformKeys = SecretService::getFreeformKeys();
-        $schemaKeys   = self::collectAllSchemaSecretKeys();
-
-        // Drop existing free-form keys (about to be replaced wholesale by the POST);
-        // drop a key the POST sent empty (cleared); keep everything else (schema-managed
-        // keys, and — conservatively — any pre-feature key that's in neither the schema
-        // nor the free-form sidecar).
+        $current = [];
         $next = [];
-        foreach ($current as $k => $v) {
-            if (!in_array($k, $freeformKeys, true) && !in_array($k, $emptied, true)) $next[$k] = $v;
-        }
-        foreach ($clean as $k => $v) {
-            $next[$k] = $v;
+        $freeformFailed = false;
+        $ok = false;
+        $busy = false;
+        // #890: the whole read-change-write runs under the secret lock, so a second save
+        // at the same time cannot read the old vault and write it back over this one.
+        SecretService::withLock(static function () use ($payload, $schemaKeys, &$result, &$clean, &$current, &$next, &$ok, &$freeformFailed) {
+            $ok = SecretService::updateAgentSecrets(static function (array $cur) use ($payload, &$result, &$clean, &$current, &$next) {
+                $current = $cur;
+                $emptied = [];
+                $rejected = [];
+                foreach ($payload as $k => $v) {
+                    $k = (string)$k; $v = (string)$v;
+                    // Secret key shape matches the existing vault: UPPER_SNAKE.
+                    if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $k)) {
+                        $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
+                        continue;
+                    }
+                    if (EnvService::isReservedKey($k)) {
+                        $rejected[] = [$k, 'reserved name (managed by the plugin runtime)'];
+                        continue;
+                    }
+                    // The UI renders a set value as the masked placeholder. If the user
+                    // didn't retype it, "keep existing" — carry the current value forward.
+                    if ($v === self::MASKED_PLACEHOLDER) {
+                        if (isset($cur[$k]) && (string)$cur[$k] !== '') $clean[$k] = (string)$cur[$k];
+                        continue;
+                    }
+                    // An empty value clears the stored value (#669). Without this a schema key,
+                    // which is never free-form, could not be cleared by this save at all.
+                    if ($v === '') { $emptied[] = $k; continue; }
+                    $clean[$k] = EnvService::sanitiseValue($v);
+                }
+                if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
+                    $result = ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
+                    return null;
+                }
+                // Drop existing free-form keys (about to be replaced wholesale by the POST);
+                // drop a key the POST sent empty (cleared); keep everything else (schema-managed
+                // keys, and — conservatively — any pre-feature key that's in neither the schema
+                // nor the free-form sidecar).
+                $freeformKeys = SecretService::getFreeformKeys();
+                foreach ($cur as $k => $v) {
+                    if (!in_array($k, $freeformKeys, true) && !in_array($k, $emptied, true)) $next[$k] = $v;
+                }
+                foreach ($clean as $k => $v) {
+                    $next[$k] = $v;
+                }
+                return $next;
+            });
+            if (!$ok || $result !== null) return;
+            // Rebuild the sidecar to mirror the new free-form set (only keys that
+            // also aren't in the schema — paranoid: a user shouldn't be able to
+            // sneak a schema name into the free-form list).
+            $newFreeform = [];
+            foreach (array_keys($clean) as $k) {
+                if (!in_array($k, $schemaKeys, true)) $newFreeform[] = $k;
+            }
+            $freeformFailed = !SecretService::updateFreeformKeys(static fn(array $old) => $newFreeform);
+        }, $busy);
+        if ($result !== null) return $result;
+        if ($busy || !$ok) return ['status' => 'error', 'message' => SecretService::lastUpdateMessage() ?? 'The secrets could not be saved. Retry in a moment.'];
+        if ($freeformFailed) {
+            return ['status' => 'error', 'message' => 'The secrets were saved, but the list of free-form names was not. ' . (SecretService::lastUpdateMessage() ?? '')];
         }
 
-        $ok = SecretService::saveAgentSecrets($next);
-        if (!$ok) return ['status' => 'error', 'message' => 'Write failed'];
-
-        // Rebuild the sidecar to mirror the new free-form set (only keys that
-        // also aren't in the schema — paranoid: a user shouldn't be able to
-        // sneak a schema name into the free-form list).
-        $newFreeform = [];
-        foreach (array_keys($clean) as $k) {
-            if (!in_array($k, $schemaKeys, true)) $newFreeform[] = $k;
-        }
-        SecretService::setFreeformKeys($newFreeform);
-
-        return ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($current, $next)];
+        return self::withNotice(['status' => 'ok', 'count' => count($clean), 'rejected' => [], 'changed' => !self::sameMap($current, $next)]);
     }
 
     // ---------- Secret — workspace ----------
@@ -209,36 +233,42 @@ class EnvHandler {
         if ($path === '') return ['status' => 'error', 'message' => 'Missing path'];
 
         $payload = self::decodeMapPayload();
-        $current = SecretService::getWorkspaceSecrets($path, $agentId);
+        $current = [];
         $clean = [];
-        $rejected = [];
-        foreach ($payload as $k => $v) {
-            $k = (string)$k; $v = (string)$v;
-            if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $k)) {
-                $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
-                continue;
+        $result = null;
+        // #890: read, change and write under the secret lock.
+        $ok = SecretService::updateWorkspaceSecrets($path, $agentId, static function (array $cur) use ($payload, &$current, &$clean, &$result) {
+            $current = $cur;
+            $rejected = [];
+            foreach ($payload as $k => $v) {
+                $k = (string)$k; $v = (string)$v;
+                if (!preg_match('/^[A-Z][A-Z0-9_]{1,127}$/D', $k)) {
+                    $rejected[] = [$k, 'invalid secret name (UPPER_SNAKE, 2 to 128 characters)'];
+                    continue;
+                }
+                if (EnvService::isReservedKey($k)) {
+                    $rejected[] = [$k, 'reserved name'];
+                    continue;
+                }
+                if ($v === self::MASKED_PLACEHOLDER) {
+                    if (isset($cur[$k]) && (string)$cur[$k] !== '') $clean[$k] = (string)$cur[$k];
+                    continue;
+                }
+                if ($v === '') continue;
+                $clean[$k] = EnvService::sanitiseValue($v);
             }
-            if (EnvService::isReservedKey($k)) {
-                $rejected[] = [$k, 'reserved name'];
-                continue;
+            if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
+                $result = ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
+                return null;
             }
-            if ($v === self::MASKED_PLACEHOLDER) {
-                if (isset($current[$k]) && (string)$current[$k] !== '') $clean[$k] = (string)$current[$k];
-                continue;
-            }
-            if ($v === '') continue;
-            $clean[$k] = EnvService::sanitiseValue($v);
-        }
-        if (!empty($rejected)) { // #666 R-154: save nothing, so a refused rename keeps the old value
-            return ['status' => 'error', 'message' => self::rejectionMsg($rejected)];
-        }
-
-        $ok = SecretService::saveWorkspaceSecrets($path, $agentId, $clean);
+            return $clean;
+        });
+        if ($result !== null) return $result;
         // #463: `changed` lets the page skip the "restart to use the new values" notice
         // when the save left every value as it was.
         return $ok
-            ? ['status' => 'ok', 'count' => count($clean), 'rejected' => $rejected, 'changed' => !self::sameMap($current, $clean)]
-            : ['status' => 'error', 'message' => 'Write failed'];
+            ? self::withNotice(['status' => 'ok', 'count' => count($clean), 'rejected' => [], 'changed' => !self::sameMap($current, $clean)])
+            : ['status' => 'error', 'message' => SecretService::lastUpdateMessage() ?? 'Write failed'];
     }
 
     // ---------- Effective merge view (for UI inherit/diff display) ----------

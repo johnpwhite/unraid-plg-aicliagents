@@ -1520,18 +1520,23 @@ class AdminService {
                 if (EnvService::isReservedKey($key)) {
                     return ['error' => "'$key' is a reserved name managed by the plugin runtime."];
                 }
-                $current = SecretService::getWorkspaceSecrets($path, $agentId);
-                if ($value === '') { unset($current[$key]); } else { $current[$key] = EnvService::sanitiseValue($value); }
-                $ok = SecretService::saveWorkspaceSecrets($path, $agentId, $current);
+                // #890: read, change and write under the secret lock.
+                $ok = SecretService::updateWorkspaceSecrets($path, $agentId, static function (array $current) use ($key, $value) {
+                    if ($value === '') { unset($current[$key]); } else { $current[$key] = EnvService::sanitiseValue($value); }
+                    return $current;
+                });
+                if (!$ok) return ['error' => SecretService::lastUpdateMessage() ?? 'Write failed.'];
             } else {
                 if (!EnvService::validateKey($key)) {
                     return ['error' => "Invalid or reserved name '$key' — see aicli_get_workspace's env_keys for what is already set."];
                 }
-                $current = EnvService::getWorkspaceEnvs($path, $agentId);
-                if ($value === '') { unset($current[$key]); } else { $current[$key] = EnvService::sanitiseValue($value); }
-                $ok = EnvService::saveWorkspaceEnvs($path, $agentId, $current);
+                // #890: read, change and write under the env lock.
+                $ok = EnvService::updateWorkspaceEnvs($path, $agentId, static function (array $current) use ($key, $value) {
+                    if ($value === '') { unset($current[$key]); } else { $current[$key] = EnvService::sanitiseValue($value); }
+                    return $current;
+                });
+                if (!$ok) return ['error' => EnvService::lastUpdateMessage() ?? 'Write failed.'];
             }
-            if (!$ok) return ['error' => 'Write failed.'];
 
             // Key NAME and a changed flag only — never the value, secret or not.
             self::emitEvent('agent.env', ['workspaceId' => $id, 'agentId' => $agentId], "Environment variable '$key' changed for workspace '$id'", ['key' => $key, 'changed' => true]);

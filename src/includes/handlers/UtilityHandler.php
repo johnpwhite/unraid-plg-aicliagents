@@ -266,11 +266,29 @@ class UtilityHandler {
      * fields entirely, so clearing a secret was a silent no-op.)
      */
     private static function saveVault() {
-        $existing = \AICliAgents\Services\SecretService::getAgentSecrets();
-        $before = array_map('strval', $existing);
-        ksort($before);
+        // #890: read, change and write under the secret lock, so a second save at the same
+        // time cannot lose a key.
+        $touched = 0; $before = []; $after = [];
+        $ok = \AICliAgents\Services\SecretService::updateAgentSecrets(static function (array $existing) use (&$touched, &$before, &$after) {
+            $before = array_map('strval', $existing);
+            ksort($before);
+            $next = self::applyVaultPost($existing, $touched);
+            $after = array_map('strval', $next);
+            ksort($after);
+            return $next;
+        });
+        if (!$ok) {
+            return ['status' => 'error', 'message' => \AICliAgents\Services\SecretService::lastUpdateMessage() ?? 'Failed to write secrets.cfg'];
+        }
+        // #463: `changed` is false when the save left every stored value as it was
+        // (for example a form whose fields all still show the dots).
+        $out = ['status' => 'ok', 'updated' => $touched, 'changed' => $after !== $before];
+        if (($n = \AICliAgents\Services\SecretService::lastUpdateNotice()) !== null) $out['notice'] = $n;
+        return $out;
+    }
 
-        $touched = 0;
+    /** Apply the POSTed secret fields to the stored map and return the new map (no I/O). */
+    private static function applyVaultPost(array $existing, int &$touched): array {
         $resolved = [];
         // First pass: collect literal values keyed by declared env name (or
         // placeholder-containing name). Literal values (e.g. GOOSE_PROVIDER=anthropic)
@@ -307,16 +325,7 @@ class UtilityHandler {
             }
         }
 
-        // #636: one writer for the vault (SecretService), with INI escaping, a read-back
-        // proof, a refusal of reserved key names and a backup of an unreadable vault.
-        if (!\AICliAgents\Services\SecretService::saveAgentSecrets($existing)) {
-            return ['status' => 'error', 'message' => 'Failed to write secrets.cfg'];
-        }
-        // #463: `changed` is false when the save left every stored value as it was
-        // (for example a form whose fields all still show the dots).
-        $after = array_map('strval', $existing);
-        ksort($after);
-        return ['status' => 'ok', 'updated' => $touched, 'changed' => $after !== $before];
+        return $existing;
     }
 
     private static function getWorkspaces() {
@@ -395,7 +404,10 @@ class UtilityHandler {
             return ['status' => 'error', 'message' => 'Workspace path is required'];
         }
         // D-403: Use the wrapper function which triggers immediate home persistence
-        saveWorkspaceEnvs($path, $agentId, $envs);
+        if (!saveWorkspaceEnvs($path, $agentId, $envs)) {
+            // #890: a failed save (busy lock, write error) is shown, not reported as saved.
+            return ['status' => 'error', 'message' => 'The variables could not be saved: the variable store is busy or could not be written. Retry in a moment.'];
+        }
         return ['status' => 'ok'];
     }
 

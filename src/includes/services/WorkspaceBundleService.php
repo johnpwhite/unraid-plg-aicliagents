@@ -393,8 +393,12 @@ class WorkspaceBundleService
             if (is_array($rawMap) && !empty($rawMap)) {
                 [$cleanMap, $rejected] = EnvService::validateMap($rawMap);
                 if (!empty($cleanMap)) {
-                    EnvService::saveWorkspaceEnvs($newWorkspacePath, $agentId, $cleanMap);
-                    $applied[] = 'env_ws.json';
+                    // #890: a failed save is reported, not counted as applied.
+                    if (EnvService::saveWorkspaceEnvs($newWorkspacePath, $agentId, $cleanMap)) {
+                        $applied[] = 'env_ws.json';
+                    } else {
+                        $skipped[] = 'env_ws.json (the variable store was busy or could not be written)';
+                    }
                     if (!empty($rejected)) {
                         $skipped[] = 'env_ws.json (some keys rejected: ' . implode('; ', array_map(fn($r) => $r[0] . ': ' . $r[1], $rejected)) . ')';
                     }
@@ -479,8 +483,12 @@ class WorkspaceBundleService
                         }
                     }
                     if (!empty($clean)) {
-                        SecretService::saveWorkspaceSecrets($newWorkspacePath, $agentId, $clean);
-                        $applied[] = 'secrets_ws.cfg';
+                        // #890: a failed save is reported, not counted as applied.
+                        if (SecretService::saveWorkspaceSecrets($newWorkspacePath, $agentId, $clean)) {
+                            $applied[] = 'secrets_ws.cfg';
+                        } else {
+                            $skipped[] = 'secrets_ws.cfg (the secret store was busy or could not be written)';
+                        }
                     } else {
                         $skipped[] = 'secrets_ws.cfg (no valid keys after allowlist gate)';
                     }

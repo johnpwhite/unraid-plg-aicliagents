@@ -10,6 +10,8 @@
 
 namespace AICliAgents\Services;
 
+require_once __DIR__ . '/FileLock.php';
+
 class EnvService {
 
     private const KEY_REGEX  = '/^[A-Za-z_][A-Za-z0-9_]{0,127}$/D';
@@ -114,17 +116,120 @@ class EnvService {
     }
 
     /**
-     * Replace the agent-tier general envs wholesale with $map. Caller is
-     * responsible for any merge/diff semantics (the workspace tier writes
-     * deltas; the agent tier writes the full intended state).
+     * Replace the agent-tier general envs wholesale with $map, under the env lock (#890).
+     * Caller is responsible for any merge/diff semantics. A caller that starts from the
+     * stored map (read, change, write back) must use updateAgentEnvs(): two saves at once
+     * can otherwise lose a key. False means nothing was written; lastUpdateMessage() says why.
      */
     public static function saveAgentEnvs(string $agentId, array $map): bool {
-        $file = self::getAgentEnvPath($agentId);
-        if (empty($map)) {
-            if (file_exists($file)) @unlink($file);
-            return true;
+        return self::updateAgentEnvs($agentId, static fn(array $cur) => $map);
+    }
+
+    // ---------- Locked read-modify-write (#890) ----------
+
+    /** Seconds an update waits for the env lock before it gives up. Tests shorten it. */
+    public static float $lockWaitSeconds = 10.0;
+    private static ?string $lastUpdateMessage = null;
+    private static ?string $lastUpdateNotice = null;
+
+    /** Lock file for the general env files. In the RAM state root, never on flash or /mnt/user. */
+    public static function lockPath(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/envs.lock';
+    }
+
+    /** Plain-words reason the last update failed in this process, or null. Show it to the person. */
+    public static function lastUpdateMessage(): ?string { return self::$lastUpdateMessage; }
+
+    /** A message for a save that WORKED but needs attention (a damaged file was set aside), or null. */
+    public static function lastUpdateNotice(): ?string { return self::$lastUpdateNotice; }
+
+    /**
+     * Run $fn under the env lock (non-blocking, 10 s deadline, re-entrant, close-on-exec).
+     * When the lock is not taken $fn does not run and $busy is true.
+     * @return mixed
+     */
+    public static function withLock(callable $fn, ?bool &$busy = null) {
+        $busy = false;
+        $path = self::lockPath();
+        if (!FileLock::isHeld($path)) { self::$lastUpdateMessage = null; self::$lastUpdateNotice = null; }
+        $result = FileLock::run($path, self::$lockWaitSeconds, $fn, $busy);
+        if ($busy) {
+            self::$lastUpdateMessage = 'The variable store is busy with another save, so this change was not saved. Retry in a moment.';
+            LogService::log('Env store: NOT SAVED: the lock stayed busy for ' . self::$lockWaitSeconds . 's', LogService::LOG_ERROR, 'EnvService');
         }
-        return AtomicWriteService::writeJson($file, $map);
+        return $result;
+    }
+
+    /**
+     * Change the agent-tier envs under the lock. $fn gets the stored map and returns the new
+     * map, or null for "no change". An empty new map removes the file. A file that cannot be
+     * parsed is copied to <file>.corrupt-* first (#636) and the update goes on with an empty map.
+     *
+     * @param callable(array):(?array) $fn
+     */
+    public static function updateAgentEnvs(string $agentId, callable $fn): bool {
+        $file = self::getAgentEnvPath($agentId);
+        return self::updateJsonFile($file, static fn(array $cur) => $fn($cur));
+    }
+
+    /**
+     * Change the workspace-tier envs under the lock. $fn gets the stored delta and returns the
+     * new map (it may hold keys that equal the agent value). The delta against the agent tier
+     * is taken inside the lock. Empty delta removes the file.
+     *
+     * @param callable(array):(?array) $fn
+     */
+    public static function updateWorkspaceEnvs(string $path, string $agentId, callable $fn): bool {
+        $file = self::getWorkspaceEnvPath($path, $agentId);
+        return self::updateJsonFile($file, static function (array $cur) use ($fn, $agentId) {
+            $map = $fn($cur);
+            if ($map === null) return null;
+            $agentMap = self::getAgentEnvs($agentId);
+            $delta = [];
+            foreach ($map as $k => $v) {
+                $sv = (string)$v;
+                $av = (string)($agentMap[$k] ?? '__AICLI_NOT_SET__');
+                if ($av !== $sv) $delta[$k] = $sv;
+            }
+            return $delta;
+        });
+    }
+
+    private static function updateJsonFile(string $file, callable $fn): bool {
+        ConfigService::refuseLiveStateInTests($file);
+        $ok = false;
+        $busy = false;
+        self::withLock(static function () use ($file, $fn, &$ok) {
+            $damaged = false;
+            $cur = [];
+            if (file_exists($file)) {
+                $decoded = json_decode((string)@file_get_contents($file), true);
+                if (is_array($decoded)) $cur = $decoded; else $damaged = true;
+            }
+            $next = $fn($cur);
+            if ($next === null) {
+                $ok = true;
+                if ($damaged) self::$lastUpdateNotice = 'A variables file is damaged and could not be read. Nothing was changed. The next save sets it aside as a copy and starts a new file.';
+                return;
+            }
+            if ($damaged) {
+                $copy = FileLock::keepCorruptCopy($file);
+                if ($copy === null) {
+                    self::$lastUpdateMessage = 'A variables file is damaged and a copy of it could not be made, so nothing was saved. Check the disk, then retry.';
+                    return;
+                }
+                self::$lastUpdateNotice = 'A variables file was damaged and could not be read. It is kept as ' . $copy . ' next to it. Your change is saved in a new file. To get back an older value, open the copy in an editor and enter the value again.';
+                LogService::log('Env store: the existing file could not be parsed; a copy was kept at ' . $copy, LogService::LOG_WARN, 'EnvService');
+            }
+            if (empty($next)) {
+                if (file_exists($file)) @unlink($file);
+                $ok = true;
+                return;
+            }
+            $ok = AtomicWriteService::writeJson($file, $next);
+            if (!$ok) self::$lastUpdateMessage = 'The variables could not be written.';
+        }, $busy);
+        return !$busy && $ok;
     }
 
     // ---------- Workspace-tier (general) — per-key delta over agent ----------
@@ -137,25 +242,11 @@ class EnvService {
      * Save the workspace-tier general envs as a per-key delta against the
      * agent tier. Keys whose value matches the agent value are omitted (no
      * point persisting "this workspace agrees with the default"). Empty delta
-     * → file unlinked (zero workspace overrides → no file).
+     * → file unlinked (zero workspace overrides → no file). Runs under the env lock (#890);
+     * a caller that starts from the stored map uses updateWorkspaceEnvs().
      */
     public static function saveWorkspaceEnvs(string $path, string $agentId, array $map): bool {
-        $agentMap = self::getAgentEnvs($agentId);
-        $delta = [];
-        foreach ($map as $k => $v) {
-            $sv = (string)$v;
-            $av = (string)($agentMap[$k] ?? '__AICLI_NOT_SET__');
-            if ($av !== $sv) {
-                $delta[$k] = $sv;
-            }
-        }
-
-        $file = self::getWorkspaceEnvPath($path, $agentId);
-        if (empty($delta)) {
-            if (file_exists($file)) @unlink($file);
-            return true;
-        }
-        return AtomicWriteService::writeJson($file, $delta);
+        return self::updateWorkspaceEnvs($path, $agentId, static fn(array $cur) => $map);
     }
 
     // ---------- Effective merge (the launch-time source of truth) ----------
@@ -309,6 +400,14 @@ class EnvService {
             return ['seeded' => [], 'skipped' => [], 'rejected' => []];
         }
 
+        // #890: read the user's envs and write the seeded ones under the env lock. A busy lock
+        // skips this seed; the next upgrade seeds again (nothing is lost).
+        $busy = false;
+        $res = self::withLock(static fn() => self::seedLocked($agentId, $defaults), $busy);
+        return $busy ? ['seeded' => [], 'skipped' => [], 'rejected' => []] : $res;
+    }
+
+    private static function seedLocked(string $agentId, array $defaults): array {
         $userEnvs = self::getAgentEnvs($agentId);
         $sidecar  = self::readSeededSidecar($agentId);
         $seeded   = [];
