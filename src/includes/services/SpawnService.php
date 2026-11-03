@@ -1791,7 +1791,7 @@ class SpawnService
                 if (!is_array($w) || !self::isHelper($w)) continue;
                 $s = is_array($w['spawn'] ?? null) ? $w['spawn'] : [];
                 $max = (int)($s['max_minutes'] ?? 0);
-                if ($max <= 0 || !empty($s['overdue_at']) || ($s['state'] ?? '') === 'reported_done') continue;
+                if ($max <= 0 || !empty($s['overdue_at']) || in_array($s['state'] ?? '', ['reported_done', 'closed'], true)) continue; // #897: a closed sub-agent is not overdue
                 $startedAt = (int)($s['started_at'] ?? 0);
                 if ($startedAt <= 0 || self::now() - $startedAt < $max * 60) continue;
                 $id = (string)($w['id'] ?? '');
@@ -1805,7 +1805,10 @@ class SpawnService
                 self::emit('workspace.task_overdue', ['workspaceId' => $id, 'agentId' => (string)($w['agentId'] ?? '')],
                     "Sub-agent '$name' passed its time limit of $max minutes", ['parent' => $parentId, 'maxMinutes' => $max, 'minutes' => intdiv($at - $startedAt, 60)]);
                 if ($parentId !== '') {
-                    $text = "Sub-agent '$name' passed its time limit of $max minutes and has not reported. It still runs. Look at its screen, or stop it with aicli_stop_workspace.";
+                    // #897: say what is true. A process that ended by itself has no screen to look at.
+                    $text = !ProcessManager::isRunning($id)
+                        ? "Sub-agent '$name' passed its time limit of $max minutes and has not reported. It no longer runs, so it ended without a report."
+                        : "Sub-agent '$name' passed its time limit of $max minutes and has not reported. It still runs. Look at its screen, or stop it with aicli_stop_workspace.";
                     try {
                         if (self::$parentNotifier !== null) (self::$parentNotifier)($id, $parentId, $text);
                         else AgentRelayService::directMessage($id, $parentId, $text);
