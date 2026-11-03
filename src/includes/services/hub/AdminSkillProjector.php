@@ -942,6 +942,12 @@ lines move to `archive/agent-journal-<yyyy-mm>.md`. Nothing is deleted.
   person's own artefacts unless they ask.
 - **Limits:** 1 MB a file, 2,000 artefacts a notebook, 60 changes a minute. A
   call over a limit is refused with one sentence. Do not retry in a loop.
+- **Commit the notebook.** Git keeps the history only of files that you commit. If
+  the project is a git repo, commit `notebook/` with your other work and push it
+  the same way. Check it for secrets first, and ask the person before you push it
+  to a public remote. In a helper worktree the notes go on your branch and reach the
+  base at the merge. Do not act if the project has no git repo or the person ignores
+  `notebook/` on purpose. Global notes are in plugin storage and are never committed.
 - **Nothing is deleted.** Archive moves a file. Git keeps the history (a "not
   committed" mark shows on changes git has not saved yet). Only a person-approved
   purge removes a file.
