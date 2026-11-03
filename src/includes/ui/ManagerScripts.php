@@ -747,14 +747,15 @@ function renderBackendMigrationStatus(s) {
         if (!choosing) window._aicliBackendStatusApplied = recordKey;
         kindNames.forEach(function (k) {
             if (firstSeen && s.status === 'complete' && target) aicliKindSelect(k).val(s.target);
-            if (s.status === 'complete' && s.target) { window._aicliCurrentStorage[k] = s.target; delete window._aicliKindReal[k]; }
-            if ((s.status === 'error' || interrupted) && s.from) { window._aicliCurrentStorage[k] = s.from; delete window._aicliKindReal[k]; }
+            // #899: drop the old reading of the real state only once for each record, not on every status check.
+            if (s.status === 'complete' && s.target) { window._aicliCurrentStorage[k] = s.target; if (firstSeen) delete window._aicliKindReal[k]; }
+            if ((s.status === 'error' || interrupted) && s.from) { window._aicliCurrentStorage[k] = s.from; if (firstSeen) delete window._aicliKindReal[k]; }
             if (firstSeen && (s.status === 'error' || interrupted) && s.from) aicliKindSelect(k).val(s.from);
             if (firstSeen && (s.status === 'error' || interrupted || s.status === 'complete')) aicliSetKindBusy(k, false);
         });
         aicliSyncStorageControls();
         // Read the real state once for each finished record, also when a pending choice kept the drop-down from moving.
-        if (s.status !== 'queued' && window._aicliBackendStateLoaded !== recordKey) { window._aicliBackendStateLoaded = recordKey; aicliLoadKindState(); }
+        if (s.status !== 'queued' && (firstSeen || window._aicliBackendStateLoaded !== recordKey)) { window._aicliBackendStateLoaded = recordKey; aicliLoadKindState(); }
         if (s.status === 'complete' && window._aicliBackendMigrationStartedHere) {
             window._aicliBackendMigrationStartedHere = false;
             setTimeout(safeReload, 800);
