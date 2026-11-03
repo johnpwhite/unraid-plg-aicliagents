@@ -168,6 +168,19 @@ class BackupCronService {
     public const WAIT_POLL_SEC = 5;
 
     /**
+     * #891: the one plain line that ends the scheduled job's output. A job report page or a phone
+     * push shows the last line of output as it is. On a failure it says what failed and what to do.
+     */
+    public static function plainResultLine(array $result, string $user): string {
+        $msg = trim((string)preg_replace('/\s+/', ' ', (string)($result['message'] ?? '')));
+        if (($result['status'] ?? '') === 'ok') {
+            return $msg !== '' ? $msg : "Home backup of $user finished.";
+        }
+        $why = $msg !== '' ? rtrim($msg, '.') : 'unknown error';
+        return "Home backup of $user FAILED: $why. What to do: read the plugin Debug Console, fix the cause, then run the backup again by hand.";
+    }
+
+    /**
      * #891: wait for the queued backup job of $user to end, and answer its real result.
      * The result is the last-run record (backup-last-<user>.json) of THIS job: its
      * data.job_id equals $jobId. A record with no job id counts only when it is newer

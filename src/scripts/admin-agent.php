@@ -1232,4 +1232,6 @@ try {
 }
 
 echo json_encode($result, JSON_UNESCAPED_SLASHES) . PHP_EOL;
+// #891: a job report shows the last line of output, so the scheduled backup ends with one plain line.
+if (!empty($bhScheduled)) echo \AICliAgents\Services\BackupCronService::plainResultLine($result, (string)($bhUser ?? '')) . PHP_EOL;
 exit(($result['status'] ?? 'error') === 'ok' ? 0 : 1);
