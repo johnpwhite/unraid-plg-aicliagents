@@ -52,6 +52,9 @@ register_shutdown_function(function() {
         }
     }
 });
+// Forgejo #835 (docs/specs/AJAX_START_UP_COST.md): the Manager registers the class loader (includes/Autoload.php).
+// A handler, a service or a helper loads when the request first uses it, so a request compiles only what it needs.
+// No handler is required here.
 
 // Forgejo #422 (docs/specs/NOTEBOOK_LEAN_BOOT.md): a Notebook read answers after a small start-up. The full start-up
 // below is about 6 MB of PHP that the server compiles on every request (it has no opcache).
@@ -60,34 +63,6 @@ if ($aicliLean) {
     require_once AICLI_GEN_SRC . '/includes/NotebookLeanBoot.php';
 } else {
 require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
-require_once AICLI_GEN_SRC . '/includes/services/ValidationService.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/TerminalHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/StorageHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/AgentHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/UtilityHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/TmuxHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/ArgsHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/AutoLaunchHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/EnvHandler.php';
-require_once AICLI_GEN_SRC . '/includes/services/SshKeyService.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/SshHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/RunScriptsHandler.php'; // AGENT_RUN_ENTRY_POINT.md R9: the Authorised scripts list
-require_once AICLI_GEN_SRC . '/includes/handlers/ActivityHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/HubHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/GitHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/DiagnosticsHandler.php';
-require_once AICLI_GEN_SRC . '/includes/services/WorkspaceBundleService.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/BundleHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/AssetsHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/AgentRelayHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/VoiceHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/FavouritesHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/HistoryHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/BootSpaceHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/BootArchiveHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/AutoContinueHandler.php';
-require_once AICLI_GEN_SRC . '/includes/handlers/NotebookHandler.php';
-require_once AICLI_GEN_SRC . '/includes/services/PerfTrace.php';
 }
 use AICliAgents\Services\ValidationService;
 

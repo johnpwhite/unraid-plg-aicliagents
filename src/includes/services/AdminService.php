@@ -13,8 +13,8 @@
  *     can both call, the way relay-mcp.php and relay-agent.php both call
  *     RelayMcpTools. It does NOT itself require_once its dependencies — like
  *     RelayMcpTools, it assumes the caller has already loaded
- *     AICliAgentsManager.php, which requires every service and handler once, up
- *     front, for the whole request.</description>
+ *     AICliAgentsManager.php, which registers the class loader (includes/Autoload.php),
+ *     so each service and handler loads when the request first uses it.</description>
  *     <dependencies>ConfigService, ProcessManager, SupervisorService, StorageMetricsService,
  *     AgentRegistry, VersionCheckService, ActivityService, ArgsService, EnvService,
  *     SecretService, ValidationService, LifecycleLogService, RedactionService,

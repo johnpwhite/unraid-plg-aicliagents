@@ -10,8 +10,8 @@
 
 namespace AICliAgents\Services;
 
-// InitService uses BootIntegrityService which is loaded via AICliAgentsManager before this runs.
-// No separate require_once needed -- AICliAgentsManager.php handles the load order.
+// InitService uses BootIntegrityService. The class loader (includes/Autoload.php, registered by
+// AICliAgentsManager.php) loads it when it is first used. No require_once and no load order needed.
 
 class InitService {
     private static $initializing = false;

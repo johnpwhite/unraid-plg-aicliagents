@@ -8,8 +8,11 @@ $manager = getenv('AICLI_REPAIR_MANAGER') ?: dirname(__DIR__, 2) . '/includes/AI
 require_once $manager;
 
 // A source-tree release candidate can be checked against the installed
-// manager before publishing. Deployed releases load this through the manager.
-if (!class_exists(\AICliAgents\Services\RepairService::class, false)) {
+// manager before publishing. Deployed releases load RepairService through the
+// manager's class loader (Forgejo #835), so this asks the loader (no `false`).
+// Only a manager that cannot find the class (an older installed one) falls back
+// to the file of this script's own tree.
+if (!class_exists(\AICliAgents\Services\RepairService::class)) {
     require_once dirname(__DIR__, 2) . '/includes/services/RepairService.php';
 }
 

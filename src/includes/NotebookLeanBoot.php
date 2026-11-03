@@ -54,4 +54,7 @@ spl_autoload_register(static function (string $class): void {
     if ($done || strncmp($class, 'AICliAgents\\', 12) !== 0) return;
     $done = true;
     require_once AICLI_GEN_SRC . '/includes/AICliAgentsManager.php';
+    // The Manager registered the class loader after this callback. Ask it for this class now, so the class
+    // resolves in this same pass (Forgejo #835).
+    \AICliAgents\Autoload::load($class);
 });
