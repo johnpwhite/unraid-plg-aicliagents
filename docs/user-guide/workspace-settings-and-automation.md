@@ -408,6 +408,7 @@ The plugin saves the values of a workspace in files that belong to the pair of a
 | **Secrets** says the home folder is not mounted. | The array is stopped, or the session has no home. | Start the array and try again. |
 | A save of secrets or variables says the store is busy. | Another save is still running. | Wait a few seconds and press save again. Nothing was saved, and the old values stay as they were. |
 | A save works and shows a note that a file was damaged. | The file could not be read. The plugin kept it as a copy with `.corrupt-` in its name and saved your change in a new file. | Open the copy in an editor and enter again any value that is now missing. |
+| You get a notification "a saved file was damaged". | A save anywhere in the plugin found a file that it could not read, and kept it as a copy. Some saves have no place on the screen to show a note, so the plugin also sends this notification. | Open the copy that the notification names, and enter again any value that you still need. |
 | The import shows an error. | The file is not a bundle from this plugin, or it is larger than 1 MB. | Export a bundle again from the plugin. |
 | The key icon is a clipboard. | SSH is off in Unraid, or no key is registered. | Turn SSH on and add a key. |
 | A workspace did not return after a restart. | You closed it with **Close**. Or **Restart all saved workspaces** is off. Or no conversation exists and **Start fresh if no resume** is off. Or an upgrade of the agent waits. | Use a favourite, or check the switches on the **Terminal** chip. |
