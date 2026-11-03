@@ -283,6 +283,8 @@ Drag a file onto the open drawer to upload it as an asset. The Notebook shows th
 
 ### The git history of a note
 
+When the project is a git repo, your agents commit the Notebook files with their other work and push them the same way. An agent asks you before it pushes them to a public remote. The plugin does not commit by itself, so a page can show **Not committed** until the agent commits it. Global notes are never committed.
+
 Press **History** to see the git history of the open note. The panel shows:
 
 - **Committed** or **Not committed**.
@@ -354,6 +356,7 @@ A notebook is a folder called notebook in the root of the project. It holds one 
 <details>
 <summary>Change history</summary>
 
+- **2026-11-03** — Agents now commit Notebook files with their other work when the project is a git repo. Spec: `docs/specs/AGENT_INJECTED_GUIDANCE.md` (#894).
 - **2026-10-28** — The note tabs, the checklist steps, the status colours (green, red, amber, blue) and the chart, data and device buttons are easier to use with a screen reader, a keyboard, a finger and low vision. Text in the state colours is dark enough to read. Spec `docs/specs/NOTEBOOK_ACCESSIBILITY.md`, issue #818.
 - **2026-10-28** — The file editor no longer replaces a note that an agent changed while the editor was open. It keeps your text and offers **Reload**. Spec `docs/specs/NOTEBOOK_EDITOR_VERSION.md`, issue #815.
 - **2026-10-26** — The Notebook list has a **Voice mail** heading for spoken messages. It sits after **Notes**, is closed at first, and shows how many are new. Spec `docs/specs/NOTEBOOK_VOICE_MAIL_SECTION.md`, issue #811.
