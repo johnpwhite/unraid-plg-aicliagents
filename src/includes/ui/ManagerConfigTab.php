@@ -1847,6 +1847,24 @@ $stSubagents = $cardOnOff($config['spawn_enabled'] ?? null, '0') . ' · up to ' 
         if (!force && n === lastN && Math.abs(w - lastW) < 2) return;
         lastN = n; lastW = w;
         var cards = collectCards();
+        // #898: a moved element loses the keyboard focus and the page can go back to the top. Move nothing when
+        // one column already has the right order; after any other move, give the focus and the position back.
+        if (n === 1 && !grid.querySelector('.aicli-config-col') && inOrder(cards)) { grid.classList.remove('aicli-config-grid--cols'); return; }
+        var focused = grid.contains(document.activeElement) ? document.activeElement : null;
+        var scrollX = window.pageXOffset, scrollY = window.pageYOffset;
+        place(cards, n);
+        if (focused && focused !== document.activeElement && focused.isConnected) {
+            try { focused.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+        }
+        if (window.pageXOffset !== scrollX || window.pageYOffset !== scrollY) window.scrollTo(scrollX, scrollY);
+    }
+
+    function inOrder(cards) {
+        var now = Array.prototype.filter.call(grid.children, function (c) { return c.classList.contains('aicli-card'); });
+        return now.length === cards.length && cards.every(function (c, i) { return c === now[i]; });
+    }
+
+    function place(cards, n) {
         cards.forEach(function (c) { grid.appendChild(c); });
         Array.prototype.forEach.call(grid.querySelectorAll('.aicli-config-col'), function (col) { col.parentNode.removeChild(col); });
         if (n === 1) { grid.classList.remove('aicli-config-grid--cols'); return; }

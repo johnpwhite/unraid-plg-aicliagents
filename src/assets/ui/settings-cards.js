@@ -532,18 +532,22 @@
             menuBtn.addEventListener('pointerdown', function (e) { dragPress(list, card, menuBtn, e); });
         }
         // A warning source (for example the storage move box) opens its card while it shows.
+        // A card can have more than one source: it warns while ANY of them shows, so a hidden source cannot clear
+        // the warning of another (#898: each off-and-on opened the card and moved every card of the tab).
         var sources = card.querySelectorAll('[data-aicli-warns-card]');
+        function check() {
+            var shown = Array.prototype.filter.call(sources, function (src) {
+                return !src.hidden && src.textContent.trim() !== '';
+            })[0];
+            var head = shown ? shown.querySelector('strong') : null;
+            setWarning(card.getAttribute('data-aicli-card'), !!shown, head ? head.textContent.trim() : '');
+        }
         Array.prototype.forEach.call(sources, function (src) {
-            function check() {
-                var shown = !src.hidden && src.textContent.trim() !== '';
-                var head = src.querySelector('strong');
-                setWarning(card.getAttribute('data-aicli-card'), shown, head ? head.textContent.trim() : '');
-            }
             if (typeof MutationObserver !== 'undefined') {
                 new MutationObserver(check).observe(src, { attributes: true, attributeFilter: ['hidden'], childList: true, characterData: true, subtree: true });
             }
-            check();
         });
+        if (sources.length) check();
     }
 
     function attachList(list) {
