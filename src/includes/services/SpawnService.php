@@ -1153,7 +1153,9 @@ class SpawnService
         $branch = (string)$worktree['branch'];
         $base = (string)$worktree['base'];
         $out = "\n---\nBranch rules (written by the plugin):\n- Work only in this worktree, on the branch '$branch'. Commit your work on that branch.\n";
-        if (AgentLaunchProfile::pushRule($agentId) === AgentLaunchProfile::PUSH_NONE) {
+        // #896: a repo with no remote `origin` has nowhere to push, so that rule would stop the helper.
+        $hasOrigin = self::git(['remote', 'get-url', 'origin'], (string)$worktree['repo'])['rc'] === 0;
+        if (AgentLaunchProfile::pushRule($agentId) === AgentLaunchProfile::PUSH_NONE || !$hasOrigin) {
             $out .= "- Do not push. Your parent takes the branch from the local repo and merges it.\n";
         } else {
             $out .= "- Push your branch: git push -u origin $branch\n- Never push to '$base', to main or to master. Your parent merges your branch.\n";

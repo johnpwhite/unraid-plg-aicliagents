@@ -901,11 +901,11 @@ try {
             $result = AdminMcpTools::call('aicli_clear_scheduled_continue', ['workspaceId' => (string)($argv[2] ?? ''), 'entryId' => (string)($argv[3] ?? '')]);
             break;
         case 'spawn':
-            // AGENT_SPAWN_WORKSPACE.md. The task is the words after the flags, or --file=<path>, or stdin.
+            // AGENT_SPAWN_WORKSPACE.md. The task is --file=<path>, or the words after the flags, or stdin.
             [$spf, $spw] = adminAgentSplitFlags(array_slice($argv, 2),
                 ['agent', 'name', 'path', 'repo', 'branch', 'base', 'sparse', 'model', 'effort', 'title', 'file', 'unattended', 'no-auto-close', 'max-minutes']);
-            $spTask = adminAgentReadBody($spf['file'] ?? null);
-            if (($spTask === null || trim($spTask) === '') && $spw !== []) $spTask = implode(' ', $spw);
+            // #896: --file, then the words, then stdin. Read stdin only with no words: an open pipe must not replace or block them.
+            $spTask = ($spw !== [] && empty($spf['file'])) ? implode(' ', $spw) : adminAgentReadBody($spf['file'] ?? null);
             $spArgs = ['agentId' => (string)($spf['agent'] ?? ''), 'task' => (string)($spTask ?? '')];
             foreach (['name' => 'name', 'path' => 'path', 'model' => 'model', 'effort' => 'effort', 'title' => 'taskTitle'] as $fk => $tk) {
                 if (isset($spf[$fk]) && is_string($spf[$fk]) && $spf[$fk] !== '') $spArgs[$tk] = $spf[$fk];
