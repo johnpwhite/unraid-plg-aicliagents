@@ -263,19 +263,25 @@ class HealthService {
     // ==================================================================
 
     /** Supervisor: pidfile-verified process alive + heartbeat tick < 3× tick interval. */
-    public static function evalSupervisor(bool $enabled, bool $running, ?int $tickAge, int $tickSeconds): array {
+    public static function evalSupervisor(bool $enabled, bool $running, ?int $tickAge, int $tickSeconds, bool $testRunActive = false): array {
         if (!$enabled) {
             return self::result(self::STATUS_OK, 'supervisor disabled by config');
         }
+        // #892: the smoke run stops and starts the supervisor on purpose. test_run = true: the notifier ignores this check.
+        $fault = static function (string $why) use ($testRunActive): array {
+            return $testRunActive
+                ? self::result(self::STATUS_WARN, 'test run active, so this is not counted as a fault: ' . $why) + ['test_run' => true]
+                : self::result(self::STATUS_FAIL, $why);
+        };
         if (!$running) {
-            return self::result(self::STATUS_FAIL, 'supervisor not running (pidfile dead/stale)');
+            return $fault('supervisor not running (pidfile dead/stale)');
         }
         $budget = 3 * max(1, $tickSeconds);
         if ($tickAge === null) {
-            return self::result(self::STATUS_FAIL, 'supervisor running but no heartbeat tick file');
+            return $fault('supervisor running but no heartbeat tick file');
         }
         if ($tickAge > $budget) {
-            return self::result(self::STATUS_FAIL, "supervisor heartbeat stale ({$tickAge}s > {$budget}s)");
+            return $fault("supervisor heartbeat stale ({$tickAge}s > {$budget}s)");
         }
         return self::result(self::STATUS_OK, "running, tick {$tickAge}s ago");
     }
@@ -563,7 +569,7 @@ class HealthService {
         $config = ConfigService::getConfig();
         $enabled = (string)($config['supervisor_enabled'] ?? '1') === '1';
         $tick = (int)($config['supervisor_tick_seconds'] ?? 5);
-        return self::evalSupervisor($enabled, SupervisorService::isRunning(), SupervisorService::getTickAge(), max(1, $tick));
+        return self::evalSupervisor($enabled, SupervisorService::isRunning(), SupervisorService::getTickAge(), max(1, $tick), self::testRunActive());
     }
 
     private static function collectManifest(): array {
