@@ -219,6 +219,7 @@ class EnvService {
                     return;
                 }
                 self::$lastUpdateNotice = 'A variables file was damaged and could not be read. It is kept as ' . $copy . ' next to it. Your change is saved in a new file. To get back an older value, open the copy in an editor and enter the value again.';
+                FileLock::notifyDamagedFile(self::$lastUpdateNotice);
                 LogService::log('Env store: the existing file could not be parsed; a copy was kept at ' . $copy, LogService::LOG_WARN, 'EnvService');
             }
             if (empty($next)) {

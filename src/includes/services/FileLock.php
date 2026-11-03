@@ -11,6 +11,8 @@
 namespace AICliAgents\Services;
 
 class FileLock {
+    private const NOTIFY_SCRIPT = '/usr/local/emhttp/plugins/dynamix/scripts/notify';
+
     /** @var array<string,int> depth of the holding frames for each lock path in this process */
     private static array $depth = [];
 
@@ -64,5 +66,17 @@ class FileLock {
         if (!@copy($file, $copy)) return null;
         @chmod($copy, 0600);
         return basename($copy);
+    }
+
+    /**
+     * #893: tell the person that a damaged file was set aside. Many save paths reply with no
+     * place for a notice (Relay, voice, git, admin tool), so the shared code sends one Unraid
+     * notification. The text names files only, never a value. No notify script: nothing is sent.
+     */
+    public static function notifyDamagedFile(string $notice): void {
+        $script = getenv('AICLI_NOTIFY_SCRIPT') ?: self::NOTIFY_SCRIPT;
+        if (!is_executable($script)) return;
+        @exec(escapeshellarg($script) . ' -e AICliAgents -s ' . escapeshellarg('AI CLI Agents: a saved file was damaged')
+            . ' -d ' . escapeshellarg($notice) . ' -i warning >/dev/null 2>&1');
     }
 }
