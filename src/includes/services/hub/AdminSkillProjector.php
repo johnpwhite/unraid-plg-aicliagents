@@ -51,9 +51,11 @@ tools:
   set its arguments, flip an agent's channel, change a setting. Read the
   "Change tools" and "Confirm before you change" sections below before you
   call one of these for the first time.
-- **Destructive tools.** They NEVER execute anything themselves. Deleting a
-  workspace or upgrading an agent is not something you can do — you can
-  only PROPOSE it. Read "Destructive tools (propose, never execute)" below
+- **Destructive tools.** They NEVER execute anything themselves, with ONE
+  exception: `aicli_delete_workspace` on a workspace that YOU created closes
+  it at once, with no approval, and a person gets a notice. Every other
+  destructive tool, and the delete of any other workspace, you can only
+  PROPOSE. Read "Destructive tools (propose, never execute)" below
   before you call one of these.
 
 Use these tools when the user asks a question about the plugin, asks for a
@@ -175,7 +177,9 @@ Change tools (CHANGE tools: read "Confirm before you change" first):
 Destructive tools (PROPOSE only — read "Destructive tools" below first):
 
 - `aicli_delete_workspace` — propose deleting a workspace. Validates the
-  request and asks a human to approve it. Deletes nothing itself.
+  request and asks a human to approve it. Deletes nothing itself, with one
+  exception: a workspace that YOU created is closed for good at once, with no
+  approval (its merged, clean worktree goes too), and a person gets a notice.
 - `aicli_upgrade_agent` — propose upgrading an already-installed agent to a
   version (or the last known available update, if you omit `version`).
   Validates the request and asks a human to approve it. Upgrades nothing
@@ -495,8 +499,15 @@ How to call it:
 - Give `agentId` and the `task`. The task is data written to a file, at most
   16000 characters. Put the full brief in it, so the sub-agent needs nothing else.
 - Give `path` (an existing folder) OR `worktree` {repo, branch, base}. With a
-  worktree the tool runs `git worktree add` under `<repo>/.claude/worktrees`.
-  It never pushes, merges or resets. Prefer a worktree: two workspaces of one
+  worktree the tool runs `git worktree add` under `<repo>/.aicli/worktrees`
+  (older worktrees under `<repo>/.claude/worktrees` stay recognised). It adds the
+  worktree folder and `.aicli-task/` an ignore file (`.gitignore` with `*`; the repo's
+  `.git/info/exclude` is not touched), and ends
+  the task file with branch rules: commit on the sub-agent's branch, push that
+  branch, never push to the base, main or master. `sparse` is an optional list
+  of repo folders (CLI: `--sparse=a,b`); with it the checkout writes only those
+  folders. Without it the repo file `.aicli/worktree-sparse` is used when it
+  exists. The tool itself never merges or resets. Prefer a worktree: two workspaces of one
   agent in one folder share chat files, and the tool refuses that.
 - Give `model` and `effort` as plain words. Never write a raw flag. An agent
   that has no such flag refuses the request with one sentence.
@@ -612,8 +623,14 @@ UI.
 `aicli_restore_home` — and the CLI equivalents `delete-workspace`,
 `upgrade-agent`, and `backup-home` — are different from every other tool in
 this skill. Calling one does not delete, upgrade, back up, or restore
-anything. It can only PROPOSE the action. Read this whole section before
-you call any of them for the first time.
+anything. It can only PROPOSE the action. The one exception is
+`aicli_delete_workspace` (CLI `delete-workspace`) on a workspace that YOU
+created (the workspace record says `createdBy` is you): the plugin then
+closes it for good at once, with no approval, and a person gets a notice in
+the Activity tray and an Unraid notification. A workspace that a person made,
+one that another workspace made, a Relay actor, and your own workspace still
+need a person's Approve. Read this whole section before you call any of
+them for the first time.
 
 This rule is about how the tools work, not about what a process on this server
 could do. Every agent runs as root, so the approval step is a rule of the
@@ -635,7 +652,7 @@ What actually happens when you call a destructive tool:
 2. If the request is valid, the tool writes a PENDING item to the Activity
    tray, in plain language, describing exactly what would happen. It
    returns an opId and that same description to you.
-3. Nothing has happened. The workspace still exists. The agent is still on
+3. Nothing has happened (except for the one exception above). The workspace still exists. The agent is still on
    its old version. Only a HUMAN, clicking Approve on that tray item in the
    Manager UI, makes the action real. A human can also click Reject, which
    discards it — again, nothing happens.

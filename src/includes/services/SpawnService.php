@@ -546,6 +546,10 @@ class SpawnService
     private static function spawnCore(array $p, string $callerId, string $callerName, array $run): array
     {
         $isRun = !empty($run['isRun']);
+        // For the undo in the catch below: what this call has made so far.
+        $id = '';
+        $madeWorktree = null;
+        $recordSaved = false;
         try {
             $agentId = trim((string)($p['agentId'] ?? ''));
             if ($agentId === '' || $agentId === 'terminal') {
@@ -616,7 +620,7 @@ class SpawnService
             // Resolve the place before any side effect.
             $worktree = null;
             if ($wtReq !== null) {
-                $plan = self::planWorktree($wtReq);
+                $plan = self::planWorktree($wtReq, $agentId);
                 if (isset($plan['error'])) return $plan;
                 $worktree = $plan;
                 $folder = $plan['path'];
@@ -655,6 +659,7 @@ class SpawnService
             if ($worktree !== null) {
                 $made = self::makeWorktree($worktree);
                 if (isset($made['error'])) return $made;
+                $madeWorktree = $worktree;
             }
 
             $id = 's' . bin2hex(random_bytes(4));
@@ -681,14 +686,17 @@ class SpawnService
                 ];
             }
             if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
-                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the sub-agent workspace.'];
+                // #865 third review 1: no record exists, so only the mark, the worktree and the branch of this call are undone.
+                return ['error' => (ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the sub-agent workspace.') . ' ' . self::undoWithoutRecord($id, $madeWorktree)];
             }
+            $recordSaved = true;
             if (!ArgsService::saveIdArgs($id, (string)$flags['args'], $promptMode)) {
-                return ['error' => "The sub-agent workspace '$id' was saved but its flags could not be written. It is held and not started.", 'id' => $id];
+                return ['error' => 'The flags of the sub-agent workspace could not be written. ' . self::rollbackSpawn($id, $worktree)];
             }
-            $filesNote = self::writeTaskFiles($folder, $task, $promptMode !== AgentLaunchProfile::PROMPT_NONE);
+            $filesNote = self::writeTaskFiles($folder, $task, $promptMode !== AgentLaunchProfile::PROMPT_NONE, $worktree, $agentId);
             if (isset($filesNote['error'])) {
-                return ['error' => $filesNote['error'] . " The sub-agent workspace '$id' is held and not started.", 'id' => $id];
+                // #865 review 3: undo what this call made, so no record with flags (unattended, prompt mode) is left over.
+                return ['error' => $filesNote['error'] . ' ' . self::rollbackSpawn($id, $worktree)];
             }
 
             // R20: no "Trust this folder?" question for a worktree that this tool made. R21: the agent's commands keep
@@ -730,12 +738,14 @@ class SpawnService
                 'state' => (string)($created['spawn']['state'] ?? 'starting'),
                 'trust' => $trust, 'relayEnv' => $relayEnv, 'maxMinutes' => $maxMinutes,
             ];
-            if ($worktree !== null) $result['worktree'] = ['path' => $worktree['path'], 'branch' => $worktree['branch'], 'base' => $worktree['base']];
+            if ($worktree !== null) $result['worktree'] = ['path' => $worktree['path'], 'branch' => $worktree['branch'], 'base' => $worktree['base'], 'sparse' => $worktree['sparse'] ?? []];
             if (!empty($filesNote['note'])) $result['note'] = $filesNote['note'];
             if ($deliveryNote !== '') $result['deliveryNote'] = $deliveryNote;
             return $result;
         } catch (\Throwable $e) {
-            return ['error' => 'The sub-agent workspace could not be started: ' . self::safeText($e->getMessage(), 300)];
+            // An exception before the record was saved leaves a worktree, a branch and a hold mark that nothing else removes.
+            $undo = !$recordSaved && ($id !== '' || $madeWorktree !== null) ? ' ' . self::undoWithoutRecord($id, $madeWorktree) : '';
+            return ['error' => 'The sub-agent workspace could not be started: ' . self::safeText($e->getMessage(), 300) . $undo];
         }
     }
 
@@ -777,10 +787,10 @@ class SpawnService
     /**
      * Check a worktree request and compute where the worktree goes. Changes nothing.
      *
-     * @param array<string,mixed> $req repo, branch, base
-     * @return array{repo:string,branch:string,base:string,path:string}|array{error:string}
+     * @param array<string,mixed> $req repo, branch, base, sparse
+     * @return array<string,mixed>|array{error:string}
      */
-    private static function planWorktree(array $req): array
+    private static function planWorktree(array $req, string $agentId = ''): array
     {
         $repoIn = trim((string)($req['repo'] ?? ''));
         $branch = trim((string)($req['branch'] ?? ''));
@@ -801,7 +811,23 @@ class SpawnService
         if ($inside['rc'] !== 0 || trim($inside['out']) !== 'true') {
             return ['error' => "The repo '$repoIn' is not a git work tree."];
         }
-        $dir = $repo . '/.claude/worktrees/' . str_replace('/', '-', $branch);
+        // #865 item 2: the folder name comes from the agent's profile, with a neutral default.
+        $dirRel = AgentLaunchProfile::worktreeDir($agentId);
+        // #865 decision B: no part of the worktree folder path may be a link. A link in the repo (it can be committed)
+        // would send `git worktree add` and the .gitignore write to a folder somewhere else. Nothing has changed yet.
+        $walk = $repo;
+        foreach (explode('/', $dirRel) as $part) {
+            $walk .= '/' . $part;
+            if (is_link($walk)) return ['error' => "The worktree folder '$walk' is a link. It was not used. Nothing was started."];
+            if (file_exists($walk) && !is_dir($walk)) return ['error' => "The worktree folder '$walk' is not a folder. Nothing was started."];
+        }
+        $parentIgnore = $repo . '/' . $dirRel . '/.gitignore';
+        if (is_link($parentIgnore)) return ['error' => "The file '$parentIgnore' is a link. It was not used. Nothing was started."];
+        if (file_exists($parentIgnore) && !is_file($parentIgnore)) return ['error' => "The path '$parentIgnore' exists and is not a regular file (a folder or a special file). It was not used. Nothing was started."];
+        if (is_file($parentIgnore) && !self::hasIgnoreAll((string)@file_get_contents($parentIgnore))) {
+            return ['error' => "The file '$parentIgnore' exists and does not ignore its folder. Add the line * to it, or remove it. Nothing was started."];
+        }
+        $dir = $repo . '/' . $dirRel . '/' . str_replace('/', '-', $branch);
         if (file_exists($dir)) return ['error' => "The worktree folder '$dir' exists already. Choose another branch name."];
         $exists = self::git(['show-ref', '--verify', '--quiet', 'refs/heads/' . $branch], $repo);
         if ($exists['rc'] === 0) return ['error' => "The branch '$branch' exists already. Choose another branch name."];
@@ -810,13 +836,95 @@ class SpawnService
             $head = self::git(['symbolic-ref', '--short', '-q', 'HEAD'], $repo);
             $base = $head['rc'] === 0 && trim($head['out']) !== '' ? trim($head['out']) : 'HEAD';
         }
-        return ['repo' => $repo, 'branch' => $branch, 'base' => $base, 'path' => $dir];
+        // #865 review 3: a base that commits `.aicli-task` (a file, a folder or a link) is refused before any side effect.
+        // The worktree folder is the top of the new work tree, so the path is the root-relative name.
+        $task = self::git(['ls-tree', '--full-tree', $base, '--', self::TASK_DIR], $repo);
+        if ($task['rc'] !== 0) return ['error' => "git could not read the base '$base' to check it for '" . self::TASK_DIR . "'. Nothing was started."];
+        if (trim($task['out']) !== '') {
+            return ['error' => "The base '$base' holds a path '" . self::TASK_DIR . "' in git. The plugin keeps the task of a sub-agent there, and a committed file or link in that place could be read as the first prompt. Remove it from the repo, or use another base. Nothing was started."];
+        }
+        // #865 item 3: the sparse list of the call, else the repo file .aicli/worktree-sparse.
+        $sparse = self::sparseList($req['sparse'] ?? null, $repo, $base);
+        if (isset($sparse['error'])) return $sparse;
+        return ['repo' => $repo, 'branch' => $branch, 'base' => $base, 'path' => $dir, 'dir_rel' => $dirRel, 'sparse' => $sparse['paths'], 'prefix' => $sparse['prefix']];
+    }
+
+    /** The repo file with the default sparse folders, one folder for each line. */
+    public const SPARSE_FILE = '.aicli/worktree-sparse';
+
+    /** The most sparse folders a worktree may list. */
+    public const MAX_SPARSE = 50;
+
+    /** The largest sparse file, in bytes. A larger file is an error, never a silent full checkout. */
+    public const MAX_SPARSE_FILE = 65536;
+
+    /** A line of input that is shown in a reply: printable ASCII only, cut at 60 characters. */
+    private static function shortLine(string $line): string
+    {
+        $line = (string)preg_replace('/[^\x20-\x7E]/', '?', $line);
+        return strlen($line) > 60 ? substr($line, 0, 60) . '...' : $line;
+    }
+
+    /**
+     * Check the sparse folder list of a worktree request. A folder is a repo-relative path of plain characters:
+     * no dot-dot, no dot part, no leading dash or slash. The list from the call wins; without one the repo file is
+     * read. An empty list means a full checkout. Every folder must be a folder (a tree) in the base ref: `git ls-tree
+     * -d <base> -- <path>` (#865 decision F), so `.`, a file name and a missing folder are refused before any side effect.
+     *
+     * @param mixed $given the `sparse` value of the call (a list of strings) or null
+     * @return array{paths:list<string>,prefix:string}|array{error:string}
+     */
+    private static function sparseList($given, string $repo, string $base): array
+    {
+        $raw = [];
+        if (is_array($given)) {
+            $raw = array_map('strval', array_values($given));
+        } elseif ($given !== null && $given !== '') {
+            return ['error' => 'The sparse value must be a list of folder names in the repo.'];
+        } else {
+            $file = $repo . '/' . self::SPARSE_FILE;
+            if (is_link($file)) return ['error' => "The sparse file '$file' is a link. It was not used. Nothing was started."];
+            if (is_file($file)) {
+                if ((int)@filesize($file) > self::MAX_SPARSE_FILE) {
+                    return ['error' => "The sparse file '$file' is larger than " . (self::MAX_SPARSE_FILE / 1024) . ' KB. Make it smaller, or give the sparse list in the call. Nothing was started.'];
+                }
+                $raw = preg_split('/\R/', (string)@file_get_contents($file)) ?: [];
+            }
+        }
+        $paths = [];
+        foreach ($raw as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') continue;
+            $line = rtrim($line, '/');
+            $bad = $line === '' || preg_match('#^[A-Za-z0-9._][A-Za-z0-9._/ -]{0,199}$#D', $line) !== 1 || strpos($line, '//') !== false;
+            foreach (explode('/', $line) as $seg) if ($seg === '.' || $seg === '..') $bad = true;
+            if ($bad) {
+                return ['error' => "The sparse folder '" . self::shortLine($line) . "' is not allowed. Use a folder path inside the repo: letters, digits and the characters . _ / - only, and no '.' or '..' part."];
+            }
+            $paths[] = $line;
+        }
+        if (count($paths) > self::MAX_SPARSE) return ['error' => 'The sparse list has more than ' . self::MAX_SPARSE . ' folders.'];
+        $paths = array_values(array_unique($paths));
+        foreach ($paths as $p) {
+            $t = self::git(['ls-tree', '-d', $base, '--', $p], $repo);
+            if ($t['rc'] !== 0) return ['error' => "git could not read the base '$base' to check the sparse folder '" . self::shortLine($p) . "'. Nothing was started."];
+            $first = trim((string)strtok($t['out'], "\n"));
+            if ($first === '') return ['error' => "The sparse folder '" . self::shortLine($p) . "' does not exist in '$base'. Nothing was started."];
+            if (preg_match('/^\d+ tree /', $first) !== 1) return ['error' => "The sparse entry '" . self::shortLine($p) . "' is not a folder in '$base'. Nothing was started."];
+        }
+        // The paths of `sparse-checkout set` are relative to the top of the git work tree, the paths above to the repo folder.
+        $prefix = '';
+        if ($paths !== []) {
+            $pre = self::git(['rev-parse', '--show-prefix'], $repo);
+            if ($pre['rc'] === 0) $prefix = trim($pre['out']);
+        }
+        return ['paths' => $paths, 'prefix' => $prefix];
     }
 
     /**
      * Make the worktree: `git worktree add <dir> -b <branch> <base>`. Never push, merge or reset.
      *
-     * @param array{repo:string,branch:string,base:string,path:string} $plan
+     * @param array<string,mixed> $plan
      * @return array<string,mixed>
      */
     private static function makeWorktree(array $plan): array
@@ -825,9 +933,53 @@ class SpawnService
         if (!is_dir($parent) && !@mkdir($parent, 0775, true) && !is_dir($parent)) {
             return ['error' => "Could not create the folder '$parent' for the worktree."];
         }
-        $r = self::git(['worktree', 'add', $plan['path'], '-b', $plan['branch'], $plan['base']], $plan['repo']);
+        // #865 decision B: just before the first git write, the real path of the parent must be the repo plus the folder.
+        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('worktree-parent');
+        $expected = (string)@realpath($plan['repo']) . '/' . $plan['dir_rel'];
+        if (@realpath($parent) !== $expected) {
+            return ['error' => "The worktree folder '$parent' does not lead to '$expected' (a link in the path). It was not used. Nothing was started."];
+        }
+        // #865 review 4: the ignore file is written BEFORE `git worktree add`, so a failure leaves no orphan worktree or branch.
+        $ign = self::writeParentIgnore($parent);
+        if ($ign !== null) return ['error' => $ign . ' Nothing was started.'];
+        $sparse = $plan['sparse'] ?? [];
+        // #865 item 3: with a sparse list the worktree is made without a checkout, the sparse folders are set, and only
+        // then the files are checked out, so the files outside the list are never written to the disk.
+        $add = ['worktree', 'add'];
+        if ($sparse !== []) $add[] = '--no-checkout';
+        $r = self::git(array_merge($add, [$plan['path'], '-b', $plan['branch'], $plan['base']]), $plan['repo']);
         if ($r['rc'] !== 0) {
-            return ['error' => 'git could not make the worktree (base ' . $plan['base'] . '). Check that the base exists. Nothing was started.'];
+            // #865 third review 3: git can fail after it made the branch (a failing checkout filter). planWorktree showed that the
+            // branch did not exist before, so it is ours: remove a half-made worktree and the branch, and say what is true.
+            $left = '';
+            $exists = self::git(['show-ref', '--verify', '--quiet', 'refs/heads/' . $plan['branch']], $plan['repo']);
+            if (is_dir($plan['path'])) {
+                $rmw = self::git(['worktree', 'remove', '--force', $plan['path']], $plan['repo']);
+                if ($rmw['rc'] !== 0) $left .= ' The half-made worktree ' . $plan['path'] . ' could not be removed. Remove it by hand.';
+            }
+            self::git(['worktree', 'prune'], $plan['repo']);
+            if ($exists['rc'] === 0) {
+                $brd = self::git(['branch', '-D', $plan['branch']], $plan['repo']);
+                $left .= $brd['rc'] === 0 ? ' The branch ' . $plan['branch'] . ' that git made was removed.' : ' The branch ' . $plan['branch'] . ' could not be removed. Remove it by hand.';
+            }
+            return ['error' => 'git could not make the worktree (base ' . $plan['base'] . '). Check that the base exists. Nothing was started.' . $left];
+        }
+        if ($sparse !== []) {
+            $prefix = (string)($plan['prefix'] ?? '');
+            $set = self::git(array_merge(['sparse-checkout', 'set', '--cone', '--'], array_map(static fn(string $p): string => $prefix . $p, $sparse)), $plan['path']);
+            $co = $set['rc'] === 0 ? self::git(['checkout', '-f', $plan['branch']], $plan['path']) : $set;
+            if ($co['rc'] !== 0) {
+                // Take the half-made worktree away again: nothing is in it yet that a person wrote. Say what is true.
+                $rm = self::git(['worktree', 'remove', '--force', $plan['path']], $plan['repo']);
+                $br = $rm['rc'] === 0 ? self::git(['branch', '-D', $plan['branch']], $plan['repo']) : ['rc' => 1, 'out' => ''];
+                if ($rm['rc'] !== 0) {
+                    return ['error' => 'git could not apply the sparse folders, and could not remove the half-made worktree ' . $plan['path'] . ' (branch ' . $plan['branch'] . '). Remove them by hand. Nothing was started.'];
+                }
+                if ($br['rc'] !== 0) {
+                    return ['error' => 'git could not apply the sparse folders. The worktree was removed, but the branch ' . $plan['branch'] . ' could not be removed. Remove it by hand. Nothing was started.'];
+                }
+                return ['error' => 'git could not apply the sparse folders to the worktree. The worktree and its branch were removed. Nothing was started.'];
+            }
         }
         return ['ok' => true];
     }
@@ -858,33 +1010,6 @@ class SpawnService
             return false;
         }
         return true;
-    }
-
-    /** The largest exclude file that is read and written back, in bytes. A larger file is refused. */
-    private const EXCLUDE_READ_LIMIT = 1048576;
-
-    /**
-     * Read a plain file without following a link at its name. lstat first, then open, then fstat the open file: the
-     * two must name the same device and inode, the file must be regular, it must have one name only and it must not
-     * be larger than the limit. Returns '' when the file does not exist, the content, or null when the file is refused.
-     */
-    private static function readPlainFile(string $name): ?string
-    {
-        $l = @lstat($name);
-        if ($l === false) return '';
-        if (($l['mode'] & 0170000) !== 0100000 || $l['nlink'] > 1) return null;
-        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('read:' . $name);
-        $h = @fopen($name, 'rb');
-        if ($h === false) return null;
-        $f = fstat($h);
-        $data = null;
-        // A file over the limit is refused: the copy would be cut and the rename would lose lines (fifth review, F2).
-        if ($f !== false && ($f['mode'] & 0170000) === 0100000 && $f['nlink'] <= 1 && $f['size'] <= self::EXCLUDE_READ_LIMIT && $f['dev'] === $l['dev'] && $f['ino'] === $l['ino']) {
-            $c = stream_get_contents($h, self::EXCLUDE_READ_LIMIT);
-            $data = is_string($c) ? $c : null;
-        }
-        fclose($h);
-        return $data;
     }
 
     /** @var callable|null fn(string $what): void. A test swaps a folder for a link in the gap between a check and its use. PHPUnit only. */
@@ -951,75 +1076,132 @@ class SpawnService
     }
 
     /**
-     * Add ".aicli-task/" to the git exclude file of the repo. The exclude file is only written when its folder is
-     * inside the run folder and is entered by the same check as the task folder. Returns a note for the reply.
+     * Take back the auto-launch mark that THIS call set. This is an undo, not a start: it clears the mark only when it was
+     * not there before the call (a workspace stopped on purpose keeps its mark). The guard test of the marker lists this
+     * method by name; no other part of closeHelper may clear it.
      */
-    private static function addToGitExclude(string $folder, string $gitPath): string
+    private static function undoOwnMark(string $id, bool $wasSuppressed): void
     {
-        $line = self::TASK_DIR . '/';
-        $real = @realpath($folder);
-        if ($real === false) return '';
-        $exclude = $gitPath[0] !== '/' ? $real . '/' . $gitPath : $gitPath;
-        $excludeDir = dirname($exclude);
-        // Only two places are used: a folder inside the run folder, and the folder .git/info of a repository that holds
-        // the run folder (a worktree of the tool keeps its exclude file there). Anything else is not touched.
-        $insideRun = strpos($excludeDir . '/', rtrim($real, '/') . '/') === 0;
-        $inRepoAbove = preg_match('#/\.git/info$#D', $excludeDir) === 1 && strpos($real . '/', dirname($excludeDir, 2) . '/') === 0;
-        if ((!$insideRun && !$inRepoAbove) || strpos($exclude, '..') !== false) {
-            return 'The git exclude file is outside the folder of the run, so the folder ' . self::TASK_DIR . '/ was not added to it.';
-        }
-        if (is_link($exclude) || is_link($excludeDir)) {
-            return 'The git exclude file is a link, so the folder ' . self::TASK_DIR . '/ was not added to it.';
-        }
-        // No mkdir: a missing folder is not made by root, because mkdir -p would follow a link in the path (fourth review, 3).
-        if (!is_dir($excludeDir)) {
-            return 'The git exclude folder does not exist, so the folder ' . self::TASK_DIR . '/ was not added to it.';
-        }
-        // The folder .git/info of a repository above the run folder may belong to a person. Root opens nothing there
-        // unless the folder is owned by root and no group or other user can write to it (fifth review, F1): an open
-        // of a name that a person controls follows a link, and a FIFO or a device file would hang or harm the host.
-        if (!$insideRun) {
-            $st = @lstat($excludeDir);
-            if ($st === false || ($st['mode'] & 0170000) !== 0040000 || $st['uid'] !== 0 || ($st['mode'] & 0022) !== 0) {
-                return 'The git exclude folder is not owned by root, so it was not opened. Add the line ' . self::TASK_DIR . '/ to .git/info/exclude of the repo yourself.';
-            }
-        }
-        if (defined('AICLI_TEST_TMP') && self::$afterCheck !== null) (self::$afterCheck)('exclude');
-        $name = basename($exclude);
-        [$entered, $result] = self::inDir($excludeDir, $excludeDir, false, static function () use ($line, $name): string {
-            $have = self::readPlainFile($name);
-            if ($have === null) return 'refused';
-            if (in_array($line, preg_split('/\R/', $have) ?: [], true)) return 'present';
-            return self::writeNoFollow($name, $have . ($have !== '' && substr($have, -1) !== "\n" ? "\n" : '') . $line . "\n", 0644) ? 'added' : 'failed';
-        });
-        if (!$entered) return 'The git exclude folder changed while it was used, so the folder ' . self::TASK_DIR . '/ was not added to it.';
-        if ($result === 'refused') return 'The git exclude file is not a plain file with one name, so the folder ' . self::TASK_DIR . '/ was not added to it.';
-        return $result === 'added' ? 'The folder ' . self::TASK_DIR . '/ was added to the git exclude file of the repo.' : '';
+        if (!$wasSuppressed) AutoLaunchSuppression::clear($id);
     }
 
     /**
-     * Write the task files into the sub-agent's folder: TASK.md (the brief) and, when the agent takes a first
-     * prompt, PROMPT.once (the fixed first line). Both mode 600. When the folder is inside a git repo, the
-     * folder .aicli-task/ goes into the repo's info/exclude, so git ignores it.
+     * Undo a spawn that failed after its record was saved: the record, the saved flags, the hold mark and, for a worktree
+     * that this call made, the worktree and its branch (the same way as the sparse failure path). Says what is true.
+     *
+     * @param array<string,mixed>|null $worktree the plan of a worktree made by this call
+     */
+    private static function rollbackSpawn(string $id, ?array $worktree): string
+    {
+        $parts = [];
+        $removed = false;
+        try {
+            $workspaces = ConfigService::getWorkspaces();
+            $remaining = array_values(array_filter($workspaces['sessions'] ?? [], static fn($w): bool => is_array($w) && (string)($w['id'] ?? '') !== $id));
+            $removed = (bool)ConfigService::saveWorkspaces(['sessions' => $remaining, 'activeId' => $workspaces['activeId'] ?? null], [$id]);
+        } catch (\Throwable $e) {
+            $removed = false;
+        }
+        ArgsService::deleteIdArgs($id);
+        if ($removed) {
+            $parts[] = 'The workspace record was removed.';
+            self::undoOwnMark($id, false);
+        } else {
+            // #865 third review 2: the hold mark STAYS, so the auto-launch sweep does not start the leftover record.
+            $parts[] = "The workspace record '$id' could not be removed, so it stays held and is not started. Remove it by hand.";
+        }
+        if ($worktree !== null) $parts[] = self::undoWorktree($worktree);
+        return 'Nothing was started. ' . implode(' ', $parts);
+    }
+
+    /**
+     * Undo a spawn that failed BEFORE its record was saved: the hold mark of this call, and the worktree and branch that
+     * this call made. There is no record to remove. Says what is true.
+     *
+     * @param array<string,mixed>|null $worktree
+     */
+    private static function undoWithoutRecord(string $id, ?array $worktree): string
+    {
+        if ($id !== '') self::undoOwnMark($id, false);
+        return 'Nothing was started.' . ($worktree !== null ? ' ' . self::undoWorktree($worktree) : '');
+    }
+
+    /**
+     * Remove the worktree and the branch that this call made. Returns one sentence that says what is true.
+     *
+     * @param array<string,mixed> $worktree the plan of the worktree
+     */
+    private static function undoWorktree(array $worktree): string
+    {
+        $rm = self::git(['worktree', 'remove', '--force', (string)$worktree['path']], (string)$worktree['repo']);
+        if ($rm['rc'] !== 0) {
+            return 'The worktree ' . $worktree['path'] . ' (branch ' . $worktree['branch'] . ') could not be removed. Remove them by hand.';
+        }
+        $br = self::git(['branch', '-D', (string)$worktree['branch']], (string)$worktree['repo']);
+        return $br['rc'] === 0 ? 'The worktree and its branch were removed.' : 'The worktree was removed, but the branch ' . $worktree['branch'] . ' could not be removed. Remove it by hand.';
+    }
+
+    /**
+     * #865 item 4: the branch rules that the plugin adds to TASK.md of a worktree helper. The text names no agent.
+     * The rule comes from the launch profile of the agent (`worktree.push`): the default lets the helper push its
+     * own branch; a profile with `push: none` tells it not to push at all.
+     *
+     * @param array<string,mixed> $worktree
+     */
+    private static function branchRules(array $worktree, string $agentId): string
+    {
+        $branch = (string)$worktree['branch'];
+        $base = (string)$worktree['base'];
+        $out = "\n---\nBranch rules (written by the plugin):\n- Work only in this worktree, on the branch '$branch'. Commit your work on that branch.\n";
+        if (AgentLaunchProfile::pushRule($agentId) === AgentLaunchProfile::PUSH_NONE) {
+            $out .= "- Do not push. Your parent takes the branch from the local repo and merges it.\n";
+        } else {
+            $out .= "- Push your branch: git push -u origin $branch\n- Never push to '$base', to main or to master. Your parent merges your branch.\n";
+        }
+        return $out . "- Leave the folder " . self::TASK_DIR . "/ alone. Git ignores it.\n";
+    }
+
+    /**
+     * Write the task files into the sub-agent's folder: TASK.md (the brief), a .gitignore with the line `*` (so git
+     * ignores the whole task folder, also the .gitignore itself) and, when the agent takes a first prompt, PROMPT.once
+     * (the fixed first line). #865 decision A: nothing is written to `.git/info/exclude` any more.
      *
      * @return array{note?:string}|array{error:string}
      */
-    private static function writeTaskFiles(string $folder, string $task, bool $withPrompt): array
+    private static function writeTaskFiles(string $folder, string $task, bool $withPrompt, ?array $worktree = null, string $agentId = ''): array
     {
-        $files = ['TASK.md' => $task . "\n"];
+        $files = ['TASK.md' => $task . "\n" . ($worktree !== null ? self::branchRules($worktree, $agentId) : ''), '.gitignore' => self::IGNORE_ALL];
         if ($withPrompt) $files['PROMPT.once'] = self::FIRST_LINE;
         $err = self::writeInTaskDir($folder, $files);
         if ($err !== null) return ['error' => $err];
-        $note = '';
-        $ex = self::git(['rev-parse', '--git-path', 'info/exclude'], $folder);
-        if ($ex['rc'] === 0 && trim($ex['out']) !== '') {
-            $note = self::addToGitExclude($folder, trim($ex['out']));
-        } else {
-            $note = 'The folder is not in a git repository. The folder ' . self::TASK_DIR . '/ was added to it.';
-        }
-        return $note !== '' ? ['note' => $note] : [];
+        return [];
     }
 
+    /** The content of every .gitignore that the plugin writes: ignore everything in the folder, itself included. */
+    public const IGNORE_ALL = "*\n";
+
+    /**
+     * #865 decision A: put a .gitignore with `*` into the worktree parent folder (`<repo>/<worktree.dir>/`). Git then
+     * ignores every worktree under it, so `git add -A` in the checkout of the repo, or in a larger repo that holds
+     * it, records no gitlink. Why not `.git/info/exclude`: it is the file of the repo that holds `.git`, so it does
+     * not work for a repo inside a larger repo, and writing it meant opening a folder that a person may control.
+     * An existing .gitignore that is not exactly this one is refused by planWorktree() before any side effect.
+     */
+    private static function writeParentIgnore(string $parent): ?string
+    {
+        $file = $parent . '/.gitignore';
+        if (is_link($file)) return "The file '$file' is a link. It was not used.";
+        if (file_exists($file) && !is_file($file)) return "The path '$file' exists and is not a regular file. It was not used.";
+        if (is_file($file) && self::hasIgnoreAll((string)@file_get_contents($file))) return null;
+        if (!self::writeNoFollow($file, self::IGNORE_ALL, 0644)) return "Could not write '$file'.";
+        return null;
+    }
+
+    private static function hasIgnoreAll(string $content): bool
+    {
+        foreach (preg_split('/\R/', $content) ?: [] as $line) if (trim($line) === '*') return true;
+        return false;
+    }
     // ======================================================================
     // Slice (c): aicli_start_workspace and aicli_stop_workspace
     // ======================================================================
@@ -1116,7 +1298,7 @@ class SpawnService
      *
      * @return array<string,mixed>
      */
-    private static function closeProcess(string $id, string $agentId, string $path): array
+    public static function closeProcess(string $id, string $agentId, string $path): array
     {
         if (self::$closeRunner !== null) return (self::$closeRunner)($id, $agentId, $path);
         if (!class_exists('\\AICliAgents\\Handlers\\TerminalHandler')) {
@@ -1271,11 +1453,12 @@ class SpawnService
      *
      * @return array<string,mixed>
      */
-    public static function closeHelper(string $id, bool $notify): array
+    public static function closeHelper(string $id, bool $notify, bool $anyKind = false): array
     {
         $record = self::findRecord($id);
         if ($record === null) return ['error' => "No workspace with id '$id' was found. It may be closed already."];
-        if (!self::isHelper($record)) return ['error' => 'Only a sub-agent workspace that the spawn tool made is closed this way.'];
+        // $anyKind is true only for closeOwn(): the creator closes a workspace it made, helper or not (#866).
+        if (!$anyKind && !self::isHelper($record)) return ['error' => 'Only a sub-agent workspace that the spawn tool made is closed this way.'];
         $name = (string)($record['name'] ?? $id);
         $agentId = (string)($record['agentId'] ?? '');
         $path = (string)($record['path'] ?? '');
@@ -1283,12 +1466,16 @@ class SpawnService
         $parentName = (string)($spawn['parent_name'] ?? '');
 
         // #687: mark the removal BEFORE the close, so a browser tab that still shows the row cannot start it again.
+        // #865 decision E: the marks are undone when the close fails, so the workspace is not left half-removed. An
+        // auto-launch mark that was there before this call (a workspace stopped on purpose) stays.
+        $wasSuppressed = AutoLaunchSuppression::isSuppressed($id);
         ConfigService::markWorkspaceDeleting($id);
         AutoLaunchSuppression::suppress($id);
         if (ProcessManager::isRunning($id)) {
             $closed = self::closeProcess($id, $agentId, $path);
             if (($closed['status'] ?? '') !== 'ok') {
                 ConfigService::clearWorkspaceDeleting($id);
+                self::undoOwnMark($id, $wasSuppressed);
                 return ['error' => (string)($closed['message'] ?? "Workspace '$name' could not be closed.")];
             }
         }
@@ -1302,6 +1489,7 @@ class SpawnService
         $ok = ConfigService::saveWorkspaces(['sessions' => $remaining, 'activeId' => $workspaces['activeId'] ?? null], [$id]);
         if (!$ok) {
             ConfigService::clearWorkspaceDeleting($id);
+            self::undoOwnMark($id, $wasSuppressed);
             return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the workspace removal.'];
         }
         $runId = (string)($spawn['run']['runId'] ?? '');
@@ -1312,6 +1500,8 @@ class SpawnService
         try { AgentRelayService::reAdoptOwnersByIdentity(); } catch (\Throwable $e) { /* best effort */ }
         ArgsService::deleteIdArgs($id);
         self::untrustWorktreeOf($spawn, $agentId);
+        // #865 decision J: only a sub-agent is called a sub-agent. A plain workspace is a "workspace".
+        $noun = self::isHelper($record) ? 'Sub-agent workspace' : 'Workspace';
 
         $worktree = self::cleanupWorktree(is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null);
         $result = ['workspaceId' => $id, 'name' => $name, 'stopped' => true, 'removed' => true, 'worktree' => $worktree];
@@ -1319,21 +1509,151 @@ class SpawnService
         $detail = "by $parentName";
         if ($worktree['kept']) {
             $detail .= ' · the worktree is kept: ' . $worktree['reason'];
-            $parentId = (string)($spawn['parent'] ?? '');
-            if ($parentId !== '') {
-                $text = "Sub-agent '$name' was closed. Its worktree '" . $worktree['branch'] . "' is kept: " . $worktree['reason'];
-                if (self::$parentNotifier !== null) (self::$parentNotifier)($id, $parentId, $text);
-                else AgentRelayService::directMessage($id, $parentId, $text);
-            }
+            self::tellParentKept($id, $name, $spawn, $worktree);
         } elseif ($worktree['removed']) {
             $detail .= ' · the worktree was removed';
         }
         if ($runId === '') {
             self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => $agentId],
-                "Sub-agent workspace '$name' closed", ['parent' => (string)($spawn['parent'] ?? ''), 'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
-            if ($notify) self::notify('Sub-agent workspace closed: ' . $name, $detail, $id);
+                "$noun '$name' closed", ['parent' => (string)($spawn['parent'] ?? ''), 'worktreeKept' => $worktree['kept'], 'branch' => $worktree['branch']]);
+            if ($notify) self::notify("$noun closed: " . $name, $detail, $id);
         }
         return $result;
+    }
+
+    /**
+     * Tell the parent of a sub-agent that the worktree of the closed sub-agent is kept, and why (one Relay message).
+     * Used by every close path, so the parent knows where the unmerged work is.
+     *
+     * @param array<string,mixed> $spawn
+     * @param array{removed:bool,kept:bool,reason:string,branch:string} $worktree
+     */
+    public static function tellParentKept(string $id, string $name, array $spawn, array $worktree): void
+    {
+        $parentId = (string)($spawn['parent'] ?? '');
+        if ($parentId === '' || empty($worktree['kept'])) return;
+        $text = "Sub-agent '$name' was closed. Its worktree '" . $worktree['branch'] . "' is kept: " . $worktree['reason'];
+        try {
+            if (self::$parentNotifier !== null) (self::$parentNotifier)($id, $parentId, $text);
+            else AgentRelayService::directMessage($id, $parentId, $text);
+        } catch (\Throwable $e) {
+            // Best effort.
+        }
+    }
+
+    /** @var callable|null fn(string $subject, string $description, string $level): void. Replaces the Unraid notify script. */
+    public static $systemNotifier = null;
+
+    /** The Unraid notify script. The path is fixed: no variable can point it at another program. */
+    public const NOTIFY_SCRIPT = '/usr/local/emhttp/webGui/scripts/notify';
+
+    /**
+     * An Unraid notification. Unraid's own notification settings decide whether and where it shows. Best effort.
+     */
+    private static function systemNotify(string $subject, string $description): void
+    {
+        try {
+            if (self::$systemNotifier !== null) {
+                (self::$systemNotifier)($subject, $description, 'normal');
+                return;
+            }
+            if (!file_exists(self::NOTIFY_SCRIPT)) return;
+            exec(escapeshellcmd(self::NOTIFY_SCRIPT) . " -e 'AICliAgents' -s " . escapeshellarg($subject) . ' -d ' . escapeshellarg($description) . ' -i normal 2>/dev/null');
+        } catch (\Throwable $e) {
+            // Best effort.
+        }
+    }
+
+    /** @var callable|null fn(string $id): bool. Replaces the Relay actor check of closeOwn(). */
+    public static $actorProbe = null;
+
+    /** True when the workspace is a live Relay actor, or when that cannot be told (then the safe answer is yes). */
+    private static function isRelayActor(string $id): bool
+    {
+        try {
+            if (self::$actorProbe !== null) return (bool)(self::$actorProbe)($id);
+            $actor = AgentRelayService::actorStatus($id);
+            return !empty($actor['is_actor']);
+        } catch (\Throwable $e) {
+            return true;
+        }
+    }
+
+    /**
+     * #866 (John, 2026-10-31): an agent may close for good a workspace that it created, with no approval. The
+     * person gets a notice, not a question. Runs only when ALL of these hold; in every other case it returns null and
+     * the caller makes the normal Tier 3 proposal:
+     * - the call comes from a workspace that has a real record (not a person's shell, not an unknown id);
+     * - the record's `createdBy` (written by the plugin, never claimed by the caller) is that workspace, and is not
+     *   `human` and not `run:*` (a person's workspace and a script run never qualify);
+     * - the workspace is not the caller itself;
+     * - the workspace is not a Relay actor (an actor is a standing member of the Relay, so a person decides).
+     * Limit, stated plainly: `AICLI_SESSION_ID` is an environment variable. A process that runs as root can claim the id
+     * of another real session. So this is a guard against mistakes, not against a hostile process.
+     *
+     * The close is graceful. The record and its flags go. The worktree goes only when it is merged and clean; the
+     * branch is never deleted. One Activity tray row names the caller, the workspace and the worktree outcome, and one
+     * Unraid notification is sent.
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function closeOwn(string $id): ?array
+    {
+        $id = trim($id);
+        $caller = self::callerId();
+        $record = self::findRecord($id);
+        if ($caller === '' || $record === null || $id === $caller) return null;
+        $creator = (string)($record['createdBy'] ?? '');
+        if ($creator !== $caller || $creator === 'human' || strpos($creator, 'run:') === 0) return null;
+        $callerRecord = self::findRecord($caller);
+        if ($callerRecord === null) return null;
+        if (self::isRelayActor($id)) return null;
+        $callerName = (string)($callerRecord['name'] ?? $caller);
+        $name = (string)($record['name'] ?? $id);
+        $noun = self::isHelper($record) ? 'sub-agent' : 'workspace';
+        $r = self::closeHelper($id, false, true);
+        if (isset($r['error'])) return $r;
+        $wt = is_array($r['worktree'] ?? null) ? $r['worktree'] : ['removed' => false, 'kept' => false, 'reason' => '', 'branch' => ''];
+        if (!empty($wt['kept'])) $outcome = 'the worktree is kept (' . $wt['reason'] . '); the work is on the branch ' . $wt['branch'];
+        elseif (!empty($wt['removed'])) $outcome = 'the worktree was removed';
+        else $outcome = 'no worktree';
+        $title = "$callerName closed its $noun $name";
+        self::notify($title, $outcome, $id);
+        self::systemNotify('AICliAgents: ' . $title, $outcome);
+        return $r + ['closedBy' => $callerName, 'approval' => 'not needed: you created this workspace'];
+    }
+
+    /**
+     * #865 decision G: the closing steps that the approved delete shares with closeHelper, for a sub-agent: one event
+     * and, when the worktree is kept, one Relay message to the parent. A script run is left to AgentRunService.
+     *
+     * @param array<string,mixed> $record the record, read before it was removed
+     * @param array<string,mixed> $worktree
+     */
+    public static function reportApprovedRemoval(array $record, array $worktree): void
+    {
+        if (!self::isHelper($record)) return;
+        $id = (string)($record['id'] ?? '');
+        $name = (string)($record['name'] ?? $id);
+        $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
+        if ((string)($spawn['run']['runId'] ?? '') !== '') return;
+        self::emit('workspace.helper_closed', ['workspaceId' => $id, 'agentId' => (string)($record['agentId'] ?? '')],
+            "Sub-agent workspace '$name' closed by a person", ['parent' => (string)($spawn['parent'] ?? ''), 'by' => 'person',
+                'worktreeKept' => !empty($worktree['kept']), 'branch' => (string)($worktree['branch'] ?? '')]);
+        self::tellParentKept($id, $name, $spawn, $worktree + ['removed' => false, 'kept' => false, 'reason' => '', 'branch' => '']);
+    }
+    /**
+     * #865 item 5: what a close does to the worktree of a helper that is removed by any path (the approved delete too).
+     * Takes the Codex trust away and removes the worktree when it is merged and clean. The branch is never deleted.
+     *
+     * @param array<string,mixed> $record the workspace record, read before it was removed
+     * @return array{removed:bool,kept:bool,reason:string,branch:string}
+     */
+    public static function finishRemoval(array $record): array
+    {
+        $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
+        self::untrustWorktreeOf($spawn, (string)($record['agentId'] ?? ''));
+        return self::cleanupWorktree(is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null);
     }
 
     /** R20: take the Codex trust of the sub-agent's worktree away again. Best effort; a table the plugin did not add is not touched. */
@@ -1528,18 +1848,39 @@ class SpawnService
             return $out;
         }
         if ($state['unknown']) {
-            $out['reason'] = 'git could not say whether the work is merged';
+            // #865 decision I: a base of HEAD names no branch, so `HEAD..HEAD` is always empty and proves nothing.
+            $out['reason'] = $base === 'HEAD'
+                ? 'the base is not a named branch, so the plugin cannot tell whether the work is merged'
+                : 'git could not say whether the work is merged';
             return $out;
         }
-        $task = $dir . '/' . self::TASK_DIR;
-        foreach (['TASK.md', 'PROMPT.once', 'PROMPT.consumed', 'RESULT.json'] as $f) @unlink($task . '/' . $f);
-        @rmdir($task);
+        // The task folder is NOT emptied by hand: a repo can commit `.aicli-task` as a link, and an unlink under it would
+        // delete files elsewhere. `git worktree remove --force` removes the folder and never follows a link.
         $r = self::git(['worktree', 'remove', '--force', $dir], $repo);
         if ($r['rc'] !== 0) {
             $out['reason'] = 'git could not remove the worktree folder';
             return $out;
         }
         return ['removed' => true, 'kept' => false, 'reason' => '', 'branch' => $branch];
+    }
+
+    /** The files that the plugin itself writes into `.aicli-task/`. */
+    public const TASK_FILES = ['TASK.md', '.gitignore', 'PROMPT.once', 'PROMPT.consumed', 'RESULT.json'];
+
+    /**
+     * True for a `git status --porcelain --ignored` line that is the plugin's own task file: exactly
+     * `!! .aicli-task/<a file the plugin writes>`. With `--untracked-files=all` git lists the ignored files one by one.
+     * A whole `!! .aicli-task/` line is NOT skipped: it could hide files of the sub-agent, so it counts as a change.
+     * Any other line, also ` M .aicli-task/notes.md`, ` M sub/.aicli-task/keep.md` or `?? my.aicli-task/draft.txt`, is
+     * work of the sub-agent and counts as a change.
+     */
+    private static function isPluginTaskLine(string $line): bool
+    {
+        $line = rtrim($line, "\r\n");
+        if (strpos($line, '!! ') !== 0) return false;
+        $path = substr($line, 3);
+        $prefix = self::TASK_DIR . '/';
+        return strpos($path, $prefix) === 0 && in_array(substr($path, strlen($prefix)), self::TASK_FILES, true);
     }
 
     /**
@@ -1553,11 +1894,13 @@ class SpawnService
     {
         $dir = (string)($wt['path'] ?? '');
         $base = (string)($wt['base'] ?? 'HEAD');
-        $st = self::git(['status', '--porcelain', '--untracked-files=all'], $dir);
-        $unknown = $st['rc'] !== 0;
+        // #865 decision I: --ignored, so a file that the helper made and git ignores (a build folder) keeps the worktree.
+        // The plugin's own task folder is skipped below.
+        $st = self::git(['status', '--porcelain', '--untracked-files=all', '--ignored'], $dir);
+        $unknown = $st['rc'] !== 0 || $base === 'HEAD';
         $dirty = 0;
         foreach (preg_split('/\R/', $st['out']) ?: [] as $line) {
-            if (trim($line) === '' || strpos($line, self::TASK_DIR . '/') !== false) continue;
+            if (trim($line) === '' || self::isPluginTaskLine($line)) continue;
             $dirty++;
         }
         $ahead = 0;

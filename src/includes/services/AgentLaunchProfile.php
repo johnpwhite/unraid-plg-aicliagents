@@ -24,6 +24,59 @@ class AgentLaunchProfile
     public const PROMPT_NONE = 'none';
     public const PROMPT_POSITIONAL = 'positional';
 
+    /** The worktree folder under the repo when the agent's profile names none. The name belongs to no agent. */
+    public const DEFAULT_WORKTREE_DIR = '.aicli/worktrees';
+
+    /** Folders that older versions used. They stay recognised by the clean-up and by the Codex trust check (#865). */
+    public const LEGACY_WORKTREE_DIRS = ['.claude/worktrees'];
+
+    /** The branch rule when a profile says nothing: commit on the helper branch and push that branch only. */
+    public const PUSH_BRANCH = 'branch';
+    public const PUSH_NONE = 'none';
+
+    /**
+     * True for a safe repo-relative folder: 1 to 3 plain parts. A part starts with a letter, a digit, an underscore or
+     * one dot (never a dash), has no `..`, and is never `.git` (any case). A leading slash is refused.
+     */
+    public static function worktreeDirValid(string $dir): bool
+    {
+        if (preg_match('#^\.?[A-Za-z0-9_][A-Za-z0-9._-]*(/\.?[A-Za-z0-9_][A-Za-z0-9._-]*){0,2}$#D', $dir) !== 1 || strpos($dir, '..') !== false) return false;
+        foreach (explode('/', $dir) as $part) {
+            if (strtolower($part) === '.git') return false;
+        }
+        return true;
+    }
+    /** The repo-relative folder for the worktrees of one agent: its profile `worktree.dir`, else the neutral default. */
+    public static function worktreeDir(string $agentId, ?array $profile = null): string
+    {
+        $profile = $profile ?? self::profileFor($agentId);
+        $dir = rtrim((string)($profile['worktree']['dir'] ?? ''), '/');
+        return $dir !== '' && self::worktreeDirValid($dir) ? $dir : self::DEFAULT_WORKTREE_DIR;
+    }
+
+    /**
+     * Every worktree folder the plugin recognises: the default, the legacy folders and each folder that a profile
+     * names. Clean-up and trust checks use this list, so a worktree made by an older version is still handled.
+     *
+     * @return list<string>
+     */
+    public static function recognisedWorktreeDirs(): array
+    {
+        $dirs = array_merge([self::DEFAULT_WORKTREE_DIR], self::LEGACY_WORKTREE_DIRS);
+        foreach (AgentRegistry::getDefaultAgents() as $id => $agent) {
+            $d = rtrim((string)($agent['launch_profile']['worktree']['dir'] ?? ''), '/');
+            if ($d !== '' && self::worktreeDirValid($d)) $dirs[] = $d;
+        }
+        return array_values(array_unique($dirs));
+    }
+
+    /** The branch rule of an agent: 'branch' (push the helper branch only) or 'none' (the profile says do not push). */
+    public static function pushRule(string $agentId, ?array $profile = null): string
+    {
+        $profile = $profile ?? self::profileFor($agentId);
+        return ($profile['worktree']['push'] ?? '') === self::PUSH_NONE ? self::PUSH_NONE : self::PUSH_BRANCH;
+    }
+
     /** Admin tools that are tagged "read" but write the caller's own cursor or subscription. A read-only run denies them too. */
     // aicli_get_events moves the caller's read position by default (ack is true).
     public const ADMIN_READ_BUT_WRITES = ['aicli_ack_events', 'aicli_subscribe_events', 'aicli_get_events'];

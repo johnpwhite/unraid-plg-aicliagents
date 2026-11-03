@@ -164,7 +164,7 @@
  *                                short allow-once answer such as 1 or yes. Refuses if
  *                                `workspaceId` does not name a known,
  *                                running workspace.
- *   spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>])
+ *   spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>] [--sparse=<dir,dir>])
  *         [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended]
  *         [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...]
  *                                CHANGES state (AGENT_SPAWN_WORKSPACE.md). Starts a
@@ -174,7 +174,9 @@
  *                                starts it and gives it a first prompt. The task is
  *                                --file, or the words after the flags, or stdin. With
  *                                --repo the tool makes a git worktree under
- *                                <repo>/.claude/worktrees (it never pushes). --unattended
+ *                                <repo>/.aicli/worktrees (the folder comes from the agent's
+ *                                launch profile; --sparse=a,b limits the checkout to those
+ *                                folders). --unattended
  *                                needs the Settings switch and a tool-made worktree.
  *                                --no-auto-close keeps the sub-agent after its report.
  *                                Refused: when the feature is off, from a sub-agent, when a
@@ -209,15 +211,19 @@
  *                                count on every device, so only do it when
  *                                the operator has dealt with the messages.
  *
- *   Tier 3 (destructive proposal — PROPOSES ONLY, never executes; Phase 3,
+ *   Tier 3 (destructive proposal — PROPOSES, and does not execute; Phase 3,
  *     2026-09-09): delete-workspace, upgrade-agent. Each one validates the
  *     request, then asks a human to approve it in the Manager UI Activity
- *     tray, and returns immediately. NOTHING IS DELETED OR UPGRADED BY THIS
- *     SCRIPT. There is no `approve`/`reject` action here on purpose — only a
+ *     tray, and returns immediately. NOTHING IS UPGRADED BY THIS SCRIPT, and
+ *     nothing is deleted by it EXCEPT one case (#866): delete-workspace of a
+ *     workspace that the calling workspace created closes it for good at
+ *     once, and a person gets a notice. There is no `approve`/`reject` action here on purpose — only a
  *     human, in the Manager UI, can approve or reject a Tier 3 proposal.
  *
- *   delete-workspace <id>       PROPOSES a workspace deletion. Does not
- *                                delete anything itself.
+ *   delete-workspace <id>       PROPOSES a workspace deletion, with one exception: a
+ *                                workspace that the calling workspace created is closed
+ *                                for good at once and a person gets a notice (#866).
+ *                                Any other workspace needs a person's Approve.
  *   upgrade-agent <agentId> [version]
  *                                PROPOSES upgrading an installed agent.
  *                                `version` is OPTIONAL — omitted uses the
@@ -449,12 +455,12 @@ const ADMIN_AGENT_USAGE = [
     'schedule-continue' => 'schedule-continue <workspaceId> <at-epoch> [none|daily|weekly] [reason] [message] -- CHANGES state; ADD a Continue at a wall-clock time (e.g. when the quota resets); prints its entryId',
     'list-scheduled-continues' => 'list-scheduled-continues [workspaceId] -- the scheduled Continues of one workspace, or of all',
     'clear-scheduled-continue' => 'clear-scheduled-continue <workspaceId> [entryId] -- CHANGES state; remove one scheduled Continue, or all of the workspace when no entryId is given',
-    'spawn' => 'spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>]) [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended] [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...] -- CHANGES state; starts a sub-agent workspace; the task is --file, the words, or stdin',
+    'spawn' => 'spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>] [--sparse=<dir,dir>]) [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended] [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...] -- CHANGES state; starts a sub-agent workspace; the task is --file, the words, or stdin',
     'start-workspace' => 'start-workspace <id> -- CHANGES state; starts a closed workspace that you created (or any, for a person)',
     'stop-workspace' => 'stop-workspace <id> -- CHANGES state; closes a workspace that you created; a sub-agent with autoClose also leaves the list and its merged, clean worktree is removed',
     'finish-task' => 'finish-task <done|failed|blocked> <summary...> -- CHANGES state; a sub-agent workspace reports that its task is over; the parent gets a Relay message',
     'propose-pattern' => 'propose-pattern <agentId|all> <error|quota|busy|chrome> <name> <regex> [sample...] -- CHANGES state; adds an auto-continue pattern and prints its GitHub report URL',
-    'delete-workspace' => 'delete-workspace <id> -- PROPOSES ONLY; a human must approve in the Manager UI',
+    'delete-workspace' => 'delete-workspace <id> -- PROPOSES; a human must approve in the Manager UI, except for a workspace you created: that one is closed for good at once and a person gets a notice',
     'upgrade-agent' => 'upgrade-agent <agentId> [version] -- PROPOSES ONLY; a human must approve in the Manager UI',
     'consolidate-home' => 'consolidate-home <user> -- PROPOSES ONLY; a human must approve in the Manager UI (closes every session of that user when approved)',
     'boot-space' => 'boot-space -- the Boot disk space lines that can be archived or removed, from the last measurement (nothing is measured)',
@@ -897,7 +903,7 @@ try {
         case 'spawn':
             // AGENT_SPAWN_WORKSPACE.md. The task is the words after the flags, or --file=<path>, or stdin.
             [$spf, $spw] = adminAgentSplitFlags(array_slice($argv, 2),
-                ['agent', 'name', 'path', 'repo', 'branch', 'base', 'model', 'effort', 'title', 'file', 'unattended', 'no-auto-close', 'max-minutes']);
+                ['agent', 'name', 'path', 'repo', 'branch', 'base', 'sparse', 'model', 'effort', 'title', 'file', 'unattended', 'no-auto-close', 'max-minutes']);
             $spTask = adminAgentReadBody($spf['file'] ?? null);
             if (($spTask === null || trim($spTask) === '') && $spw !== []) $spTask = implode(' ', $spw);
             $spArgs = ['agentId' => (string)($spf['agent'] ?? ''), 'task' => (string)($spTask ?? '')];
@@ -907,6 +913,7 @@ try {
             if (isset($spf['repo']) && is_string($spf['repo'])) {
                 $spArgs['worktree'] = ['repo' => $spf['repo'], 'branch' => (string)($spf['branch'] ?? '')];
                 if (isset($spf['base']) && is_string($spf['base']) && $spf['base'] !== '') $spArgs['worktree']['base'] = $spf['base'];
+                if (isset($spf['sparse']) && is_string($spf['sparse']) && $spf['sparse'] !== '') $spArgs['worktree']['sparse'] = array_values(array_filter(array_map('trim', explode(',', $spf['sparse'])), static fn($p) => $p !== ''));
             }
             if (isset($spf['max-minutes']) && is_string($spf['max-minutes']) && $spf['max-minutes'] !== '') $spArgs['maxMinutes'] = $spf['max-minutes'];
             if (!empty($spf['unattended'])) $spArgs['unattended'] = true;

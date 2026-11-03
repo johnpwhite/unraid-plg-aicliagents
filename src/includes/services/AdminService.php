@@ -2392,6 +2392,11 @@ class AdminService {
      */
     public static function proposeDeleteWorkspace(string $id): array {
         try {
+            // #866 (John, 2026-10-31): the creator of a workspace closes it for good with no approval; a person gets a
+            // notice. Every other caller (a person's shell, another workspace, a workspace a person made) falls
+            // through to the Tier 3 proposal below.
+            $own = SpawnService::closeOwn($id);
+            if ($own !== null) return isset($own['error']) ? $own : ['closed' => true] + $own;
             $validated = self::validateDeleteWorkspace($id);
             if (isset($validated['error'])) return $validated;
             return self::proposePending('aicli_delete_workspace', $validated['description'], $validated['params']);
@@ -2438,7 +2443,7 @@ class AdminService {
             }
 
             if (ProcessManager::isRunning($id)) {
-                \AICliAgents\Handlers\TerminalHandler::handle('graceful_close', $id);
+                SpawnService::closeProcess($id, (string)($session['agentId'] ?? ''), (string)($session['path'] ?? ''));
             }
 
             try { AgentRelayService::forgetSessionRelayTraces($id); }
@@ -2468,7 +2473,26 @@ class AdminService {
             try { AgentRelayService::reAdoptOwnersByIdentity(); }
             catch (\Throwable $e) { /* best-effort, same as UtilityHandler::saveWorkspaces() */ }
 
-            return ['id' => $id, 'name' => (string)($session['name'] ?? $id)];
+            // #865 item 5: a helper that a person deletes through the tray also loses its worktree when it is merged
+            // and clean (and its Codex trust). Unmerged work is kept and the reply names the branch.
+            // #865 decision D: when the session still runs after the close, the worktree is NOT touched. The clean-up is
+            // queued and runs when the session has stopped (the same queue as a person's close in the drawer).
+            $spawnData = is_array($session['spawn'] ?? null) ? $session['spawn'] : [];
+            $wtData = is_array($spawnData['worktree'] ?? null) ? $spawnData['worktree'] : null;
+            if (ProcessManager::isRunning($id)) {
+                $queued = SpawnService::queuePersonClosed($session);
+                $worktree = ['removed' => false, 'kept' => $wtData !== null, 'branch' => (string)($wtData['branch'] ?? ''), 'queued' => $queued,
+                    'reason' => 'the session did not stop' . ($queued ? ', so the clean-up is queued and runs when it has stopped' : '')];
+            } else {
+                $worktree = SpawnService::finishRemoval($session);
+                SpawnService::reportApprovedRemoval($session, $worktree);
+            }
+            // #865 decision G: the person sees the outcome in the finish text of the tray row.
+            if ($wtData === null) $finish = '';
+            elseif (!empty($worktree['removed'])) $finish = 'the worktree was removed';
+            elseif (!empty($worktree['kept'])) $finish = 'the worktree is kept (branch ' . $worktree['branch'] . '): ' . $worktree['reason'];
+            else $finish = '';
+            return ['id' => $id, 'name' => (string)($session['name'] ?? $id), 'worktree' => $worktree, 'finishText' => $finish];
         } catch (\Throwable $e) {
             return self::failure('executeApprovedDeleteWorkspace', $e);
         }
@@ -3116,7 +3140,8 @@ class AdminService {
             ActivityService::fail($opId, (string)$result['error'], null, ['step' => '']);
             return ['error' => (string)$result['error']];
         }
-        ActivityService::finish($opId, 'Approved and done');
+        $finishText = is_string($result['finishText'] ?? null) && $result['finishText'] !== '' ? ' · ' . $result['finishText'] : '';
+        ActivityService::finish($opId, 'Approved and done' . $finishText);
         return ['opId' => $opId, 'tool' => $tool, 'result' => $result];
     }
 

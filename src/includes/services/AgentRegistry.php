@@ -573,6 +573,12 @@ class AgentRegistry {
                     'file'   => '.gemini/settings.json',
                     'values' => ['general.enableAutoUpdate' => false],
                 ],
+                // #865 item 6: the unattended setting is `--approval-mode=yolo`. Official docs:
+                // https://geminicli.com/docs/cli/cli-reference/ (the older `--yolo` is marked deprecated there).
+                // The first-prompt flag is not verified, so the task is typed into the pane (mode none).
+                'launch_profile' => [
+                    'unattended' => ['flags' => '--approval-mode=yolo', 'needs_setting' => 'spawn_allow_unattended'],
+                ],
             ],
             'claude-code' => [
                 'id' => 'claude-code',
@@ -680,10 +686,13 @@ class AgentRegistry {
                 'default_envs' => ['OPENCODE_DISABLE_AUTOUPDATE' => 'true'],
                 // AGENT_SPAWN_WORKSPACE.md R4: a helper workspace of OpenCode. `-m provider/model` and `--prompt`
                 // are the flags of the OpenCode TUI (https://opencode.ai/docs/cli/). There is no effort flag and
-                // no unattended flag here: OpenCode asks the person for permission by its own rules, and a
-                // spawn that asks for either is refused.
+                // no effort flag here, and a spawn that asks for an effort is refused. #865 item 6: the unattended
+                // flag is `--auto` ("auto-approve permissions that are not explicitly denied"; explicit deny rules
+                // still hold). Official docs: https://opencode.ai/docs/permissions/ . Also seen in `opencode --help`
+                // of the installed build. OpenCode 2 has no profile: its flag is not verified.
                 'launch_profile' => [
                     'model'  => ['flag' => '-m {model}'],
+                    'unattended' => ['flags' => '--auto', 'needs_setting' => 'spawn_allow_unattended'],
                     'prompt' => ['mode' => 'flag:--prompt'],
                 ],
             ],

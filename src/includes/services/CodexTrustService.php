@@ -42,7 +42,7 @@ class CodexTrustService
     }
 
     /**
-     * R20: only a worktree that the spawn tool made under `<repo>/.claude/worktrees/` is trusted. `$wt` is the
+     * R20: only a worktree that the spawn tool made under `<repo>/<worktree folder>/` is trusted (default `.aicli/worktrees`, plus the legacy `.claude/worktrees`). `$wt` is the
      * `worktree` block of the helper's `spawn` data.
      *
      * @param array<string,mixed>|null $wt
@@ -52,10 +52,14 @@ class CodexTrustService
         if ($wt === null || empty($wt['tool_made']) || !self::isSafePath($path)) return false;
         $repo = rtrim((string)($wt['repo'] ?? ''), '/');
         if ((string)($wt['path'] ?? '') !== $path || !self::isSafePath($repo) || $repo === '') return false;
-        $prefix = $repo . '/.claude/worktrees/';
-        if (strpos($path, $prefix) !== 0) return false;
-        $rest = substr($path, strlen($prefix));
-        return $rest !== '' && strpos($rest, '/') === false;
+        // #865 item 2: the default folder, a folder that a profile names, and the legacy `.claude/worktrees` all count.
+        foreach (AgentLaunchProfile::recognisedWorktreeDirs() as $dir) {
+            $prefix = $repo . '/' . $dir . '/';
+            if (strpos($path, $prefix) !== 0) continue;
+            $rest = substr($path, strlen($prefix));
+            if ($rest !== '' && strpos($rest, '/') === false) return true;
+        }
+        return false;
     }
 
     // ======================================================================

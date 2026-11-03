@@ -122,7 +122,7 @@ The workspace tools, the schedule tools and `aicli_add_favourite` accept an empt
 
 | What it proposes | Tool | Shell command | What happens after you approve |
 | :-- | :-- | :-- | :-- |
-| Delete a workspace | `aicli_delete_workspace` | `delete-workspace` | The workspace closes if it runs, and the plugin removes it from the drawer. |
+| Delete a workspace | `aicli_delete_workspace` | `delete-workspace` | The workspace closes if it runs, and the plugin removes it from the drawer. No approval is needed when the agent that asks created the workspace: it is closed at once and you get a notice. |
 | Upgrade an agent | `aicli_upgrade_agent` | `upgrade-agent` | The upgrade starts. If a session still uses the agent, the plugin waits and finishes the upgrade when the session closes. The tool cannot force a session to close. |
 | Back up a home | `aicli_backup_home` | `backup-home` | The plugin closes every running session of that user, copies the home to the backup target, and starts the sessions again. A warm backup skips the close. |
 | Restore a home | `aicli_restore_home` | `restore-home` | The plugin closes every running session of that user, saves a "pre-restore" safety copy (unless the proposal says otherwise), restores the home, and starts the sessions again. **Replace** makes the home match the copy. **Merge** only adds files. |
@@ -170,7 +170,9 @@ What you see: a notice in the Activity tray, for example "Sub-agent workspace st
 The rules:
 
 - Only a workspace that you opened can start sub-agents. A sub-agent cannot start another sub-agent.
-- With a **worktree**, the plugin makes a new git branch and folder under `<repo>/.claude/worktrees`. It never pushes, merges or resets.
+- With a **worktree**, the plugin makes a new git branch and folder under `<repo>/.aicli/worktrees`. The folder name belongs to no agent. The plugin never merges or resets, and it puts an ignore file in the folder and in the task folder, so a later `git add -A` in your own checkout does not record the helper's folder. The task file tells the sub-agent to commit on its own branch, to push only that branch and never to push to the main branch. Worktrees that older versions made under `<repo>/.claude/worktrees` are still found and cleaned up.
+- A parent may ask for a **sparse** worktree: it lists the repo folders that the sub-agent needs. Git then writes only those folders to the disk. Use it when a repo holds a large folder that the sub-agent must not read. A repo can also keep a default list in the file `.aicli/worktree-sparse`, one folder on each line.
+- **Let sub-agents run without asking** works for Codex, Claude Code, OpenCode and Gemini CLI. For any other agent the plugin has no verified setting for it, so the request is refused.
 - A start is refused when a limit is reached, when the agent shows a usage limit (the answer gives the time it resets), or when the folder is a plugin state folder.
 - Two workspaces of one agent in one folder are not allowed. Use a worktree.
 - Only the workspace that started a sub-agent, or you, can close it again. Another agent is refused.
@@ -182,6 +184,8 @@ The rules:
 - A parent can give a sub-agent a time limit with `maxMinutes` (1 to 1440). When the sub-agent passes the limit without a report, the parent gets one message and the Activity tray shows one notice. The plugin does not stop the sub-agent.
 - A Codex sub-agent in a worktree starts with that folder already trusted, so it does not stop on the "trust this folder" question. The plugin removes the trust again when the sub-agent closes. The plugin also makes sure the Relay command works inside a Codex sub-agent.
 - When you close a sub-agent yourself, in the drawer, the plugin finishes the job a little later, when the sub-agent has stopped. It removes the sub-agent's flags file, and it removes the worktree under the same rule as below: only when all work is merged and nothing is uncommitted.
+- A parent may also delete, for good, a workspace that it created itself, with no approval from you. You get a notice in the Activity tray (for example "main closed its sub-agent docs-codex", with what happened to the worktree) and an Unraid notification, which your Unraid notification settings control. A workspace that you made, or that another workspace made, still waits for your **Approve**.
+- When you approve the delete of a sub-agent in the Activity tray, its worktree is removed too when all work is merged and nothing is uncommitted. Otherwise the worktree stays and the notice names the branch.
 - When a parent closes a sub-agent, the sub-agent stops and leaves the list. The plugin removes its worktree only when all its work is merged and nothing is uncommitted. Otherwise the worktree stays, and the parent is told which branch holds the work. No approval is needed for this, because only the parent or you can do it.
 
 ## The Notebook tools
@@ -229,6 +233,7 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 <details>
 <summary>Change history</summary>
 
+- **2026-11-03** — Sub-agent worktrees now live in a folder that belongs to no agent (`.aicli/worktrees`), the plugin always makes git ignore them (an ignore file in the folder), a parent can ask for a sparse worktree, the task file tells the sub-agent how to use its branch, OpenCode and Gemini CLI can run without asking, a closed or deleted sub-agent loses a merged worktree, and a parent may delete a workspace it created with no approval. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issues #865 and #866.
 - **2026-10-27** — The settings for sub-agent workspaces have their own card, **Sub-agent workspaces**, after **Script runs**. They were in **General**, part **Advanced**. The word "helper" is now "sub-agent". Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #792.
 - **2026-10-24** — The tools `aicli_archive_boot_data`, `aicli_remove_boot_data` and `aicli_get_boot_space` also cover the large session logs of the other agents and the old layer images (home name `all`). Spec `docs/specs/BOOT_DISK_SPACE.md` (R8), issue #724.
 - **2026-10-24** — An agent can start any existing workspace, also when the helper switch is off. A new tool sets the launch arguments of a whole agent. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #542.

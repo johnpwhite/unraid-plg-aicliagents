@@ -1103,6 +1103,8 @@ _aicli_task_prompt_suffix() {
     local _root="${ROOT_DIR:-${AICLI_WORKSPACE_PATH:-}}" _args="${_ARGS_ID_FILE:-${AICLI_ARGS_ID_FILE:-}}"
     local _file="$_root/.aicli-task/PROMPT.once" _mode _flag _text
     [ -n "$_root" ] && [ -n "$_args" ] && [ -f "$_args" ] && [ -f "$_file" ] || return 0
+    # #865 review 3: a link is never a first prompt (a repo can commit one, and root would read its target).
+    [ ! -L "$_file" ] && [ ! -L "$_root/.aicli-task" ] || return 0
     # Same rule as AgentLaunchProfile::promptModeValid(): any other text means "no prompt".
     _mode=$(php -r '$d=json_decode(@file_get_contents($argv[1]),true);$m=is_array($d)?(string)($d["prompt_mode"]??""):"";echo preg_match("/^(positional|flag:--[a-z][a-z-]{0,30})$/D",$m)?$m:"";' "$_args" 2>/dev/null)
     case "$_mode" in
