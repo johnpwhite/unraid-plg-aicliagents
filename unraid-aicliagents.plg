@@ -3,6 +3,37 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.11.04.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.11.04.02
+
+**Agent Relay**
+
+- **Fix: Relay notices stop repeating once you read the messages.** Before, a notice for a message that was already read came back every 30 seconds.
+- **Feat: a Relay remote has a Copy setup prompt button.** Paste its one line into Claude Code or Codex on another computer, and that agent connects with no hand-copied keys.
+
+**Helper workspaces**
+
+- **Feat: helper workspaces follow one rule for every agent kind.** A helper's worktree is in a folder that git ignores, it can check out only the folders it needs, and its task file says how to use its branch. A merged and clean worktree is removed when the helper closes. A helper that fails to start leaves nothing behind.
+- **Improve: OpenCode and Gemini CLI helpers can run without asking.** An agent may close a helper it created, and you get a notice instead of a question.
+- **Fix: an agent can answer or reject the OpenCode permission box of its helper while a spinner moves above it.** To allow, the mark must be on Allow once.
+- **Fix: a helper that was already stopped no longer gets a notice that it passed its time limit.** A helper that ended by itself is reported as no longer running.
+- **Fix: a helper's task words are no longer replaced by piped input,** and a repository with no remote no longer tells the helper to push.
+
+**Agents and secrets**
+
+- **Fix: uninstalling an agent frees its disk space.**
+- **Fix: two changes to agent keys at the same time no longer overwrite each other.** The vault shows a notice when it cannot save.
+- **Fix: a damaged secrets or variables file no longer goes unnoticed.** The workspace editor shows a note, and every save sends one notification that names the kept copy.
+
+**Scheduled jobs**
+
+- **Fix: the scheduled home backup job waits for the backup to end and reports the real result.** Its output ends with one plain line, so a job report page or a phone push is readable. On a failure the line says what failed and what to do.
+
+**Settings, Notebook and speed**
+
+- **Fix: the Settings page no longer jumps to the top or loses keyboard focus while a storage warning shows.** A closed card stays closed, and the storage boxes keep showing the real state after a storage change.
+- **Feat: when the Notebook is on, every agent is told to commit Notebook files with its other work in a git repo,** to check them for secrets first, and to ask before a push to a public remote.
+- **Improve: every plugin request starts faster,** because it loads only the code it uses.
+
 ## 2026.11.02.02
 
 **Scheduled jobs: please make a backup or check your schedule after this update**
