@@ -649,32 +649,83 @@ class InstallerService {
 
         LogService::log("Initiating complete uninstallation sequence for agent $agentId...", LogService::LOG_INFO, "InstallerService");
 
-        // 1. Kill active sessions using this agent (tmux + ttyd)
-        $safeId = escapeshellarg($agentId);
+        // 1. Find the sessions of this agent (tmux + ttyd). #904: nothing is killed yet.
         // Non-root audit: iterate every per-uid tmux server so non-root
-        // user sessions for this agent get killed too.
+        // user sessions for this agent get found too.
         $socketPaths = isset($seams['tmux_socket_paths'])
             ? $seams['tmux_socket_paths']()
             : \AICliAgents\Services\ProcessManager::tmuxSocketPaths();
         $runCommand = $seams['exec'] ?? static function (string $command): void { exec($command); };
+        $listPanes = $seams['tmux_panes'] ?? static function (string $sock): array {
+            $lines = [];
+            exec('tmux -S ' . escapeshellarg($sock) . " list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null", $lines);
+            return $lines;
+        };
+        $ttydPids = $seams['ttyd_pids'] ?? static function (string $sessionId): array {
+            $pids = [];
+            // The pattern names the exact socket of one session: aicliterm-<sid>.sock.
+            exec('pgrep -f ' . escapeshellarg('ttyd.*aicliterm-' . $sessionId . '\\.sock') . ' 2>/dev/null', $pids);
+            return array_map('intval', $pids);
+        };
+        $sessions = [];   // socket => [session name, ...]
+        $ownRoots = [];   // pane pids and ttyd pids of this agent's own sessions
+        $ttyds = [];
         foreach ($socketPaths as $sock) {
-            $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
-            // #591: each pattern is ONE escapeshellarg() word, never an id
-            // placed inside a hand-written quoted string.
-            $runCommand("$tmuxBin ls -F '#S' 2>/dev/null | grep " . escapeshellarg("aicli-agent-.*$agentId") . " | xargs -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1");
+            foreach ($listPanes($sock) as $line) {
+                $line = trim((string)$line);
+                $space = strrpos($line, ' ');
+                if ($space === false) continue;
+                $name = substr($line, 0, $space);
+                // The agent id must match exactly: opencode never owns an opencode2 session.
+                [$sessionId, $owner] = \AICliAgents\Services\ProcessManager::parseAgentSessionName($name, $sock);
+                if ($owner !== $agentId) continue;
+                $sessions[$sock][$name] = true;
+                $panePid = (int)substr($line, $space + 1);
+                if ($panePid > 1) $ownRoots[$panePid] = true;
+                foreach ($ttydPids($sessionId) as $tp) if ($tp > 1) { $ownRoots[$tp] = true; $ttyds[$tp] = true; }
+            }
         }
-        $runCommand("pgrep -f " . escapeshellarg("ttyd.*$agentId") . " 2>/dev/null | xargs -r kill -15 > /dev/null 2>&1");
+        $ownRoots = array_keys($ownRoots);
+
+        // 1b. #904: a version that a process uses stays. The process can have no
+        //     workspace (a service with parent 1). Only the processes under this
+        //     agent's own sessions are ignored: they end with the sessions. The scan
+        //     runs BEFORE the kill, so a refusal leaves every session running.
+        $scanHolders = $seams['version_holders'] ?? static fn(string $id, string $path, array $roots): array => self::versionHolders($id, $path, ['exclude_roots' => $roots]);
+        $holders = $scanHolders($agentId, $persistPath, $ownRoots);
+        if ($holders !== []) return self::versionsInUseReply($agentId, $holders);
+
+        // 1c. Close the sessions and wait until their processes are gone, so the
+        //     unmount below does not meet a session that is still exiting.
+        foreach ($sessions as $sock => $names) {
+            foreach (array_keys($names) as $name) {
+                // "=" asks tmux for this exact session name, never a prefix.
+                $runCommand('tmux -S ' . escapeshellarg($sock) . ' kill-session -t ' . escapeshellarg('=' . $name) . ' > /dev/null 2>&1');
+            }
+        }
+        foreach (array_keys($ttyds) as $tp) $runCommand('kill -15 ' . (int)$tp . ' > /dev/null 2>&1');
+        $pause = $seams['pause'] ?? static function (int $us): void { usleep($us); };
+        $alive = $seams['pids_alive'] ?? static fn(array $pids): array => array_values(array_filter($pids, static fn(int $p): bool => is_dir("/proc/$p")));
+        for ($try = 0; $try < 20 && $ownRoots !== [] && $alive($ownRoots) !== []; $try++) $pause(500000);
 
         // 2. Unmount the stack: the stable name AND every side-by-side
         //    generation mounted under agents/.versions/<id>/ (Forgejo #441).
         // #512: a real unmount only. A busy agent mount stops the uninstall:
         // deleting its layers would leave their space held until a reboot.
         $unmount = $seams['unmount_real'] ?? [StorageMountService::class, 'unmountReal'];
-        if (!$unmount($mnt)) {
+        if (!$unmount($mnt, 10)) {
             return ['status' => 'error', 'message' => "The $agentId agent is still in use. Close its sessions, then try again."];
         }
-        if (isset($seams['unmount_generations'])) $seams['unmount_generations']($agentId);
-        else self::unmountAgentGenerations($agentId);
+        $stillMounted = isset($seams['unmount_generations'])
+            ? $seams['unmount_generations']($agentId)
+            : self::unmountAgentGenerations($agentId);
+        // #904: a version bind that stays mounted keeps its source folder. Deleting the
+        // source would leave the bind with a deleted source ("//deleted").
+        if (is_array($stillMounted) && $stillMounted !== []) {
+            $busyVersions = [];
+            foreach ($stillMounted as $target) $busyVersions[(string)$target] = 'its mount is still in use';
+            return self::versionsInUseReply($agentId, $busyVersions);
+        }
 
         // 2b. #901: unmount the loop mount of every layer file of the agent, and
         //     remove its folder, BEFORE the layer files go. A layer file that is
@@ -768,31 +819,174 @@ class InstallerService {
     }
 
     /**
+     * #904: the error reply when a version of the agent is in use. Nothing is
+     * deleted. `busy` lists each kept path. `kept` gives each kept path with the reason.
+     *
+     * @param array<string,string> $busy path => reason
+     * @return array<string,mixed>
+     */
+    private static function versionsInUseReply(string $agentId, array $busy): array {
+        $parts = [];
+        foreach ($busy as $path => $why) $parts[] = "$path ($why)";
+        LogService::log("Uninstall of $agentId stopped: version(s) in use: " . implode('; ', $parts), LogService::LOG_WARN, "InstallerService");
+        return [
+            'status' => 'error',
+            'message' => "The $agentId agent still has " . count($busy) . " version(s) in use. Nothing was deleted. Stop the process that uses it, then try again. " . implode(' ', $parts),
+            'busy' => array_keys($busy),
+            'kept' => $busy,
+        ];
+    }
+
+    /**
+     * #904: the versions of a plain-folder agent that a running process uses. A
+     * process uses a version when its program (exe), its working folder (cwd), an
+     * open file (fd), a mapped file (maps) or its command line lies in the version
+     * folder, under the mount path (agents/.versions/<id>/<gen>) or under the source
+     * on flash (passthrough/agents/.versions/<id>/<gen>). The command line matters
+     * for a Node program: its exe is the system node, and it closes the script file
+     * after it loads it (pi-coder, gh-copilot, gemini-cli). The environment is not
+     * scanned: the Secret Service daemons keep the environment of an agent session
+     * and would stay false holders until a reboot (#827). A path through the stable
+     * name (agents/<id>/..., or the old folder passthrough/agents/<id>/...) names no
+     * version, so it holds the whole agent. A process with no workspace and parent 1
+     * counts the same as a workspace process. The own process is skipped, and so is
+     * every process that descends from a pid in the seam `exclude_roots` (the panes
+     * and the ttyd of this agent's own sessions).
+     *
+     * Seams: `proc` (the /proc folder), `base` (the mount base), `self_pid`,
+     * `exclude_roots` (list of pids).
+     *
+     * @param array<string,mixed> $seams
+     * @return array<string,string> source path of the version => reason
+     */
+    public static function versionHolders(string $agentId, string $persistPath, array $seams = []): array {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return [];
+        $proc = rtrim((string)($seams['proc'] ?? '/proc'), '/');
+        $base = rtrim((string)($seams['base'] ?? AgentRegistry::agentBase()), '/');
+        $selfPid = (int)($seams['self_pid'] ?? getmypid());
+        $roots = array_flip(array_map('intval', (array)($seams['exclude_roots'] ?? [])));
+        $persist = rtrim($persistPath, '/');
+        $source = "$persist/passthrough/agents/.versions/$agentId";
+        $stable = "$persist/passthrough/agents/$agentId";
+        // [prefix, true when the next path part names a generation]
+        $prefixes = [["$base/.versions/$agentId/", true], ["$source/", true], ["$base/$agentId/", false], ["$stable/", false]];
+        $realBase = @realpath($base);
+        if ($realBase !== false && $realBase !== $base) {
+            $prefixes[] = ["$realBase/.versions/$agentId/", true];
+            $prefixes[] = ["$realBase/$agentId/", false];
+        }
+        $realSource = @realpath($source);
+        if ($realSource !== false && $realSource !== $source) $prefixes[] = ["$realSource/", true];
+        $realStable = @realpath($stable);
+        if ($realStable !== false && $realStable !== $stable) $prefixes[] = ["$realStable/", false];
+        $generationOf = static function (string $text) use ($prefixes, $source): ?string {
+            foreach ($prefixes as [$prefix, $versioned]) {
+                $pos = strpos($text, $prefix);
+                if ($pos === false) continue;
+                if (!$versioned) return $source;
+                $rest = substr($text, $pos + strlen($prefix));
+                $gen = strstr($rest, '/', true);
+                $gen = $gen === false ? $rest : $gen;
+                $gen = trim((string)preg_replace('/ \(deleted\)$/', '', $gen));
+                if ($gen !== '' && $gen[0] !== '.') return "$source/$gen";
+            }
+            return null;
+        };
+        // The parent of every process, to find the descendants of the excluded roots.
+        $parentOf = [];
+        $dirs = glob("$proc/[0-9]*", GLOB_ONLYDIR) ?: [];
+        if ($roots !== []) {
+            foreach ($dirs as $dir) {
+                $stat = @file_get_contents("$dir/stat");
+                if (is_string($stat) && ($p = strrpos($stat, ')')) !== false && preg_match('/^\s+\S+\s+(\d+)/', substr($stat, $p + 1), $m) === 1) {
+                    $parentOf[(int)basename($dir)] = (int)$m[1];
+                }
+            }
+        }
+        $isExcluded = static function (int $pid) use ($roots, $parentOf): bool {
+            for ($i = 0; $i < 64 && $pid > 1; $i++) {
+                if (isset($roots[$pid])) return true;
+                $pid = $parentOf[$pid] ?? 0;
+            }
+            return false;
+        };
+        $found = [];
+        foreach ($dirs as $dir) {
+            $pid = (int)basename($dir);
+            if ($pid === $selfPid || $isExcluded($pid)) continue;
+            $texts = [];
+            foreach (['exe', 'cwd'] as $name) {
+                $t = @readlink("$dir/$name");
+                if (is_string($t)) $texts[] = $t;
+            }
+            foreach (glob("$dir/fd/*") ?: [] as $fd) {
+                $t = @readlink($fd);
+                if (is_string($t)) $texts[] = $t;
+            }
+            $maps = @file_get_contents("$dir/maps");
+            if (is_string($maps) && $maps !== '') {
+                foreach (explode("\n", $maps) as $line) {
+                    $p = strpos($line, '/');
+                    if ($p !== false) $texts[] = substr($line, $p);
+                }
+            }
+            $cmd = @file_get_contents("$dir/cmdline");
+            if (is_string($cmd) && $cmd !== '') {
+                foreach (explode("\0", $cmd) as $arg) $texts[] = $arg;
+            }
+            foreach ($texts as $t) {
+                $key = $generationOf($t);
+                if ($key === null) continue;
+                $name = trim((string)@file_get_contents("$dir/comm"));
+                $found[$key][$pid] = $name === '' ? "process $pid" : "process $pid ($name)";
+                break;
+            }
+        }
+        ksort($found);
+        $out = [];
+        foreach ($found as $path => $who) $out[$path] = 'in use by ' . implode(', ', $who);
+        return $out;
+    }
+
+    /**
      * Forgejo #441: unmount every side-by-side generation of an agent
      * (agents/.versions/<id>/<generation>, overlay or bind) and remove the
      * now-empty generation directories and the stable symlink. A mount that
      * refuses a real umount stays mounted (#512, never lazy). Best-effort; never throws.
+     * Returns the mount paths that stay mounted (#904): the caller keeps their source folders.
+     *
+     * Seams: `base` (the mount base), `targets` (the mounted paths; findmnt when absent),
+     * `unmount` (fn(string):bool; a real unmount when absent), `is_mounted` (fn(string):bool).
+     *
+     * @param array<string,mixed> $seams
+     * @return string[]
      */
-    private static function unmountAgentGenerations(string $agentId): void {
-        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return;
-        $base = AgentRegistry::agentBase();
+    public static function unmountAgentGenerations(string $agentId, array $seams = []): array {
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return [];
+        $stillMounted = [];
+        $base = rtrim((string)($seams['base'] ?? AgentRegistry::agentBase()), '/');
         $versions = "$base/.versions/$agentId";
+        $unmount = $seams['unmount'] ?? static fn(string $p): bool => StorageMountService::unmountReal($p, 10);
+        $mountedCheck = $seams['is_mounted'] ?? [StorageMountService::class, 'isMounted'];
         $out = [];
-        exec("findmnt -rn -o TARGET 2>/dev/null", $out);
+        if (isset($seams['targets'])) $out = $seams['targets'];
+        else exec("findmnt -rn -o TARGET 2>/dev/null", $out);
         foreach ($out as $target) {
             $target = trim((string)$target);
             if ($target === '') continue;
             if (strncmp($target, "$versions/", strlen($versions) + 1) !== 0 && $target !== $versions) continue;
             // #512: a real unmount only; a busy generation stays mounted, and the
             // isMounted() check below then keeps its folder.
-            StorageMountService::unmountReal($target);
+            if (!$unmount($target)) $stillMounted[] = $target;
         }
-        if (is_dir($versions) && !StorageMountService::isMounted($versions)) {
+        if ($stillMounted !== []) return $stillMounted;
+        if (is_dir($versions) && !$mountedCheck($versions)) {
             self::rmdirContents($versions);
             @rmdir($versions);
         }
         $stable = "$base/$agentId";
         if (is_link($stable)) @unlink($stable);
+        return [];
     }
 
     /**

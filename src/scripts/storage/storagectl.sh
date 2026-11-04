@@ -1044,7 +1044,7 @@ _pt_wipe() {
     # .versions/<id> and binds each at agents/.versions/<id>/<gen>. Removing
     # only the stable symlink (as before) left all of them on flash for good.
     if [ "$TYPE" = "agent" ]; then
-        local vroot gdir
+        local vroot gdir gname kept_busy=""
         # Plain-directory binds only (the persistence name is a version link):
         # a layered overlay generation is the layered wipe's business.
         if declare -f agent_versions_dir >/dev/null 2>&1 && _pt_versioned_generation >/dev/null; then
@@ -1053,10 +1053,21 @@ _pt_wipe() {
                 [ -d "$gdir" ] || continue
                 gdir="${gdir%/}"
                 case "$(basename -- "$gdir")" in .*) continue ;; esac
-                umount_or_keep "$gdir" "version bind" 3 || continue   # #512: never lazy
+                gname="$(basename -- "$gdir")"
+                # #904: a busy bind keeps its source folder. A bind whose source is
+                # deleted shows "//deleted" and the running process loses its files.
+                if ! umount_or_keep "$gdir" "version bind" 3; then   # #512: never lazy
+                    kept_busy="$kept_busy $gname"
+                    continue
+                fi
                 rmdir "$gdir" 2>/dev/null || true
             done
             [ -L "$mnt" ] && case "$(readlink "$mnt")" in .versions/"$ID"/*) rm -f "$mnt" ;; esac
+        fi
+        if [ -n "$kept_busy" ]; then
+            # #904: delete nothing. A later wipe finds the same links and removes
+            # every version when the busy one is free.
+            emit_json 2 "deferred" "version_busy:${kept_busy# }"; exit 2
         fi
         case "$PERSIST" in
             /*) rm -rf "${PERSIST:?}/passthrough/agents/.versions/${ID:?}" "${PERSIST:?}/passthrough/agents/.staging-data/${ID:?}" 2>/dev/null ;;
