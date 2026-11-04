@@ -2022,9 +2022,10 @@ class SpawnService
             if (!in_array($gate['reason'], self::PROMPT_REASONS, true)) {
                 return ['error' => "Sub-agent '$name' is busy, not asking a question (" . $gate['reason'] . '). Wait and look at its screen with aicli_read_workspace_screen.'];
             }
-            $screen = self::$paneCapture !== null
+            $raw = self::$paneCapture !== null
                 ? (string)(self::$paneCapture)($agentId, $workspaceId)
-                : TmuxService::plainPaneText(TmuxService::capturePaneRaw($agentId, $workspaceId));
+                : TmuxService::capturePaneRaw($agentId, $workspaceId);
+            $screen = self::$paneCapture !== null ? $raw : TmuxService::plainPaneText($raw);
             $tail = implode("\n", array_slice(preg_split('/\R/', $screen) ?: [], -24));
             $word = strtolower(preg_replace('/\s+/', ' ', $answer) ?? $answer);
             $isBox = $gate['reason'] === 'opencode-permission';
@@ -2049,8 +2050,11 @@ class SpawnService
                     return ['error' => "The prompt of sub-agent '$name' looks like it touches live state, a push, a delete or another workspace. A parent may not answer it. Ask a person."];
                 }
             }
-            // On the permission box a typed word does nothing; the highlighted option starts on "Allow once", so the
-            // parent presses Enter alone. It never sends an arrow key, so it cannot move the highlight to "Allow always".
+            // On the permission box a typed word does nothing, so the parent presses Enter alone, and only when the
+            // mark is on "Allow once": a person may have moved it to "Allow always". It never sends an arrow key.
+            if ($isBox && PaneInputRules::openCodeMarkedOption($raw) !== 'once') {
+                return ['error' => "The mark on the prompt of sub-agent '$name' is not on \"Allow once\", or the plugin cannot see it. Nothing was pressed. Answer 'reject', or ask a person."];
+            }
             $res = $isBox
                 ? self::pressKey($agentId, $workspaceId, 'Enter')
                 : (self::$paneTyper !== null

@@ -337,4 +337,36 @@ class PaneInputRules {
         foreach ($e['idle'] as $agentId => $rows) { $p = $pick($rows); if ($p !== []) $idle[$agentId] = $p; }
         return ['block' => $pick($e['block']), 'idle' => $idle];
     }
+
+    /**
+     * #900: which option of the OpenCode permission box has the mark, from a capture WITH colour. The marked
+     * option has another text colour than the two others. Returns 'once', 'always' or 'reject', or null when
+     * the row is not there or the colours do not show one marked option. The caller refuses an allow on null.
+     */
+    public static function openCodeMarkedOption(string $raw): ?string
+    {
+        foreach (preg_split('/\R/', $raw) ?: [] as $line) {
+            if (!str_contains($line, 'Allow once') || !str_contains($line, 'Allow always') || !str_contains($line, 'Reject')) continue;
+            $colour = [];
+            $fg = '';
+            $parts = preg_split('/(\x1b\[[0-9;]*m)/', $line, -1, PREG_SPLIT_DELIM_CAPTURE) ?: [];
+            foreach ($parts as $part) {
+                if (preg_match('/^\x1b\[([0-9;]*)m$/', $part, $m)) {
+                    if ($m[1] === '' || $m[1] === '0' || $m[1] === '39') $fg = '';
+                    elseif (preg_match('/(?:^|;)(38;[25];[0-9;]+?|3[0-7]|9[0-7])(?:;48;.*)?$/', $m[1], $c)) $fg = $c[1];
+                    continue;
+                }
+                foreach (['once' => 'Allow once', 'always' => 'Allow always', 'reject' => 'Reject'] as $key => $label) {
+                    if (!isset($colour[$key]) && str_contains($part, $label)) $colour[$key] = $fg;
+                }
+            }
+            if (count($colour) !== 3) return null;
+            foreach ($colour as $key => $value) {
+                $others = array_values(array_diff_key($colour, [$key => 1]));
+                if ($others[0] === $others[1] && $value !== $others[0]) return $key;
+            }
+            return null;
+        }
+        return null;
+    }
 }
