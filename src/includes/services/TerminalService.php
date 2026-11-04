@@ -74,6 +74,17 @@ class TerminalService {
             LogService::log("Start of $id refused: storage is being migrated. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
             return ['ok' => false, 'reason' => 'storage_migration'];
         }
+        // #906: an agent that is being uninstalled does not start. The uninstall holds this lock
+        // exclusively; a start holds it shared until it ends. No stale mark: the kernel frees it.
+        $agentLock = false;
+        if ($agentId !== 'terminal' && (string)$agentId !== '') {
+            $agentLock = AgentUninstallLock::acquireForStart((string)$agentId);
+            if ($agentLock === false) {
+                StorageBackendMigrationService::releaseLaunchGuard($migrationLock);
+                LogService::log("Start of $id refused: the $agentId agent is being uninstalled. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
+                return ['ok' => false, 'reason' => 'agent_uninstalling'];
+            }
+        }
         try {
             if (!SessionLaunchLock::acquire((string)$id, $lockWaitSeconds ?? SessionLaunchLock::START_WAIT_SECONDS)) {
                 LogService::log("Start of $id refused: another start, close or restart of this workspace did not finish in time. Nothing was launched.", LogService::LOG_WARN, "TerminalService");
@@ -85,6 +96,7 @@ class TerminalService {
                 SessionLaunchLock::release((string)$id);
             }
         } finally {
+            AgentUninstallLock::release($agentLock);
             StorageBackendMigrationService::releaseLaunchGuard($migrationLock);
         }
     }
@@ -195,6 +207,7 @@ class TerminalService {
     {
         switch ($reason) {
             case 'storage_migration':    return 'Storage is being migrated. Workspaces open again when it finishes.';
+            case 'agent_uninstalling':  return 'This agent is being uninstalled. It cannot start now.';
             case 'agent_unknown':       return 'This agent is not installed on this server.';
             case 'no_terminal_server':  return 'The terminal server program is missing.';
             case 'runtime_unavailable': return 'A required terminal program is missing or cannot run. Check the Debug Console.';

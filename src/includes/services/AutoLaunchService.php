@@ -439,6 +439,13 @@ class AutoLaunchService
                 $agentUp = ProcessManager::isRunning($sid);
                 $bound = $agentUp && self::ttydBound((string)$sid);
                 $startRefused = is_array($startResult) && array_key_exists('ok', $startResult) && $startResult['ok'] === false;
+                // #906: the agent is being uninstalled. This is not a failed start, so no red row. The
+                // uninstall removes the workspace, or the next sweep launches it if the uninstall stops.
+                if ($startRefused && ($startResult['reason'] ?? '') === 'agent_uninstalling') {
+                    $skipped++;
+                    self::log("Auto-launch deferred for $sid ($agentId): the agent is being uninstalled (trigger=$reason)", AICLI_LOG_INFO);
+                    continue;
+                }
                 if (!$agentUp || !$bound || $startRefused) {
                     $failed++;
                     $step = !$agentUp ? 'agent session (tmux)' : ($startRefused ? 'start step ' . (string)($startResult['reason'] ?? 'unknown') : 'terminal server (ttyd) socket');

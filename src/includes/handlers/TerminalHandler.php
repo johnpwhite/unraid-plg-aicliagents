@@ -898,6 +898,17 @@ class TerminalHandler {
             aicli_log("WARNING: Could not create emergency home symlink — $homeLink still exists", AICLI_LOG_WARN, "TerminalHandler");
         }
 
+        // #906: the mount below must not run while the agent is uninstalled. Hold the agent's
+        // shared lock from here to the end of the start (startTerminal takes it again; shared
+        // locks do not block each other).
+        $agentLock = false;
+        if ($agentId !== 'terminal' && $agentId !== '') {
+            $agentLock = \AICliAgents\Services\AgentUninstallLock::acquireForStart((string)$agentId);
+            if ($agentLock === false) {
+                return self::startRefusal(['ok' => false, 'reason' => 'agent_uninstalling'], (string)$id);
+            }
+        }
+        try {
         // Ensure agent is available — try sqsh mount first, fall back to checking if binary exists in RAM
         if ($agentId !== 'terminal') {
             $registry = \AICliAgents\Services\AgentRegistry::getRegistry();
@@ -925,6 +936,9 @@ class TerminalHandler {
         if ($refused !== null) return $refused;
 
         return self::startedResponse($id, ['emergency' => true]);
+        } finally {
+            \AICliAgents\Services\AgentUninstallLock::release($agentLock);
+        }
     }
 
     private static function stop($id) {
@@ -2071,6 +2085,11 @@ class TerminalHandler {
         if ($reason === 'lock_timeout') {
             return ['status' => 'busy', 'reason' => 'launch_in_progress',
                 'message' => 'This workspace is still starting, closing or restarting. Try again in a moment.'];
+        }
+        if ($reason === 'agent_uninstalling') {
+            // #906: no tray row exists for this refusal, so the reply carries the plain sentence.
+            return ['status' => 'error', 'reason' => $reason,
+                'message' => \AICliAgents\Services\TerminalService::startFailureSentence($reason, '')];
         }
         return ['status' => 'error', 'reason' => $reason,
             'message' => 'The workspace did not start (' . $reason . '). Check the Activity tray for the cause.'];

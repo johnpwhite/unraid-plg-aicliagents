@@ -369,7 +369,7 @@ final class StorageBackendMigrationService
     {
         $lockFile = self::lockPath();
         @mkdir(dirname($lockFile), 0755, true);
-        $lock = @fopen($lockFile, 'c');
+        $lock = @fopen($lockFile, 'ce');   // 'e': close-on-exec, so a tmux server started by the holder never keeps the lock
         if ($lock === false) return false;
         $mode = $exclusive ? LOCK_EX : LOCK_SH;
         if (!@flock($lock, $mode | LOCK_NB)) { @fclose($lock); return false; }

@@ -638,7 +638,23 @@ class InstallerService {
         if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', (string)$agentId)) {
             return ['status' => 'error', 'message' => 'Invalid agent id'];
         }
+        // #906: hold the agent's exclusive lock from before the version scan to the end, so no
+        // workspace of this agent starts in between (every start takes the same lock shared and
+        // refuses with 'agent_uninstalling'). The kernel frees the lock if this process ends,
+        // so a crash leaves no mark behind.
+        $uninstallLock = AgentUninstallLock::acquireForUninstall((string)$agentId);
+        if ($uninstallLock === false) {
+            return ['status' => 'error', 'reason' => 'agent_busy', 'message' => "A workspace of the $agentId agent is starting, or it is being uninstalled. Nothing was deleted. Try again in a moment."];
+        }
+        try {
+            return self::uninstallAgentLocked((string)$agentId, $seams);
+        } finally {
+            AgentUninstallLock::release($uninstallLock);
+        }
+    }
 
+    /** @param array<string,mixed> $seams */
+    private static function uninstallAgentLocked(string $agentId, array $seams): array {
         $config = $seams['config'] ?? ConfigService::getConfig();
         $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
         $mnt = $seams['agent_path'] ?? AgentRegistry::agentPath($agentId);
@@ -738,6 +754,21 @@ class InstallerService {
             LogService::log("Uninstall of $agentId stopped: layer mount(s) still in use: " . implode(', ', $layerMounts['busy']), LogService::LOG_WARN, "InstallerService");
             return ['status' => 'error', 'message' => "The $agentId agent still has " . count($layerMounts['busy']) . " layer mount(s) in use. Nothing was deleted. Close its sessions, then try again.", 'busy' => $layerMounts['busy']];
         }
+
+        // 2c. #906: check again, just before the purge. A path that takes no uninstall lock (the
+        //     emergency mount, Repair, a version probe, an install job) can bind a version after
+        //     the unmount above. A bind that is back, or a process that uses a version again,
+        //     stops the uninstall with the same refusal, and nothing is deleted.
+        $reboundBinds = isset($seams['unmount_generations'])
+            ? $seams['unmount_generations']($agentId)
+            : self::unmountAgentGenerations($agentId);
+        $reboundMount = $seams['is_mounted'] ?? [StorageMountService::class, 'isMounted'];
+        $busyAgain = [];
+        if (is_array($reboundBinds)) foreach ($reboundBinds as $target) $busyAgain[(string)$target] = 'its mount came back before the purge';
+        if ($reboundMount($mnt)) $busyAgain[(string)$mnt] = 'its mount came back before the purge';
+        if ($busyAgain !== []) return self::versionsInUseReply($agentId, $busyAgain);
+        $holdersAgain = $scanHolders($agentId, $persistPath, $ownRoots);
+        if ($holdersAgain !== []) return self::versionsInUseReply($agentId, $holdersAgain);
 
         // 3 + 4. Delete every version of the agent from the storage location
         //    (Forgejo #441, John 2026-10-07: "when an agent is uninstalled all

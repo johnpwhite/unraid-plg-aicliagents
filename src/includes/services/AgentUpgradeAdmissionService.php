@@ -18,7 +18,7 @@ class AgentUpgradeAdmissionService
         $tmpBase = getenv('AICLI_TMP_BASE');
         $base = rtrim($tmpBase !== false && $tmpBase !== '' ? $tmpBase : SecretPaths::stateRoot(), '/');
         @mkdir($base, 0755, true);
-        $handle = @fopen("$base/agent-upgrade-admission-$agentId.lock", 'c');
+        $handle = @fopen("$base/agent-upgrade-admission-$agentId.lock", 'ce');   // 'e': close-on-exec, so a tmux server started by the holder never keeps the lock
         if ($handle === false || !@flock($handle, LOCK_EX | LOCK_NB)) {
             if (is_resource($handle)) @fclose($handle);
             return null;

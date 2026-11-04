@@ -1076,13 +1076,32 @@ class AgentRelayService {
         }
         return ['status'=>'error','message'=>'Selected workspace no longer exists.'];
     }
+    /** @var callable|null Test seam: fn(string $sid, string $path, string $agentId): mixed. Replaces TerminalService::startTerminal(). */
+    public static $startRunner = null;
+    /** @return mixed what startTerminal returned */
+    private static function startActor(string $sid, string $path, string $agentId) {
+        if (is_callable(self::$startRunner)) return call_user_func(self::$startRunner, $sid, $path, $agentId);
+        return TerminalService::startTerminal($sid,$path,'auto',$agentId,'relay');
+    }
+    /**
+     * #906: the real result of an actor start. Null when it ran; else the error reply, with the
+     * plain sentence of the refusal reason (startFailureSentence) and the reason itself.
+     * @param mixed $result
+     * @return array<string,mixed>|null
+     */
+    private static function actorStartRefusal($result, string $agentId): ?array {
+        if (!is_array($result) || !array_key_exists('ok',$result) || $result['ok']) return null;
+        $reason=(string)($result['reason'] ?? 'start_failed');
+        return ['status'=>'error','started'=>false,'reason'=>$reason,'message'=>TerminalService::startFailureSentence($reason, UtilityService::trayAgentName($agentId))];
+    }
     /** Starts only a stopped selected actor; a live actor receives a fixed notice instead of a restart. */
     public static function ensureActorReady(string $topic): array {
         $sid=self::actorFor($topic); if ($sid==='') return ['status'=>'error','message'=>'This topic has no assigned actor.'];
         if (self::actorPaused($topic)) return ['status'=>'error','message'=>'This topic actor is paused by the administrator. Launch it from Relay settings when it is needed again.'];
         foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) if (($w['id'] ?? '')===$sid) {
             if (!ProcessManager::isRunning($sid)) {
-                TerminalService::startTerminal($sid,(string)($w['path'] ?? ''),'auto',(string)($w['agentId'] ?? ''),'relay');
+                $refused=self::actorStartRefusal(self::startActor($sid,(string)($w['path'] ?? ''),(string)($w['agentId'] ?? '')),(string)($w['agentId'] ?? ''));
+                if ($refused!==null) return $refused;
                 self::scheduleActorNotice($sid,$topic);
                 return ['status'=>'ok','started'=>true];
             }
@@ -1093,7 +1112,8 @@ class AgentRelayService {
         $rec=ConfigService::restoreManagedWorkspaceToDrawer($sid);
         if ($rec!==null) {
             if (!ProcessManager::isRunning($sid)) {
-                TerminalService::startTerminal($sid,(string)($rec['path'] ?? ''),'auto',(string)($rec['agentId'] ?? ''),'relay');
+                $refused=self::actorStartRefusal(self::startActor($sid,(string)($rec['path'] ?? ''),(string)($rec['agentId'] ?? '')),(string)($rec['agentId'] ?? ''));
+                if ($refused!==null) return $refused;
                 self::scheduleActorNotice($sid,$topic);
                 return ['status'=>'ok','started'=>true,'restored'=>true];
             }
@@ -1165,7 +1185,7 @@ class AgentRelayService {
     public static function ensureBootActors(): array {
         $started=[]; $seen=[]; foreach ((self::actors()['actors'] ?? []) as $topic=>$actor) { $sid=is_array($actor)?self::cleanId((string)($actor['session_id'] ?? '')):self::cleanId((string)$actor); if (!$sid || isset($seen[$sid]) || (is_array($actor) && (empty($actor['start_on_boot']) || !empty($actor['paused'])))) continue;
             $seen[$sid]=true;
-            foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) if (($w['id'] ?? '')===$sid && !ProcessManager::isRunning($sid)) { TerminalService::startTerminal($sid,(string)($w['path'] ?? ''),'auto',(string)($w['agentId'] ?? ''),'relay'); $started[]=$sid; }
+            foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) if (($w['id'] ?? '')===$sid && !ProcessManager::isRunning($sid)) { if (self::actorStartRefusal(self::startActor($sid,(string)($w['path'] ?? ''),(string)($w['agentId'] ?? '')),(string)($w['agentId'] ?? ''))===null) $started[]=$sid; }
         } return $started;
     }
     private static function actorPaused(string $topic): bool { $actor=(self::actors()['actors'][$topic] ?? null); return is_array($actor) && !empty($actor['paused']); }
