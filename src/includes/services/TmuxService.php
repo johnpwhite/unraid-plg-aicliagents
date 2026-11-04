@@ -3056,15 +3056,20 @@ class TmuxService {
         if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sender)) return;
         $file = self::pendingFile($agentId, $sessionId);
         @mkdir(dirname($file), 0770, true);
-        $cur = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
-        if (!is_array($cur) || !isset($cur['senders']) || !is_array($cur['senders'])) {
-            $cur = ['senders' => []];
-        }
-        $prev = $cur['senders'][$sender]['count'] ?? 0;
-        // Keep the friendly name alongside the id so the drain (which may run in a
-        // different, later process) can still label the notice with the workspace name.
-        $cur['senders'][$sender] = ['count' => ((int)$prev) + 1, 'reason' => $reason, 'at' => gmdate('c'), 'name' => (string)$senderName];
-        \AICliAgents\Services\AtomicWriteService::writeJson($file, $cur);
+        // #902: the read-modify-write holds the queue lock, so a read of the inbox that clears
+        // the queue (clearPendingRelayForSession) cannot lose this message.
+        $cur = self::withPendingLock($file, static function () use ($file, $sender, $senderName, $reason): array {
+            $cur = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
+            if (!is_array($cur) || !isset($cur['senders']) || !is_array($cur['senders'])) {
+                $cur = ['senders' => []];
+            }
+            $prev = $cur['senders'][$sender]['count'] ?? 0;
+            // Keep the friendly name alongside the id so the drain (which may run in a
+            // different, later process) can still label the notice with the workspace name.
+            $cur['senders'][$sender] = ['count' => ((int)$prev) + 1, 'reason' => $reason, 'at' => gmdate('c'), 'name' => (string)$senderName];
+            \AICliAgents\Services\AtomicWriteService::writeJson($file, $cur);
+            return $cur;
+        });
 
         try {
             if ($announce && file_exists('/var/run/nginx.socket') && class_exists('\AICliAgents\Services\EventBus')) {
@@ -3228,21 +3233,106 @@ class TmuxService {
     }
 
     /**
+     * #902: run $fn while holding the lock of one pending queue file. The lock is taken
+     * without blocking and for at most one second. When it is busy, $fn runs without the
+     * lock: a message is never lost because a lock was slow.
+     */
+    private static function withPendingLock(string $file, callable $fn) {
+        $busy = false;
+        $r = \AICliAgents\Services\FileLock::run($file . '.lock', 1.0, $fn, $busy);
+        return $busy ? $fn() : $r;
+    }
+
+    /**
+     * #902: the held notices of one workspace now: for each pending file of the session,
+     * the count of messages per sender. AgentRelayService takes this BEFORE a read lists
+     * the inbox, and gives it back to clearPendingRelayForSession() after.
+     *
+     * @return array<string,array<string,int>> pending file name => sender id => count
+     */
+    public static function pendingRelaySnapshot(string $sessionId): array {
+        $sid = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        if ($sid === '' || $sid !== $sessionId) return [];
+        $out = [];
+        foreach (glob(self::relayPendingDir() . '/*__' . $sid . '.json') ?: [] as $file) {
+            $data = json_decode((string)@file_get_contents($file), true);
+            $counts = [];
+            foreach (is_array($data['senders'] ?? null) ? $data['senders'] : [] as $id => $meta) {
+                $counts[(string)$id] = (int)(is_array($meta) ? ($meta['count'] ?? 1) : 1);
+            }
+            $out[basename($file)] = $counts;
+        }
+        return $out;
+    }
+
+    /**
+     * #902: the workspace read its inbox, so the held notices that the read covered are
+     * removed: the sender entries, the pending file when none is left, and the waiting pill.
+     * Nothing is left to retry. A sender whose count grew after the picture was taken (a
+     * newer message), a sender that is new, and a file that is new all stay: that message
+     * still gets its notice. Returns the number of sender entries removed.
+     *
+     * @param array<string,array<string,int>> $snapshot from pendingRelaySnapshot()
+     */
+    public static function clearPendingRelayForSession(string $sessionId, array $snapshot): int {
+        $sid = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        if ($sid === '' || $sid !== $sessionId || $snapshot === []) return 0;
+        $removed = 0;
+        foreach (glob(self::relayPendingDir() . '/*__' . $sid . '.json') ?: [] as $file) {
+            $seen = $snapshot[basename($file)] ?? null;
+            if ($seen === null) continue;
+            $agentId = substr(basename($file, '.json'), 0, -(strlen($sid) + 2));
+            $removed += (int)self::withPendingLock($file, static function () use ($file, $seen, $agentId, $sid): int {
+                $cur = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
+                $senders = is_array($cur['senders'] ?? null) ? $cur['senders'] : [];
+                $keep = [];
+                foreach ($senders as $id => $meta) {
+                    $count = (int)(is_array($meta) ? ($meta['count'] ?? 1) : 1);
+                    if (!array_key_exists((string)$id, $seen) || $seen[(string)$id] !== $count) $keep[$id] = $meta;
+                }
+                $gone = count($senders) - count($keep);
+                if ($keep === []) {
+                    self::unlinkPendingFile($file);
+                    self::publishRelayWaitingCleared($agentId, $sid);
+                } elseif ($gone > 0) {
+                    $cur['senders'] = $keep;
+                    \AICliAgents\Services\AtomicWriteService::writeJson($file, $cur);
+                    try {
+                        if (file_exists('/var/run/nginx.socket') && class_exists('\AICliAgents\Services\EventBus')) {
+                            \AICliAgents\Services\EventBus::publish('activity', [], self::relayWaitingEntry($agentId, $sid, self::normalizeSenders($keep)));
+                        }
+                    } catch (\Throwable $e) {
+                        // Best-effort: the tray's own poll still shows the right pill.
+                    }
+                }
+                return $gone;
+            });
+        }
+        if ($removed > 0) LogService::log("A read of the inbox cleared $removed held Relay notice(s) of $sessionId", LogService::LOG_INFO, 'TmuxService');
+        return $removed;
+    }
+
+    /**
      * #320: re-stamp every queued sender with a new held reason, WITHOUT counting a new
      * message (enqueuePendingRelay() would add one per sender). Used when a drain typed
      * the notice but no Enter took, so the pill says why and the supervisor retries.
      */
     private static function markPendingReason(string $agentId, string $sessionId, string $reason): void {
         $file = self::pendingFile($agentId, $sessionId);
-        $cur = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
-        if (!is_array($cur) || !is_array($cur['senders'] ?? null) || $cur['senders'] === []) return;
-        foreach ($cur['senders'] as $id => $meta) {
-            if (!is_array($meta)) $meta = ['count' => 1];
-            $meta['reason'] = $reason;
-            $meta['at'] = gmdate('c');
-            $cur['senders'][$id] = $meta;
-        }
-        \AICliAgents\Services\AtomicWriteService::writeJson($file, $cur);
+        // #902: under the queue lock, so a read that clears the queue cannot be undone by this write.
+        $cur = self::withPendingLock($file, static function () use ($file, $reason): ?array {
+            $cur = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
+            if (!is_array($cur) || !is_array($cur['senders'] ?? null) || $cur['senders'] === []) return null;
+            foreach ($cur['senders'] as $id => $meta) {
+                if (!is_array($meta)) $meta = ['count' => 1];
+                $meta['reason'] = $reason;
+                $meta['at'] = gmdate('c');
+                $cur['senders'][$id] = $meta;
+            }
+            \AICliAgents\Services\AtomicWriteService::writeJson($file, $cur);
+            return $cur;
+        });
+        if (!is_array($cur)) return;
         try {
             if (file_exists('/var/run/nginx.socket') && class_exists('\AICliAgents\Services\EventBus')) {
                 \AICliAgents\Services\EventBus::publish('activity', [], self::relayWaitingEntry($agentId, $sessionId, self::normalizeSenders($cur['senders'])));

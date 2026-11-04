@@ -2418,13 +2418,14 @@ class AgentRelayService {
         $sessionId=self::cleanId($sessionId);
         $no=['status'=>'error','message'=>'No such direct message in this inbox.'];
         if ($sessionId===''||!preg_match('/^msg_[a-f0-9]{24}$/D', $id)) return $no;
+        $mark=self::noticeReadBegin($sessionId);
         self::ensureDirectIndex();
         $hit=glob(self::path("direct/_inbox/$sessionId/*_$id.json")) ?: [];
         if (!$hit) return $no;
         $m=self::readJson($hit[0],[]);
         if (empty($m['id']) || (string)($m['recipient_session'] ?? '')!==$sessionId) return $no;
         unset($m['message_file']); $m['relay_role']='recipient';
-        self::noticeRead($sessionId);
+        self::noticeRead($sessionId,$mark);
         return ['status'=>'ok','message'=>$m];
     }
     /**
@@ -2593,9 +2594,25 @@ class AgentRelayService {
         $t=(int)strtotime($time); $s=(int)strtotime($since);
         return $t>$s || ($t===$s && !in_array(self::unreadKey($id,$time),$seen,true));
     }
-    /** Any inbox read tells the notice ledger that this workspace has looked. */
-    private static function noticeRead(string $sid): void {
+    /**
+     * #902: take the picture of the held notices BEFORE the read lists the inbox. Every held
+     * notice in it names a message that is already in the inbox, so the read will show it.
+     * A message that arrives after this point is not in the picture and keeps its notice.
+     *
+     * @return array<string,array<string,int>>
+     */
+    private static function noticeReadBegin(string $sid): array {
+        return class_exists(TmuxService::class) ? TmuxService::pendingRelaySnapshot($sid) : [];
+    }
+    /**
+     * Any inbox read tells the notice ledger that this workspace has looked, and removes the
+     * held notices (the pending file and the waiting pill) that the read covered (#902).
+     *
+     * @param array<string,array<string,int>> $mark the picture from noticeReadBegin()
+     */
+    private static function noticeRead(string $sid, array $mark = []): void {
         if (class_exists(RelayNoticeLedger::class)) RelayNoticeLedger::clear($sid);
+        if ($mark !== [] && class_exists(TmuxService::class)) TmuxService::clearPendingRelayForSession($sid, $mark);
     }
     /** Received direct messages newer than the cursor, newest first, plus how many older ones were left out. */
     private static function unreadDirect(string $sid, string $since): array {
@@ -2647,6 +2664,7 @@ class AgentRelayService {
      */
     public static function agentInbox(string $sessionId, int $limit = 20, array $cursor = [], string $mode = 'all'): array {
         $sessionId=self::cleanId($sessionId); if ($sessionId==='') return ['events'=>[],'requests'=>[]];
+        $mark=self::noticeReadBegin($sessionId);
         $unread=($mode==='unread' && !$cursor);
         $sinceEvents=$unread ? self::readCursor($sessionId,'events') : '';
         $sinceRequests=$unread ? self::readCursor($sessionId,'requests') : '';
@@ -2763,7 +2781,7 @@ class AgentRelayService {
                 if ($newest!=='') self::advanceReadCursor($sessionId,$category,$newest,$rows['shown']);
             }
         }
-        self::noticeRead($sessionId);
+        self::noticeRead($sessionId,$mark);
         return $out;
     }
     /**

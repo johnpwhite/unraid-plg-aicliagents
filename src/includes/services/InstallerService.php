@@ -676,6 +676,18 @@ class InstallerService {
         if (isset($seams['unmount_generations'])) $seams['unmount_generations']($agentId);
         else self::unmountAgentGenerations($agentId);
 
+        // 2b. #901: unmount the loop mount of every layer file of the agent, and
+        //     remove its folder, BEFORE the layer files go. A layer file that is
+        //     deleted while its mount stays keeps its disk space until a reboot.
+        //     A busy layer mount stops the uninstall: nothing is deleted yet.
+        $layerMounts = isset($seams['unmount_layers'])
+            ? $seams['unmount_layers']($agentId)
+            : self::unmountAgentLayerMounts($agentId);
+        if ($layerMounts['busy'] !== []) {
+            LogService::log("Uninstall of $agentId stopped: layer mount(s) still in use: " . implode(', ', $layerMounts['busy']), LogService::LOG_WARN, "InstallerService");
+            return ['status' => 'error', 'message' => "The $agentId agent still has " . count($layerMounts['busy']) . " layer mount(s) in use. Nothing was deleted. Close its sessions, then try again.", 'busy' => $layerMounts['busy']];
+        }
+
         // 3 + 4. Delete every version of the agent from the storage location
         //    (Forgejo #441, John 2026-10-07: "when an agent is uninstalled all
         //    versions of the agent are deleted from the storage location"):
@@ -759,8 +771,7 @@ class InstallerService {
      * Forgejo #441: unmount every side-by-side generation of an agent
      * (agents/.versions/<id>/<generation>, overlay or bind) and remove the
      * now-empty generation directories and the stable symlink. A mount that
-     * refuses a real umount after the sessions were killed is detached lazily,
-     * as the stable mount always was. Best-effort; never throws.
+     * refuses a real umount stays mounted (#512, never lazy). Best-effort; never throws.
      */
     private static function unmountAgentGenerations(string $agentId): void {
         if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return;
@@ -782,6 +793,38 @@ class InstallerService {
         }
         $stable = "$base/$agentId";
         if (is_link($stable)) @unlink($stable);
+    }
+
+    /**
+     * #901: the loop mounts of an agent's layer files. The plugin mounts each
+     * `agent_<id>_<kind>_<n>_<stamp>.sqsh` as a squashfs at
+     * `<state root>/mnt/<layer name>`. The mount keeps the file's disk space after
+     * the file is deleted. This unmounts each one (a real umount, never lazy, #512)
+     * and removes the empty folder. A busy mount is kept and listed in `busy`.
+     * The pattern is anchored on `agent_<id>_`, so `grok-build` never matches
+     * `grok-build-pro`.
+     *
+     * Seams: `root` (the mount folder), `unmount` (fn(string):bool), `mounted`
+     * (fn(string):bool).
+     *
+     * @param array<string,mixed> $seams
+     * @return array{unmounted:string[], removed:string[], busy:string[]}
+     */
+    public static function unmountAgentLayerMounts(string $agentId, array $seams = []): array {
+        $res = ['unmounted' => [], 'removed' => [], 'busy' => []];
+        if (!preg_match('/^[a-z0-9][a-z0-9-]{0,63}$/D', $agentId)) return $res;
+        $root = rtrim((string)($seams['root'] ?? (SecretPaths::stateRoot() . '/mnt')), '/');
+        $unmount = $seams['unmount'] ?? [StorageMountService::class, 'unmountReal'];
+        $mounted = $seams['mounted'] ?? [StorageMountService::class, 'isMounted'];
+        foreach (glob("$root/agent_{$agentId}_*") ?: [] as $dir) {
+            if (!is_dir($dir) || is_link($dir)) continue;
+            if ($mounted($dir)) {
+                if (!$unmount($dir)) { $res['busy'][] = $dir; continue; }
+                $res['unmounted'][] = $dir;
+            }
+            if (!$mounted($dir) && @rmdir($dir)) $res['removed'][] = $dir;
+        }
+        return $res;
     }
 
     /**
