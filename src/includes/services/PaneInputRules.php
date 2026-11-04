@@ -351,7 +351,7 @@ class PaneInputRules {
             $fg = '';
             $parts = preg_split('/(\x1b\[[0-9;]*m)/', $line, -1, PREG_SPLIT_DELIM_CAPTURE) ?: [];
             foreach ($parts as $part) {
-                if (preg_match('/^\x1b\[([0-9;]*)m$/', $part, $m)) {
+                if (preg_match('/^\x1b\[([0-9;]*)m$/D', $part, $m)) {
                     if ($m[1] === '' || $m[1] === '0' || $m[1] === '39') $fg = '';
                     elseif (preg_match('/(?:^|;)(38;[25];[0-9;]+?|3[0-7]|9[0-7])(?:;48;.*)?$/', $m[1], $c)) $fg = $c[1];
                     continue;
