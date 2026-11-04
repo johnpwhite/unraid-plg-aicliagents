@@ -479,7 +479,9 @@ its own. You may answer it for a sub-agent that you started: pass `answerPrompt:
 (CLI: `--answer`) and a short allow-once answer such as `1` or `yes`. Read the
 prompt first with `aicli_read_workspace_screen`. Answer only a request to READ,
 or an action that the task you gave already names. Never answer "always" or
-"all". The plugin refuses a prompt that mentions a push, a delete, the boot disk,
+"all". OpenCode shows a box with Allow once, Allow always and Reject: answer `yes`
+(allow once) or `reject`. A reject presses Escape only, never Enter, and the result
+says `resolved` when the box went away. The plugin refuses a prompt that mentions a push, a delete, the boot disk,
 plugin state, an aicli tool, a remote shell or another workspace; ask the person
 for those. Your answer and the prompt text are recorded.
 

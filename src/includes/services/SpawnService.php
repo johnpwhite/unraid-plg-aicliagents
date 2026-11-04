@@ -57,7 +57,14 @@ class SpawnService
     ];
 
     /** Pane reasons (PaneInputRules ids) that mean "the agent waits for an answer to a question". */
-    public const PROMPT_REASONS = ['option-selector', 'selector-cursor', 'menu-nav-hint', 'yes-no', 'do-you-want', 'proceed'];
+    public const PROMPT_REASONS = ['option-selector', 'selector-cursor', 'menu-nav-hint', 'yes-no', 'do-you-want', 'proceed', 'opencode-permission'];
+
+    /** Answers that reject. Never typed with Enter: Enter takes the highlighted option, which is "Allow once" (#900). */
+    public const REJECT_WORDS = ['reject', 'deny', 'cancel', 'esc', 'escape'];
+    /** Also a reject on the OpenCode permission box, where a typed word does nothing. */
+    public const REJECT_WORDS_BOX = ['no', 'n'];
+    /** Allow-once answers on the OpenCode permission box. */
+    public const ALLOW_ONCE_WORDS_BOX = ['1', 'y', 'yes', 'ok', 'once', 'allow', 'allow once'];
 
     /** A prompt that shows one of these is never answered by a parent (spec R13): a person decides. */
     public const PROMPT_DENY_PATTERNS = [
@@ -88,6 +95,8 @@ class SpawnService
     public static $paneCapture = null;
     /** @var callable|null fn(string $agentId, string $id, string $text, bool $enter): array. Replaces the pane typer. */
     public static $paneTyper = null;
+    /** @var callable|null fn(string $agentId, string $id, string $key): array. Replaces the single key press (Enter or Escape). */
+    public static $paneKeyer = null;
     /** @var callable|null fn(int $milliseconds): void. Replaces the wait between two pane checks. */
     public static $sleeper = null;
     /** @var callable|null fn(): int. Replaces time(). */
@@ -2017,14 +2026,36 @@ class SpawnService
                 ? (string)(self::$paneCapture)($agentId, $workspaceId)
                 : TmuxService::plainPaneText(TmuxService::capturePaneRaw($agentId, $workspaceId));
             $tail = implode("\n", array_slice(preg_split('/\R/', $screen) ?: [], -24));
+            $word = strtolower(preg_replace('/\s+/', ' ', $answer) ?? $answer);
+            $isBox = $gate['reason'] === 'opencode-permission';
+
+            // #900: a reject is one Escape key and never an Enter. Enter takes the highlighted option, and on a
+            // permission box that is "Allow once". A reject needs no deny-list check: it allows nothing.
+            if (in_array($word, self::REJECT_WORDS, true) || ($isBox && in_array($word, self::REJECT_WORDS_BOX, true))) {
+                $res = self::pressKey($agentId, $workspaceId, 'Escape');
+                if (($res['status'] ?? '') !== 'ok') return ['error' => (string)($res['message'] ?? 'Could not press the key.')];
+                (self::$sleeper ?? static function (int $ms): void { usleep($ms * 1000); })(700);
+                $after = self::gate($agentId, $workspaceId);
+                $resolved = !($after['ready'] === false && in_array($after['reason'], self::PROMPT_REASONS, true));
+                self::emit('workspace.prompt_answered', ['workspaceId' => $workspaceId, 'agentId' => $agentId],
+                    "Parent rejected a prompt of sub-agent '$name'", ['answer' => 'reject', 'prompt' => self::safeText($tail, 400), 'resolved' => $resolved]);
+                return ['workspaceId' => $workspaceId, 'name' => $name, 'answered' => true, 'answer' => 'reject', 'key' => 'Escape', 'resolved' => $resolved];
+            }
+            if ($isBox && !in_array($word, self::ALLOW_ONCE_WORDS_BOX, true)) {
+                return ['error' => "The prompt of sub-agent '$name' is an OpenCode permission box. Answer 'yes' to allow it once, or 'reject' to refuse it."];
+            }
             foreach (self::PROMPT_DENY_PATTERNS as $pattern) {
                 if (preg_match($pattern, $tail)) {
                     return ['error' => "The prompt of sub-agent '$name' looks like it touches live state, a push, a delete or another workspace. A parent may not answer it. Ask a person."];
                 }
             }
-            $res = self::$paneTyper !== null
-                ? (self::$paneTyper)($agentId, $workspaceId, $answer, true)
-                : TmuxService::pasteAndConfirm($agentId, $workspaceId, $answer, true);
+            // On the permission box a typed word does nothing; the highlighted option starts on "Allow once", so the
+            // parent presses Enter alone. It never sends an arrow key, so it cannot move the highlight to "Allow always".
+            $res = $isBox
+                ? self::pressKey($agentId, $workspaceId, 'Enter')
+                : (self::$paneTyper !== null
+                    ? (self::$paneTyper)($agentId, $workspaceId, $answer, true)
+                    : TmuxService::pasteAndConfirm($agentId, $workspaceId, $answer, true));
             if (($res['status'] ?? '') !== 'ok') return ['error' => (string)($res['message'] ?? 'Could not type the answer.')];
             self::emit('workspace.prompt_answered', ['workspaceId' => $workspaceId, 'agentId' => $agentId],
                 "Parent answered a prompt of sub-agent '$name'", ['answer' => $answer, 'prompt' => self::safeText($tail, 400)]);
@@ -2032,6 +2063,12 @@ class SpawnService
         } catch (\Throwable $e) {
             return ['error' => 'The answer could not be sent: ' . self::safeText($e->getMessage(), 300)];
         }
+    }
+
+    /** One allow-listed key press into a pane (Enter or Escape). @return array<string,mixed> */
+    private static function pressKey(string $agentId, string $id, string $key): array
+    {
+        return self::$paneKeyer !== null ? (self::$paneKeyer)($agentId, $id, $key) : TmuxService::sendKey($agentId, $id, $key);
     }
 
     /**

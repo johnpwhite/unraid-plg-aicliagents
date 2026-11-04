@@ -107,6 +107,13 @@ class PaneInputRules {
                 // TUI wraps the line ("[retry" / "in 1h 21m attempt #1]", real capture
                 // on .4 2026-09-26), so the second branch matches the wrapped row.
                 ['id' => 'opencode-retry-wait', 're' => '/\[\s*retry(?:ing)?\s+in\s+\d+\s*[dhms]|^\s*in\s+\d+\s*[dhms](?:\s+\d+\s*[dhms]){0,3}\s+attempt\s+#\d+\]/imu'],
+                // OpenCode's permission box ("Access external directory", and the like) offers
+                // "Allow once", "Allow always" and "Reject" on one row (#900). No other block
+                // rule knows this shape, so the pane fell through to the two-sample stability
+                // check, and the spinner on the tool line above the box made the samples differ
+                // for as long as the box waited. The three words in this order are the box.
+                // [\s\S] lets a narrow terminal wrap the row.
+                ['id' => 'opencode-permission', 're' => '/\bAllow once\b[\s\S]{0,120}?\bAllow always\b[\s\S]{0,120}?\bReject\b/iu'],
                 // A dismissable full-screen overlay — settings/config/menu/help — shows an
                 // "… Esc to close/cancel/exit" footer. A paste+Enter lands IN the overlay
                 // (2026-08-22: a Relay notice typed into a Config settings search box).
