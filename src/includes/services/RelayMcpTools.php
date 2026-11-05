@@ -139,6 +139,9 @@ class RelayMcpTools {
     /** Successful Relay inbox reads advance a cursor and stay outside the action audit. */
     public const AUDIT_EXEMPT_TOOLS = ['relay_get_inbox'];
 
+    /** Result statuses that mean "accepted and stored": 'recipient_offline' and 'queued_for_peer' are not refusals. */
+    public const ACCEPTED_STATUSES = ['ok', 'recipient_offline', 'queued_for_peer'];
+
     /**
      * The tools that send, answer or change something: the catalogue minus the read-only tools. A new tool is in
      * this list until someone puts it in READ_ONLY_TOOLS, so a read-only run never gets it by accident.
@@ -175,10 +178,19 @@ class RelayMcpTools {
         $status = (string)($result['status'] ?? 'error');
         $successfulCursorRead = in_array($name, self::AUDIT_EXEMPT_TOOLS, true) && $status === 'ok';
         if (!$successfulCursorRead && ($tier !== 'read' || $status !== 'ok')) {
-            $outcome = $status === 'ok' ? 'ok' : (strpos((string)($result['message'] ?? ''), 'failed while it ran') !== false ? 'error' : 'refused');
+            $outcome = self::auditOutcome($status, (string)($result['message'] ?? ''));
             AgentActionAudit::record($surface, $name, $tier, $args, $outcome, (string)($result['message'] ?? ''), $result, $session);
         }
         return $result;
+    }
+
+    /**
+     * The audit outcome of one tool result. A stored message is accepted, not refused (#909): the peer or the
+     * workspace is offline and the message waits.
+     */
+    public static function auditOutcome(string $status, string $message): string {
+        if (in_array($status, self::ACCEPTED_STATUSES, true)) return 'ok';
+        return strpos($message, 'failed while it ran') !== false ? 'error' : 'refused';
     }
 
     private static function dispatch(string $name, array $args, string $session, ?array $allowed, ?array $principal, string $surface): array {

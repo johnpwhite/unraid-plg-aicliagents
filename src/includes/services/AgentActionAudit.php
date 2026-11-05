@@ -56,7 +56,7 @@ final class AgentActionAudit
                 $row = self::row(self::fallbackSeq($now), $now, $surface, $tool, $tier, $identity, $target,
                     $outcome, $reasonData, $safeArgs, $resultId);
                 if (!self::appendLine($row)) return ['recorded' => false, 'folded' => false];
-                self::afterWrite($row, $identity, $tool, $tier, $outcome, $refusalReasonCode, $now);
+                self::afterWrite($row, $identity, $tool, $tier, $outcome, $refusalReasonCode, $now, $args);
                 return ['recorded' => true, 'folded' => false];
             }
 
@@ -159,7 +159,7 @@ final class AgentActionAudit
                 }
             }
             if ($outcome === 'refused' && $currentTrayCount > 0) {
-                self::recordTrayRollup($identity, $tool, $currentTrayCount, $now, 'refused');
+                self::recordTrayRollup($identity, $tool, $currentTrayCount, $now, 'refused', (string)($reasonData['message'] ?? ""), $args);
                 if (self::isSecurityRefusal($tool, $tier, $refusalReasonCode)) {
                     self::warn($identity, $tool, $refusalReasonCode);
                 }
@@ -225,11 +225,11 @@ final class AgentActionAudit
             ], $eventActor);
     }
 
-    private static function afterWrite(array $row, array $identity, string $tool, string $tier, string $outcome, string $reasonCode, int $now): void
+    private static function afterWrite(array $row, array $identity, string $tool, string $tier, string $outcome, string $reasonCode, int $now, array $args = []): void
     {
         self::appendLedger($row, (int)($row['count'] ?? 1));
         if ($outcome === 'refused') {
-            self::recordTrayRollup($identity, $tool, 1, $now, 'refused');
+            self::recordTrayRollup($identity, $tool, 1, $now, 'refused', (string)($row['reason']['message'] ?? ""), $args);
             if (self::isSecurityRefusal($tool, $tier, $reasonCode)) self::warn($identity, $tool, $reasonCode);
         }
     }
@@ -388,7 +388,7 @@ final class AgentActionAudit
         LogService::log("Agent action refused: $tool by $by$in ($reasonCode).", LogService::LOG_WARN, 'AgentActionAudit');
     }
 
-    private static function recordTrayRollup(array $identity, string $tool, int $count, int $now, string $kind): void
+    private static function recordTrayRollup(array $identity, string $tool, int $count, int $now, string $kind, string $reasonMessage = "", array $args = []): void
     {
         $workspaceId = (string)($identity['workspaceId'] ?? '');
         if ($workspaceId === '') return;
@@ -398,17 +398,95 @@ final class AgentActionAudit
         $group = $kind === 'refused' ? $workspaceId : $workspaceId . "\0" . $tool;
         $opId = 'agent_action_' . ($kind === 'refused' ? 'refused_' : 'burst_') . substr(hash('sha256', $group . "\0" . $window), 0, 32);
         if ($kind === 'refused') {
-            $label = "$count refused calls by $agentName in $workspaceName";
+            $sentence = self::refusalSentence((string)($identity['workspaceName'] ?? ''), $tool, $args, $reasonMessage);
+            $label = $count === 1
+                ? $sentence
+                : (trim((string)($identity['workspaceName'] ?? '')) === '' ? 'A workspace' : 'Workspace "' . $workspaceName . '"')
+                    . ": $count requests were refused. Last: " . $sentence;
         } else {
-            $label = "$count calls by $agentName in $workspaceName were grouped";
+            $label = ($count === 1 ? '1 call' : "$count calls") . " by $agentName in $workspaceName "
+                . ($count === 1 ? 'was' : 'were') . ' grouped';
         }
-        ActivityService::register($opId, 'admin', $label, ['meta' => [
+        // The row is a record. It names workspaces and a reason, never an id, an argument or a message body.
+        $detail = ($kind === 'refused' && $count > 1) ? 'The full list is in the record of agent actions.' : '';
+        $meta = [
             'kind' => 'record', 'tool' => $tool, 'outcome' => $kind, 'count' => $count,
             'workspaceId' => $workspaceId, 'agentId' => (string)($identity['agentId'] ?? ''),
             'agentActionRollup' => true,
-            'by' => ['agentName' => $agentName, 'workspaceName' => $workspaceName],
-        ]]);
-        ActivityService::finish($opId);
+        ];
+        if ($kind !== 'refused') $meta['by'] = ['agentName' => $agentName, 'workspaceName' => $workspaceName];
+        ActivityService::register($opId, 'admin', $label, ['meta' => $meta]);
+        ActivityService::finish($opId, $detail);
+    }
+
+    private const TOOL_ACTIONS = [
+        'relay_send_direct_message' => ['send a message to', true],
+        'relay_request' => ['send a request to', true],
+        'relay_publish_event' => ['publish a Relay event', false],
+        'relay_join_topic' => ['join a Relay topic', false],
+        'relay_leave_topic' => ['leave a Relay topic', false],
+        'aicli_set_setting' => ['change a plugin setting', false],
+        'aicli_stop_workspace' => ['stop', true],
+        'aicli_start_workspace' => ['start', true],
+        'aicli_delete_workspace' => ['delete', true],
+        'aicli_send_input' => ['send input to', true],
+        'aicli_read_workspace_screen' => ['read the screen of', true],
+        'aicli_spawn_workspace' => ['start a new workspace', false],
+        'aicli_upgrade_agent' => ['upgrade an agent', false],
+        'aicli_speak' => ['speak', false],
+        'backup-home' => ['back up the home folder', false],
+        'restore-home' => ['restore the home folder', false],
+    ];
+
+    /**
+     * One plain sentence for a refused call: the workspace that made it, what it tried, the target by name and
+     * the reason. A tool without a mapped phrase falls back to a readable form of its name.
+     */
+    public static function refusalSentence(string $workspaceName, string $tool, array $args, string $reason): string
+    {
+        $who = trim($workspaceName) === '' ? 'A workspace' : 'Workspace "' . self::clip(self::safeText($workspaceName), 100) . '"';
+        [$action, $wantsTarget] = self::TOOL_ACTIONS[$tool] ?? [null, false];
+        if ($action === null) {
+            $readable = trim(str_replace(['_', '-'], ' ', (string)preg_replace('/^(aicli|relay)_/', '', $tool)));
+            $action = 'use the "' . self::clip(self::safeText($readable !== '' ? $readable : 'requested'), 60) . '" action';
+        }
+        $target = $wantsTarget ? self::targetName($args) : '';
+        if ($wantsTarget && $target === '') {
+            $target = 'another workspace';
+        } elseif ($target !== '') {
+            $target = '"' . $target . '"';
+        }
+        $why = trim($reason) !== '' ? trim($reason) : 'The tool refused this request.';
+        return "$who could not $action" . ($target !== '' ? " $target" : '') . ": $why";
+    }
+
+    /** The name of the workspace or Relay contact an action aimed at, or '' when no name is known. */
+    private static function targetName(array $args): string
+    {
+        $id = '';
+        foreach (['recipient_session_id', 'workspaceId', 'session_id', 'sessionId'] as $key) {
+            if (isset($args[$key]) && is_scalar($args[$key]) && trim((string)$args[$key]) !== '') { $id = trim((string)$args[$key]); break; }
+        }
+        if ($id === '') return '';
+        try {
+            foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $workspace) {
+                if (is_array($workspace) && (string)($workspace['id'] ?? '') === $id) {
+                    $name = trim((string)($workspace['name'] ?? ''));
+                    if ($name !== '') return self::clip(self::safeText($name), 100);
+                }
+            }
+            foreach (RelayPeerService::contactRows() as $contact) {
+                if ((string)($contact['session_id'] ?? '') === $id) {
+                    $name = trim((string)preg_replace('/ @ /', ' on ', (string)($contact['name'] ?? ''), 1));
+                    if ($name !== '') return self::clip(self::safeText($name), 100);
+                }
+            }
+            $remote = AgentRelayService::remoteName($id);
+            if ($remote !== '') return self::clip(self::safeText($remote), 100);
+        } catch (\Throwable $e) {
+            // No name is known: the sentence says "another workspace".
+        }
+        return '';
     }
 
     /** Count all refused calls in one workspace window, across tools and reasons. */
