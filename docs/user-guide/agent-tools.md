@@ -170,6 +170,7 @@ What you see: a notice in the Activity tray, for example "Sub-agent workspace st
 The rules:
 
 - Only a workspace that you opened can start sub-agents. A sub-agent cannot start another sub-agent.
+- A closed sub-agent does not start when you select it. You see its name, the line "This sub-agent is closed. Starting it can use quota." and a **Start** button. Press **Start** to run it. A sub-agent that already runs opens at once. A workspace that you made yourself still starts when you select it.
 - With a **worktree**, the plugin makes a new git branch and folder under `<repo>/.aicli/worktrees`. The folder name belongs to no agent. The plugin never merges or resets, and it puts an ignore file in the folder and in the task folder, so a later `git add -A` in your own checkout does not record the helper's folder. The task file tells the sub-agent to commit on its own branch, to push only that branch and never to push to the main branch. Worktrees that older versions made under `<repo>/.claude/worktrees` are still found and cleaned up.
 - A parent may ask for a **sparse** worktree: it lists the repo folders that the sub-agent needs. Git then writes only those folders to the disk. Use it when a repo holds a large folder that the sub-agent must not read. A repo can also keep a default list in the file `.aicli/worktree-sparse`, one folder on each line.
 - **Let sub-agents run without asking** works for Codex, Claude Code, OpenCode and Gemini CLI. For any other agent the plugin has no verified setting for it, so the request is refused.
@@ -233,6 +234,8 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 
 <details>
 <summary>Change history</summary>
+
+- **2026-11-05** — A closed sub-agent no longer starts when you select it. It shows a **Start** button and a line about quota. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md` (R23), issue #907.
 
 - **2026-11-04** — A parent can now answer the OpenCode permission box of its sub-agent while a spinner moves above it, and it can reject the box. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issue #900.
 - **2026-11-03** — Sub-agent worktrees now live in a folder that belongs to no agent (`.aicli/worktrees`), the plugin always makes git ignore them (an ignore file in the folder), a parent can ask for a sparse worktree, the task file tells the sub-agent how to use its branch, OpenCode and Gemini CLI can run without asking, a closed or deleted sub-agent loses a merged worktree, and a parent may delete a workspace it created with no approval. Spec `docs/specs/AGENT_SPAWN_WORKSPACE.md`, issues #865 and #866.

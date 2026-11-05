@@ -93,7 +93,7 @@ A Relay notice that waits shows as "Message waiting for <workspace>", with "from
 - A workspace start, but only when nobody watched it or it went wrong. A start that you began by a click shows a row only if it runs for more than 10 seconds. A reconnect to an agent that still runs shows no row.
 - A failed auto-launch, with **Retry**.
 - Changes that an agent made through the plugin management tools, for example "Setting changed: Voice speed to 1.2" with "by Claude Code in my-project" under it.
-- Refused agent actions appear together in one record row for each workspace and 10-minute period. The title gives the count, agent and workspace, for example "3 refused calls by Claude Code in Builder". The row disappears after 60 seconds.
+- Refused agent actions appear together in one record row for each workspace and 10-minute period. The title names the workspace and, when there is one, the target workspace, for example `Workspace "Builder" could not send a message to "tester": <reason>`. For several refused calls it reads `Workspace "Builder": 3 requests were refused. Last: <sentence>`. A Relay message that waits for an offline workspace or box is not a refused call. The row disappears after 60 seconds.
 - Calls from one workspace after the first 20 calls to the same tool in one minute stay allowed and appear in one counted row. The count describes grouped records, not refused calls.
 - Proposals that wait for your approval.
 - Relay notices that were held back.
