@@ -612,6 +612,16 @@ class TerminalHandler {
                 'message' => 'Storage is being migrated. Workspaces open again when it finishes.',
             ];
         }
+        // #910: the host shuts down. Refuse at once, before any mount job is queued, for every
+        // storage class. The page stops its retry on this reason.
+        if (\AICliAgents\Services\StorageMountService::refuseWhileHostShutsDown('a start request from the page')) {
+            return [
+                'status' => 'error',
+                'reason' => 'host_shutdown',
+                'message' => \AICliAgents\Services\StorageMountService::HOST_SHUTDOWN_MESSAGE,
+                'emergency_possible' => false,
+            ];
+        }
         // #687: never start a session for a workspace that is being deleted or was
         // deleted. An open browser tab re-sends `start` when the delete closes its
         // session; without this the session came back as an untracked one. The page
@@ -2086,8 +2096,8 @@ class TerminalHandler {
             return ['status' => 'busy', 'reason' => 'launch_in_progress',
                 'message' => 'This workspace is still starting, closing or restarting. Try again in a moment.'];
         }
-        if ($reason === 'agent_uninstalling') {
-            // #906: no tray row exists for this refusal, so the reply carries the plain sentence.
+        if ($reason === 'agent_uninstalling' || $reason === 'host_shutdown') {
+            // #906, #910: no tray row exists for this refusal, so the reply carries the plain sentence.
             return ['status' => 'error', 'reason' => $reason,
                 'message' => \AICliAgents\Services\TerminalService::startFailureSentence($reason, '')];
         }

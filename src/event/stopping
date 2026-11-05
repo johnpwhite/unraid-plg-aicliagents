@@ -123,6 +123,34 @@ log "Shutdown/Array stop detected."
 # event/disks_mounted removes it; /tmp does not survive a reboot.
 touch "${MOUNT_ROOT}/.array_stopping" 2>/dev/null || true
 
+# Check if this is a full server shutdown vs just array stop.
+# Bug #539: pgrep alone misses shutdowns initiated via systemd or the WebGUI
+# AJAX endpoint (powerdown calls into rc.local and friends, not /sbin/shutdown).
+# Cross-check runlevel and systemd state so the emergency_mode flag is set
+# correctly in both code paths.
+IS_SHUTDOWN=false
+if pgrep -f '(/sbin/shutdown|/sbin/reboot|/sbin/poweroff|/sbin/halt|/usr/sbin/powerdown)' >/dev/null 2>&1; then
+    IS_SHUTDOWN=true
+fi
+if [ "$IS_SHUTDOWN" = false ] && command -v runlevel >/dev/null 2>&1; then
+    # Runlevels 0 (halt) and 6 (reboot) signal shutdown intent regardless of
+    # which binary triggered the transition.
+    _RL="$(runlevel 2>/dev/null | awk '{print $2}')"
+    case "$_RL" in 0|6) IS_SHUTDOWN=true ;; esac
+fi
+if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
+    # systemd-managed boxes (rare on Unraid 7.2 but possible on derivatives).
+    case "$(systemctl is-system-running 2>/dev/null)" in
+        stopping|halting) IS_SHUTDOWN=true ;;
+    esac
+fi
+# #853, #910: tell the supervisor and the PHP code (StorageMountService::isHostShuttingDown)
+# not to start or mount anything while the server goes down. On tmpfs, so it is gone
+# after the boot; event/disks_mounted removes it after an aborted shutdown. The
+# .logged marker makes the PHP side write one log line per shutdown.
+rm -f "${MOUNT_ROOT}/.system_shutdown" "${MOUNT_ROOT}/.system_shutdown.logged" 2>/dev/null || true
+[ "$IS_SHUTDOWN" = true ] && { touch "${MOUNT_ROOT}/.system_shutdown" 2>/dev/null || true; }
+
 # docs/specs/VOICE_MAIL.md: voice mail lives on tmpfs between heartbeats, so flush
 # it to Flash before anything else in shutdown runs — this is the moment a reboot
 # would otherwise lose whatever was spoken since the last supervisor tick. Bounded
@@ -166,30 +194,8 @@ STORAGE_CLASS=$(classify "$PERSIST_PATH")
 log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
 lifecycle_log "info" "event_stopping" "shutdown_event_received" "{\"storage_class\":\"$STORAGE_CLASS\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
 
-# Check if this is a full server shutdown vs just array stop.
-# Bug #539: pgrep alone misses shutdowns initiated via systemd or the WebGUI
-# AJAX endpoint (powerdown calls into rc.local and friends, not /sbin/shutdown).
-# Cross-check runlevel and systemd state so the emergency_mode flag is set
-# correctly in both code paths.
-IS_SHUTDOWN=false
-if pgrep -f '(/sbin/shutdown|/sbin/reboot|/sbin/poweroff|/sbin/halt|/usr/sbin/powerdown)' >/dev/null 2>&1; then
-    IS_SHUTDOWN=true
-fi
-if [ "$IS_SHUTDOWN" = false ] && command -v runlevel >/dev/null 2>&1; then
-    # Runlevels 0 (halt) and 6 (reboot) signal shutdown intent regardless of
-    # which binary triggered the transition.
-    _RL="$(runlevel 2>/dev/null | awk '{print $2}')"
-    case "$_RL" in 0|6) IS_SHUTDOWN=true ;; esac
-fi
-if [ "$IS_SHUTDOWN" = false ] && command -v systemctl >/dev/null 2>&1; then
-    # systemd-managed boxes (rare on Unraid 7.2 but possible on derivatives).
-    case "$(systemctl is-system-running 2>/dev/null)" in
-        stopping|halting) IS_SHUTDOWN=true ;;
-    esac
-fi
-# #853: tell the supervisor not to start again while the server goes down.
-# On tmpfs, so it is gone after the boot.
-[ "$IS_SHUTDOWN" = true ] && { touch "${MOUNT_ROOT}/.system_shutdown" 2>/dev/null || true; }
+# (#910: the shutdown check and the .system_shutdown flag moved up, next to the
+# .array_stopping flag, so the flag exists before the first session closes.)
 
 # Helper: run the full stop script, bounded by the Unraid-derived budget.
 # GH #10 / #228: reserve a slice of that budget for the squashfs loop-mount

@@ -155,6 +155,14 @@ class InitService {
             return;
         }
 
+        // #910: the host shuts down. A request must not restart the supervisor, run the
+        // boot sweep (it launches workspaces and mounts their homes) or mount anything,
+        // whatever the storage class. initPlugin() above only prepares folders.
+        $goingDown = isset(self::$seams['hostShutdown'])
+            ? (bool)(self::$seams['hostShutdown'])()
+            : StorageMountService::refuseWhileHostShutsDown('the init mount');
+        if ($goingDown) return;
+
         // Phase 3 + OP#1381: Lazy backstop / self-heal — restore exactly one
         // healthy supervisor on the next page load. ensureHealthy() covers the
         // plain dead-supervisor case (start one) AND the wedged states a bare

@@ -269,6 +269,66 @@ class StorageMountService {
         return true;
     }
 
+    /** #910: written by event/stopping on a reboot or power-off, removed by event/disks_mounted. */
+    private static function hostShutdownFlagPath(): string {
+        return rtrim(SecretPaths::stateRoot(), '/') . '/.system_shutdown';
+    }
+
+    /** #910: the message a start returns while the server shuts down. */
+    const HOST_SHUTDOWN_MESSAGE = 'The server is shutting down.';
+
+    /** #910: the flag counts for at most this long (seconds). A shutdown ends in minutes. */
+    const HOST_SHUTDOWN_FLAG_MAX_AGE = 10800;
+    /** #910: a flag older than this is stale when var.ini says the array is Started (seconds). */
+    const HOST_SHUTDOWN_FLAG_GRACE = 300;
+
+    /**
+     * #910: is this host going down (reboot or power-off)?
+     *
+     * On 2026-11-05 the UPS shut prod02 down. The stop hook closed every session at
+     * 12:53:30. Storage is on flash there, so the array-stop guards (#558, #761) let a
+     * web request mount the home again at 12:53:38, and an open tab sent `start` every
+     * 10 seconds until 12:55:03. A plain array stop must keep letting a flash
+     * workspace run, so this is a separate predicate: it is true only for a host going down.
+     *
+     * The signal is the flag `.system_shutdown` that event/stopping writes (the flag of
+     * #853; the supervisor reads it too) when pgrep, the runlevel (0 or 6) or systemd say
+     * the host goes down. Unraid gives PHP no shutdown signal: var.ini says only that the
+     * array stops, and /var/run/utmp is binary. The flag lives on tmpfs, so a reboot
+     * clears it. event/disks_mounted removes it, so an aborted shutdown ends with the next
+     * array start. Safety net: the flag is ignored after 3 hours, and after 5 minutes when
+     * var.ini says the array is Started.
+     * $varIni, $flag and $now are test seams.
+     */
+    public static function isHostShuttingDown(?string $varIni = null, ?string $flag = null, ?int $now = null): bool {
+        $f = $flag ?? self::hostShutdownFlagPath();
+        clearstatcache(true, $f);
+        if (!file_exists($f)) return false;
+        $age = ($now ?? time()) - (int)@filemtime($f);
+        if ($age > self::HOST_SHUTDOWN_FLAG_MAX_AGE) return false;
+        $ini = $varIni ?? (string)@file_get_contents('/var/local/emhttp/var.ini');
+        if ($age > self::HOST_SHUTDOWN_FLAG_GRACE && preg_match('/^fsState="Started"/m', $ini)) return false;
+        return true;
+    }
+
+    /**
+     * #910: true while the host goes down. Writes ONE log line per shutdown, not one per
+     * request: the marker `.system_shutdown.logged` is created exclusively, so only one
+     * of many concurrent requests logs. event/stopping removes the marker before it
+     * writes the flag, and event/disks_mounted removes both.
+     * $what names the step that was refused. $flag, $varIni and $now are test seams.
+     */
+    public static function refuseWhileHostShutsDown(string $what, ?string $flag = null, ?string $varIni = null, ?int $now = null): bool {
+        if (!self::isHostShuttingDown($varIni, $flag, $now)) return false;
+        $marker = ($flag ?? self::hostShutdownFlagPath()) . '.logged';
+        $fp = @fopen($marker, 'x');
+        if ($fp !== false) {
+            fclose($fp);
+            LogService::log("The server is shutting down: $what is refused. The plugin starts and mounts nothing until the server is back.", LogService::LOG_INFO, "StorageMountService");
+        }
+        return true;
+    }
+
     /** R-129 (#662): the stop flag is ignored when it is older than this (seconds). */
     const ARRAY_STOPPING_FLAG_MAX_AGE = 10800;
     /** R-129 (#662): a flag older than this is stale when var.ini says the array is Started (seconds). */
@@ -605,6 +665,11 @@ class StorageMountService {
      */
     private static function runAgentMount(string $agentId, string $mnt, int &$exit): bool {
         $exit = 1;
+        // #910: the host goes down: mount nothing, whatever the storage class.
+        if (self::refuseWhileHostShutsDown("the agent mount of $agentId")) {
+            if (self::isMounted($mnt) && self::isAgentMountHealthy($agentId)) { $exit = 0; return true; }
+            return false;
+        }
         // Issue #761: while the array stops, storagectl refuses this mount. Return before
         // it starts, so a polling page does not retry and log every refusal to flash.
         // A mount that is already healthy stays usable; only a new mount waits.
@@ -817,6 +882,13 @@ class StorageMountService {
         if (!$forcedUnmount && self::isMounted($mnt) && self::isHomeMountHealthy($user) && !$writeFault) { $exit = 0; return true; }
         if ($writeFault) {
             LogService::log("Home $user has a queued write-fault repair; requesting a safe overlay refresh.", LogService::LOG_WARN, "StorageMountService");
+        }
+
+        // #910: the host goes down: mount nothing, whatever the storage class. The healthy
+        // fast path above already returned.
+        if (self::refuseWhileHostShutsDown("the home mount of $user")) {
+            if (self::isMounted($mnt) && self::isHomeMountHealthy($user)) { $exit = 0; return true; }
+            return false;
         }
 
         // Issue #761: while the array stops, storagectl refuses this mount. Return before

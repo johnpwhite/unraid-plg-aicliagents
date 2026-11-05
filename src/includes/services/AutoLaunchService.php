@@ -375,6 +375,13 @@ class AutoLaunchService
                     continue;
                 }
 
+                // #910: the host shuts down. Nothing launches, whatever the storage class, and no
+                // red row shows in the tray. The sweep after the next boot launches the workspace.
+                if (StorageMountService::refuseWhileHostShutsDown("the auto-launch of $sid")) {
+                    $skipped++;
+                    continue;
+                }
+
                 // Issue #761 (GitHub #10): the array is stopping and plugin storage is on
                 // it. TerminalService::startTerminal refuses the start. Skip here, so the
                 // refusal is not shown as a failed start in the tray. The sweep that runs
@@ -444,6 +451,10 @@ class AutoLaunchService
                 if ($startRefused && ($startResult['reason'] ?? '') === 'agent_uninstalling') {
                     $skipped++;
                     self::log("Auto-launch deferred for $sid ($agentId): the agent is being uninstalled (trigger=$reason)", AICLI_LOG_INFO);
+                    continue;
+                }
+                if ($startRefused && ($startResult['reason'] ?? '') === 'host_shutdown') {
+                    $skipped++;   // #910: the server shuts down; not a failed start
                     continue;
                 }
                 if (!$agentUp || !$bound || $startRefused) {

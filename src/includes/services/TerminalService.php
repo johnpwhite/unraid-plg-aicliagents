@@ -208,6 +208,7 @@ class TerminalService {
         switch ($reason) {
             case 'storage_migration':    return 'Storage is being migrated. Workspaces open again when it finishes.';
             case 'agent_uninstalling':  return 'This agent is being uninstalled. It cannot start now.';
+            case 'host_shutdown':       return StorageMountService::HOST_SHUTDOWN_MESSAGE;
             case 'agent_unknown':       return 'This agent is not installed on this server.';
             case 'no_terminal_server':  return 'The terminal server program is missing.';
             case 'runtime_unavailable': return 'A required terminal program is missing or cannot run. Check the Debug Console.';
@@ -360,6 +361,14 @@ class TerminalService {
                 "TerminalService"
             );
             return ['ok' => false, 'reason' => 'array_stopping'];
+        }
+
+        // #910: the host shuts down (reboot or power-off). Nothing starts, whatever the
+        // storage class: the array-stop guards above let a flash workspace run during a
+        // plain array stop, and that is right only when the host stays up. One log line
+        // per shutdown comes from refuseWhileHostShutsDown().
+        if (StorageMountService::refuseWhileHostShutsDown("the start of session $id")) {
+            return ['ok' => false, 'reason' => 'host_shutdown'];
         }
 
         // 2. Setup environment

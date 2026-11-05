@@ -34,6 +34,8 @@ log "Array disks mounted. Checking for deferred storage restoration..."
 # Forgejo #558: the array is started again, so starts on the array or a pool
 # are allowed. Remove the flag FIRST, before anything below starts a session.
 rm -f "${MOUNT_ROOT}/.array_stopping" 2>/dev/null || true
+# #910: the array is up, so the host is not going down (an aborted shutdown ends here).
+rm -f "${MOUNT_ROOT}/.system_shutdown" "${MOUNT_ROOT}/.system_shutdown.logged" 2>/dev/null || true
 
 # BOOT_DISK_SPACE.md R5: the pool is back. Plain homes whose caches fell back to
 # RAM at array stop go back to the pool folder when the setting asks for it.
