@@ -944,6 +944,12 @@
             return '';
         }
 
+        /** The single-note page of a note in the Global Notebook (#915), or '' for a bad id. Same shape as noteTabUrl() in the app. */
+        _globalNoteUrl(noteId) {
+            if (!noteId || !/^[A-Za-z0-9_-]{1,128}$/.test(noteId)) return '';
+            return '/AICliNote?ws=global&note=' + encodeURIComponent(noteId);
+        }
+
         /**
          * After a same-page "Go to": the terminal page removes the hash as soon as
          * it reads it. A hash still there after a short wait means nothing read it
@@ -1067,6 +1073,15 @@
                     // takes the operator to the workspace the message is waiting for,
                     // and only then does the button become Force inject.
                     // NOTEBOOK_REFRESH_REQUEST.md R6: a Notebook change line leads to the note.
+                    if (act === 'open_global_note') {
+                        var gUrl = self._globalNoteUrl(el.getAttribute('data-note') || '');
+                        if (!gUrl) { self._relayNote[opId] = 'This notice does not name a note, so nothing was opened.'; self._render(); return; }
+                        window.open(gUrl, '_blank', 'noopener');
+                        (self._opened = self._opened || {})[opId] = true;
+                        self._render();
+                        self._action('dismiss_activity', opId, isLocal);
+                        return;
+                    }
                     if (act === 'goto_note') {
                         var nWs = el.getAttribute('data-session') || '';
                         var nId = el.getAttribute('data-note') || '';
@@ -1210,7 +1225,13 @@
             }
             // Open note: the workspace that owns the note, and the note id, are in the entry meta.
             var noteWs = a.meta && a.meta.workspaceId, noteId = a.meta && a.meta.artefactId;
-            if (!active && !pending && noteWs && noteId && /^[A-Za-z0-9_-]{1,128}$/.test(noteWs) && /^[A-Za-z0-9_-]{1,128}$/.test(noteId)) {
+            // #915: a note in the Global Notebook (the card of a script run) opens on its own page. It needs no
+            // workspace, so it opens when the workspace of the run is gone.
+            if (!active && !pending && noteId && a.meta && a.meta.noteNotebook === 'global' && /^[A-Za-z0-9_-]{1,128}$/.test(noteId)) {
+                btns += '<button class="btn deliver" data-act="open_global_note" data-opid="' + esc(a.opId) + '"'
+                    + ' data-note="' + esc(noteId) + '"'
+                    + ' title="Opens this note from the Global Notebook in a new tab.">Open note</button>';
+            } else if (!active && !pending && noteWs && noteId && /^[A-Za-z0-9_-]{1,128}$/.test(noteWs) && /^[A-Za-z0-9_-]{1,128}$/.test(noteId)) {
                 btns += '<button class="btn deliver" data-act="goto_note" data-opid="' + esc(a.opId) + '"'
                     + ' data-session="' + esc(noteWs) + '" data-note="' + esc(noteId) + '"'
                     + ' title="Opens this workspace and shows the note in its Notebook.">Open note</button>';

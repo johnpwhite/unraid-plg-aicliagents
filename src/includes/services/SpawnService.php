@@ -1357,10 +1357,11 @@ class SpawnService
                 }
                 $summary = trim($summary);
                 if ($summary === '') return ['error' => 'Give a short summary of what you did, or why you could not finish.'];
-                if (self::length($summary) > self::MAX_SUMMARY_CHARS) {
-                    return ['error' => 'The summary is too long. The limit is ' . self::MAX_SUMMARY_CHARS . ' characters. Put the detail in a file and name the file.'];
+                // #915: a run report is kept whole (the Notebook card holds it), so its limit is the run limit.
+                if (self::length($summary) > AgentRunService::REPORT_MAX_CHARS) {
+                    return ['error' => 'The report is too long. The limit is ' . AgentRunService::REPORT_MAX_CHARS . ' characters. Put the detail in a file and name the file.'];
                 }
-                $safe = self::safeText($summary, self::MAX_SUMMARY_CHARS);
+                $safe = self::safeText($summary, AgentRunService::REPORT_MAX_CHARS);
                 if ($safe === '') return ['error' => 'The summary could not be checked for secrets, so nothing was saved. Try again.'];
                 return AgentRunService::reportFromWorkspace($callerId, $runId, $status, $safe);
             }
@@ -1435,7 +1436,8 @@ class SpawnService
         }
         $existing = $record['spawn']['report'] ?? null;
         if (is_array($existing)) {
-            if ((string)($existing['status'] ?? '') === $status && (string)($existing['summary'] ?? '') === $summary) {
+            if ((string)($existing['status'] ?? '') === $status && ((string)($existing['summary'] ?? '') === $summary
+                || (string)($existing['summary_sha'] ?? '') === hash('sha256', $summary))) {
                 return ['resultFile' => rtrim((string)$record['path'], '/') . '/' . self::TASK_DIR . '/RESULT.json', 'report' => $existing];
             }
             return ['error' => 'This run already has a report.'];
@@ -1446,10 +1448,17 @@ class SpawnService
         if (!is_string($json)) return ['error' => 'The report could not be encoded.'];
         $writeError = self::writeInTaskDir((string)($record['path'] ?? ''), ['RESULT.json' => $json . "\n"]);
         if ($writeError !== null) return ['error' => $writeError];
-        $saved = self::updateRecord($workspaceId, static function (array $rec) use ($runId, $report): array {
+        // #915: the workspace list keeps a short copy. The whole report is in RESULT.json and on the Notebook card,
+        // so the list (saved often, and copied to flash) does not grow by up to 200,000 characters per run.
+        $stored = $report;
+        if (self::length($summary) > self::MAX_SUMMARY_CHARS) {
+            $stored['summary'] = mb_substr($summary, 0, self::MAX_SUMMARY_CHARS) . ' [The whole report is in RESULT.json and on the Notebook card.]';
+            $stored['summary_sha'] = hash('sha256', $summary);
+        }
+        $saved = self::updateRecord($workspaceId, static function (array $rec) use ($runId, $stored): array {
             if ((string)($rec['spawn']['run']['runId'] ?? '') !== $runId || is_array($rec['spawn']['report'] ?? null)) return $rec;
             $rec['spawn']['state'] = 'reported_done';
-            $rec['spawn']['report'] = $report;
+            $rec['spawn']['report'] = $stored;
             if (!empty($rec['spawn']['auto_close'])) $rec['spawn']['close_pending'] = true;
             return $rec;
         });

@@ -113,7 +113,9 @@ A script whose file changed is refused until you trust its new fingerprint. The 
 
 A read-only call starts at once. It needs no approval, and it still counts against the limits. The **Activity tray** shows it as **Run started**. A call with `--mode=may-change` waits in the **Activity tray** as **Approve run**. The card shows the run title, the script path, the agent, the folder, the mode (**May change** is marked in amber, with the words) and the model, effort and key when set. A quote **Prompt** shows the full task, and a second quote shows the start of the data, with secrets hidden. The line **If you approve** says what the agent does after Approve. **Technical details** shows the fingerprint, the user and the process chain. Press **Approve** to start the run. A run with `--mode=may-change` then works without asking for permission, when the agent has such a mode. A read-only run keeps its permission questions and all its read-only limits. Before it starts, the plugin checks again that the script is still on the list with the same fingerprint, that the file is unchanged and that the limits still allow the run. With no answer in the time you set, the run ends and starts nothing.
 
-When the agent reports, the plugin saves its summary in one Notebook card. A key reuses the same card on later runs. The Activity tray keeps a result notice. The plugin closes the workspace after its report. It also closes a run that reaches the time limit.
+When the agent reports, the plugin saves the whole report in one Notebook card. The card has the run title as its name, and the key as a tag. Its first lines say where the result file is, and when the plugin removes the folder of a temporary run. A key reuses the same card on later runs. A run in a project folder that has a Notebook writes its card to the Notebook of that project. Every other run writes its card to the Global Notebook. In the Notebook, switch to **Global** to see those cards.
+
+The Activity tray keeps a result notice. Press **Open note** on the notice to open the card. A card in the Global Notebook opens in a new tab, also when the workspace of the run is gone. The plugin cuts a report that is longer than 200 000 characters, and the card says so. The plugin closes the workspace after its report. It also closes a run that reaches the time limit.
 
 ## Choices and settings
 
@@ -161,6 +163,7 @@ This version runs every agent as root. A restricted run user is not available ye
 <details>
 <summary>Change history</summary>
 
+- **2026-11-06** — The result notice of a run has an **Open note** button. The card has the run title, the whole report and the place of the result file, and it goes to the project Notebook when the folder has one. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #915.
 - **2026-10-29** — The Activity tray draws an approval of a script as a card: name and path, a grid of facts, the script's own words as a quote, one line on what Approve allows, and closed **Technical details**. The title is short: **A script asks to start agents**. Spec `docs/specs/ACTIVITY_TRAY_PLAIN_NOTICES.md`.
 - **2026-10-29** — A run that may change files takes no follow-up message, and one run takes at most 10. A temporary folder must be inside a share that exists already. A script file under `/tmp` cannot ask for access. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issues #838, #839, #840.
 - **2026-10-29** — A script can ask to be put on the list with `aicli-run --request-access`, with the limits it needs. You accept or decline in the Activity tray. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #838.

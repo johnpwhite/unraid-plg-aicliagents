@@ -37,6 +37,10 @@ final class AgentRunService
 
     public const MAX_PROMPT_CHARS = 16000;
     public const MAX_TITLE_CHARS = 80;
+    /** #915: the longest report a run keeps and a Notebook card holds. */
+    public const REPORT_MAX_CHARS = 200000;
+    /** The Notebook of the last card: 'global' or the id of the workspace whose project Notebook holds it. */
+    private static string $lastCardScope = 'global';
     public const MAX_DATA_BYTES = 65536;
     public const MAX_WAIT_SECONDS = 3600;
     public const KEY_PATTERN = '/^[A-Za-z0-9._:\/@-]{1,200}$/D';
@@ -1374,9 +1378,10 @@ final class AgentRunService
     public static function reportFromWorkspace(string $workspaceId, string $runId, string $status, string $summary): array
     {
         if (!in_array($status, ['done', 'failed', 'blocked'], true)) return ['error' => 'The run report status is not valid.'];
-        $summary = self::safeText($summary, 2000);
+        $clipped = self::length(trim($summary)) > self::REPORT_MAX_CHARS;
+        $summary = self::safeText($summary, self::REPORT_MAX_CHARS);
         if ($summary === '') return ['error' => 'The summary could not be checked for secrets, so nothing was saved. Try again.'];
-        $out = self::withRunLock(function () use ($workspaceId, $runId, $status, $summary): array {
+        $out = self::withRunLock(function () use ($workspaceId, $runId, $status, $summary, $clipped): array {
             $record = self::loadRun($runId);
             if ($record === null || (string)($record['workspaceId'] ?? '') !== $workspaceId) {
                 return self::reply('error', 'The run record does not match this workspace.', self::EXIT_INTERNAL, $runId, $workspaceId);
@@ -1393,7 +1398,7 @@ final class AgentRunService
             if (($record['state'] ?? '') !== 'started') {
                 return self::reply('error', 'This run is no longer open.', self::EXIT_INTERNAL, $runId, $workspaceId);
             }
-            return self::saveReportLocked($record, $status, $summary);
+            return self::saveReportLocked($record, $status, $summary, $clipped);
         });
         if (in_array((string)($out['reply']['state'] ?? ''), ['done', 'failed', 'blocked', 'timed_out'], true)) {
             return $out['reply'] + ['status' => (string)$out['reply']['state']];
@@ -1402,11 +1407,11 @@ final class AgentRunService
     }
 
     /** Store the run and workspace report while the run lock is held. @param array<string,mixed> $record */
-    private static function saveReportLocked(array $record, string $status, string $summary): array
+    private static function saveReportLocked(array $record, string $status, string $summary, bool $clipped = false): array
     {
         $runId = (string)($record['runId'] ?? '');
         $workspaceId = (string)($record['workspaceId'] ?? '');
-        $summary = self::safeText($summary, 2000);
+        $summary = self::safeText($summary, self::REPORT_MAX_CHARS);
         if ($summary === '') return self::reply('error', 'The summary could not be checked for secrets, so nothing was saved.', self::EXIT_INTERNAL, $runId, $workspaceId);
         $saved = SpawnService::recordRunReport($workspaceId, $runId, $status, $summary, self::now());
         if (isset($saved['error'])) return self::reply('error', (string)$saved['error'], self::EXIT_INTERNAL, $runId, $workspaceId);
@@ -1415,17 +1420,19 @@ final class AgentRunService
         $record['summary'] = $summary;
         $record['reportedAt'] = self::now();
         $record['resultFile'] = (string)$saved['resultFile'];
+        if ($clipped) $record['summaryClipped'] = true;
         $record['notebookCard'] = self::upsertNotebookCard($record);
+        $record['notebookScope'] = self::$lastCardScope;
         if (!self::storeRun($record)) return self::reply('error', 'The report file was saved, but the run record could not be updated.', self::EXIT_INTERNAL, $runId, $workspaceId);
 
         $who = self::runActor($record);
-        self::emit('run.reported', 'script ' . (string)($record['script'] ?? ''), 'Run reported ' . $status . ': ' . $summary,
+        self::emit('run.reported', 'script ' . (string)($record['script'] ?? ''), 'Run reported ' . $status . ': ' . self::cut($summary, 2000),
             ['runId' => $runId, 'workspaceId' => $workspaceId, 'key' => (string)($record['key'] ?? ''), 'status' => $status,
                 'label' => (string)($record['label'] ?? ''), 'resultFile' => (string)$saved['resultFile']], $who);
         self::reportTrayRecord($runId, $status, $summary, $workspaceId, $record);
         $noticeSummary = preg_replace('/\s+/u', ' ', $summary);
         if (!is_string($noticeSummary)) $noticeSummary = $summary;
-        $noticeSummary = trim($noticeSummary);
+        $noticeSummary = self::cut(trim($noticeSummary), 2000);
         if ($status === 'done') {
             if (self::settings()['run_notify_routine'] === '1') {
                 self::notifyOnce(self::noticeKey($record), 'done', 'AICliAgents: a run is done', $noticeSummary, 'normal');
@@ -1442,23 +1449,64 @@ final class AgentRunService
         return self::waitReply($record);
     }
 
+    /**
+     * The Notebook that gets the card of a run (#915): the Notebook of the run folder when that folder has one
+     * (the rule of the workspace Notebook), else the Global Notebook. A temporary folder is removed later, so its
+     * card goes to Global.
+     * @param array<string,mixed> $record
+     * @return array<string,mixed>
+     */
+    private static function cardContext(array $record): array
+    {
+        $workspaceId = (string)($record['workspaceId'] ?? '');
+        if (!self::isTempRun($record) && $workspaceId !== '') {
+            $project = NotebookService::contextFor($workspaceId);
+            if (!isset($project['error']) && is_dir((string)$project['root'])) return $project;
+        }
+        return NotebookService::contextFor('global');
+    }
+
+    /** True when the result file of the run is in a temporary run folder (it has the marker of R19). @param array<string,mixed> $record */
+    private static function isTempRun(array $record): bool
+    {
+        $resultFile = (string)($record['resultFile'] ?? '');
+        return $resultFile !== '' && is_file(dirname($resultFile, 2) . '/.aicli-run.json');
+    }
+
     /** @param array<string,mixed> $record */
     private static function upsertNotebookCard(array $record): string
     {
+        self::$lastCardScope = 'global';
         try {
             if (!class_exists('AICliAgents\\Services\\NotebookService', false)) require_once __DIR__ . '/NotebookService.php';
-            $ctx = NotebookService::contextFor('global');
+            $ctx = self::cardContext($record);
             if (isset($ctx['error'])) return '';
+            self::$lastCardScope = (string)($ctx['scope'] ?? '') === 'global' ? 'global' : (string)($ctx['workspaceId'] ?? 'global');
             $key = (string)($record['key'] ?? '');
             $identity = $key !== '' ? 'key:' . hash('sha256', $key) : 'run:' . (string)($record['runId'] ?? '');
             $cardKey = hash('sha256', $identity);
             $tag = 'run-' . substr(hash('sha256', $key !== '' ? $key : (string)($record['runId'] ?? '')), 0, 32);
-            $titleText = $key !== '' ? 'Run: ' . $key : 'Run: ' . (string)($record['title'] ?? $record['label'] ?? 'script');
-            $title = self::safeText($titleText, 180);
+            // The title is the run title; the key is a tag (#915).
+            $title = self::safeText((string)($record['title'] ?? ''), 180);
+            if ($title === '') $title = self::safeText($key, 180);
             if ($title === '') $title = 'Script run';
+            $tags = ['script-run', $tag];
+            $keyTag = self::safeText($key, 35);
+            if ($keyTag !== '') $tags[] = 'key:' . $keyTag;
             $state = (string)($record['state'] ?? 'done');
-            $summary = self::safeText((string)($record['summary'] ?? ''), 2000);
-            $body = "# " . $title . "\n\nState: " . $state . "\n\n" . $summary . "\n\nRun ID: " . (string)($record['runId'] ?? '') . "\n";
+            $report = self::safeText((string)($record['summary'] ?? ''), self::REPORT_MAX_CHARS);
+            $resultFile = self::safeText((string)($record['resultFile'] ?? ''), 500);
+            $where = '';
+            if ($resultFile !== '') {
+                $where = 'The whole report is on this card. The result file is `' . $resultFile . '`. '
+                    . (self::isTempRun($record)
+                        ? 'That file is in a temporary run folder. The plugin removes the folder ' . self::intSetting('run_temp_keep_hours', 1, 720) . ' hours after the run closes. This card stays.'
+                        : 'That file stays in the run folder until a person removes the folder.')
+                    . "\n\n";
+            }
+            $clip = !empty($record['summaryClipped'])
+                ? "\n\nThe report is longer than " . self::REPORT_MAX_CHARS . " characters. This card holds the first " . self::REPORT_MAX_CHARS . " characters.\n" : '';
+            $body = "# " . $title . "\n\n" . $where . "State: " . $state . ($key !== '' ? "\n\nKey: " . self::safeText($key, 200) : '') . "\n\n" . $report . $clip . "\n\nRun ID: " . (string)($record['runId'] ?? '') . "\n";
             $author = NotebookService::author((string)($record['workspaceId'] ?? ''));
             $id = self::notebookCardId($cardKey);
             if ($id !== '') {
@@ -1468,7 +1516,7 @@ final class AgentRunService
                     return isset($saved['error']) ? '' : 'artefact:' . $id;
                 }
             }
-            $created = NotebookService::create($ctx, ['title' => $title, 'type' => 'markdown', 'area' => 'inbox', 'tags' => ['script-run', $tag], 'content' => $body], $author);
+            $created = NotebookService::create($ctx, ['title' => $title, 'type' => 'markdown', 'area' => 'inbox', 'tags' => $tags, 'content' => $body], $author);
             $link = (string)($created['link'] ?? '');
             if (isset($created['error']) || !preg_match('/^artefact:(a_[0-9a-f]{12})$/D', $link, $m)) return '';
             return self::storeNotebookCardId($cardKey, $m[1]) ? $link : '';
@@ -1505,10 +1553,16 @@ final class AgentRunService
     {
         try {
             $opId = 'runreport_' . $runId;
-            ActivityService::register($opId, 'admin', 'Script run ' . $status, ['actor' => 'script ' . (string)($record['script'] ?? ''), 'meta' => [
+            $meta = [
                 'tool' => 'aicli_run', 'kind' => 'record', 'workspaceId' => $workspaceId,
                 'by' => ['agentName' => 'Script run', 'workspaceName' => ''],
-            ]]);
+            ];
+            // #915: the Open note button. noteNotebook is 'global' or the workspace of the project Notebook.
+            if (preg_match('/^artefact:(a_[0-9a-f]{12})$/D', (string)($record['notebookCard'] ?? ''), $m)) {
+                $meta['artefactId'] = $m[1];
+                $meta['noteNotebook'] = (string)($record['notebookScope'] ?? 'global') ?: 'global';
+            }
+            ActivityService::register($opId, 'admin', 'Script run ' . $status, ['actor' => 'script ' . (string)($record['script'] ?? ''), 'meta' => $meta]);
             ActivityService::finish($opId, self::safeText($summary, 300) ?: 'The run reported ' . $status . '.');
         } catch (\Throwable $e) {
             // Best effort.
