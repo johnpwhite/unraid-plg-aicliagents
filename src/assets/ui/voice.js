@@ -1546,6 +1546,25 @@
         ws.onerror = function () { /* onclose follows and decides */ };
     }
 
+    /** #913: "Send when I stop talking" in live mode follows the microphone, the same clock as
+     *  the piece engine. A timer on the engine's replies alone can miss the stop: a reply with new
+     *  words restarts it. */
+    function liveSilenceTick(samples) {
+        var silenceStop = stopOnSilenceMs();
+        if (!silenceStop || !samples || !samples.length) return;
+        var sumSq = 0;
+        for (var i = 0; i < samples.length; i++) sumSq += samples[i] * samples[i];
+        var now = Date.now();
+        if (Math.sqrt(sumSq / samples.length) >= ENGINE_SILENCE_RMS) {
+            inputHeardThisRecording = true;
+            inputQuietSince = 0;
+            return;
+        }
+        if (!inputHeardThisRecording) return;
+        if (!inputQuietSince) inputQuietSince = now;
+        else if (now - inputQuietSince >= silenceStop) { inputHeardThisRecording = false; stopInput(); }
+    }
+
     function startLiveInput(gen) {
         if (!window.WebSocket || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             liveFallBackBeforeStart(gen, 'This browser cannot stream to the live transcription engine.');
@@ -1575,7 +1594,9 @@
                 var rate = live.ctx.sampleRate;
                 live.node.onaudioprocess = function (e) {
                     if (gen !== inputGeneration || live.done || live.stopping) return;
-                    liveSendFloat(live, liveResample(e.inputBuffer.getChannelData(0), rate, LIVE_RATE));
+                    var liveInput = e.inputBuffer.getChannelData(0);
+                    liveSendFloat(live, liveResample(liveInput, rate, LIVE_RATE));
+                    liveSilenceTick(liveInput);
                 };
                 live.source.connect(live.node);
                 live.node.connect(live.ctx.destination);   // a processor runs only while connected; its output is silent

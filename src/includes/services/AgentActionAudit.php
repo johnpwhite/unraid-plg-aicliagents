@@ -364,10 +364,13 @@ final class AgentActionAudit
             } else {
                 $code = 'tool_refused'; $message = 'The tool refused this request.';
             }
+            // John, 2026-11-05: a refusal says why. The tool's own sentence is the reason, masked and on one line.
+            $own = trim((string)preg_replace('/\s+/', ' ', self::safeText($raw)));
+            if ($own !== '' && !in_array($code, ['locked_setting', 'operator_inside_workspace', 'not_creator'], true)) $message = $own;
         } elseif ($outcome === 'error') {
             $code = 'tool_error'; $message = 'The tool failed while it ran.';
         }
-        return ['code' => $code, 'message' => self::clip(self::safeText($message), 180)];
+        return ['code' => $code, 'message' => self::clip(self::safeText($message), 300)];
     }
 
     private static function isSecurityRefusal(string $tool, string $tier, string $reasonCode): bool
