@@ -352,8 +352,12 @@ class VersionCheckService {
         // October). An entry with no publish time is kept.
         if ($channel === 'beta') {
             $stableTs = self::stableReleaseTime($versions, $distTags);
+            $stableVersion = (string)($distTags['stable'] ?? $distTags['latest'] ?? '');
             if ($stableTs > 0) {
-                $result = array_values(array_filter($result, static fn($e) => (int)($e['timestamp'] ?? 0) === 0 || (int)$e['timestamp'] >= $stableTs));
+                // #912: a preview can be published minutes before the stable release and still be newer
+                // (Gemini: 0.68.0-preview.0 before 0.67.0). A higher version is never superseded.
+                $result = array_values(array_filter($result, static fn($e) => (int)($e['timestamp'] ?? 0) === 0 || (int)$e['timestamp'] >= $stableTs
+                    || version_compare((string)($e['version'] ?? ''), $stableVersion, '>')));
             }
         }
 
