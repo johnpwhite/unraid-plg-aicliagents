@@ -273,6 +273,14 @@ _hc_human() {
     awk -v b="${1:-0}" 'BEGIN { if (b >= 1073741824) printf "%.1f GB", b/1073741824; else printf "%d MB", int((b+1048575)/1048576) }'
 }
 
+# _hc_home_alive <persist> <id> — 0 while the plain folder of the home exists. The
+# folder is made by the mount BEFORE the cache step runs, so a missing folder means
+# the home was removed while the cache step ran (#914). Nothing here may make it
+# again: not the cache folders, not a marker.
+_hc_home_alive() {
+    [ -d "$1/passthrough/homes/$2" ]
+}
+
 # home_cache_clean_once <id> <persist> <persist_home> <mnt>
 # The first mount after the R5 change: remove the old cache content from the boot
 # disk ONCE. Only while no process uses the home (else it waits for the next
@@ -281,11 +289,13 @@ home_cache_clean_once() {
     local id="$1" persist="$2" home="$3" mnt="$4" marker freed
     marker="$persist/passthrough/.home-cache-cleaned/$id"
     [ -e "$marker" ] && return 0
+    _hc_home_alive "$persist" "$id" || return 0   # #914: removed meanwhile
     if home_cache_home_busy "$mnt"; then
         cmn_log INFO home-cache "old cache content of home $id stays for now: a workspace uses the home"
         return 0
     fi
     freed="$(home_cache_wipe_boot "$home")"
+    _hc_home_alive "$persist" "$id" || return 0   # #914: removed during the wipe; write no marker
     mkdir -p "$(dirname "$marker")" 2>/dev/null
     printf '%s\n' "$freed" > "$marker" 2>/dev/null || true
     cmn_log INFO home-cache "removed old cache content of home $id from the boot disk: freed $freed bytes"
@@ -324,6 +334,7 @@ home_cache_apply() {
     local home="$persist/passthrough/homes/$id" eff root mounted src rel tgt mb a b
     case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
     [ -d "$mnt" ] || return 1
+    _hc_home_alive "$persist" "$id" || { cmn_log INFO home-cache "home $id has no folder any more: no cache step"; return 0; }   # #914
     mounted="$(home_cache_pool_mounted "$pool_path")"
     eff="$(home_cache_effective_location "$want" "$pool_path" "$mounted")"
     if [ "$want" = "pool" ] && [ "$eff" = "ram" ]; then
@@ -344,6 +355,14 @@ home_cache_apply() {
     home_cache_clean_once "$id" "$persist" "$home" "$mnt"
     while IFS=$'\t' read -r src rel; do
         [ -n "$src" ] || continue
+        # #914: the clean-up above can take seconds. A home removed meanwhile gets no
+        # folder, no bind and no state: the RAM cache made for it goes too.
+        if ! _hc_home_alive "$persist" "$id"; then
+            cmn_log INFO home-cache "home $id was removed while its cache step ran: stop"
+            [ "$eff" = "ram" ] && { _hc_umount "$root" 0 && rmdir "$root" 2>/dev/null; }
+            rm -f "$(_hc_state_file "$id")" 2>/dev/null
+            return 0
+        fi
         tgt="$mnt/$rel"
         if _hc_chain_has_symlink "$mnt" "$rel"; then
             cmn_log WARN home-cache "skip $rel of home $id: a symlink lies on its path"

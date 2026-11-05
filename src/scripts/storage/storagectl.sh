@@ -113,6 +113,9 @@ done
 
 # Sanitised id for lock/marker filenames (mirrors commit_stack.sh).
 _LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
+# #914: when this call started (nanoseconds). A passthrough mount compares it with
+# the "removed" note of its entity (entity_removed_since in common.sh).
+_SC_START_NS="$(date +%s%N 2>/dev/null || echo 0)"
 
 # ---- JSON helpers (no jq dependency) ----------------------------------------
 # _json_str <s> — emit a JSON-escaped string value (without surrounding quotes).
@@ -987,9 +990,39 @@ _pt_cache_step() {
     return 0
 }
 
+# #914: a plain-folder mount takes the per-entity mount lock that op_mount takes
+# (a poll with flock -n, never a blocking wait), and holds it until this process
+# exits. A teardown that takes the same lock then waits for the mount to end. A
+# timeout answers "deferred" (exit 2); a lock that cannot be opened is skipped.
+_pt_take_mount_lock() {
+    command -v flock >/dev/null 2>&1 || return 0
+    declare -f mount_op_lock_path >/dev/null 2>&1 || return 0
+    local wait_s="${AICLI_MOUNT_LOCK_WAIT_S:-20}" deadline fd
+    case "$wait_s" in ''|*[!0-9]*) wait_s=20 ;; esac
+    [ "$wait_s" -le 60 ] || wait_s=60
+    { exec {fd}>"$(mount_op_lock_path "$TYPE" "$ID")"; } 2>/dev/null || return 0
+    deadline=$((SECONDS + wait_s))
+    until flock -n "$fd"; do
+        [ "$SECONDS" -ge "$deadline" ] && return 1
+        sleep 0.2
+    done
+    return 0
+}
+
 _pt_mount() {
     local mnt pdir; mnt="$(_mnt_point)"; pdir="$(_pt_dir)"
     guard_path "$PERSIST" "PERSIST" || { emit_json 1 "failed" "guard_reject"; exit 1; }
+    if ! _pt_take_mount_lock; then
+        write_defer_reason "$TYPE" "$ID" "mount_op_lock_timeout" 2>/dev/null || true
+        emit_json 2 "deferred" "mount_op_lock_timeout"; exit 2
+    fi
+    # #914: the entity was removed after this mount started (a late mount). Making
+    # the plain folder now would bring a removed home back. A new home has no note.
+    if declare -f entity_removed_since >/dev/null 2>&1 && entity_removed_since "$TYPE" "$ID" "$_SC_START_NS"; then
+        lifecycle_log "info" "storagectl" "passthrough_mount_skipped_removed" "{\"type\":\"$TYPE\",\"id\":\"$ID\"}" 2>/dev/null || true
+        _sc_err "passthrough: $TYPE $ID was removed while this mount waited — not recreating it"
+        emit_json 1 "failed" "entity_removed_during_mount"; exit 1
+    fi
     # 2026-09-24 (#317): an agent whose persistence name is a version link gets
     # one bind per version and a stable symlink, like the layered engine.
     if [ "$TYPE" = "agent" ] && _pt_versioned_generation >/dev/null; then
@@ -1074,6 +1107,7 @@ _pt_wipe() {
         esac
     fi
     case "$pdir" in "$PERSIST"/passthrough/*) rm -rf "$pdir" 2>/dev/null ;; esac
+    entity_removed_mark "$TYPE" "$ID"   # #914: a mount that started earlier must not bring it back
     emit_json 0 "ok" ""; exit 0
 }
 
