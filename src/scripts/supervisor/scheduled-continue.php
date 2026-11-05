@@ -34,6 +34,7 @@ use AICliAgents\Services\ActivityService;
 use AICliAgents\Services\EventActor;
 use AICliAgents\Services\TransientErrorService;
 use AICliAgents\Services\QuotaDetectionService;
+use AICliAgents\Services\AutoLaunchSuppression;
 
 const STALE_S = 21600; // 6 h — an occurrence older than this fires nothing.
 
@@ -165,6 +166,15 @@ try {
                     continue;
                 }
                 if ($decision !== 'send') continue;                       // its own retry wait: next tick
+            }
+
+            if (!$running && !QuotaDetectionService::launchesClosedWorkspace($entry, AutoLaunchSuppression::isSuppressed((string)$sid))) {
+                // #907: a limit-reset entry must never start a workspace that was closed on purpose (the close mark).
+                // A workspace that stopped by accident or by a restart keeps its earlier behaviour.
+                ConfigService::clearScheduledContinue($sid, $entryId);
+                @ActivityService::register("sched_cont_quota_$sid", 'system', 'Scheduled continue dropped', ['meta' => ['kind' => 'record', 'workspaceId' => $sid]]);
+                @ActivityService::finish("sched_cont_quota_$sid", "$name · the workspace was closed on purpose");
+                continue;
             }
 
             if (!$running) {

@@ -446,7 +446,7 @@ class SpawnService
             $id = (string)($record['id'] ?? '');
             $agentId = (string)($record['agentId'] ?? '');
             if ($id === '' || !ProcessManager::isRunning($id)) return 'closed';
-            $limit = self::$quotaProbe !== null ? (self::$quotaProbe)($agentId) : QuotaDetectionService::activeLimit($agentId);
+            $limit = self::$quotaProbe !== null ? (self::$quotaProbe)($agentId) : QuotaDetectionService::activeLimit($agentId, null, null, null, null, (string)($s['model'] ?? ''));
             if ($limit !== null) return 'quota';
             $gate = self::gate($agentId, $id);
             if ($gate['ready']) return 'idle';
@@ -655,10 +655,10 @@ class SpawnService
             if ($kind >= self::cap('spawn_max_per_agent')) {
                 return ['error' => "$kind sub-agent workspaces of '$agentId' already run. The limit is " . self::cap('spawn_max_per_agent') . ' for each agent kind.'];
             }
-            $limit = self::$quotaProbe !== null ? (self::$quotaProbe)($agentId) : QuotaDetectionService::activeLimit($agentId, self::now());
+            $limit = self::$quotaProbe !== null ? (self::$quotaProbe)($agentId, $model) : QuotaDetectionService::activeLimit($agentId, self::now(), null, null, null, $model);
             if ($limit !== null) {
                 $name = self::findRecord((string)$limit['workspaceId'])['name'] ?? (string)$limit['workspaceId'];
-                return ['error' => "The agent '$agentId' shows a usage limit (workspace $name). Its limit resets at " . self::whenText((int)$limit['reset_at']) . '. A sub-agent would burn the same quota. Start the sub-agent after that time.', 'resetAt' => (int)$limit['reset_at']];
+                return ['error' => "The agent '$agentId' shows a usage limit (workspace $name). Its limit resets at " . self::whenText((int)$limit['reset_at']) . '. A sub-agent may use the same quota, because the limit is not known to belong to a different provider than the model of this sub-agent. Start the sub-agent after that time.', 'resetAt' => (int)$limit['reset_at']];
             }
             if (!self::gapOpen('spawn-' . $callerId, self::SPAWN_GAP_SECONDS)) {
                 return ['error' => 'You started a sub-agent too recently. Wait ' . self::SPAWN_GAP_SECONDS . ' seconds and try again.'];

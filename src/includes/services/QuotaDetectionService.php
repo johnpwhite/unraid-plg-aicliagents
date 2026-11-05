@@ -301,6 +301,8 @@ final class QuotaDetectionService
                 'state' => (string)($detection['nativeState'] ?? $detection['source'] ?? ''),
                 'reset_at' => isset($detection['at']) ? (int)$detection['at'] : null,
                 'fingerprint' => (string)($detection['fingerprint'] ?? ''),
+                // #908: the provider the screen shows ("provider: x"), or empty. activeLimit compares it with a new sub-agent's provider.
+                'provider' => strtolower((string)(WorkspaceScreenService::detectModel(preg_split('/\R/u', TmuxService::plainPaneText((string)($captures[$sid] ?? ''))) ?: [])['provider'] ?? '')),
                 'seen_at' => (int)($detection['seen_at'] ?? $now),
             ];
         }
@@ -331,7 +333,7 @@ final class QuotaDetectionService
      * @param callable|null $isRunning Test seam: fn(string $sid): bool. Null uses ProcessManager.
      * @return array{reset_at:int,workspaceId:string}|null The earliest reset among the limits found, or null.
      */
-    public static function activeLimit(string $agentId, ?int $now = null, ?array $agentBySession = null, ?array $scheduled = null, ?callable $isRunning = null): ?array
+    public static function activeLimit(string $agentId, ?int $now = null, ?array $agentBySession = null, ?array $scheduled = null, ?callable $isRunning = null, ?string $newModel = null, ?array $providerBySession = null, ?array $stateSessions = null): ?array
     {
         $now ??= time();
         if ($agentId === '') return null;
@@ -343,6 +345,19 @@ final class QuotaDetectionService
         }
         $scheduled ??= ConfigService::getScheduledContinueMap();
         $isRunning ??= static fn(string $sid): bool => ProcessManager::isRunning($sid);
+        $stateSessions ??= (self::readState()['sessions'] ?? []);
+        // #908: only an OpenCode-style agent has a quota per provider and model. Its limit is skipped when the
+        // new workspace names a provider and the limited workspace names a different one. Claude and Codex have
+        // one account quota, so a different model never bypasses their limit.
+        $newProvider = in_array($agentId, self::OPENCODE_AGENTS, true) ? self::providerOfModel((string)$newModel) : '';
+        if ($newProvider !== '') $providerBySession ??= self::spawnProviders();
+        $providerBySession ??= [];
+        $differs = static function (string $sid) use ($newProvider, $providerBySession, $stateSessions): bool {
+            if ($newProvider === '') return false;
+            $seen = strtolower(trim((string)($stateSessions[$sid]['provider'] ?? '')));
+            if ($seen === '') $seen = (string)($providerBySession[$sid] ?? '');
+            return $seen !== '' && $seen !== $newProvider;
+        };
 
         $best = null;
         $consider = static function (int $at, string $sid) use (&$best, $now): void {
@@ -353,15 +368,53 @@ final class QuotaDetectionService
             $entry = self::entryOfSource(ConfigService::normalizeScheduledEntries($raw, (string)$sid), 'quota-detect');
             if ($entry === null) continue;
             if (($agentBySession[(string)$sid] ?? '') !== $agentId) continue;
+            if ($differs((string)$sid)) continue;
             $consider((int)($entry['at'] ?? 0), (string)$sid);
         }
-        foreach ((self::readState()['sessions'] ?? []) as $sid => $row) {
+        foreach ($stateSessions as $sid => $row) {
             if (!is_array($row) || (string)($row['agent_id'] ?? '') !== $agentId) continue;
             if (($row['state'] ?? '') === 'native-agent-owned' || ($row['state'] ?? '') === 'cancelled') continue;
             if (!isset($agentBySession[(string)$sid]) || !$isRunning((string)$sid)) continue;
+            if ($differs((string)$sid)) continue;
             $consider((int)($row['reset_at'] ?? 0), (string)$sid);
         }
         return $best;
+    }
+
+    /**
+     * #907: may the scheduled-continue ticker start a workspace that is not running? An entry a person or a tool
+     * set on purpose (source `user`, the documented "start it at a time" use) may. Any other entry (a limit reset, a
+     * retry) may not when the workspace was closed on purpose (`$closedOnPurpose`, the auto-launch close mark).
+     *
+     * @param array<string,mixed> $entry
+     */
+    public static function launchesClosedWorkspace(array $entry, bool $closedOnPurpose): bool
+    {
+        return !$closedOnPurpose || (string)($entry['source'] ?? 'user') === 'user';
+    }
+
+    /** #908: the provider part of a model name such as "litellm/gpt-5", lower case, or "" when the name has none. */
+    public static function providerOfModel(string $model): string
+    {
+        $model = trim($model);
+        $p = strpos($model, '/');
+        return $p === false || $p === 0 ? '' : strtolower(substr($model, 0, $p));
+    }
+
+    /** @return array<string,string> #908: workspace id => provider, for workspaces started with a known model (sub-agents). */
+    private static function spawnProviders(): array
+    {
+        $out = [];
+        try {
+            foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $s) {
+                if (!is_array($s) || (string)($s['id'] ?? '') === '') continue;
+                $p = self::providerOfModel((string)($s['spawn']['model'] ?? ''));
+                if ($p !== '') $out[(string)$s['id']] = $p;
+            }
+        } catch (\Throwable $e) {
+            return [];
+        }
+        return $out;
     }
 
     /** @return array<int,array{id:string,agentId:string}> */
