@@ -4071,6 +4071,34 @@ lifecycle_log "info" "consolidate_layers" "bash_consolidate_ok" "{\"type\":\"$TY
 update_task_status "Consolidation complete." 100 ""
 )
 
+# graduate_removed_since <type> <id> <start_ns> — #920: 0 when the entity was removed
+# (a removal note, see entity_removed_since) at or after <start_ns>, that is, while
+# a plain-folder move that began at <start_ns> was still running. The move must then
+# make no folder, no bind and no cache. When the note helper is not loaded, the
+# answer is "not removed".
+graduate_removed_since() {
+    declare -f entity_removed_since >/dev/null 2>&1 || return 1
+    entity_removed_since "${1:-home}" "${2:-}" "${3:-}"
+}
+
+# graduate_drop_removed_home <persist> <id> — #920: remove the plain folder that a
+# move made for a home that was removed meanwhile. It acts on ONE folder only,
+# <persist>/passthrough/homes/<id>, after these checks: the id is a plain name (no
+# slash, not "." or ".."), the persist path is not empty, the folder is a real
+# folder (not a link) and nothing is mounted on it. Returns 0 when the folder is
+# gone or was never there, 1 when it was kept.
+graduate_drop_removed_home() {
+    local persist="${1%/}" id="${2:-}" d
+    [ -n "$persist" ] || return 1
+    case "$id" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    d="$persist/passthrough/homes/$id"
+    [ -e "$d" ] || [ -L "$d" ] || return 0
+    [ -L "$d" ] && return 1
+    mountpoint -q "$d" 2>/dev/null && return 1
+    rm -rf -- "$d" 2>/dev/null || true
+    [ ! -e "$d" ]
+}
+
 # ---- op_graduate  (S-10, Feature #1354) --------------------------------------
 # Migrate a flash (layering) entity to the PASSTHROUGH backend on a capable
 # device: flush → consolidate to ONE layer → copy into the plain passthrough
@@ -4079,7 +4107,9 @@ update_task_status "Consolidation complete." 100 ""
 # clear in ONE locked write → clear intent → rebind the mount via the
 # passthrough path. Exit contract: 0 ok · 2 deferred (transient; reason
 # marker) · 4 precondition failed (reason marker graduate_precondition) ·
-# 1 hard failure.
+# 1 hard failure. A home that was removed while the move ran (#920) ends with 4: the
+# precondition "the home exists" no longer holds, and it is not a failure to retry
+# (the supervisor uses the same code for "removed while the work ran").
 #
 # CRASH ARMS (both sides of the manifest write — THE authority flip):
 #   • Killed BEFORE the manifest write: the layers are still authoritative.
@@ -4129,6 +4159,9 @@ guard_path "$PERSIST_PATH" "PERSIST_PATH" || { error "Persistence path failed va
 _assert_persist_durable "$PERSIST_PATH" || { error "Persistence path is on a non-durable filesystem — graduate refused"; exit 1; }
 
 _GR_LOCK_ID="${ID//[^a-zA-Z0-9_-]/_}"
+# #920: the start time of this move. A removal note newer than this means the home was
+# removed while the move ran; the move then makes no folder, no bind and no cache.
+_GR_START_NS="$(date +%s%N)"
 # Clear any stale defer-reason marker so the reason PHP reads is THIS run's truth.
 rm -f "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" \
       "${MOUNT_ROOT}/.graduate_refusal_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
@@ -4450,6 +4483,21 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         log "The plain home will take about $_GR_EST bytes on the boot disk; it fits after the layers move off."
     fi
 
+    # #920: the home was removed (a smoke teardown, or the person) while the copy ran.
+    # Nothing is moved yet, so drop the copy of this run and stop: no folder, no bind,
+    # no cache. The removal note is the proof; the copy folder is guarded.
+    if [ "$TYPE" = "home" ] && graduate_removed_since "$TYPE" "$ID" "$_GR_START_NS"; then
+        lifecycle_log "info" "graduate" "graduate_skipped_removed" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"stage\":\"before_move\"}" 2>/dev/null || true
+        log "The home was removed while the copy ran — dropping the copy, no move."
+        printf "%s\n" "entity_removed" > "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+        convert_cleanup_failed_copy "$_GR_COPY" "$_GR_STAGING_MARKER" || true
+        # Only a copy made straight into the plain folder is this run's to drop.
+        [ "$_GR_COPY" = "$_GR_PT_DIR" ] && { graduate_drop_removed_home "$PERSIST_PATH" "$ID" || true; }
+        _gr_cleanup_meta
+        exit 4
+    fi
+
     # ---- critical section: bake lock, unmount, intent, retire ----
     if ! convert_acquire_graduate_bake_lock "$TYPE" "$_GR_LOCK_ID" "$FORCE_DIRECT"; then
         _gr_cleanup_meta
@@ -4656,6 +4704,20 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         exit 0
     fi
 
+    # #920: removed during the final steps. The layers are retired already, so nothing
+    # can be put back: make no bind, no mount folder and no cache, and drop the plain
+    # folder so the removed home does not come back.
+    if [ "$TYPE" = "home" ] && graduate_removed_since "$TYPE" "$ID" "$_GR_START_NS"; then
+        lifecycle_log "info" "graduate" "graduate_skipped_removed" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"stage\":\"before_bind\"}" 2>/dev/null || true
+        log "The home was removed while the move ran — no bind, no cache; dropping the plain folder."
+        printf "%s\n" "entity_removed" > "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+        graduate_drop_removed_home "$PERSIST_PATH" "$ID" || true
+        # The manifest already says plain folders (or the switch added the removed
+        # home back): take the entry out, so a later mount makes no empty home.
+        manifest_remove_entity "$TYPE" "$ID" 2>/dev/null || true
+        exit 4
+    fi
     [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
     mkdir -p "$MNT_POINT" 2>/dev/null
     if [ "$ID" != "root" ] && id "$ID" >/dev/null 2>&1; then
@@ -4665,7 +4727,7 @@ if [ "$TYPE" = "home" ] || [ "$_GR_AGENT" = "1" ]; then
         lifecycle_log "info" "storagectl" "passthrough_mount" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"dir\":\"$_GR_PT_DIR\"}" 2>/dev/null || true
         log "Plain home bind mounted at $MNT_POINT."
         # BOOT_DISK_SPACE.md R5: the caches of the new plain home go to RAM or a pool.
-        { declare -f home_cache_mount >/dev/null 2>&1 && home_cache_mount "$ID" "$ID" "$MNT_POINT" "$PERSIST_PATH" 2>/dev/null; } || true
+        { declare -f home_cache_mount >/dev/null 2>&1 && AICLI_HC_START_NS="$_GR_START_NS" home_cache_mount "$ID" "$ID" "$MNT_POINT" "$PERSIST_PATH" 2>/dev/null; } || true
     else
         log "Bind mount failed (non-fatal) — the next mount binds the plain folder."
     fi
@@ -4873,6 +4935,19 @@ if [ "$_GR_TD" -eq 0 ]; then
         umount_or_keep "$_gr_lm" "layer mount" 3 || continue   # #512: never lazy; a kept mount keeps its dir
         rmdir "$_gr_lm" 2>/dev/null || true
     done
+    # #920: a home removed while the move ran gets no bind and no cache (same check
+    # as the main home flow above).
+    if [ "$TYPE" = "home" ] && graduate_removed_since "$TYPE" "$ID" "$_GR_START_NS"; then
+        lifecycle_log "info" "graduate" "graduate_skipped_removed" \
+            "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"stage\":\"before_bind\"}" 2>/dev/null || true
+        log "The home was removed while the move ran — no bind, no cache; dropping the plain folder."
+        printf "%s\n" "entity_removed" > "${MOUNT_ROOT}/.bake_defer_reason_${TYPE}_${_GR_LOCK_ID}" 2>/dev/null || true
+        graduate_drop_removed_home "$PERSIST_PATH" "$ID" || true
+        # The manifest already says plain folders (or the switch added the removed
+        # home back): take the entry out, so a later mount makes no empty home.
+        manifest_remove_entity "$TYPE" "$ID" 2>/dev/null || true
+        exit 4
+    fi
     [ -L "$MNT_POINT" ] && rm -f "$MNT_POINT"
     mkdir -p "$MNT_POINT" 2>/dev/null
     _GR_OWNER=""
@@ -4885,7 +4960,7 @@ if [ "$_GR_TD" -eq 0 ]; then
         log "Passthrough bind mounted at $MNT_POINT."
         # BOOT_DISK_SPACE.md R5: a plain home gets its cache binds (agents do not).
         if [ "$TYPE" = "home" ] && declare -f home_cache_mount >/dev/null 2>&1; then
-            home_cache_mount "$ID" "$ID" "$MNT_POINT" "$PERSIST_PATH" 2>/dev/null
+            AICLI_HC_START_NS="$_GR_START_NS" home_cache_mount "$ID" "$ID" "$MNT_POINT" "$PERSIST_PATH" 2>/dev/null
         fi
     else
         log "Passthrough bind failed (non-fatal) — the next mount binds via the passthrough path."

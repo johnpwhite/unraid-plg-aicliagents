@@ -2601,6 +2601,15 @@ _op_graduate() {
         log_info "Graduate deferred: $entity (reason=${_OP_DEFER_REASON:-unknown})"
         lifecycle_log "info" "supervisor" "graduate_deferred" \
             "{\"entity\":\"$entity\",\"defer_reason\":\"${_OP_DEFER_REASON:-}\"}" 2>/dev/null || true
+    elif [ "$exit_code" -eq 4 ] && [ "${_OP_DEFER_REASON:-}" = "entity_removed" ]; then
+        # #920: the home was removed while the move ran. Nothing to say and no
+        # session to open again: the home is gone on purpose.
+        log_info "Graduate stopped: $entity was removed while it ran"
+        lifecycle_log "info" "supervisor" "graduate_skipped_removed" \
+            "{\"entity\":\"$entity\"}" 2>/dev/null || true
+        # The start guard of a "Convert to plain folders" job goes too (it is
+        # cleared in _relaunch_home_sessions, which a removed home skips).
+        [ "$closes_home" -eq 1 ] && _clear_home_consolidating "$id" "$_CURRENT_JOB_ID"
     elif [ "$exit_code" -eq 4 ]; then
         log_warn "Graduate precondition failed: $entity (reason=${_OP_DEFER_REASON:-unknown})"
         lifecycle_log "warn" "supervisor" "graduate_precondition_failed" \
@@ -2623,7 +2632,7 @@ _op_graduate() {
     # every retry closed the workspace, deferred and reopened it (prod02,
     # 2026-10-14). The guard keeps the workspaces closed while the job is deferred;
     # if the retry budget runs out the job fails and the guard goes stale.
-    if [ "$closes_home" -eq 1 ] && [ "$exit_code" -eq 4 ]; then
+    if [ "$closes_home" -eq 1 ] && [ "$exit_code" -eq 4 ] && [ "${_OP_DEFER_REASON:-}" != "entity_removed" ]; then
         [ -n "$_CURRENT_JOB_ID" ] && job_ledger_set_phase "$_CURRENT_JOB_ID" "relaunching" 2>/dev/null
         _relaunch_home_sessions "$id" "$_CURRENT_JOB_ID"
     fi

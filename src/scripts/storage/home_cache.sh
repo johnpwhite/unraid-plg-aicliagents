@@ -281,6 +281,15 @@ _hc_home_alive() {
     [ -d "$1/passthrough/homes/$2" ]
 }
 
+# _hc_removed_since <id> <start_ns> — 0 when a removal note for home <id> is newer than
+# <start_ns> (#920). The plain folder can exist again at that time: a background
+# folder move makes it after the teardown ran. The note is the proof of the removal.
+# When the note helper is not loaded, the answer is "not removed".
+_hc_removed_since() {
+    declare -f entity_removed_since >/dev/null 2>&1 || return 1
+    entity_removed_since home "$1" "$2"
+}
+
 # home_cache_clean_once <id> <persist> <persist_home> <mnt>
 # The first mount after the R5 change: remove the old cache content from the boot
 # disk ONCE. Only while no process uses the home (else it waits for the next
@@ -331,10 +340,12 @@ _hc_ensure_tmpfs() {
 # stays on the boot disk).
 home_cache_apply() {
     local id="$1" owner="$2" mnt="${3%/}" persist="$4" want="$5" pool_path="$6"
-    local home="$persist/passthrough/homes/$id" eff root mounted src rel tgt mb a b
+    local home="$persist/passthrough/homes/$id" eff root mounted src rel tgt mb a b start_ns
+    start_ns="${AICLI_HC_START_NS:-$(date +%s%N)}"   # #920: a removal note newer than this stops the step (a caller such as op_graduate passes its own, earlier start)
     case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
     [ -d "$mnt" ] || return 1
     _hc_home_alive "$persist" "$id" || { cmn_log INFO home-cache "home $id has no folder any more: no cache step"; return 0; }   # #914
+    _hc_removed_since "$id" "$start_ns" && { cmn_log INFO home-cache "home $id was removed after this cache step began: no cache step"; return 0; }   # #920
     mounted="$(home_cache_pool_mounted "$pool_path")"
     eff="$(home_cache_effective_location "$want" "$pool_path" "$mounted")"
     if [ "$want" = "pool" ] && [ "$eff" = "ram" ]; then
@@ -357,7 +368,7 @@ home_cache_apply() {
         [ -n "$src" ] || continue
         # #914: the clean-up above can take seconds. A home removed meanwhile gets no
         # folder, no bind and no state: the RAM cache made for it goes too.
-        if ! _hc_home_alive "$persist" "$id"; then
+        if ! _hc_home_alive "$persist" "$id" || _hc_removed_since "$id" "$start_ns"; then
             cmn_log INFO home-cache "home $id was removed while its cache step ran: stop"
             [ "$eff" = "ram" ] && { _hc_umount "$root" 0 && rmdir "$root" 2>/dev/null; }
             rm -f "$(_hc_state_file "$id")" 2>/dev/null
