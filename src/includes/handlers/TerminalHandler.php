@@ -1246,6 +1246,15 @@ class TerminalHandler {
             if ($reapedPids !== []) {
                 aicli_log("gracefulClose: reaped detached session descendants=" . implode(',', $reapedPids) . " | $ctx", AICLI_LOG_INFO, "TerminalHandler");
             }
+            // #905: OpenCode 2 keeps one background service (`serve --service`) for all workspaces of
+            // a user. It carries the session id of the shell that started it, so the reap above can
+            // miss it. Stop it when no other OpenCode 2 workspace is running.
+            if ($agentId === 'opencode2') {
+                $serviceStopped = \AICliAgents\Services\ProcessManager::stopUnusedOpencode2Service($safeId);
+                if ($serviceStopped !== []) {
+                    aicli_log("gracefulClose: stopped the unused OpenCode 2 service pids=" . implode(',', $serviceStopped) . " | $ctx", AICLI_LOG_INFO, "TerminalHandler");
+                }
+            }
             // WORKSPACE_LIFECYCLE_EVENTS.md: this is the graceful-close path, so
             // the `stopped` event this teardown emits carries that reason (not
             // the generic 'stop' default) even when the quiesce above fell back

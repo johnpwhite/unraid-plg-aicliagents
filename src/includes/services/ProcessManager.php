@@ -158,6 +158,7 @@ class ProcessManager {
         self::$paneLivenessProbe = null;
         self::$sessionPidProbe = null;
         self::$sessionSignalProbe = null;
+        self::$processArgvProbe = null;
         self::$tmuxServerProbe = null;
         self::$processInfoProbe = null;
         self::$owningSessionProbe = null;
@@ -769,6 +770,61 @@ class ProcessManager {
      */
     /** @var array<int,bool> pids already reported as spared system services (one log line each per request). */
     private static array $sparedServices = [];
+
+    /** @var (callable():array<int,array{pid:int,argv:array<int,string>}>)|null #905 test seam: the process list behind opencode2ServePids(). */
+    public static $processArgvProbe = null;
+
+    /**
+     * #905: the pids of OpenCode 2 background services. OpenCode 2 starts one `serve --service`
+     * process for each user when a command runs without `--standalone`. The process keeps the
+     * AICLI_SESSION_ID of the shell that started it (maybe a parent workspace), so the
+     * environment reap in terminateSessionDescendants() does not find it for the workspace
+     * that closed. A match is exact: argv[0] is the OpenCode 2 binary (package folder
+     * `@opencode/cli`) and one argument is `serve`. Never a substring match on the command line.
+     *
+     * @return array<int,int>
+     */
+    public static function opencode2ServePids(): array {
+        $rows = [];
+        if (is_callable(self::$processArgvProbe)) {
+            $rows = (array) call_user_func(self::$processArgvProbe);
+        } else {
+            foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+                $raw = @file_get_contents($file);
+                if (!is_string($raw) || strpos($raw, '@opencode/cli') === false) continue;
+                $rows[] = ['pid' => (int)basename(dirname($file)), 'argv' => explode("\0", rtrim($raw, "\0"))];
+            }
+        }
+        $pids = [];
+        foreach ($rows as $row) {
+            $argv = $row['argv'] ?? [];
+            $pid = (int)($row['pid'] ?? 0);
+            if ($pid <= 1 || $pid === getmypid() || !is_array($argv) || $argv === []) continue;
+            if (strpos((string)$argv[0], '/@opencode/cli/bin/opencode.exe') === false) continue;
+            if (!in_array('serve', array_slice($argv, 1), true)) continue;
+            $pids[] = $pid;
+        }
+        return $pids;
+    }
+
+    /**
+     * #905: after an OpenCode 2 workspace closes, stop the shared OpenCode 2 background
+     * service when no other OpenCode 2 workspace is running. The service is one process for
+     * all workspaces of a user, so it stays while another OpenCode 2 workspace is live and
+     * stops when the last one closes. Returns the pids signalled (empty when kept).
+     *
+     * @return array<int,int>
+     */
+    public static function stopUnusedOpencode2Service(string $closingSessionId, int $graceMilliseconds = 2000): array {
+        $closing = preg_replace('/[^a-zA-Z0-9_-]/', '', $closingSessionId);
+        foreach (self::listAgentTmuxSessions() as $s) {
+            if ($s['agentId'] === 'opencode2' && $s['id'] !== $closing) return [];
+        }
+        $pids = self::opencode2ServePids();
+        if ($pids === []) return [];
+        self::terminatePidListWithGrace($pids, $graceMilliseconds);
+        return $pids;
+    }
 
     /** Send TERM to a group, wait for the full grace period, then kill only survivors. */
     private static function terminatePidListWithGrace(array $rawPids, int $graceMilliseconds): void
