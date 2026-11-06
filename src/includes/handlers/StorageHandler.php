@@ -543,6 +543,15 @@ class StorageHandler {
      *   { "status": "ok"|"error", "agent": "<id>", "version": "<v|null>",
      *     "message": "<human-readable>" }
      */
+    /**
+     * #916 test seam: replaces InstallerService::installAgent() in auto_heal_agent_install, so a
+     * unit run installs nothing. fn(string $agentId, ?string $version): array. Null in production.
+     * Refused (the action throws) when it is set in any process that has not loaded PHPUnit.
+     *
+     * @var (callable(string,?string):array<string,mixed>)|null
+     */
+    public static $agentInstaller = null;
+
     private static function autoHealAgentInstall(): array {
         $id = trim((string)($_REQUEST['id'] ?? ''));
         if ($id === '' || !preg_match('/^[a-zA-Z0-9._-]{1,64}$/D', $id)) {
@@ -571,7 +580,15 @@ class StorageHandler {
         // we can't recover the pinned version.
         $version = self::_recordedAgentVersion($id);
 
-        $result = \AICliAgents\Services\InstallerService::installAgent($id, $version);
+        if (self::$agentInstaller !== null) {
+            if (!class_exists('PHPUnit\\Framework\\TestCase', false)) {
+                self::$agentInstaller = null;
+                throw new \RuntimeException('StorageHandler::$agentInstaller is a test seam: it is refused outside a unit run, and nothing was installed.');
+            }
+            $result = call_user_func(self::$agentInstaller, $id, $version);
+        } else {
+            $result = \AICliAgents\Services\InstallerService::installAgent($id, $version);
+        }
         $ok = is_array($result) && (($result['status'] ?? '') !== 'error');
 
         if ($ok) {

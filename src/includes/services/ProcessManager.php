@@ -149,9 +149,55 @@ class ProcessManager {
     public static function tmuxRoot(): string { return SecretPaths::stateRoot() . '/tmux'; }
 
     /**
+     * #916 test seam: the command runner for the shell commands that find and stop a
+     * session (the ttyd and agent search in stopTerminal(), the tmux session lookup and
+     * kill). Null in production: the commands run in a real shell.
+     * Signature: fn(string $command): string, the text the command prints.
+     * A test sets it to record the commands and answer for them, so no real tmux, ttyd
+     * or process is touched. It works only while PHPUnit is loaded. Set in any other
+     * process, the next command throws and runs nothing.
+     * @var (callable(string):string)|null
+     */
+    public static $commandRunner = null;
+
+    /**
+     * Run a shell command and return what it prints (the shell_exec contract).
+     * Production: a real shell. With the test seam set: the seam, and only under PHPUnit.
+     */
+    public static function runCommand(string $command): string {
+        if (self::$commandRunner !== null) {
+            if (!class_exists('PHPUnit\\Framework\\TestCase', false)) {
+                self::$commandRunner = null;
+                throw new \RuntimeException('ProcessManager::$commandRunner is a test seam: it is refused outside a unit run, and the command was not run.');
+            }
+            return (string) call_user_func(self::$commandRunner, $command);
+        }
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        return (string) @shell_exec($command);
+    }
+
+    /**
+     * Run a shell command and return its output lines (the exec contract: one entry for
+     * each line, no line ends). With the test seam set, the seam answers.
+     *
+     * @return list<string>
+     */
+    public static function runCommandLines(string $command): array {
+        if (self::$commandRunner !== null) {
+            $out = rtrim(self::runCommand($command), "\n");
+            return $out === '' ? [] : explode("\n", $out);
+        }
+        $lines = [];
+        // nosemgrep: php.lang.security.exec-use.exec-use
+        exec($command, $lines);
+        return array_values($lines);
+    }
+
+    /**
      * Reset all test seams to their live-probe defaults. Call in tearDown.
      */
     public static function resetProbes(): void {
+        self::$commandRunner = null;
         self::$tmuxLivenessProbe = null;
         self::$ttydPidProbe = null;
         self::$ttydChildrenProbe = null;
@@ -364,7 +410,11 @@ class ProcessManager {
         $pid = self::findTtydPidForSock($sock);
         if (!$pid) return false;
         LogService::log("Bridge refresh (#142): terminating ttyd pid=$pid for $safeId; agent + tmux session left running", LogService::LOG_INFO, 'ProcessManager');
-        @posix_kill($pid, defined('SIGTERM') ? SIGTERM : 15);
+        if (is_callable(self::$sessionSignalProbe)) {
+            call_user_func(self::$sessionSignalProbe, (int)$pid, defined('SIGTERM') ? SIGTERM : 15);
+        } else {
+            @posix_kill($pid, defined('SIGTERM') ? SIGTERM : 15);
+        }
         self::publishBridgeEvent($safeId);
         return true;
     }
@@ -553,6 +603,10 @@ class ProcessManager {
         $dir = $root . substr(self::sessionTmuxTmpdir($sessionId), strlen(self::tmuxRoot()));
         if (!is_dir($dir) || is_link($dir)) return !file_exists($dir);
         $serverAlive ??= static function (string $sock): bool {
+            if (self::$commandRunner !== null) {
+                // #916 test seam: the runner prints the exit status of the probe.
+                return trim(self::runCommand('tmux -S ' . escapeshellarg($sock) . ' list-sessions > /dev/null 2>&1; echo $?')) === '0';
+            }
             $rc = 1; $out = [];
             // nosemgrep: php.lang.security.exec-use.exec-use
             @exec('tmux -S ' . escapeshellarg($sock) . ' list-sessions > /dev/null 2>&1', $out, $rc);
@@ -1164,14 +1218,12 @@ class ProcessManager {
         $pidFile = "/var/run/unraid-aicliagents-$id.pid";
         
         // 1. Kill ttyd
-        $pids = [];
-        exec("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep " . escapeshellarg($sock) . " | awk '{print $1}'", $pids);
+        $pids = self::runCommandLines("pgrep -x ttyd | xargs -I {} ps -p {} -o pid=,args= | grep " . escapeshellarg($sock) . " | awk '{print $1}'");
         self::terminatePidListWithGrace($pids, $graceMilliseconds);
         
         // 2. Kill agent processes (Node)
-        $nodePids = [];
         $escapedId = escapeshellarg((string)self::sessionArgvPattern($id));
-        exec("pgrep -f $escapedId 2>/dev/null", $nodePids);
+        $nodePids = self::runCommandLines("pgrep -f $escapedId 2>/dev/null");
         self::terminatePidListWithGrace($nodePids, $graceMilliseconds);
 
         // #159: the pgrep -f above matches the ARGV, which only the runuser/ttyd/
@@ -1209,8 +1261,7 @@ class ProcessManager {
             [$sessName, $tmuxSock, $tmuxBin] = self::findTmuxSessionForId($id);
             if ($sessName !== '') {
                 $escSess = escapeshellarg($sessName);
-                // nosemgrep: php.lang.security.exec-use.exec-use
-                @shell_exec("$tmuxBin kill-session -t $escSess > /dev/null 2>&1");
+                self::runCommand("$tmuxBin kill-session -t $escSess > /dev/null 2>&1");
             }
             // The session's own tmux server exits with its last session, but
             // its s-<id> socket folder stayed behind: 97 of them had piled up
@@ -1455,8 +1506,7 @@ class ProcessManager {
         foreach (self::sessionSocketCandidates($safeId) as $sock) {
             if (!self::isLiveUnixSocket($sock)) continue;
             $cmd = 'tmux -S ' . escapeshellarg($sock) . " ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            $name = trim((string) @shell_exec($cmd));
+            $name = trim(self::runCommand($cmd));
             $name = trim($name, "' \t\n");
             if ($name !== '') {
                 return [$name, $sock, 'tmux -S ' . escapeshellarg($sock)];

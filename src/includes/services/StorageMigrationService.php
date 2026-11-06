@@ -179,11 +179,27 @@ class StorageMigrationService {
      * Purges all migration artifacts (migrated_legacy_data/, .img.migrated, .migrated folders).
      * D-313: Version-Aware 'Analyze & Rescue' for incorrect SquashFS volumes.
      */
-    public static function purgeArtifacts() {
+    /**
+     * @param array{persist:string,plugin:string,state:string,mount?:callable,unmount?:callable}|null $roots
+     *        #916 test seam. Null (every production call) = the configured agent persist path,
+     *        the flash root and the state root. A test gives a temp folder for each and may
+     *        replace the loop mount and unmount. Outside a unit run a non-null value is refused.
+     */
+    public static function purgeArtifacts(?array $roots = null) {
         LogService::log("PURGE: Starting 'Analyze & Rescue' for storage artifacts.", LogService::LOG_WARN, "StorageMigrationService");
-        $config = ConfigService::getConfig();
-        $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
-        $pluginBase = SecretPaths::flashRoot();
+        if ($roots !== null) {
+            if (!class_exists('PHPUnit\\Framework\\TestCase', false)) {
+                throw new \RuntimeException('purgeArtifacts(): the roots argument is a test seam and is refused outside a unit run.');
+            }
+            $persistPath = rtrim((string)$roots['persist'], '/');
+            $pluginBase = rtrim((string)$roots['plugin'], '/');
+            $stateBase = rtrim((string)$roots['state'], '/');
+        } else {
+            $config = ConfigService::getConfig();
+            $persistPath = StoragePathResolver::agentPersistPathFromConfig($config);
+            $pluginBase = SecretPaths::flashRoot();
+            $stateBase = SecretPaths::stateRoot();
+        }
         $envPath = "$pluginBase/envs";
         if (!is_dir($envPath)) @mkdir($envPath, 0755, true);
 
@@ -191,6 +207,8 @@ class StorageMigrationService {
         $searchPaths = [$persistPath, "$persistPath/persistence", $pluginBase];
         $seen = [];
         foreach ($searchPaths as $path) {
+            // A folder INSIDE the configured roots that is a link is not followed: its target is not ours to clean.
+            if ($path !== $persistPath && $path !== $pluginBase && is_link($path)) continue;
             if (!is_dir($path)) continue;
             $real = realpath($path);
             if (isset($seen[$real])) continue;
@@ -208,7 +226,7 @@ class StorageMigrationService {
         }
 
         // 2. Analyze & Rescue misplaced SquashFS files (v44 artifacts)
-        $mnt = SecretPaths::stateRoot() . "/mnt/rescue";
+        $mnt = $stateBase . "/mnt/rescue";
         if (!is_dir($mnt)) @mkdir($mnt, 0755, true);
 
         foreach (glob("$persistPath/home_*.sqsh") as $file) {
@@ -220,7 +238,7 @@ class StorageMigrationService {
             $denylist = ['envs', 'persistence', 'pkg-cache', 'test-fixtures', 'includes', 'scripts', 'assets'];
             if (in_array($user, $denylist)) {
                 LogService::log("Artifact found: $name. Attempting data rescue...", LogService::LOG_INFO, "StorageMigrationService");
-                if (!self::rescueArtifactLayer($file, $mnt, $envPath)) continue;
+                if (!self::rescueArtifactLayer($file, $mnt, $envPath, $roots['mount'] ?? null, $roots['unmount'] ?? null)) continue;
                 LogService::log("Purging artifact: $name", LogService::LOG_INFO, "StorageMigrationService");
                 @unlink($file);
             }
