@@ -43,6 +43,9 @@ class ActivityService {
     /** Completed (`done`) entries are pruned from list() after this many seconds. */
     const DONE_TTL_SECONDS = 60;
 
+    /** #917: a completed entry with an action for the person (see isInformationOnly()) stays this long at most. */
+    const DONE_ACTION_TTL_SECONDS = 604800;
+
     /**
      * #830 (John, 2026-10-28): a failed entry whose only button is Dismiss is for
      * information only. It leaves the tray this many seconds after its last change;
@@ -913,7 +916,10 @@ class ActivityService {
         $status = $entry['status'] ?? 'running';
 
         if ($status === 'done') {
-            if ($now - (int)($entry['heartbeatAt'] ?? $now) > self::DONE_TTL_SECONDS) {
+            // #917: a finished entry with an action for the person (Open note, Retry, or a notice) stays
+            // until it is dismissed, like a failed one (#830). A safety limit removes it after 7 days.
+            $ttl = self::isInformationOnly($entry) ? self::DONE_TTL_SECONDS : self::DONE_ACTION_TTL_SECONDS;
+            if ($now - (int)($entry['heartbeatAt'] ?? $now) > $ttl) {
                 @unlink(self::pathFor((string)$entry['opId']));
                 return null;
             }
