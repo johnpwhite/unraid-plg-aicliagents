@@ -323,6 +323,7 @@ class ProcessManager {
         'scripts/user/effective-env-export.php',
         'includes/AICliAgentsManager.php',
         'scripts/user/agent-exit-recorder.sh',
+        'scripts/user/agent-restart-policy.sh', // #888: sourced after each agent exit; a missing file means auto
         'scripts/agent-state-preflight.sh',
         'scripts/tmux-session-closed.sh',
         'scripts/priority.sh',      // RESPONSIVE_PRIORITY.md: runs after a tmux server starts

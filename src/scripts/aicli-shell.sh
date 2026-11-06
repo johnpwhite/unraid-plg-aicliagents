@@ -1414,6 +1414,9 @@ _aicli_load_envs() {
 # retry prompts. Reset on any launch that survived >=3s.
 consecutive_fast_crashes=0
 
+# #888: count of short failures in a row (3 s to under 60 s, rc not 0/130/143). See user/agent-restart-policy.sh.
+consecutive_short_failures=0
+
 # #814: a closing sentinel left by an earlier close that died must not hold this start.
 rm -f "${MOUNT_ROOT}/closing-$AICLI_SESSION_ID.flag" 2>/dev/null
 
@@ -2087,6 +2090,20 @@ while true; do
     # fast exit is detected, require an explicit ENTER instead of timing out after
     # 10s so the user has a chance to read the message and close the workspace.
     launch_duration="$last_launch_duration"
+    # #888: the restart decision lives in user/agent-restart-policy.sh (sourced at call time).
+    # A missing file (older release on disk) falls back to the old behaviour: "auto".
+    _restart_mode="auto"
+    _restart_policy_file="$PLUGIN_SRC/scripts/user/agent-restart-policy.sh"
+    if [ -f "$_restart_policy_file" ]; then
+        unset -f aicli_restart_policy 2>/dev/null || true
+        # shellcheck source=/dev/null -- release symlink intentionally resolves at call time
+        source "$_restart_policy_file"
+        if declare -F aicli_restart_policy >/dev/null 2>&1; then
+            _restart_out=$(aicli_restart_policy "$launch_duration" "$last_launch_rc" "$consecutive_short_failures")
+            _restart_mode="${_restart_out%% *}"
+            consecutive_short_failures="${_restart_out##* }"
+        fi
+    fi
     if [ "$launch_duration" -lt 3 ]; then
         consecutive_fast_crashes=$((consecutive_fast_crashes + 1))
         # #37: after repeated immediate crashes, stop blaming "configuration" — the
@@ -2100,6 +2117,12 @@ while true; do
             echo -e "\n\033[1;31m[Agent Exited Immediately]\033[0m The agent exited after ${launch_duration}s — likely missing configuration."
             echo -e "Press ENTER to retry, or close this workspace from the UI."
         fi
+        read -r
+    elif [ "$_restart_mode" = "enter-repeat" ]; then
+        consecutive_fast_crashes=0
+        # #888: 3 short failures in a row. Wait for ENTER with no timeout. ENTER keeps the count.
+        log_aicli "WARN" 1 "Agent $AGENT_ID stopped with an error $consecutive_short_failures times in a row (last rc=$last_launch_rc, last duration=${launch_duration}s); not auto-retrying"
+        echo -e "\n\033[1;31m[Agent Keeps Failing]\033[0m $AGENT_ID stopped with an error ${consecutive_short_failures} times in a row, each within a minute. Check its log or settings. Press ENTER to try again, or close this workspace from the UI."
         read -r
     else
         consecutive_fast_crashes=0
