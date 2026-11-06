@@ -2192,8 +2192,8 @@ agent_convert_unlink_layout() {
 # a second. We still skip files >2GB (SQLite header is always within the first
 # 16 bytes and large non-DB files like archives would be wasteful to sniff).
 # WAL/SHM siblings (*.db-wal, *.db-shm) intentionally NOT included — they have
-# their own magic bytes ("ZP" for WAL, internal for SHM) and the caller's
-# build_mksquashfs_sqlite_excludes generates -wal/-shm exclusions from each
+# their own magic bytes ("ZP" for WAL, internal for SHM). The pseudo-file merge writes the
+# -wal/-shm exclusions from each
 # parent .db automatically.
 detect_sqlite_dbs() {
     local root="$1"
@@ -2515,33 +2515,6 @@ selective_upper_cleanup() {
     printf '{"wiped_bytes":%d,"wiped_count":%d,"residual_bytes":%s,"residual_files":%s}\n' \
         "$wiped_bytes" "$wiped_count" "$residual_bytes" "$residual_files"
     return 0
-}
-
-# build_mksquashfs_sqlite_excludes <root> <db-paths...>
-# Echoes the `-e <relpath>` arguments to pass to mksquashfs for excluding each
-# SQLite DB and its WAL/SHM siblings. Caller splits the output on whitespace
-# and passes to mksquashfs.
-build_mksquashfs_sqlite_excludes() {
-    local root="$1"; shift
-    local db rel
-    for db in "$@"; do
-        rel="${db#$root/}"
-        printf -- '-e %s -e %s -e %s ' "$rel" "${rel}-wal" "${rel}-shm"
-    done
-}
-
-# build_mksquashfs_sqlite_sidecar_excludes <root> <db-paths...>
-# Echoes `-e <relpath>-wal -e <relpath>-shm -e <relpath>-journal` arguments —
-# the SIDECAR files only, NOT the .db itself. Retained for callers that build
-# their own mksquashfs command; the consolidate path uses a temporary exclude
-# file because the no-mount pseudo-file merge must also exclude each live .db.
-build_mksquashfs_sqlite_sidecar_excludes() {
-    local root="$1"; shift
-    local db rel
-    for db in "$@"; do
-        rel="${db#$root/}"
-        printf -- '-e %s -e %s -e %s ' "${rel}-wal" "${rel}-shm" "${rel}-journal"
-    done
 }
 
 # _pseudofile_merge_args <base_args> <exclude_file> <pseudo_file>
