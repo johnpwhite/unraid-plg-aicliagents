@@ -1938,6 +1938,9 @@ TYPE="${1:-}"
 ID="${2:-}"
 PERSIST_PATH="${3:-}"
 _UPPER_OVERRIDE="${4:-}"
+# #914: when this save started (nanoseconds). A home removed after this time gets no
+# layer file and no manifest entry from this save (checked before the record below).
+_BAKE_START_NS="$(date +%s%N 2>/dev/null || echo 0)"
 
 # Source shared storage functions (guard_path, check_disk_space, etc.)
 source "$_SO_DIR/common.sh"
@@ -2528,6 +2531,14 @@ log "Bake complete: $NEW_BASENAME"
 # is gated on the writer's SUCCESS (it no longer fires when the write failed) and the
 # supervisor reconcile is the only remaining backstop.
 _MANIFEST_RECORDED=0
+# #914: the home was removed (smoke teardown, wipe) after this save started. Do not
+# bring it back: remove the layer just written and record nothing.
+if [ "$TYPE" = "home" ] && entity_removed_since "$TYPE" "$ID" "$_BAKE_START_NS"; then
+    log "Home $ID was removed while this save ran — the new layer $NEW_BASENAME is removed and no manifest entry is made."
+    rm -f "$NEW_SQSH" 2>/dev/null || true
+    lifecycle_log "warn" "commit_stack" "bake_entity_removed_during_save" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\"}" 2>/dev/null || true
+    exit 1
+fi
 if manifest_record_layer "$TYPE" "$ID" "$PERSIST_PATH" "$NEW_BASENAME"; then
     _MANIFEST_RECORDED=1
     lifecycle_log "info" "commit_stack" "manifest_recorded_under_lock" "{\"type\":\"$TYPE\",\"id\":\"$ID\",\"sqsh\":\"$NEW_BASENAME\"}" 2>/dev/null || true

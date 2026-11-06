@@ -57,6 +57,39 @@ CONFIG_FILE="$PLUGIN_BASE/unraid-aicliagents.cfg"
 # path. Unset in production -> the literal below, unchanged from Phase 1.
 EMHTTP_AGENTS="${AICLI_EMHTTP_AGENTS:-/usr/local/emhttp/plugins/unraid-aicliagents/agents}"
 
+# #914: a "removed" note per entity. A save or mount that STARTED before the entity was
+# removed must not bring it back (mkdir of the plain folder, cache folders, a layer
+# file, a manifest entry). One that starts AFTER the removal is a deliberate new one and
+# works as always: the check compares the start time of the caller with the time of the
+# note, so a new home (no note) and a home re-made on purpose are never refused.
+# These three functions live here (not in common.sh) because the supervisor sources
+# only this file.
+entity_removed_note_path() {
+    local _type="${1:-home}" _id="${2:-}"
+    echo "${MOUNT_ROOT}/removed/${_type}_${_id//[^a-zA-Z0-9_-]/_}"
+}
+
+# entity_removed_mark <type> <id> — record "removed now" (nanoseconds). Notes older
+# than a day are dropped on the way.
+entity_removed_mark() {
+    local f; f="$(entity_removed_note_path "${1:-home}" "${2:-}")"
+    mkdir -p "${f%/*}" 2>/dev/null || return 0
+    find "${f%/*}" -type f -mmin +1440 -delete 2>/dev/null || true
+    date +%s%N > "$f" 2>/dev/null || true
+    return 0
+}
+
+# entity_removed_since <type> <id> <start_ns> — true when the entity was removed at
+# or after <start_ns>, that is, while the caller's work was already running.
+entity_removed_since() {
+    local f at; f="$(entity_removed_note_path "${1:-home}" "${2:-}")"
+    [ -r "$f" ] || return 1
+    at="$(cat "$f" 2>/dev/null)"
+    case "$at" in ''|*[!0-9]*) return 1 ;; esac
+    case "${3:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$at" -ge "$3" ]
+}
+
 # ---- Internal helpers -------------------------------------------------------
 
 # _rp_read_cfg <key>

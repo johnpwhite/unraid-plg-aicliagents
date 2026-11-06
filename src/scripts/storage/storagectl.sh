@@ -717,6 +717,8 @@ do_wipe() {
         # home/it123; removeEntity targets exactly this entity).
         manifest_remove_entity "$TYPE" "$ID" || true
     fi
+    # #914: a save or a manifest check that started earlier must not bring it back.
+    if [ "$WANT_LAYERS" -eq 1 ] || [ "$WANT_MANIFEST" -eq 1 ]; then entity_removed_mark "$TYPE" "$ID"; fi
     emit_json 0 "ok" ""
     exit 0
 }

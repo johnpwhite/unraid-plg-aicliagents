@@ -1077,7 +1077,10 @@ _pending_release_tick() {
 _manifest_heal_missing_homes() {
     declare -f manifest_homes_missing >/dev/null 2>&1 || return 0
     declare -f manifest_rebuild_entity >/dev/null 2>&1 || return 0
-    local ids id lockid rc
+    local ids id lockid rc start_ns
+    # #914: the time this pass started. A home removed after it (a smoke teardown, a
+    # wipe) is not recorded again: the layers the pass saw are on their way out.
+    start_ns="$(date +%s%N 2>/dev/null || echo 0)"
     ids="$(manifest_homes_missing 2>/dev/null || true)"
     [ -n "$ids" ] || return 0
     while IFS= read -r id; do
@@ -1088,9 +1091,19 @@ _manifest_heal_missing_homes() {
             # Its own descriptor, never fd 9 (Bug #757 keeps fd 9 off the supervisor mutex).
             exec {_heal_fd}>"${AICLI_BAKE_LOCK_DIR:-/var/run}/aicli-bake-home-${lockid}.lock" || exit 2
             flock -n "$_heal_fd" || exit 3
-            manifest_rebuild_entity home "$id"
+            if entity_removed_since home "$id" "$start_ns"; then exit 4; fi
+            manifest_rebuild_entity home "$id" || exit 1
+            # Removed while the rebuild ran: take the entry out again.
+            if entity_removed_since home "$id" "$start_ns"; then
+                manifest_remove_entity home "$id" || true
+                exit 4
+            fi
+            exit 0
         ) || rc=$?
         case "$rc" in
+            4)
+                log_info "Reconcile: home/$id was removed while the manifest check ran — not recorded again"
+                ;;
             0)
                 log_warn "Reconcile: home/$id had layers but no manifest entry — recorded again from the layers"
                 lifecycle_log "warn" "supervisor" "manifest_entry_restored" \
