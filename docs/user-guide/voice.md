@@ -122,7 +122,7 @@ You can dictate into the workspace that you look at. You press the microphone ic
 The bubble has two options. On a phone, press the options button of the bar to see them.
 
 - **Type while I speak** (on by default): with the browser's own recognition, the words appear in the input even before the phrase is finished, and they change if the browser changes its mind about what it heard. Turn it off if the changes distract you. Then only finished phrases are typed.
-- **Send when I stop talking** (off by default): after two seconds of silence, the recording stops, and the plugin presses Enter for you. It presses Enter only when the agent waits at its normal prompt. If the agent is busy or shows a menu or a question, the text is still typed, and the bubble says "Typed, not sent: the agent is busy". You press Enter when the agent is ready.
+- **Send when I stop talking** (off by default): after two seconds of silence, the recording stops, and the plugin presses Enter for you. It presses Enter only when the agent waits at its normal prompt. If the agent is busy or shows a menu or a question, the text is still typed, and the bubble says "Typed, not sent: the agent is busy". You press Enter when the agent is ready. The option takes effect at once, also when you tick or clear it during a recording.
 
 Both options are kept in this browser, per device. The **i** icon of the bubble lists every spoken command (see below).
 
