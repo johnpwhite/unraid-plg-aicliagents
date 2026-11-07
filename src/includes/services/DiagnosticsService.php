@@ -50,6 +50,7 @@ class DiagnosticsService {
         'consolidate_layer_threshold_flash', 'consolidate_layer_threshold_array', 'consolidate_max_layers',
         'boot_integrity_strict', 'verify_sha256_on_boot',
         'debug_log_format', 'debug_log_max_bytes', 'lifecycle_log_max_bytes', 'perf_trace',
+        'syslog_keep_location', 'syslog_keep_path', 'syslog_keep_interval_s',
         'version_check_schedule', 'graceful_close_timeout',
         'event_stopping_flush_timeout_seconds',
         'health_check_schedule',

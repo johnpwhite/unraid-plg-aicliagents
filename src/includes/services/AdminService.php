@@ -640,6 +640,9 @@ class AdminService {
             'debug_log_max_bytes'      => ['group' => 'logging', 'description' => 'Maximum size of the debug log, in bytes, before it rotates.'],
             'debug_log_format'         => ['group' => 'logging', 'description' => 'Debug log format: plain text, or one JSON record per line.'],
             'perf_trace'               => ['group' => 'logging', 'description' => 'Writes timing lines for slow steps (slow requests, Notebook scans, mount checks) to the performance log and the debug log. Off by default.'],
+            'syslog_keep_location'     => ['group' => 'logging', 'description' => 'Where the plugin keeps its copy of the system log, so that it survives a reboot: flash (default, /boot/logs on the boot disk), pool (the folder in syslog_keep_path) or off (no copy).'],
+            'syslog_keep_path'         => ['group' => 'logging', 'description' => 'Folder on a pool for the copy of the system log when syslog_keep_location is pool, for example /mnt/cache/system/aicli-logs. The folder must exist. The plugin skips the copy while the pool is not mounted.'],
+            'syslog_keep_interval_s'   => ['group' => 'logging', 'description' => 'Seconds between two copies of the system log, 60 to 86400 (default 300). Each copy rewrites up to the last 2 MB of the log.'],
 
             // ---- agent voice (AGENT_VOICE.md, VOICE_SWITCHES.md) ----
             'voice_enabled' => ['group' => 'voice', 'description' => 'The global voice switch. Off by default. When off, the aicli_speak tool and the speak command both refuse.'],
@@ -1075,6 +1078,13 @@ class AdminService {
         'backup_schedule'     => ['regex' => '#^(off|daily:([01]\d|2[0-3]):([0-5]\d)|weekly:[0-6]:([01]\d|2[0-3]):([0-5]\d))$#D', 'hint' => "'off', 'daily:HH:MM', or 'weekly:D:HH:MM' (D is 0-6, Sunday=0)"],
         'backup_excludes'     => ['regex' => "#^[A-Za-z0-9_./*\r\n -]*$#D", 'allowEmpty' => true, 'hint' => 'a newline-separated list of relative glob patterns (letters, digits, . / * - _ and spaces only)'],
         'backup_nudge_working' => ['0', '1'],
+
+        // GitHub #37: the copy of the system log. Like backup_target, a destination for a copy,
+        // never where live data lives. setSetting() also applies the cache-folder rule of
+        // HomeCacheService::normalisePath() to syslog_keep_path, so a refused folder is reported.
+        'syslog_keep_location'   => ['flash', 'pool', 'off'],
+        'syslog_keep_path'       => ['regex' => '#^/mnt/\S+$#D', 'allowEmpty' => true, 'hint' => 'empty, or a folder under /mnt/<pool>, for example /mnt/cache/system/aicli-logs (not /mnt/user, an array disk, or an unassigned or remote disk)'],
+        'syslog_keep_interval_s' => ['min' => 60, 'max' => 86400],
 
         // WORKSPACE_UPLOAD_MULTI_CHUNKED.md R3: a size POLICY only — it never
         // moves data or changes where it lives, so it belongs in this
@@ -1840,6 +1850,14 @@ class AdminService {
             if (!self::settingValueAllowed($key, $value)) {
                 $allowed = self::settingAllowedDescription((array)self::settingRule($key));
                 return ['error' => "'$value' is not a valid value for '$key'. Allowed: $allowed."];
+            }
+
+            // GitHub #37: ConfigService::saveConfig() keeps the stored folder when a new one breaks the
+            // cache-folder rule. Refuse it here, so the caller is not told about a change that did not happen.
+            if ($key === 'syslog_keep_path' && $value !== ''
+                && HomeCacheService::normalisePath($value, "\0") === "\0") {
+                return ['error' => "'$value' is not a folder under /mnt/<pool>. The copy of the system log can go to a pool, "
+                    . 'not to a user share, an array disk, or an unassigned or remote disk. No setting was changed.'];
             }
 
             // HOME_BACKUP.md: backup_target's regex only checks shape (an absolute
