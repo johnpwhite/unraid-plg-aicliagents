@@ -908,6 +908,20 @@
         }, ms);
     }
 
+    /** #913: change "stop after silence" during a recording. ms > 0 turns it on, 0 (or none)
+     *  turns it off. The silence clock restarts; speech already heard still counts. */
+    function setStopOnSilence(ms) {
+        var n = Number(ms || 0);
+        var next = {};
+        for (var k in inputOpts) { if (Object.prototype.hasOwnProperty.call(inputOpts, k)) next[k] = inputOpts[k]; }
+        if (n > 0) next.stopOnSilenceMs = n; else delete next.stopOnSilenceMs;
+        inputOpts = next;
+        inputQuietSince = 0;
+        if (inputSilenceStopTimer) { clearTimeout(inputSilenceStopTimer); inputSilenceStopTimer = null; }
+        // Browser mode: a timer is armed per recogniser result, so turning it on after speech arms it now.
+        if (n > 0 && _inputState === 'recording' && inputRecogniser && inputHeardThisRecording) armBrowserSilenceStop(inputGeneration);
+    }
+
     function inputCsrf() {
         if (window.csrf_token) return window.csrf_token;
         var el = document.querySelector('input[name="csrf_token"]');
@@ -1550,17 +1564,19 @@
      *  the piece engine. A timer on the engine's replies alone can miss the stop: a reply with new
      *  words restarts it. */
     function liveSilenceTick(samples) {
-        var silenceStop = stopOnSilenceMs();
-        if (!silenceStop || !samples || !samples.length) return;
+        if (!samples || !samples.length) return;
         var sumSq = 0;
         for (var i = 0; i < samples.length; i++) sumSq += samples[i] * samples[i];
         var now = Date.now();
+        // The speech heard is tracked also while the option is off (#913), so turning it on
+        // during a recording counts the speech that came before.
         if (Math.sqrt(sumSq / samples.length) >= ENGINE_SILENCE_RMS) {
             inputHeardThisRecording = true;
             inputQuietSince = 0;
             return;
         }
-        if (!inputHeardThisRecording) return;
+        var silenceStop = stopOnSilenceMs();
+        if (!silenceStop || !inputHeardThisRecording) return;
         if (!inputQuietSince) inputQuietSince = now;
         else if (now - inputQuietSince >= silenceStop) { inputHeardThisRecording = false; stopInput(); }
     }
@@ -1786,6 +1802,8 @@
         // Stop now. Always finishes and reports whatever was captured so
         // far — a tap, Escape, or the 5-minute cap all take this same path.
         stopInput: function () { stopInput(); },
+        // #913: turn "stop after silence" on (ms > 0) or off (0) for the recording in progress.
+        setStopOnSilence: function (ms) { setStopOnSilence(ms); },
         // 'idle' | 'recording' | 'transcribing' | 'refused'.
         inputState: function () { return _inputState; }
     };
