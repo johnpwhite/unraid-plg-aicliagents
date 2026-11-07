@@ -122,7 +122,7 @@ The header of a card always shows the version you run in full, for example **v1.
 On a computer with a mouse, the **Upgrade** button shows when you point at the card or move the keyboard focus into its header. On a phone or a tablet there is no pointing. There, the new version is the button, and it is at least 44 pixels high. The **...** menu of the card also has **Update to v1.5.0…** and **Release notes**.
 
 1. Press the new version (or **Upgrade**, or **Update to v1.5.0…** in the **...** menu, or pick a newer version in the version picker). Expect: a dialog called **Update <agent>** opens.
-2. Read the two versions and the channel at the top. Under **What is new**, read the release notes. Each version has its own part; the newest one is open. When the plugin has no notes for the agent, the dialog says so and shows a link to the notes on the vendor's site.
+2. Read the two versions and the channel at the top. Under **What is new**, read the release notes. Each version has its own part; the newest one is open. When the plugin has no notes for the agent, the dialog says so and shows a link to the notes on the vendor's site. When the plugin could not load the notes, the dialog says "The release notes could not be loaded now" and shows the same link; open the dialog again later to try again. Pre-release versions are not listed.
 3. Read **Your open workspaces**. It says what happens to them. The next sections describe it.
 4. Decide on **Keep a copy**. The section "Keep a copy before an upgrade" describes it.
 5. Press **Update now**. Press **Close** (or Escape) to leave without a change.
@@ -473,6 +473,7 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-11-07** — The release notes of an update load for agents with a long release list, such as Codex. When they cannot load, the dialog now says so instead of saying that there are none. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issue #926.
 - **2026-10-27** — New agent **OpenCode 2**, the new version of OpenCode. It installs beside OpenCode and keeps its own data. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issue #822.
 - **2026-10-27** — The card header shows the version you run and the new version in full, with the new version as a button that opens the dialog **Update <agent>** (release notes, open workspaces, **Keep a copy**, **Update now**). **Upgrade** shows when you point at the card. **Uninstall** moved to the foot as a link, and the foot says what **Remove old versions** and **Uninstall** free. The card keeps its height during an install. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issues #793 and #795.
 - **2026-10-24** — An upgrade shows the real step: "Closing workspace 2 of 3...", then "Saving workspace data" with a percentage and the time, and it says when the save is slow. The old line "Upgrade queued — saving workspace data first" at 5 % is gone. Spec `docs/specs/UPGRADE_PROGRESS_PHASES.md`, issue #443.

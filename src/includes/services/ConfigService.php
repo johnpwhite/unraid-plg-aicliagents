@@ -742,10 +742,13 @@ class ConfigService {
 
     /**
      * The command part of a plugin cron line: the job goes through cron-run.sh, which reports it
-     * when the server has a job reporter and runs it as before when it has none.
+     * when the server has a job reporter and runs it as before when it has none. It also writes
+     * the run record (R9). $interval is the seconds between two runs (JobRecordService::intervalFromCron),
+     * or null when unknown; the flag --interval=N tells the runner and the jobs status.
      */
-    public static function cronRunCommand(string $job, string $command, bool $frequent = false): string {
-        return '/bin/bash ' . self::CRON_RUN_SCRIPT . ' ' . $job . ($frequent ? ' --frequent' : '') . ' -- ' . $command;
+    public static function cronRunCommand(string $job, string $command, bool $frequent = false, ?int $interval = null): string {
+        return '/bin/bash ' . self::CRON_RUN_SCRIPT . ' ' . $job . ($frequent ? ' --frequent' : '')
+            . ($interval !== null && $interval > 0 ? ' --interval=' . $interval : '') . ' -- ' . $command;
     }
 
     /**
@@ -787,7 +790,7 @@ class ConfigService {
             // Disabled — remove cron file
             self::removePluginCron('agent-check');
         } else {
-            $content = "# AICliAgents: Agent version check schedule\n$schedule " . self::cronRunCommand('aicli-agent-check', $script) . " &> /dev/null\n";
+            $content = "# AICliAgents: Agent version check schedule\n$schedule " . self::cronRunCommand('aicli-agent-check', $script, false, JobRecordService::intervalFromCron($schedule)) . " &> /dev/null\n";
             self::writePluginCron('agent-check', $content);
         }
         exec("/usr/local/sbin/update_cron 2>/dev/null");
@@ -810,7 +813,7 @@ class ConfigService {
             // Disabled — remove cron file
             self::removePluginCron('health-check');
         } else {
-            $content = "# AICliAgents: plugin health check schedule\n$schedule " . self::cronRunCommand('aicli-health-check', "/usr/bin/php $script", true) . " &> /dev/null\n";
+            $content = "# AICliAgents: plugin health check schedule\n$schedule " . self::cronRunCommand('aicli-health-check', "/usr/bin/php $script", true, JobRecordService::intervalFromCron($schedule)) . " &> /dev/null\n";
             self::writePluginCron('health-check', $content);
         }
         exec("/usr/local/sbin/update_cron 2>/dev/null");

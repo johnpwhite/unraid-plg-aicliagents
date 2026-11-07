@@ -420,8 +420,12 @@ function av2RenderReleaseNotes(container, r, changelogUrl) {
     while (container.firstChild) container.removeChild(container.firstChild);
     var notes = (r && r.notes) || [];
     var link = (r && r.changelog_url) || changelogUrl || '';
+    // A failed request (r is null) or a failed fetch is not "no notes": say that the notes could not be loaded.
+    var failed = !r || !!r.fetch_failed;
     if (!notes.length) {
-        container.appendChild(av2h('p', 'av2-notes-none', 'The plugin has no release notes for this version.', { 'data-testid': 'update-notes-none' }));
+        container.appendChild(failed
+            ? av2h('p', 'av2-notes-none', 'The release notes could not be loaded now. Try again later or open them on the vendor’s site.', { 'data-testid': 'update-notes-failed' })
+            : av2h('p', 'av2-notes-none', 'The plugin has no release notes for this version.', { 'data-testid': 'update-notes-none' }));
     }
     notes.forEach(function (n, i) {
         var d = av2h('details', 'av2-notes-ver', null, { 'data-testid': 'update-notes-' + n.version });
@@ -433,6 +437,9 @@ function av2RenderReleaseNotes(container, r, changelogUrl) {
         d.appendChild(body);
         container.appendChild(d);
     });
+    if (notes.length && failed) {
+        container.appendChild(av2h('p', 'av2-notes-p', 'Some release notes could not be loaded now.', { 'data-testid': 'update-notes-partial' }));
+    }
     if (link && /^https:\/\//.test(link)) {
         var p = av2h('p', 'av2-notes-link');
         p.appendChild(av2h('a', null, notes.length ? 'Open all release notes on the vendor’s site ↗' : 'Open the release notes on the vendor’s site ↗', { href: link, target: '_blank', rel: 'noopener noreferrer', 'data-testid': 'update-notes-link' }));

@@ -84,6 +84,9 @@ Read tools (no confirmation needed, no tray entry):
 - `aicli_get_logs` — a bounded tail of the plugin log, filtered by context.
 - `aicli_list_backups` — one user's backup snapshots, plus their last backup
   and last restore records. See "Home backup" below before your first call.
+- `aicli_get_jobs_status` — the jobs the plugin schedules and the state of each
+  from its last run record: ok, warn, fail, skipped, late, missing, pending or unscheduled.
+  The CLI form is `jobs-status [--json]`.
 - `aicli_list_favourites` — list every saved favourite: a bookmark of one
   workspace's agent and folder, kept even after the workspace itself is
   closed completely.

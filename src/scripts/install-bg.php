@@ -60,7 +60,9 @@ aicli_log("Background Install Job Started for: $agentId$verLabel (PID: " . getmy
 // from the release channel and no version was passed.
 $agentName = \AICliAgents\Services\UtilityService::trayAgentName($agentId);
 $installedBefore = !in_array(\AICliAgents\Services\AgentRegistry::getInstalledVersion($agentId), ['', '0.0.0', 'unknown', 'installed'], true);
-$isUpgrade = $targetVersion !== null || $installedBefore;
+// #927: only an agent that was installed before is upgraded. A first install from the Store
+// passes a version too, and it is an install.
+$isUpgrade = $installedBefore;
 $upgradeTo = $targetVersion;
 if ($isUpgrade && $upgradeTo === null) {
     try {

@@ -62,6 +62,10 @@ Four more checks appear only when they apply.
 
 If a check cannot run, it shows warn with the message "check errored". The other checks still run.
 
+### Job run records
+
+The plugin runs three jobs on a schedule: the agent version check, the health check and the home backups. Each job writes a run record after every run. The record says when the job ran, how long it took, and whether it went well. A server owner who wants to monitor the jobs can read the records with the command `$AICLI_ADMIN_COMMAND jobs-status` in a terminal workspace. It prints one line for each job. Add `--json` to get the same data for another tool. Each job has one state: ok, warn, fail, skipped, late (no run for twice the usual time), missing (the job never ran), pending (the server started, or the job was installed, a short time ago and the job has not run yet) or unscheduled (a record of a job that no longer runs). The records live in memory, so every job shows pending after a restart of the server until its next run. The plugin does not need any monitoring tool for this.
+
 ## The Activity tray
 
 ### What you see
@@ -247,6 +251,7 @@ If the problem is not here, build a support bundle and ask on the forum thread f
 <details>
 <summary>Change history</summary>
 
+- **2026-11-07** — Each scheduled job writes a run record. The command `$AICLI_ADMIN_COMMAND jobs-status` shows the state of every job. Spec `docs/specs/CRON_JOB_REPORTING.md`, issue #925.
 - **2026-11-01** — New check **agent_versions** warns when an agent runs an older version than the Agent Store shows. The plugin also sets aside writable layers on the boot drive that no agent version uses, and removes them after seven days. Spec `docs/specs/AGENT_VERSION_HEALTH.md`, issue #860.
 - **2026-10-30** — A page whose Unraid sign-in ended stops asking the server for updates and shows a bar with **Sign in again**. Spec `docs/specs/EVENT_STREAM_MULTIPLEX.md`, issue #857.
 - **2026-10-26** — The Activity tray groups refused agent actions in a short-lived row and groups calls after the first 20 per tool each minute. Spec `docs/specs/PLUGIN_MANAGEMENT_TOOLS.md`, issue #804.

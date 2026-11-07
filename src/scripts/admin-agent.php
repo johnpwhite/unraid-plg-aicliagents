@@ -33,6 +33,10 @@
  *                                same self-resolution the Relay CLI uses
  *   agents                      no arguments
  *   storage                     no arguments
+ *   jobs-status [--json]        the scheduled jobs and the state of each (ok, warn,
+ *                                fail, skipped, late, missing, pending), from the
+ *                                run records of cron-run.sh (#925). Read-only.
+ *                                Plain lines; --json prints the stable record.
  *   activities [limit]          limit is OPTIONAL, a positive integer; omitted
  *                                uses the catalogue tool's own default
  *   settings                    no arguments
@@ -427,6 +431,7 @@ const ADMIN_AGENT_USAGE = [
     'voices' => 'voices -- the voices the speech engine offers, plus the default; hear one with speak --voice=<id>',
     'agents' => 'agents',
     'storage' => 'storage',
+    'jobs-status' => 'jobs-status [--json] -- the scheduled jobs and the state of each from their last run record (ok, warn, fail, skipped, late, missing, pending); read-only',
     'activities' => 'activities [limit]',
     'settings' => 'settings',
     'logs' => 'logs [context] [lines]',
@@ -633,6 +638,15 @@ try {
         case 'agents':
             $result = AdminMcpTools::call('aicli_list_agents', []);
             break;
+        case 'jobs-status':
+            // CRON_JOB_REPORTING.md R14 (#925). Read-only; the JSON form is a stable interface (schema 1).
+            $jsReport = \AICliAgents\Services\JobStatusService::report();
+            if (in_array('--json', array_slice($argv, 2), true)) {
+                echo json_encode($jsReport, JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            } else {
+                foreach (\AICliAgents\Services\JobStatusService::plainLines($jsReport) as $jsLine) echo $jsLine . PHP_EOL;
+            }
+            exit(0);
         case 'storage':
             $result = AdminMcpTools::call('aicli_get_storage_status', []);
             break;
@@ -1014,6 +1028,11 @@ try {
                 }
                 $outcome = (($result['status'] ?? '') === 'ok') ? 'ok' : 'error';
                 \AICliAgents\Services\AgentActionAudit::record('cli', 'backup-home', 'destructive', ['user' => $bhUser], $outcome, (string)($result['message'] ?? ''), $result);
+                // #925: the run record says ok, skipped (nothing to do) or fail with the plain reason.
+                [$bhRecStatus, $bhRecSummary] = \AICliAgents\Services\BackupCronService::jobOutcome($result, $bhUser);
+                \AICliAgents\Services\JobRecordService::writeResult($bhRecStatus, $bhRecSummary);
+                // A skipped run (the home is halted or not mounted) is not a failure: the cron run exits 0.
+                $bhSkipped = ($bhRecStatus === 'skipped');
                 // The cron line sends stdout to /dev/null, so a failed scheduled
                 // run must leave its own record (#489).
                 if (($result['status'] ?? '') === 'error') {
@@ -1240,5 +1259,5 @@ try {
 
 echo json_encode($result, JSON_UNESCAPED_SLASHES) . PHP_EOL;
 // #891: a job report shows the last line of output, so the scheduled backup ends with one plain line.
-if (!empty($bhScheduled)) echo \AICliAgents\Services\BackupCronService::plainResultLine($result, (string)($bhUser ?? '')) . PHP_EOL;
-exit(($result['status'] ?? 'error') === 'ok' ? 0 : 1);
+if (!empty($bhScheduled)) echo (!empty($bhSkipped) ? 'Home backup of ' . (string)($bhUser ?? '') . ' skipped: ' . (string)($result['message'] ?? '') : \AICliAgents\Services\BackupCronService::plainResultLine($result, (string)($bhUser ?? ''))) . PHP_EOL;
+exit(($result['status'] ?? 'error') === 'ok' || !empty($bhSkipped) ? 0 : 1);

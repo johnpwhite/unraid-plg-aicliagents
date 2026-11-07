@@ -837,7 +837,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.11.07.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
-<SHA256>dc97cf42f1495d73945800bf4c22cab035d21388c89805b564ff29920b02f18d</SHA256>
+<SHA256>675b72f05e87fa43ff063cfba812024e736e0e9c2273bbdf88489c4551e8394b</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.11.07.02.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>

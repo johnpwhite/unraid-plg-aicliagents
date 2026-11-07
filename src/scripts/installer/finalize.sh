@@ -117,6 +117,28 @@ log_step "Registering agent version check schedule..."
 # which reports the job when the optional job_report_command setting names a reporter.
 CRON_FILE="${PLUGIN_BASE}/agent-check.cron"
 CRON_RUN="$EMHTTP_DEST/src/scripts/cron-run.sh"
+# #925: seconds between two runs of a cron schedule, as "--interval=N " (empty when not simple).
+# The same rule as JobRecordService::intervalFromCron: every N minutes, hourly, daily, weekly.
+cron_interval_flag() {
+    local m h dom mon dow extra n=""
+    read -r m h dom mon dow extra <<< "$1"
+    [ -n "$dow" ] && [ -z "$extra" ] && [ "$dom" = "*" ] && [ "$mon" = "*" ] || return 0
+    if [[ "$m" =~ ^\*/([0-9]{1,2})$ ]] && [ "$h" = "*" ] && [ "$dow" = "*" ]; then
+        n=$(( 10#${BASH_REMATCH[1]} * 60 ))
+        { [ "$n" -ge 60 ] && [ "$n" -le 3540 ]; } || n=""
+    elif [[ "$m" =~ ^[0-9]{1,2}$ ]] && [ "$((10#$m))" -le 59 ]; then
+        if [ "$h" = "*" ] && [ "$dow" = "*" ]; then n=3600
+        elif [[ "$h" =~ ^\*/([0-9]{1,2})$ ]] && [ "$dow" = "*" ]; then
+            n=$(( 10#${BASH_REMATCH[1]} * 3600 ))
+            { [ "$n" -ge 3600 ] && [ "$n" -le 82800 ]; } || n=""
+        elif [[ "$h" =~ ^[0-9]{1,2}$ ]] && [ "$((10#$h))" -le 23 ]; then
+            if [ "$dow" = "*" ]; then n=86400
+            elif [[ "$dow" =~ ^[0-7]$ ]]; then n=604800; fi
+        fi
+    fi
+    [ -n "$n" ] && printf -- '--interval=%s ' "$n"
+    return 0
+}
 chmod 755 "$CRON_RUN" 2>/dev/null
 rm -f /etc/cron.d/unraid-aicliagents.agent-check /etc/cron.d/unraid-aicliagents.health-check /etc/cron.d/unraid-aicliagents.backup-home
 AGENT_CHECK_SCRIPT="$EMHTTP_DEST/src/scripts/agentcheck"
@@ -126,7 +148,7 @@ SCHEDULE=$(grep -oP 'version_check_schedule="\K[^"]+' "${PLUGIN_BASE}/unraid-aic
 [ -z "$SCHEDULE" ] && SCHEDULE="0 6 * * *"
 cat > "$CRON_FILE" <<CRON
 # AICliAgents: Agent version check schedule
-$SCHEDULE /bin/bash $CRON_RUN aicli-agent-check -- $AGENT_CHECK_SCRIPT &> /dev/null
+$SCHEDULE /bin/bash $CRON_RUN aicli-agent-check $(cron_interval_flag "$SCHEDULE")-- $AGENT_CHECK_SCRIPT &> /dev/null
 CRON
 /usr/local/sbin/update_cron 2>/dev/null || true
 log_ok "Agent version check scheduled ($SCHEDULE)."
@@ -145,7 +167,7 @@ fi
 if [ -n "$HEALTH_SCHEDULE" ]; then
     cat > "$HEALTH_CRON_FILE" <<CRON
 # AICliAgents: plugin health check schedule
-$HEALTH_SCHEDULE /bin/bash $CRON_RUN aicli-health-check --frequent -- /usr/bin/php $HEALTH_SCRIPT &> /dev/null
+$HEALTH_SCHEDULE /bin/bash $CRON_RUN aicli-health-check --frequent $(cron_interval_flag "$HEALTH_SCHEDULE")-- /usr/bin/php $HEALTH_SCRIPT &> /dev/null
 CRON
     log_ok "Plugin health check scheduled ($HEALTH_SCHEDULE)."
 else

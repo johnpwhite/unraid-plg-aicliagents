@@ -101,6 +101,8 @@ class AdminMcpTools {
         // it writes nothing, the same reason aicli_get_workspace is 'read'
         // even though it takes an argument.
         'aicli_list_backups'      => 'read',
+        // CRON_JOB_REPORTING.md R14 (#925): the scheduled jobs and the state of each. Reads files only.
+        'aicli_get_jobs_status'   => 'read',
 
         // WORKSPACE_FAVOURITES.md (2026-09-12): a read tool listing every
         // saved favourite. 'read': it writes nothing.
@@ -345,6 +347,7 @@ class AdminMcpTools {
 
             // ---- HOME_RESTORE.md (2026-09-12). Read-only: names what a restore proposal would act on. ----
             ['name'=>'aicli_list_backups','description'=>'Read-only. List one user\'s backup snapshots (path, time, cold/warm, file count, size, and a \'pre-restore\' label on a safety snapshot taken before a restore), plus that user\'s last backup and last restore records. Does not back up or restore anything. Changes nothing.','inputSchema'=>['type'=>'object','properties'=>['user'=>$str],'required'=>['user']]] + self::readOnly(true),
+            ['name'=>'aicli_get_jobs_status','description'=>'Read-only. List the jobs that the plugin schedules (version check, health check, home backups) and the state of each from its last run record: ok, warn, fail, skipped, late (no run for twice its interval), missing (never ran, and the host has been up for more than twice the interval) pending (not run yet since boot or install) or unscheduled (a record of a job that no longer runs). Records live in RAM, so every job is pending after a reboot. Changes nothing.','inputSchema'=>['type'=>'object','properties'=>new \stdClass()]] + self::readOnly(true),
 
             // ---- WORKSPACE_FAVOURITES.md (2026-09-12). Read-only: names every saved bookmark of a workspace's agent and folder. ----
             ['name'=>'aicli_list_voicemail','description'=>'Read-only. List voice mail — every message spoken aloud through aicli_speak, kept as text so a notice spoken while nobody was looking can be read afterwards. Newest first. Each entry has its id, when it was spoken, the workspace and agent that spoke it, the text, and whether it has been heard. `heard` means the operator played the message from voice mail or marked it heard; a message read out automatically stays unheard, because the plugin cannot know a human heard anything — so never tell the operator they "heard" or "missed" something on the strength of this field alone. Pass `workspaceId` to see one workspace. Also returns unheard counts per workspace and in total. Changes nothing.','inputSchema'=>['type'=>'object','properties'=>['workspaceId'=>$str]]] + self::readOnly(true),
@@ -586,6 +589,9 @@ class AdminMcpTools {
                 // aicli_get_workspace/aicli_get_storage_status shallow-wrap
                 // convention (an 'error' from AdminService lands nested under
                 // the payload key, still status=>'ok', the same as those two).
+                case 'aicli_get_jobs_status':
+                    $result = ['status'=>'ok','jobs_status'=>JobStatusService::report()];
+                    break;
                 case 'aicli_list_backups':
                     $result = ['status'=>'ok','backups'=>AdminService::listBackups((string)($args['user'] ?? ''))];
                     break;

@@ -157,9 +157,29 @@ class BackupCronService {
                 continue;
             }
             $job = $user === 'root' ? 'aicli-backup-home' : 'aicli-backup-home-' . $user;
-            $lines[] = "$cronExpr " . ConfigService::cronRunCommand($job, '/usr/bin/php ' . self::ADMIN_AGENT_SCRIPT . " backup-home --user=$user --scheduled") . " &> /dev/null\n";
+            $lines[] = "$cronExpr " . ConfigService::cronRunCommand($job, '/usr/bin/php ' . self::ADMIN_AGENT_SCRIPT . " backup-home --user=$user --scheduled", false, JobRecordService::intervalFromCron($cronExpr)) . " &> /dev/null\n";
         }
         return $lines;
+    }
+
+    /**
+     * #925: the run record of a scheduled backup. Pure. A refusal that means "nothing to do"
+     * (the home is halted, or the home is not mounted; the two exact refusal texts) is "skipped". Any other error
+     * is "fail" with the plain reason. A good backup is "ok".
+     *
+     * @return array{0:string,1:string} [status, summary]
+     */
+    public static function jobOutcome(array $result, string $user): array {
+        $msg = trim((string)preg_replace('/\s+/', ' ', (string)($result['message'] ?? '')));
+        if (($result['status'] ?? '') === 'ok') {
+            return ['ok', $msg !== '' ? $msg : "Home backup of $user finished."];
+        }
+        // Only the two exact pre-check refusals of StorageHandler::backupHome() mean "nothing to do".
+        // A missing target is a configuration fault, and a network share that is not mounted is a fault: both stay fail.
+        if (preg_match('/^Home backup refused: [A-Za-z0-9._-]+\'s home is (halted|not mounted)\.$/D', $msg)) {
+            return ['skipped', $msg];
+        }
+        return ['fail', $msg !== '' ? $msg : "Home backup of $user failed."];
     }
 
     /** #891: the longest a scheduled backup run waits for its job: 6 hours, so a very large home can finish. */

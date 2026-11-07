@@ -419,10 +419,11 @@ class UtilityService {
      * The tray title of an install row: "Installing Claude Code" or
      * "Upgrading Claude Code to 2.1.4" (ACTIVITY_TRAY_PLAIN_NOTICES.md R1).
      * Pure: no I/O. $version null or empty gives "Upgrading Claude Code".
+     * A first install with a chosen version gives "Installing Claude Code (version 2.1.4)" (#927).
      */
     public static function trayInstallTitle(string $agentName, bool $isUpgrade, ?string $version = null): string {
-        if (!$isUpgrade) return "Installing $agentName";
         $version = $version === null ? '' : trim($version);
+        if (!$isUpgrade) return $version !== '' ? "Installing $agentName (version $version)" : "Installing $agentName";
         return $version !== '' ? "Upgrading $agentName to $version" : "Upgrading $agentName";
     }
 
