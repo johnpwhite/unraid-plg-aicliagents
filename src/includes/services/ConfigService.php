@@ -125,6 +125,13 @@ class ConfigService {
             // NOTEBOOK_HANG_OBSERVABILITY.md R12: timing traces (perf.log and the "slow:" lines in
             // debug.log) are OFF unless this is '1'. Switch: Debug Console tab, "Performance trace".
             'perf_trace'                        => '0',
+            // GitHub #37: the copy of the system log that syslog-keep.sh keeps (Forgejo #392).
+            // flash keeps it in /boot/logs (the behaviour before these keys), pool keeps it in
+            // syslog_keep_path (a folder under /mnt/<pool>), off keeps no copy.
+            // syslog_keep_interval_s is the time between two copies, 60 to 86400 seconds.
+            'syslog_keep_location'              => 'flash',
+            'syslog_keep_path'                  => '',
+            'syslog_keep_interval_s'            => '300',
             // T-12 (FIRST_RUN_WIZARD.md): empty = wizard not yet completed.
             // Set to 'yes' by the React wizard via the `save` action on completion.
             // No UI toggle — the wizard is deliberately one-shot.
@@ -492,6 +499,24 @@ class ConfigService {
         if (array_key_exists('home_cache_path', $newConfig)) {
             $newConfig['home_cache_path'] = HomeCacheService::normalisePath(
                 $newConfig['home_cache_path'], (string)(self::getConfig()['home_cache_path'] ?? ''));
+        }
+        // GitHub #37: the three settings of the system log copy. A bad value keeps the stored one.
+        if (array_key_exists('syslog_keep_location', $newConfig)) {
+            $loc = (string)$newConfig['syslog_keep_location'];
+            $newConfig['syslog_keep_location'] = in_array($loc, ['flash', 'pool', 'off'], true)
+                ? $loc : (string)(self::getConfig()['syslog_keep_location'] ?? 'flash');
+        }
+        if (array_key_exists('syslog_keep_path', $newConfig)) {
+            // The rule of the cache folder of plain-folder homes: a folder under /mnt/<pool>, never a
+            // user share (FUSE), an array disk, an unassigned or a remote disk.
+            $newConfig['syslog_keep_path'] = HomeCacheService::normalisePath(
+                $newConfig['syslog_keep_path'], (string)(self::getConfig()['syslog_keep_path'] ?? ''));
+        }
+        if (array_key_exists('syslog_keep_interval_s', $newConfig)) {
+            $iv = trim((string)$newConfig['syslog_keep_interval_s']);
+            $newConfig['syslog_keep_interval_s'] = ctype_digit($iv)
+                ? (string)max(60, min(86400, (int)$iv))
+                : (string)(self::getConfig()['syslog_keep_interval_s'] ?? '300');
         }
         if (isset($newConfig['storage_upper_mode'])) {
             $newConfig['storage_upper_mode'] = ((string)$newConfig['storage_upper_mode'] === 'disk') ? 'disk' : 'zram';

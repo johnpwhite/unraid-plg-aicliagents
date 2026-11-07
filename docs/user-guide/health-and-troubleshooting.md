@@ -174,6 +174,26 @@ The bundle holds no password files and no environment files. It holds no screen 
 
 The check downloads a short public list that the developer keeps. It compares each entry with the last 500 cleaned log lines. It runs only when you press the button, and the plugin keeps the list for 24 hours. If you are offline, it uses the last copy. A match shows the title, a workaround, the log line that matched, a link to the forum thread and the version that fixes it.
 
+### The copy of the system log
+
+Unraid keeps its system log in RAM, so a reboot or a hard stop loses it. The plugin keeps a copy, so the cause of a lost session can still be found afterwards. Every 5 minutes, when the system log has changed, it writes the last 2 MB of the log to `aicli-syslog-latest.txt`. After a reboot, that file becomes `aicli-syslog-previous-<time>.txt`, and the plugin keeps the newest 3.
+
+By default the copy is in `/boot/logs` on the boot disk. A busy server changes its log all the time, so this rewrites up to 2 MB every 5 minutes. On an old USB stick you can move the copy to a pool, make it less often, or turn it off. There is no control on the page yet. The three settings are on the short list of settings that the plugin management tools may change, so:
+
+1. Turn on **Let agents manage the plugin** (Settings, Configuration, General, Advanced). See [Plugin management tools for agents](agent-tools.md).
+2. Ask an agent to change the setting, or run one of these commands in the Unraid terminal:
+
+   ```
+   php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php set-setting syslog_keep_location pool
+   php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php set-setting syslog_keep_path /mnt/cache/system/aicli-logs
+   php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php set-setting syslog_keep_interval_s 1800
+   php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php set-setting syslog_keep_location off
+   ```
+
+3. Turn **Let agents manage the plugin** off again if you do not use the tools.
+
+The folder on the pool must exist; create it first. A user share, an array disk, and an unassigned or remote disk are refused. While the pool is not mounted, for example while the array is stopped, the plugin keeps no copy and writes nothing into RAM. The change applies at the next copy, without a restart. The files that are already in `/boot/logs` stay there until you remove them.
+
 ## The update banner and the reload after an update
 
 When you install a new plugin version, your open terminals keep running the old code until they reconnect. A page reload alone does not fix that. The plugin therefore does both steps in the right order.
@@ -200,6 +220,9 @@ A workspace that still shows an older version has a small orange dot on its agen
 | **Strict anonymize** (Support menu) | Hides share names, server name and home addresses in the bundle and the summaries. | Off | Turn on when you post in public. |
 | **Level**, **Context**, **Trace**, **Tail** (Debug tab) | Narrow the log. | All, All, empty, 500 | Narrow it to find one problem. |
 | **Let agents manage the plugin** (Settings, Configuration, General, Advanced) | Lets agents read the log and the health. | Off | See [Plugin management tools for agents](agent-tools.md). |
+| `syslog_keep_location` (no control on the page) | Where the plugin keeps its copy of the system log: `flash` (`/boot/logs`), `pool` (the folder in `syslog_keep_path`) or `off`. | `flash` | On an old USB stick. See **The copy of the system log** above. |
+| `syslog_keep_path` (no control on the page) | The folder on a pool for the copy, for example `/mnt/cache/system/aicli-logs`. It must exist. A user share, an array disk, and an unassigned or remote disk are refused. | Empty | When `syslog_keep_location` is `pool`. |
+| `syslog_keep_interval_s` (no control on the page) | Seconds between two copies, from 60 to 86400. | 300 | To write the copy less often. |
 
 The background health check runs every 30 minutes. There is no setting for it on the page.
 
