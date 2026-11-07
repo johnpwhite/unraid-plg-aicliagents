@@ -157,6 +157,33 @@ aicli_blocked_by_array_stop() {
     return 1
 }
 
+# aicli_persist_path_mounted <path>: true when the file system that holds <path>
+# is mounted and durable. GitHub #36: at boot the plg starts the supervisor
+# before the array and pools are up, so a persist path on a pool does not exist
+# yet. findmnt gives no answer for a missing path, so walk up to the nearest
+# folder that exists: a missing pool lands on /mnt (rootfs, RAM on Unraid) or
+# a tmpfs, which means "not mounted yet"; a missing persist folder on a pool
+# that IS mounted lands on the pool and still counts as mounted, so a real loss
+# is still seen. The fstype list follows BootIntegrityService::durableFstypeOk()
+# and common.sh _durable_fstype_ok, plus rootfs. A relative path, or a system
+# without findmnt, is not judged (true), so callers behave as before.
+aicli_persist_path_mounted() {
+    local p="${1:-}" fst
+    case "$p" in
+        /*) ;;
+        *) return 0 ;;
+    esac
+    command -v findmnt >/dev/null 2>&1 || return 0
+    while [ ! -e "$p" ] && [ "$p" != "/" ]; do
+        p="$(dirname "$p")"
+    done
+    fst="$(findmnt --noheadings --output FSTYPE --target "$p" 2>/dev/null)"
+    case "$fst" in
+        ''|rootfs|tmpfs|ramfs|devtmpfs|overlay|zram|squashfs) return 1 ;;
+    esac
+    return 0
+}
+
 manifest_path() {
     # #1254: AICLI_MANIFEST_PATH redirects the manifest off USB flash for the L3.5
     # suite (test-only hook; unset in production -> the flash path).
