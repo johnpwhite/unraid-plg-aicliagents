@@ -3,6 +3,43 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.11.07.03" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.11.07.03
+
+**Dictation**
+
+- **Fix: "Send when I stop talking" works with live dictation, and when you tick it during a dictation.** Before, the option did nothing with live dictation, and a tick during a dictation took effect only at the next one. The terminal also keeps the keyboard focus while you dictate, so the text goes where you expect.
+
+**Agents and workspaces**
+
+- **Fix: an agent that keeps stopping with an error waits for you after three tries in a row,** instead of restarting every few seconds without end.
+- **Feat: a closed helper workspace shows a Start button.** Selecting it starts nothing until you press Start, so looking at a helper no longer spends quota.
+- **Improve: when the plugin refuses an agent action, it shows one plain sentence** with the workspace names and the real reason.
+- **Fix: closing the last OpenCode 2 workspace stops its background service,** so no server process is left running.
+- **Fix: a usage limit on one OpenCode provider no longer blocks a helper that uses another provider.**
+- **Fix: the Beta version list no longer comes up empty** when a preview came out just before a stable release.
+- **Fix: uninstalling an agent keeps a version that a process still uses,** and an agent cannot start while it is being uninstalled.
+
+**Script runs**
+
+- **Fix: the Notebook card of a finished script run is easy to find.** The tray has an Open note button, the card shows the run's title and the whole report, and a run in a project folder also gets a card in that project's Notebook.
+
+**Storage, shutdown and Activity tray**
+
+- **Fix: a home folder that you removed stays removed.** Before, it could come back on the boot disk when a workspace was still starting or a save was still running.
+- **Fix: the plugin mounts and starts nothing while the server shuts down,** and an open page stops retrying.
+- **Fix: a notice in the Activity tray stays until you close it,** instead of going away when the page refreshes.
+- **Fix: buttons, menus and toggles on a phone are large enough to tap with a finger.**
+
+**Scheduled jobs**
+
+- **Feat: each scheduled job keeps a record of its last run,** and `jobs-status` lists every job as OK, warning, failed, skipped, late or missing. A monitoring tool can read it with no extra setup.
+
+**Agent Store**
+
+- **Fix: release notes load again for Codex** and other agents with large GitHub releases. When notes cannot be loaded, the window says so instead of saying there are none.
+- **Fix: a first install of an agent says "Installing" in the Activity tray,** not "Upgrading".
+- **Fix: in a diff note, the list of changed files is easy to tap on a phone.**
+
 ## 2026.11.04.02
 
 **Agent Relay**
