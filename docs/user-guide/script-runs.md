@@ -159,7 +159,7 @@ The Activity tray keeps a result notice. Press **Open note** on the notice to op
 | **Let scripts start agent runs** | The master switch. Off refuses every call. | Off (default) | Turn it on when you add your first script. |
 | **Restricted run user** | The state of the Unraid user `aicli-run`, the SMB warnings, a password generator and the sign-in button. | Not created | Set it up once before the first restricted run. |
 | **Authorised scripts** | The scripts that may call. Each row shows a name and description. Select a row to see its file, fingerprint, agents, folders, mode, **Run as** and runs each day. | Empty | Add a script for each job. |
-| **Run as** (in an entry) | The users that the script may ask for: **aicli-run (restricted)**, **root**, or both. | **aicli-run (restricted)** | Tick **root** only for a trusted script that needs it. |
+| **Run as** (in an entry) | The users that the script may ask for: **aicli-run (restricted)**, **root**, or both. An entry that allows only **root** was approved before restricted runs: a call that names no user runs as root, and the entry says so. | **aicli-run (restricted)** | Tick **root** only for a trusted script that needs it. |
 | **Runs open at one time** | The most runs that are open together. | 2 | Raise it when scripts often overlap. |
 | **Runs each day** (all scripts) | The most runs that start in 24 hours. | 6 | Raise it for a busy server. |
 | **Wait before the same problem runs again** | Hours before a call with the same key starts a new run. | 24 | Lower it for a problem that needs a quick second look. |
@@ -191,7 +191,7 @@ In a may-change restricted run, the full `.git` and `.claude` directories, `.mcp
 | Exit code 23 | A limit on runs, or the usage limit of the agent, holds the call. | Call again later. |
 | Exit code 23, "Only one restricted run is open at a time" | A restricted run is open, or the sign-in workspace is open. | Call again later, or close the sign-in workspace. |
 | Exit code 21, "The run user aicli-run is missing" (or another sentence about the run user) | The user is not set up as the plugin needs. | Follow the steps in **Set up the restricted run user**, or fix what the sentence names. |
-| Exit code 21, "may not run the agent as 'aicli-run'" | The entry allows only root. | Open the entry, press **Edit**, tick **aicli-run (restricted)** under **Run as**, and save. |
+| Exit code 21, "may not run the agent as 'aicli-run'" | The entry allows only root, and the call names `--user=aicli-run`. A call that names no user runs as root for such an entry. | Open the entry, press **Edit**, tick **aicli-run (restricted)** under **Run as**, and save. |
 | The workspace does not start as root and names `.aicli-run.json` | The folder was used by a restricted run. | Review the folder contents. Remove `.aicli-run.json` only when you are ready to let a root workspace use the folder. |
 | The reply has a note that the workspace did not start | The plugin could not make the private disk view, so it did not start the agent. The Activity tray names the fault. | Look at the Debug Console, then press **Restart** on the workspace. |
 | The entry shows **File changed** | The file differs from the stored fingerprint. | Open the entry and press **Trust the file as it is now**, if you made the change. |
@@ -209,6 +209,7 @@ A run as `aicli-run` cannot write outside its disk view, but the user is still a
 <details>
 <summary>Change history</summary>
 
+- **2026-11-09** — A script approved before restricted runs (its entry allows only root) keeps running as root when its call names no user, so an update does not stop it. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #944.
 - **2026-11-08** — The card of a run as the restricted user says that the result file is in the private folder of the plugin, and a temporary run as the restricted user writes its card to the Global Notebook. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issues #745 and #915.
 - **2026-11-06** — May-change approvals name the protected `.git` and `.claude` directories, and warn when a run uses `/mnt/user` without refusing it. Root starts are blocked only by may-change restricted-run markers; temporary and read-only markers remain usable. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-11-06** — The result notice of a run has an **Open note** button. The card has the run title, the whole report and the place of the result file, and it goes to the project Notebook when the folder has one. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #915.
