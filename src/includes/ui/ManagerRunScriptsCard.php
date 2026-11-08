@@ -30,7 +30,7 @@ $stRuns = ($runsEnabled ? 'On' : 'Off') . ' · ' . $runsCount . ($runsCount === 
                         <dt>Restricted run user</dt>
                         <dd>
                             <div id="aicli-run-user-state" class="runs-callout" role="status" data-testid="run-user-state">Checking the run user…</div>
-                            <p>Create <code>aicli-run</code> on the <a href="/Main/Users">Users page</a>. Give it the description <strong>AICliAgents run user</strong>, primary group <strong>users</strong>, shell <code>/bin/false</code>, and no other groups. The plugin does not create this account.</p>
+                            <p>Create <code>aicli-run</code> on the <a class="runs-text-link" href="/Main/Users">Users page</a>. Give it the description <strong>AICliAgents run user</strong>, primary group <strong>users</strong>, shell <code>/bin/false</code>, and no other groups. The plugin does not create this account.</p>
                             <div class="runs-target-row"><button type="button" class="aicli-btn-slim" id="aicli-run-password-generate">Generate a password</button><input id="aicli-run-password" type="text" autocomplete="off" readonly hidden aria-label="Generated password"><button type="button" class="aicli-btn-slim" id="aicli-run-password-copy" hidden>Copy password</button></div>
                             <p class="hb-help">The password is made in this page. This page does not send or save it. Paste it into the Users page.</p>
                             <ul id="aicli-run-share-warnings" class="runs-callout" aria-label="SMB access warnings"></ul>

@@ -1898,6 +1898,8 @@
     .runs-callout { padding: 10px; border: 1px solid color-mix(in srgb, #d97706 48%, var(--text-color, #222)); border-radius: 6px; background: color-mix(in srgb, #d97706 8%, var(--background-color, #fff)); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
     .runs-callout p { margin: 0 0 8px; }
     .runs-callout p:last-child { margin-bottom: 0; }
+    /* #934: a link in the card takes the text colour and an underline. The theme link blue on the grey card is 4.49:1, under the 4.5:1 minimum. */
+    .runs-text-link, .runs-text-link:visited { color: var(--text-color, inherit); text-decoration: underline; }
     .runs-callout-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
     .runs-callout-actions .aicli-btn-slim, .runs-inline-action { min-height: 44px; box-sizing: border-box; }
     .runs-view h3 { margin-bottom: 7px; }
