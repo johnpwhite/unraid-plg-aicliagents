@@ -1820,7 +1820,9 @@ class ConfigService {
                 // AGENT_SPAWN_WORKSPACE.md: a page loaded before a helper existed resends the record
                 // without the helper marks. Keep them, or a browser save would turn a helper into an
                 // ordinary workspace (no autoClose, no parent, no spawn rules).
-                foreach (['spawned', 'spawn'] as $spawnKey) {
+                // AGENT_RUN_ENTRY_POINT.md R16: the same for the run user mark, so a browser save never turns a run as
+                // aicli-run into a workspace that starts as root outside the private disk view.
+                foreach (['spawned', 'spawn', 'runAs'] as $spawnKey) {
                     if (!array_key_exists($spawnKey, $session) && array_key_exists($spawnKey, $prior)) {
                         $session[$spawnKey] = $prior[$spawnKey];
                     }

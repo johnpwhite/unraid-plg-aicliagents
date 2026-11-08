@@ -672,10 +672,13 @@ class InstallerService {
             ? $seams['tmux_socket_paths']()
             : \AICliAgents\Services\ProcessManager::tmuxSocketPaths();
         $runCommand = $seams['exec'] ?? static function (string $command): void { exec($command); };
+        // #745: each tmux client has an argv and a deadline. Agent uninstall leaves a restricted workspace open and refuses
+        // to remove a version that it uses; it never stops that workspace as a side effect.
         $listPanes = $seams['tmux_panes'] ?? static function (string $sock): array {
-            $lines = [];
-            exec('tmux -S ' . escapeshellarg($sock) . " list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null", $lines);
-            return $lines;
+            if (\AICliAgents\Services\RunUserService::socketIsRunUserControlled($sock)) return [];
+            $raw = \AICliAgents\Services\ProcessManager::runTmuxForSocket($sock,
+                ['list-panes', '-a', '-F', '#{session_name} #{pane_pid}'], 8);
+            return is_string($raw) && trim($raw) !== '' ? explode("\n", trim($raw)) : [];
         };
         $ttydPids = $seams['ttyd_pids'] ?? static function (string $sessionId): array {
             $pids = [];
@@ -716,7 +719,8 @@ class InstallerService {
         foreach ($sessions as $sock => $names) {
             foreach (array_keys($names) as $name) {
                 // "=" asks tmux for this exact session name, never a prefix.
-                $runCommand('tmux -S ' . escapeshellarg($sock) . ' kill-session -t ' . escapeshellarg('=' . $name) . ' > /dev/null 2>&1');
+                if (\AICliAgents\Services\RunUserService::socketIsRunUserControlled($sock)) continue;
+                \AICliAgents\Services\ProcessManager::runTmuxForSocket($sock, ['kill-session', '-t', '=' . $name], 8);
             }
         }
         foreach (array_keys($ttyds) as $tp) $runCommand('kill -15 ' . (int)$tp . ' > /dev/null 2>&1');

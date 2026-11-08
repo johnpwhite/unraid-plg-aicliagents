@@ -854,7 +854,7 @@
 <!-- MANIFEST: Download Modular Scripts (Installer) -->
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-clean-2026.11.07.03.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/cleanup.sh</URL>
-<SHA256>41219fd49f33ffb98ba7038d948a82970b2d3960a587b6b2c5826567de1ed50f</SHA256>
+<SHA256>575c5603843499edd93c5ff4c1917ba104c7b63fe984164828c90f9bdb40cd55</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-legacy-2026.11.07.03.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/migrate-from-geminicli.sh</URL>
@@ -874,7 +874,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-finalize-2026.11.07.03.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/finalize.sh</URL>
-<SHA256>675b72f05e87fa43ff063cfba812024e736e0e9c2273bbdf88489c4551e8394b</SHA256>
+<SHA256>0b3e8498866cdc0ca91628fcf5feaf2c56dfea4cfa880a5d4daf767feed37e4f</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-repair-2026.11.07.03.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/repair-plugin.sh</URL>
@@ -882,7 +882,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-2026.11.07.03.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/user/stop-plugin.sh</URL>
-<SHA256>10f066fd7ef279c75833d280c6757c4f1d66154ffb31902c90a7ee7fa497f62e</SHA256>
+<SHA256>39395d08c3abfb0441e90f5f162e799c972cd74c9a73982ab0488324330bd588</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-stop-warning-2026.11.07.03.page">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/ArrayStopWarning.page</URL>

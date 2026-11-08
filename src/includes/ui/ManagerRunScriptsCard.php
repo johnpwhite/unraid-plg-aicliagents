@@ -27,6 +27,17 @@ $stRuns = ($runsEnabled ? 'On' : 'Off') . ' · ' . $runsCount . ($runsCount === 
                             </select>
                             <?=aicli_help_panel('run-enabled')?>
                         </dd>
+                        <dt>Restricted run user</dt>
+                        <dd>
+                            <div id="aicli-run-user-state" class="runs-callout" role="status" data-testid="run-user-state">Checking the run user…</div>
+                            <p>Create <code>aicli-run</code> on the <a href="/Main/Users">Users page</a>. Give it the description <strong>AICliAgents run user</strong>, primary group <strong>users</strong>, shell <code>/bin/false</code>, and no other groups. The plugin does not create this account.</p>
+                            <div class="runs-target-row"><button type="button" class="aicli-btn-slim" id="aicli-run-password-generate">Generate a password</button><input id="aicli-run-password" type="text" autocomplete="off" readonly hidden aria-label="Generated password"><button type="button" class="aicli-btn-slim" id="aicli-run-password-copy" hidden>Copy password</button></div>
+                            <p class="hb-help">The password is made in this page. This page does not send or save it. Paste it into the Users page.</p>
+                            <ul id="aicli-run-share-warnings" class="runs-callout" aria-label="SMB access warnings"></ul>
+                            <p id="aicli-run-temp-root" class="hb-help"></p>
+                            <div class="runs-target-row"><label for="aicli-run-sign-in-agent">Sign in to an agent</label><select id="aicli-run-sign-in-agent" aria-label="Sign in to an agent"></select><button type="button" class="aicli-btn-slim" id="aicli-run-sign-in">Open sign-in workspace</button></div>
+                            <p id="aicli-run-sign-in-message" role="status" aria-live="polite"></p>
+                        </dd>
                         <dt>Authorised scripts <?=aicli_help_btn('run-scripts', 'Authorised scripts')?></dt>
                         <dd>
                             <p id="aicli-runs-off" class="aicli-runs-off" hidden>Script runs are off. No script on this list can start a run.</p>
@@ -57,7 +68,7 @@ $stRuns = ($runsEnabled ? 'On' : 'Off') . ' · ' . $runsCount . ($runsCount === 
                                         <dt>Agents</dt><dd data-view="agents"></dd>
                                         <dt>Folders</dt><dd data-view="folders"></dd>
                                         <dt>Highest mode</dt><dd data-view="mode"></dd>
-                                        <dt>Run as</dt><dd>root</dd>
+                                        <dt>Run as</dt><dd data-view="users"></dd>
                                     </dl></section>
                                     <section class="runs-view" data-view-group="limits"><h3>Limits</h3><dl class="runs-facts"><dt>Runs each day</dt><dd data-view="perday"></dd></dl></section>
                                     <fieldset class="hb-fields runs-edit" data-edit-group="what-runs" hidden><legend>What runs</legend>
@@ -75,7 +86,7 @@ $stRuns = ($runsEnabled ? 'On' : 'Off') . ' · ' . $runsCount . ($runsCount === 
                                         <div class="hb-field"><div class="hb-label-row"><span class="hb-label">Agents it may start</span> <?=aicli_help_btn('run-script-agents', 'Agents it may start')?> <?=aicli_help_panel('run-script-agents')?></div><div class="runs-agent-list" data-role="agents"></div></div>
                                         <div class="hb-field"><div class="hb-label-row"><label class="hb-label" for="runs-edit-folders">Folders it may use</label> <?=aicli_help_btn('run-script-folders', 'Folders it may use')?> <?=aicli_help_panel('run-script-folders')?></div><textarea id="runs-edit-folders" rows="3" placeholder="/mnt/cache/appdata/example"></textarea><div class="runs-target-row"><button type="button" class="aicli-btn-slim" data-action="browse-folder">Browse…</button><input id="runs-folder-path-picker" class="runs-hidden-input" type="text" value="/mnt"></div></div>
                                         <div class="hb-field"><div class="hb-label-row"><span class="hb-label">Highest mode</span> <?=aicli_help_btn('run-script-mode', 'Highest mode')?> <?=aicli_help_panel('run-script-mode')?></div><label class="runs-choice runs-mode-choice"><input type="radio" data-mode="read-only"> <span><strong>Read-only</strong><span>Starts at once and only reads files.</span></span></label><label class="runs-choice runs-mode-choice"><input type="radio" data-mode="may-change"> <span><strong>May change files</strong><span>Waits for your approval each time.</span></span></label></div>
-                                        <div class="hb-field"><div class="hb-label-row"><span class="hb-label">Run as</span> <?=aicli_help_btn('run-script-users', 'Run as')?> <?=aicli_help_panel('run-script-users')?></div><span class="runs-root">root</span></div>
+                                        <div class="hb-field"><div class="hb-label-row"><span class="hb-label">Run as</span> <?=aicli_help_btn('run-script-users', 'Run as')?> <?=aicli_help_panel('run-script-users')?></div><label class="runs-choice"><input type="checkbox" data-user-id="root"> <span>root</span></label><label class="runs-choice"><input type="checkbox" data-user-id="aicli-run"> <span>aicli-run (restricted)</span></label></div>
                                     </fieldset>
                                     <fieldset class="hb-fields runs-edit" data-edit-group="limits" hidden><legend>Limits</legend><div class="hb-field"><div class="hb-label-row"><label class="hb-label" for="runs-edit-perday">Runs each day</label> <?=aicli_help_btn('run-script-perday', 'Runs each day')?> <?=aicli_help_panel('run-script-perday')?></div><input id="runs-edit-perday" type="number" inputmode="numeric" min="1" max="1000" value="6"></div></fieldset>
                                     <div class="runs-discard" data-role="discard" role="group" aria-label="Discard changes" hidden><span>Discard your changes?</span><button type="button" class="aicli-btn-slim" data-action="discard">Discard</button><button type="button" class="aicli-btn-slim" data-action="keep-editing">Keep editing</button></div>

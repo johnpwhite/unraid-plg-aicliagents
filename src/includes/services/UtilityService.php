@@ -11,6 +11,9 @@
 namespace AICliAgents\Services;
 
 class UtilityService {
+    /** Test-only root for per-session metadata; production always uses /var/run. */
+    public static ?string $sessionMetadataRootForTests = null;
+
     /**
      * Expand a leading `~` (agent home) in a user-supplied path, like the shell — so a
      * `~/.claude/secrets/prod01.env` clicked in the terminal resolves even when the
@@ -538,26 +541,38 @@ class UtilityService {
      * Path Helpers for Terminal Sessions
      */
     public static function getSockPath($id = 'default') {
-        return "/var/run/aicliterm-$id.sock";
+        return defined('AICLI_TEST_TMP') && self::$sessionMetadataRootForTests !== null
+            ? rtrim(self::$sessionMetadataRootForTests, '/') . "/aicliterm-$id.sock"
+            : "/var/run/aicliterm-$id.sock";
     }
 
     public static function getPidPath($id = 'default') {
-        return "/var/run/unraid-aicliagents-$id.pid";
+        return defined('AICLI_TEST_TMP') && self::$sessionMetadataRootForTests !== null
+            ? rtrim(self::$sessionMetadataRootForTests, '/') . "/unraid-aicliagents-$id.pid"
+            : "/var/run/unraid-aicliagents-$id.pid";
     }
 
     public static function getChatIdPath($id = 'default') {
-        return "/var/run/unraid-aicliagents-$id.chatid";
+        return defined('AICLI_TEST_TMP') && self::$sessionMetadataRootForTests !== null
+            ? rtrim(self::$sessionMetadataRootForTests, '/') . "/unraid-aicliagents-$id.chatid"
+            : "/var/run/unraid-aicliagents-$id.chatid";
     }
 
     public static function getAgentIdPath($id = 'default') {
-        return "/var/run/unraid-aicliagents-$id.agentid";
+        return defined('AICLI_TEST_TMP') && self::$sessionMetadataRootForTests !== null
+            ? rtrim(self::$sessionMetadataRootForTests, '/') . "/unraid-aicliagents-$id.agentid"
+            : "/var/run/unraid-aicliagents-$id.agentid";
     }
 
     public static function getWorkDirFilePath($id = 'default') {
-        return "/var/run/unraid-aicliagents-$id.workdir";
+        return defined('AICLI_TEST_TMP') && self::$sessionMetadataRootForTests !== null
+            ? rtrim(self::$sessionMetadataRootForTests, '/') . "/unraid-aicliagents-$id.workdir"
+            : "/var/run/unraid-aicliagents-$id.workdir";
     }
 
     public static function getUserIdPath($id = 'default') {
-        return "/var/run/unraid-aicliagents-$id.user";
+        return defined('AICLI_TEST_TMP') && self::$sessionMetadataRootForTests !== null
+            ? rtrim(self::$sessionMetadataRootForTests, '/') . "/unraid-aicliagents-$id.user"
+            : "/var/run/unraid-aicliagents-$id.user";
     }
 }

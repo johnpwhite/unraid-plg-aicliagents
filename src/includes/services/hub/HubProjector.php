@@ -529,7 +529,17 @@ class HubProjector {
      * bare tmpfs path would be lost at the next mount/bake.
      * @return array{ok:bool,home:string,error?:string}
      */
-    public static function resolveHome(): array {
+    public static function resolveHome(?string $homeOverride = null): array {
+        if ($homeOverride !== null) {
+            $home = rtrim($homeOverride, '/');
+            if ($home === '' || !is_dir($home) || is_link($home)) {
+                return ['ok' => false, 'home' => $home, 'error' => 'home_unavailable'];
+            }
+            if (defined('AICLI_TEST_TMP') || StorageMountService::isMounted($home)) {
+                return ['ok' => true, 'home' => $home];
+            }
+            return ['ok' => false, 'home' => $home, 'error' => 'home_unavailable'];
+        }
         $env = getenv('AICLI_HUB_HOME');
         if ($env !== false && $env !== '') {
             return ['ok' => true, 'home' => rtrim($env, '/')];
@@ -621,8 +631,60 @@ class HubProjector {
         return $result;
     }
 
-    public static function projectAll(?array $targetAgentIds = null, ?array $installedOverride = null): array {
-        $homeInfo = self::resolveHome();
+    /** Project user Config Hub choices into the restricted run user's home only. */
+    public static function projectRunUserForLaunch(string $agentId, ?array $installedOverride = null, ?string $homeOverride = null): array {
+        if ($agentId === '' || $agentId === 'terminal') return ['status' => 'skipped', 'reason' => 'no_managed_agent'];
+        $home = $homeOverride ?? (\AICliAgents\Services\SecretPaths::stateRoot() . '/work/aicli-run/home');
+        try {
+            $result = self::projectAll([$agentId], $installedOverride, $home, true);
+        } catch (\Throwable $e) {
+            \AICliAgents\Services\LogService::log(
+                "Run-user Hub projection before launch of '$agentId' failed: " . $e->getMessage(),
+                \AICliAgents\Services\LogService::LOG_WARN,
+                'HubProjector'
+            );
+            return ['status' => 'error', 'reason' => 'exception', 'message' => $e->getMessage()];
+        }
+        if (($result['status'] ?? '') !== 'ok') {
+            \AICliAgents\Services\LogService::log(
+                "Run-user Hub projection before launch of '$agentId' did not apply: " . (string)($result['reason'] ?? 'unknown'),
+                \AICliAgents\Services\LogService::LOG_WARN,
+                'HubProjector'
+            );
+        }
+        return $result;
+    }
+
+    /** True while projectAll() runs for the restricted run user: no target may pass a link (finding 4). */
+    private static bool $refuseLinks = false;
+
+    public static function projectAll(?array $targetAgentIds = null, ?array $installedOverride = null, ?string $homeOverride = null, bool $restrictedRunUser = false): array {
+        $previous = self::$refuseLinks;
+        self::$refuseLinks = $restrictedRunUser;
+        try {
+            return self::projectAllUnchecked($targetAgentIds, $installedOverride, $homeOverride, $restrictedRunUser);
+        } finally {
+            self::$refuseLinks = $previous;
+        }
+    }
+
+    /** True when $abs, or any folder between $home and $abs, is a link. Nothing is followed. */
+    private static function passesLink(string $home, string $abs): bool {
+        $home = rtrim($home, '/');
+        if ($abs === $home || strpos($abs, $home . '/') !== 0) return true;   // outside the home: refuse
+        $path = $home;
+        foreach (explode('/', substr($abs, strlen($home) + 1)) as $part) {
+            if ($part === '' || $part === '.' || $part === '..') return true;
+            $path .= '/' . $part;
+            $st = @lstat($path);
+            if ($st === false) return false;                                  // nothing there yet: nothing to follow
+            if (($st['mode'] & 0170000) === 0120000) return true;
+        }
+        return false;
+    }
+
+    private static function projectAllUnchecked(?array $targetAgentIds, ?array $installedOverride, ?string $homeOverride, bool $restrictedRunUser): array {
+        $homeInfo = self::resolveHome($homeOverride);
         if (!$homeInfo['ok']) {
             return ['status' => 'error', 'reason' => 'home_unavailable',
                     'message' => 'The agent home overlay is not mounted — start a session or the array, then retry. Projection never writes to an unmounted home.'];
@@ -637,6 +699,11 @@ class HubProjector {
         }
         $servers = HubStore::getMcp()['servers'];
         $state = HubStore::getState();
+        $runUserLedger = '';
+        if ($restrictedRunUser) {
+            $runUserLedger = rtrim($home, '/') . '/.aicli-hub-projections.json';
+            $state['projections'] = HubStore::getLedgerFile($runUserLedger);
+        }
 
         $installed = $installedOverride ?? self::installedSupportedAgentIds();
         $targets =($targetAgentIds === null) ? $installed : array_values(array_intersect($targetAgentIds, $installed));
@@ -652,7 +719,11 @@ class HubProjector {
 
         foreach (self::supportedVendors() as $agentId => $projector) {
             if (!in_array($agentId, $targets, true)) continue;
-            $desired = $projector->desired(self::enabledServersFor($servers, $agentId));
+            $agentServers = self::enabledServersFor($servers, $agentId);
+            if ($restrictedRunUser) {
+                unset($agentServers['aicli-admin'], $agentServers['aicli-relay']);
+            }
+            $desired = $projector->desired($agentServers);
             $r = self::reconcileVendor($projector, $home, $desired, $state, true);
             $results[$projector->ledgerKey()] = ['agentId' => $agentId, 'written' => $r['written'],
                                                 'removed' => $r['removed'], 'drift' => $r['drift']];
@@ -718,7 +789,8 @@ class HubProjector {
         foreach (self::relayInstructionVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
-            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, true, true);
+            $desired = $restrictedRunUser ? [] : $projector->desired([]);
+            $r = self::reconcileVendor($projector, $home, $desired, $state, true, true);
             $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
             foreach ($r['drift'] as $d) $driftAll[] = $d;
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
@@ -731,7 +803,8 @@ class HubProjector {
         foreach (self::relaySkillVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
-            $r = self::reconcileVendor($projector, $home, $projector->desired([]), $state, true, true);
+            // R18: the run user gets no Relay skill (an empty desired set also removes one that was projected before).
+            $r = self::reconcileVendor($projector, $home, $restrictedRunUser ? [] : $projector->desired([]), $state, true, true);
             $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
             foreach ($r['drift'] as $d) $driftAll[] = $d;
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
@@ -740,7 +813,7 @@ class HubProjector {
         // Plugin-management skill. An empty desired set while the feature is off is
         // deliberate: it removes a copy written when it was on, so switching the
         // feature off also withdraws the instructions that describe it.
-        $adminWanted = self::adminSkillWanted();
+        $adminWanted = !$restrictedRunUser && self::adminSkillWanted();
         foreach (self::adminSkillVendors() as $projector) {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $targets));
             if (empty($serving)) continue;
@@ -760,9 +833,10 @@ class HubProjector {
         }
 
         if (self::$beforeLedgerSave !== null) (self::$beforeLedgerSave)();
-        HubStore::saveLedger($state);
+        if ($restrictedRunUser) HubStore::saveLedgerFile($state, $runUserLedger);
+        else HubStore::saveLedger($state);
         LogService::log('hub project: agents=[' . implode(',', $targets) . '] changed=[' . implode(',', $writtenAgents) . '] drift=' . count($driftAll), LogService::LOG_INFO, 'HubProjector');
-        if (!empty($writtenAgents)) {
+        if (!$restrictedRunUser && !empty($writtenAgents)) {
             // H-04 (#1365): debounced auto-commit AFTER the vendor writes — agent ids only.
             GitHomeService::commitIfEnabled('hub: projected to [' . implode(',', $writtenAgents) . ']');
         }
@@ -1636,6 +1710,12 @@ class HubProjector {
         $file = $projector->ledgerKey();
         $abs = $projector->absPath($home);
         $agentId = $projector->agentId();
+        if (self::$refuseLinks && self::passesLink($home, $abs)) {
+            // The home of the run user belongs to the run user, who can plant a link at a target. A write through it
+            // could change another file. Nothing is written and nothing is read for this target.
+            LogService::log("Run-user projection skipped $file: the target or a folder above it is a link", LogService::LOG_WARN, 'HubProjector');
+            return ['written' => [], 'removed' => [], 'drift' => []];
+        }
 
         $entry = $state['projections'][$file] ?? [];
         $managed = is_array($entry['managedKeys'] ?? null) ? $entry['managedKeys'] : [];

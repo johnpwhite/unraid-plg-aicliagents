@@ -1178,7 +1178,6 @@ class TerminalHandler {
             $capturedId = null;
 
             if (!empty($sessName)) {
-                $escSess = escapeshellarg($sessName);
                 aicli_log("gracefulClose: tmux session resolved as '$sessName' (sock=$tmuxSock) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
 
                 @mkdir(\AICliAgents\Services\SecretPaths::stateRoot(), 0755, true);
@@ -1199,7 +1198,7 @@ class TerminalHandler {
                 // 10s. Order is critical: sentinel before Enter means the next
                 // loop iteration breaks; the Enter just wakes the blocking read.
                 @touch($closeFlag);
-                \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
+                \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'Enter'], 8);
 
                 // Poll for the tmux session to actually exit. Budget is per-session
                 // configurable via `graceful_close_timeout` (seconds, default 3 —
@@ -1209,8 +1208,8 @@ class TerminalHandler {
                 $budget = max(1, min(60, $budget ?: 3));
                 $exited = false;
                 for ($i = 0; $i < $budget * 10; $i++) {
-                    $still = trim(\AICliAgents\Services\ProcessManager::runCommand("$tmuxBin has-session -t $escSess 2>/dev/null && echo y || echo n"));
-                    if ($still === 'n') { $exited = true; break; }
+                    $still = \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['has-session', '-t', $sessName], 8);
+                    if ($still === null) { $exited = true; break; }
                     usleep(100000);
                 }
                 if ($exited) {
@@ -1380,8 +1379,7 @@ class TerminalHandler {
         $flagFile = \AICliAgents\Services\SecretPaths::stateRoot() . '/auto-reload-' . $safeId . '.flag';
         @touch($flagFile);
 
-        $escSess = escapeshellarg($sessName);
-        \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+        \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'C-c'], 8);
 
         // WP #275a: do NOT blindly fire a second Ctrl-C 200ms later. If the agent
         // exits cleanly on the first Ctrl-C, the wrapper script consumes the flag
@@ -1404,7 +1402,7 @@ class TerminalHandler {
             if (!file_exists($flagFile)) { $consumed = true; break; }
         }
         if (!$consumed) {
-            \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+            \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'C-c'], 8);
             aicli_log("agentSignalReload: agent ignored first Ctrl-C; sent second to $sessName for $id", AICLI_LOG_INFO, "TerminalHandler");
         } else {
             aicli_log("agentSignalReload: clean exit on first Ctrl-C for $sessName ($id), no second needed", AICLI_LOG_INFO, "TerminalHandler");
@@ -1456,8 +1454,6 @@ class TerminalHandler {
         // Where the saved id came from decides how it may be saved: a screen-scraped id is
         // this workspace's own; a disk id is the folder's newest (RESUME_IDENTITY_PER_WORKSPACE.md V3).
         $fromDisk = false;
-        $escSess = escapeshellarg($sessName);
-
         // #814: tell the agent shell a close has started BEFORE any exit key. The close sentinel
         // is set only after the scrape below; without this mark a Ctrl-D that ends the shell's
         // "Press ENTER" read sends the loop round again and the agent starts a second time.
@@ -1478,15 +1474,15 @@ class TerminalHandler {
         // (often 80 cols or narrower), which wraps copilot's UUID onto two
         // lines in a way tmux's -J flag cannot always re-join cleanly.
         // Resizing here guarantees the full resume line fits on one row.
-        \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin resize-window -t $escSess -x 220 -y 50 2>/dev/null");
+        \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['resize-window', '-t', $sessName, '-x', '220', '-y', '50'], 8);
 
         // #837: an agent that documents its own exit command (registry `exit_command`, e.g.
         // Factory droid `/quit`) gets it typed first. The generic keys below stay as the fallback.
         $exitCommand = self::closeExitCommand($agentId);
         if ($exitCommand !== '') {
-            \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess -l " . escapeshellarg($exitCommand) . " 2>/dev/null");
+            \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, '-l', $exitCommand], 8);
             usleep(150000);
-            \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess Enter 2>/dev/null");
+            \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'Enter'], 8);
             usleep(300000);
             aicli_log("captureResumeForClose: sent exit command '$exitCommand' (#837) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
         }
@@ -1494,18 +1490,18 @@ class TerminalHandler {
         // Two Ctrl-Cs covers both single-press (opencode) and double-press
         // (claude/gemini/copilot/kilo) exit conventions. The second key on
         // single-press agents lands on the post-exit shell as a no-op.
-        \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+        \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'C-c'], 8);
         usleep(150000);
-        \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess C-c 2>/dev/null");
+        \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'C-c'], 8);
         // Bug #1071: Antigravity CLI ignores Ctrl-C and exits only on Ctrl-D.
         // Sending Ctrl-D x2 covers both the agy single-press (REPL line) and
         // double-press (exit confirmation) conventions. For agents that
         // already exited from the Ctrl-C pair, the Ctrl-Ds land on the
         // post-exit shell as a no-op.
         usleep(150000);
-        \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
+        \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'C-d'], 8);
         usleep(150000);
-        \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin send-keys -t $escSess C-d 2>/dev/null");
+        \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['send-keys', '-t', $sessName, 'C-d'], 8);
         aicli_log("captureResumeForClose: sent Ctrl-C x2 + Ctrl-D x2 (Bug #1071) | $ctx", AICLI_LOG_DEBUG, "TerminalHandler");
 
         // Capture with up to 3 retries - agents that stream their exit
@@ -1537,7 +1533,8 @@ class TerminalHandler {
         $scrapePane = !in_array($agentId, self::DISK_RESUME_ID_AGENTS, true);
         for ($attempt = 0; $scrapePane && $attempt < 3; $attempt++) {
             usleep($attempt === 0 ? 1800000 : 1000000);
-            $pane = \AICliAgents\Services\ProcessManager::runCommand("$tmuxBin capture-pane -p -J -S -200 -t $escSess 2>/dev/null");
+            $pane = (string)(\AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock,
+                ['capture-pane', '-p', '-J', '-S', '-200', '-t', $sessName], 8) ?? '');
             $found = self::resumeIdFromPane($pane, false);
             if ($found !== null) {
                 $m = [$found, $found];

@@ -1,5 +1,6 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
+source "$(dirname "${BASH_SOURCE[0]}")/../tmux-socket-safety.sh" || { echo 'tmux-socket-safety.sh missing' >&2; exit 1; }
 # AICliAgents uninstaller residual process/runtime sweep.
 #
 # The primary uninstaller calls stop-plugin.sh first so live home data is baked
@@ -77,13 +78,22 @@ if [ "${AICLI_CLEANUP_TEST_MODE:-0}" != "1" ]; then
     graceful_kill 'dbus-daemon .*unraid-aicliagents/secret-service' 2
     graceful_kill "$EMHTTP_DEST/src/scripts/(install-bg|emergency-install-bg|version-check-bg|healthcheck|agentcheck)" 2
 
+# Second review, finding 1: root never runs a tmux client against a socket that the run user (aicli-run) can write. A fake server
+# on such a socket can order the client to start a program as root. Such a socket is skipped here; the processes of the run user
+# are ended by user id instead. When this script runs as the run user itself, nothing is skipped.
+_run_uid="$(id -u aicli-run 2>/dev/null || true)"
     if command -v tmux >/dev/null 2>&1; then
         for sock in "$TMUX_TMPDIR"/tmux-*/default; do
             [ -S "$sock" ] || continue
+            aicli_tmux_socket_skip_for_root "$sock" "$_run_uid" && continue
             tmux -S "$sock" ls -F '#S' 2>/dev/null \
                 | grep -E '^aicli-agent-' \
                 | xargs -r -I {} tmux -S "$sock" kill-session -t "{}" >/dev/null 2>&1 || true
         done
+    fi
+    if ! /bin/bash "$EMHTTP_DEST/src/scripts/aicli-run-cleanup.sh" uninstall; then
+        log_status "ERROR: restricted-run processes or namespaces remain; refusing source removal."
+        exit 1
     fi
 fi
 

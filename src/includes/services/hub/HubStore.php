@@ -814,10 +814,11 @@ class HubStore {
      * $fn still runs, with a warning: a missed lock must not stop a Settings save.
      * @return mixed what $fn returns
      */
-    private static function withStateLock(callable $fn) {
-        $lockFile = self::stateFile() . '.lock';
+    private static function withStateLock(callable $fn, ?string $stateFile = null) {
+        $lockFile = ($stateFile ?? self::stateFile()) . '.lock';
         @mkdir(dirname($lockFile), 0755, true);
-        $fp = @fopen($lockFile, 'c');
+        // A link at the lock file would make fopen create or open the target of the link.
+        $fp = is_link($lockFile) ? false : @fopen($lockFile, 'c');
         $got = false;
         if ($fp) {
             $deadline = microtime(true) + 3.0;
@@ -858,6 +859,29 @@ class HubStore {
             $fresh['projections'] = is_array($state['projections'] ?? null) ? $state['projections'] : [];
             return $fresh;
         });
+    }
+
+    /** Read a projection ledger kept outside the main user state file. */
+    public static function getLedgerFile(string $file): array {
+        if (is_link($file) || !is_file($file)) return [];
+        $data = json_decode((string)@file_get_contents($file), true);
+        return is_array($data) && is_array($data['projections'] ?? null) ? $data['projections'] : [];
+    }
+
+    /** Save only a projection ledger, so a restricted run home cannot rewrite global state. */
+    public static function saveLedgerFile(array $state, string $file): bool {
+        // The folder of this ledger belongs to the run user. A link at the file would send the write to another file.
+        if (is_link($file)) {
+            LogService::log('Hub ledger not saved: the ledger file is a link', LogService::LOG_WARN, 'HubStore');
+            return false;
+        }
+        return (bool)self::withStateLock(static function () use ($state, $file): bool {
+            $projections = is_array($state['projections'] ?? null) ? $state['projections'] : [];
+            ksort($projections);
+            $payload = ['schema' => self::SCHEMA,
+                'projections' => empty($projections) ? new \stdClass() : $projections];
+            return AtomicWriteService::writeJson($file, $payload);
+        }, $file);
     }
 
     public static function saveState(array $state): bool {

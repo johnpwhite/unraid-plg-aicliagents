@@ -6,22 +6,49 @@
 
 ## In plain words
 
-You can let your own scripts start an agent for you, while you stay in control of what each script may do. A script on your server can ask the plugin to start an agent. The script says which agent, which folder and what to do. The plugin checks which script asked and starts only scripts on **Authorised scripts**. A read-only run starts at once. A run that may change files waits until you approve it in the Activity tray. The agent sends its result to the Notebook and the Activity tray. A script can wait for that result and get its summary.
+You can let a script start an agent while you choose what it can do. The plugin checks which script called it and starts only scripts on the **Authorised scripts** list. A read-only run starts at once. A run that may change files waits for approval in the Activity tray. The agent adds its result to the Notebook and the Activity tray. A script can wait for the result and get its summary.
+
+## Where to find it
+
+- **Settings, Configuration** tab, card **Script runs**: the switch, the **Restricted run user** part, the list of Authorised scripts and, in the part **Advanced**, the limits.
+- **Activity tray**: shows each run, each refused script, each result and each run that waits for your approval.
+- Unraid's own notices: a notice appears when a run starts and when it reports, unless you turn off routine notices. Warnings always appear.
 
 Words used on this page:
 
 - **Run**: one call from a script, and the workspace that the plugin opens for it.
 - **Fingerprint**: a short code that the plugin computes from the content of a script file (a sha256 hash). A changed file has another fingerprint.
 - **Activity tray**: the pill at the bottom right of the page that lists what the plugin is doing.
-- **Read-only**: the agent may use only the tools Read, Grep and Glob and the read tools of the plugin. It has no shell and no file editing, the plugin tools that change things are denied, and the file tools stay in the run folder, the agent ignores the settings files of that folder, and it can still report its result. The agent still runs as root, and these limits come from the agent itself. They are not a lock on the disks.
-
-## Where to find it
-
-- **Settings, Configuration** tab, card **Script runs**: the switch, the list of Authorised scripts and, in the part **Advanced**, the limits.
-- **Activity tray**: shows each run, each refused script, each result and each run that waits for your approval.
-- Unraid's own notices: a notice appears when a run starts and when it reports, unless you turn off routine notices. Warnings always appear.
+- **Read-only**: the agent may use only the tools Read, Grep and Glob. It has no shell and no file editing, and it ignores the settings files of the run folder. It can still report its result. When the agent runs as the restricted user, it sees only the run folder and the folders listed on the authorised entry under `/mnt`. The listed folders are read-only. Other paths under `/mnt` stay hidden. An allowed temporary run folder can be written.
+- **Restricted run user**: the Unraid user aicli-run. It cannot log in, it has no sudo right and it is not in the group docker. By default, an agent run by a script runs as this user.
+- **Disk view**: the private view that a restricted run gets. It shows the run folder and the folders on the script's entry. Listed folders stay read-only. The run folder can be written only when the run mode allows it. Other folders under `/mnt` stay hidden.
 
 ## How to use it
+
+### Set up the restricted run user
+
+Do this once, before the first run as the restricted user. The plugin does not create the user. You create it on the Unraid page for users, so that Unraid keeps it after a restart.
+
+1. Open **Settings**, then the **Configuration** tab, then the card **Script runs**. In the part **Restricted run user**, read the line under the heading. It says **Ready**, or it names what is wrong.
+2. Press **Generate a password**. The page makes a long random password in your browser. It does not send the password to the server and does not keep it. Press **Copy password**.
+3. Open the Unraid page **Users** (the link in the card), then **Add User**. Type the name `aicli-run`. Paste the password. Type the description `AICliAgents run user`. Press **Add**. Do not add the user to other groups.
+4. Go back to the card and reload the page. Expect: the line says **Ready. Script runs use aicli-run unless an authorised entry selects root.**
+5. Read the warnings under the line, if any. A warning means that the share lists `aicli-run` or lets many users in. To limit it, open **Shares**, open the share, open **SMB Security Settings** and set `aicli-run` to **No Access**. The plugin never changes the share settings itself.
+
+The user must have a user id of 1000 or more, the group `users`, the shell `/bin/false`, and no sudo entry. The card names the first thing that is wrong. A call that needs the run user is refused with the same sentence until you fix it.
+
+### Sign in the agents for the run user
+
+The run user has its own home. An agent that needs a login (for example Claude Code) must be signed in once for this user. API keys from the agent secrets are added at each start, as for any workspace.
+
+1. In the card **Script runs**, part **Restricted run user**, choose an agent in the list **Sign in to an agent**.
+2. Press **Open sign-in workspace**. The plugin opens a normal workspace as `aicli-run`, in a new temporary folder, with the read-only disk view.
+3. Sign in to the agent in that terminal. Expect: the agent shows that you are signed in.
+4. Close the workspace. The plugin saves the agent's known sign-in files in the home of the run user. A later restricted run uses those files. If the save fails, the plugin keeps the private home and tries again during cleanup. Nothing is copied from the home of root.
+
+### Network access for a restricted run
+
+A restricted run can reach public internet services, including public model providers and public DNS. It cannot reach the Unraid server, local network addresses, Docker networks or VM networks. A model hosted on the Unraid server or another local address is not available to a restricted run. The plugin refuses the run when a required network tool or limit is not ready.
 
 ### Turn the feature on and add a script
 
@@ -29,8 +56,10 @@ Words used on this page:
 2. Open the card **Script runs**. Set **Let scripts start agent runs** to **On**. The default is **Off (default)**.
 3. Under **Authorised scripts**, press **Add a script**.
 4. Choose **A User Script** and select a script by name. Choose **Another script file** when the file is elsewhere, then type its full path or press **Browse…**.
-5. Type a short **Name** when the file name does not explain its purpose. Type a **Description** to say what the script checks. Select the agents it may start and add the folders it may use, one on each line.
+5. Type a short **Name** when the file name does not explain its purpose. Type a **Description** to say what the script checks. Select the agents it may start and add the folders it may use, one on each line. Under **Run as**, tick **aicli-run (restricted)**, **root**, or both. A new entry has **aicli-run (restricted)** ticked.
 6. Press **Save**. Expect: the list shows the name and one description line.
+
+For a restricted run, the selected run folder and the folders on the entry are the only folders the agent can see under `/mnt`. The listed folders are read-only. An allowed temporary run folder can be written; otherwise, the run folder can be written only for a **May change** run. The plugin refuses a listed folder that is missing, outside `/mnt`, or reached through a symbolic link. The plugin does not access `/mnt/user` unless the selected run folder or a listed folder is under it.
 
 ### See and change a script
 
@@ -47,7 +76,7 @@ To let the plugin run a changed file, open the entry and press **Trust the file 
 
 ### Call the plugin from the script
 
-A script runs the command `aicli-run` as root. For example:
+A script runs the command `aicli-run` as root. The agent that the command starts runs as the restricted user, unless the call says `--user=root` and the entry allows root. For example:
 
 ```bash
 #!/bin/bash
@@ -55,6 +84,8 @@ aicli-run --agent=claude-code --folder=/mnt/cache/appdata/example \
   --prompt="Look into the finding in the data below." \
   --title="Daily check" --key=daily-check --data-file=/tmp/finding.json
 ```
+
+Add `--user=root` to a call that needs root. Without `--user`, the agent runs as `aicli-run`. The plugin refuses the call (exit code 21) when the entry of the script does not allow that user, or when `aicli-run` is not ready.
 
 The command prints one JSON object. The field `state` says what happened. Exit code 0 means the run started or finished. Check `state`, not only the shell exit code. Exit codes 2 and 3 mean bad input and feature off. Code 4 means the command was not run as root. Codes 10, 11 and 12 mean failed, blocked and timed out. Code 20 means the run waits for approval. Codes 21, 22 and 23 mean refused, duplicate or held. The state `delivered` (exit 0) means that the plugin typed a follow-up message into a run that was open.
 
@@ -68,7 +99,11 @@ A script that has no project folder can ask for a new empty folder for each run.
 aicli-run --agent=claude-code --temp --prompt="Check the finding in the data." --data-file=/tmp/finding.json
 ```
 
-The plugin makes the folder when the run starts, inside the appdata folder of Unraid on its pool (the folder is named after the run). It does not make the folder for a request that still waits for your approval. The folder stays for 24 hours after the run closed, so you can look at what the agent made. Then the plugin removes it. The script entry must allow it: an entry with no folder allows a temporary folder only. If the plugin cannot find a safe place for the folder, it refuses the call and says why.
+The plugin makes the folder when the run starts, inside the appdata folder of Unraid on its pool (the folder is named after the run). It does not make the folder for a request that still waits for your approval. For a restricted run, the folder belongs to `aicli-run`, so the agent can write in it. The folder stays for 24 hours after the run closed, so you can look at what the agent made. Then the plugin removes it. The script entry must allow it: an entry with no folder allows a temporary folder only. If the plugin cannot find a safe place for the folder, it refuses the call and says why.
+
+### How a restricted run reports
+
+A restricted run cannot use the root tools of the plugin. A read-only run has no shell, so the agent reports with a small report tool (`report`, with a status and a summary). A run that may change files reports with the command `aicli-run-report <done|failed|blocked> <summary>`. The summary has at most 2000 characters of plain text. The plugin checks the file every 30 seconds. When the file is good, the run reports as usual: the Notebook card, the Activity tray and the Unraid notice. When the file is not good, the Activity tray shows one notice, **A run report was ignored**, and the run goes on until a good report or the time limit. The plugin keeps a small copy of the result after it removes the private task folder of the run.
 
 ### Send a new message to a run that is open
 
@@ -79,7 +114,7 @@ aicli-run --agent=claude-code --folder=/mnt/cache/appdata/example --key=daily-ch
   --on-duplicate=send --prompt="The finding changed. Look again." --data-file=/tmp/finding.json
 ```
 
-The plugin types the new prompt into the workspace of the open run, with the data in the same fenced block as a first call. The reply is `delivered` with exit code 0. This works only when the open run was started by the same script, its agent is the same, and its workspace is running. A run that may change files never takes a follow-up message, because it runs without asking and you never approved the new instructions. One run takes at most 10 follow-up messages. If the agent is busy, the plugin does not force the message: the reply stays `duplicate` and says why, and the script may call again later. A message is not a new run, so it does not use up the runs of the day. The Activity tray shows each message that the plugin delivered.
+The plugin types the new prompt into the workspace of the open run, with the data in the same fenced block as a first call. The reply is `delivered` with exit code 0. This works only when the open run was started by the same script, its agent is the same, and its workspace is running. A run that may change files never takes a follow-up message, because it runs without asking and you never approved the new instructions. A run as the restricted user takes a follow-up message with text only, not with data. One run takes at most 10 follow-up messages. If the agent is busy, the plugin does not force the message: the reply stays `duplicate` and says why, and the script may call again later. A message is not a new run, so it does not use up the runs of the day. The Activity tray shows each message that the plugin delivered.
 
 ### Let the script ask to be put on the list
 
@@ -111,9 +146,9 @@ A script whose file changed is refused until you trust its new fingerprint. The 
 
 ### Runs that need approval
 
-A read-only call starts at once. It needs no approval, and it still counts against the limits. The **Activity tray** shows it as **Run started**. A call with `--mode=may-change` waits in the **Activity tray** as **Approve run**. The card shows the run title, the script path, the agent, the folder, the mode (**May change** is marked in amber, with the words) and the model, effort and key when set. A quote **Prompt** shows the full task, and a second quote shows the start of the data, with secrets hidden. The line **If you approve** says what the agent does after Approve. **Technical details** shows the fingerprint, the user and the process chain. Press **Approve** to start the run. A run with `--mode=may-change` then works without asking for permission, when the agent has such a mode. A read-only run keeps its permission questions and all its read-only limits. Before it starts, the plugin checks again that the script is still on the list with the same fingerprint, that the file is unchanged and that the limits still allow the run. With no answer in the time you set, the run ends and starts nothing.
+A read-only call starts at once. It needs no approval, and it still counts against the limits. The **Activity tray** shows it as **Run started**. A call with `--mode=may-change` waits in the **Activity tray** as **Approve run**. The card shows the run title, the script path, the agent, the folder, the mode (**May change** is marked in amber, with the words) and the model, effort and key when set. A quote **Prompt** shows the full task, and a second quote shows the start of the data, with secrets hidden. The line **If you approve** says what the agent does after Approve. **Technical details** shows the fingerprint, the user and the process chain. If the run folder or an authorised folder is under `/mnt/user`, the approval warns that file locks or delays can affect other work on the share. This warning does not refuse the run. A listed folder stays read-only in a restricted run. Press **Approve** to start the run. A run with `--mode=may-change` then works without asking for permission, when the agent has such a mode. A read-only run keeps its permission questions and all its read-only limits. Before it starts, the plugin checks again that the script is still on the list with the same fingerprint, that the file is unchanged and that the limits still allow the run. With no answer in the time you set, the run ends and starts nothing.
 
-When the agent reports, the plugin saves the whole report in one Notebook card. The card has the run title as its name, and the key as a tag. Its first lines say where the result file is, and when the plugin removes the folder of a temporary run. A key reuses the same card on later runs. A run in a project folder that has a Notebook writes its card to the Notebook of that project. Every other run writes its card to the Global Notebook. In the Notebook, switch to **Global** to see those cards.
+When the agent reports, the plugin saves the whole report in one Notebook card. The card has the run title as its name, and the key as a tag. Its first lines say where the result file is, and when the plugin removes the folder of a temporary run. For a run as the restricted user, the card says that the result file is in the private folder of the plugin, which only root can read: the task folder of that run is removed when the run closes, so the card is the place to read the report. A key reuses the same card on later runs. A run in a project folder that has a Notebook writes its card to the Notebook of that project. Every other run writes its card to the Global Notebook. In the Notebook, switch to **Global** to see those cards.
 
 The Activity tray keeps a result notice. Press **Open note** on the notice to open the card. A card in the Global Notebook opens in a new tab, also when the workspace of the run is gone. The plugin cuts a report that is longer than 200 000 characters, and the card says so. The plugin closes the workspace after its report. It also closes a run that reaches the time limit.
 
@@ -122,7 +157,9 @@ The Activity tray keeps a result notice. Press **Open note** on the notice to op
 | Setting | What it does | Default | When to change it |
 | :-- | :-- | :-- | :-- |
 | **Let scripts start agent runs** | The master switch. Off refuses every call. | Off (default) | Turn it on when you add your first script. |
-| **Authorised scripts** | The scripts that may call. Each row shows a name and description. Select a row to see its file, fingerprint, agents, folders, mode and runs each day. | Empty | Add a script for each job. |
+| **Restricted run user** | The state of the Unraid user `aicli-run`, the SMB warnings, a password generator and the sign-in button. | Not created | Set it up once before the first restricted run. |
+| **Authorised scripts** | The scripts that may call. Each row shows a name and description. Select a row to see its file, fingerprint, agents, folders, mode, **Run as** and runs each day. | Empty | Add a script for each job. |
+| **Run as** (in an entry) | The users that the script may ask for: **aicli-run (restricted)**, **root**, or both. | **aicli-run (restricted)** | Tick **root** only for a trusted script that needs it. |
 | **Runs open at one time** | The most runs that are open together. | 2 | Raise it when scripts often overlap. |
 | **Runs each day** (all scripts) | The most runs that start in 24 hours. | 6 | Raise it for a busy server. |
 | **Wait before the same problem runs again** | Hours before a call with the same key starts a new run. | 24 | Lower it for a problem that needs a quick second look. |
@@ -136,7 +173,11 @@ The Activity tray keeps a result notice. Press **Open note** on the notice to op
 
 The plugin finds the calling script from the process list of the server, not from what the caller says. It compares the content of the file with the stored fingerprint. This protects you from a mistake, a stray script and a changed script. It does not protect you from a hostile program that runs as root, because such a program can fake its name. See C4 Code: Services (part 3 of 3) for the technical detail.
 
-The plugin reads the script from the file that the shell has open, and it looks only at the program directly above the command. A program that a listed script started is not that script. The plugin writes the task into a folder named `.aicli-task` inside the folder of the run, so a read-only run does add that one folder there. The data of a call goes to a private file in the plugin's own state folder, and the task names that file. The agent does not inherit the environment of the script.
+The plugin reads the script from the file that the shell has open, and it looks only at the program directly above the command. A program that a listed script started is not that script. For a run as root, the plugin writes the task into a folder named `.aicli-task` inside the folder of the run. For a restricted run, the plugin keeps the task, the data and the report in a private folder of its own, outside the run folder. The run folder does not hold task data or reports. The data of a call to a run as root goes to a private file in the plugin's own state folder, and the task names that file. The agent does not inherit the environment of the script.
+
+A restricted run starts inside a private view of the server. The plugin places a private temporary file system over `/mnt`, then exposes only the run folder and the folders listed on the authorised entry. Listed folders are read-only. The run folder is writable only for an allowed temporary run or a run that may change files. The plugin does not inspect `/mnt/user` unless the run folder or a listed folder is under it. The view has its own empty `/tmp`, and it hides the plugin's own state folder, the home of root, the control socket of Unraid and the terminal sockets of other workspaces. The plugin checks the view before the agent starts. If an unapproved mount is writable, the agent does not start. The terminal in the browser enters the same view. Only one restricted workspace (a run or the sign-in workspace) is open at a time, because they use one user. A second restricted call is held and the script may call again. The agent has no Relay and no admin tools, and the plugin does not project its own tools into the home of the run user. The plugin does not edit Unraid's user or system configuration files.
+
+In a may-change restricted run, the full `.git` and `.claude` directories, `.mcp.json` and `.aicli-run.json` stay read-only. The plugin may add empty `.git` or `.claude` directories when they are missing. The approval card says these paths stay read-only. A valid marker blocks a root start when it records a may-change restricted run. A temporary-run marker or a read-only restricted-run marker does not block a root start. A malformed or unsafe marker still blocks the start. The plugin checks the selected folder and its parents under `/mnt` for a marker. Review the folder contents, then remove a may-change restricted-run marker before you start it as root.
 
 ## If something goes wrong
 
@@ -148,11 +189,16 @@ The plugin reads the script from the file that the shell has open, and it looks 
 | Exit code 21, "No script file was found" | Someone typed the command in a shell, or used a pipe. | Put the command in a script file and add the file to the list. |
 | Exit code 22 | A run with the same key is open, or started a short time ago. | Wait, or use another key. |
 | Exit code 23 | A limit on runs, or the usage limit of the agent, holds the call. | Call again later. |
+| Exit code 23, "Only one restricted run is open at a time" | A restricted run is open, or the sign-in workspace is open. | Call again later, or close the sign-in workspace. |
+| Exit code 21, "The run user aicli-run is missing" (or another sentence about the run user) | The user is not set up as the plugin needs. | Follow the steps in **Set up the restricted run user**, or fix what the sentence names. |
+| Exit code 21, "may not run the agent as 'aicli-run'" | The entry allows only root. | Open the entry, press **Edit**, tick **aicli-run (restricted)** under **Run as**, and save. |
+| The workspace does not start as root and names `.aicli-run.json` | The folder was used by a restricted run. | Review the folder contents. Remove `.aicli-run.json` only when you are ready to let a root workspace use the folder. |
+| The reply has a note that the workspace did not start | The plugin could not make the private disk view, so it did not start the agent. The Activity tray names the fault. | Look at the Debug Console, then press **Restart** on the workspace. |
 | The entry shows **File changed** | The file differs from the stored fingerprint. | Open the entry and press **Trust the file as it is now**, if you made the change. |
 | The entry shows **Needs attention** | It points at a temporary User Scripts copy. | Open it and press **Switch to the original and trust it as it is now**. |
 | The entry shows **File missing** | The script file is not on the server. | Restore the file at the same path or remove the entry. |
 
-This version runs every agent as root. A restricted run user is not available yet.
+A run as `aicli-run` cannot write outside its disk view, but the user is still a normal member of the group `users`. A share with the SMB security Public or Secure is open to this user over the network. The warnings in the card tell you which shares to check.
 
 ## Related pages
 
@@ -163,7 +209,14 @@ This version runs every agent as root. A restricted run user is not available ye
 <details>
 <summary>Change history</summary>
 
+- **2026-11-08** — The card of a run as the restricted user says that the result file is in the private folder of the plugin, and a temporary run as the restricted user writes its card to the Global Notebook. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issues #745 and #915.
+- **2026-11-06** — May-change approvals name the protected `.git` and `.claude` directories, and warn when a run uses `/mnt/user` without refusing it. Root starts are blocked only by may-change restricted-run markers; temporary and read-only markers remain usable. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-11-06** — The result notice of a run has an **Open note** button. The card has the run title, the whole report and the place of the result file, and it goes to the project Notebook when the folder has one. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #915.
+- **2026-11-05** — A restricted run keeps known sign-in files when it closes. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
+- **2026-11-05** — A restricted run can reach public internet services, but cannot reach the Unraid server, local networks, Docker networks or VM networks. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
+- **2026-11-05** — A restricted run sees only its run folder and the folders on its authorised entry; other paths under `/mnt` stay hidden. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
+- **2026-11-04** — After a security review, a restricted run gets an empty private `/tmp`, does not see the plugin state, the home of root or the control sockets, reports through a small tool when it is read-only, and only one restricted workspace is open at a time. The terminal of a root workspace is closed to every group. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
+- **2026-11-04** — A script run uses the restricted user `aicli-run` by default. The card **Script runs** has the part **Restricted run user** (status, SMB warnings, password generator, sign-in button), and an entry has **Run as**. The agent starts in a private read-only disk view, keeps its task in a private folder and reports with `aicli-run-report`. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #745.
 - **2026-10-29** — The Activity tray draws an approval of a script as a card: name and path, a grid of facts, the script's own words as a quote, one line on what Approve allows, and closed **Technical details**. The title is short: **A script asks to start agents**. Spec `docs/specs/ACTIVITY_TRAY_PLAIN_NOTICES.md`.
 - **2026-10-29** — A run that may change files takes no follow-up message, and one run takes at most 10. A temporary folder must be inside a share that exists already. A script file under `/tmp` cannot ask for access. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issues #838, #839, #840.
 - **2026-10-29** — A script can ask to be put on the list with `aicli-run --request-access`, with the limits it needs. You accept or decline in the Activity tray. Spec `docs/specs/AGENT_RUN_ENTRY_POINT.md`, issue #838.

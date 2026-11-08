@@ -15,10 +15,20 @@ require_once __DIR__ . '/SessionLaunchLock.php';
 class TerminalService {
     /** Test seam: callable(string $name, string $path): bool for required runtime readiness. */
     public static $requiredRuntimeProbe = null;
+    /** Test-only overrides for the terminal programs and output paths. */
+    public static ?array $runtimeProgramsForTests = null;
+    public static ?array $startPathsForTests = null;
+    /** @var callable|null fn(string $command, string $log): int  Replaces ensure-session in tests. */
+    public static $ensureRunnerForTests = null;
+    /** Test seam: called with each bound path right after its owner and mode check, so a test can swap the path there. */
+    public static $bindCheckSwapForTests = null;
+    /** @var callable|null fn(array $argv, string $log, bool $truncate): int  Replaces detached ttyd launch in tests. */
+    public static $spawnRunnerForTests = null;
 
     /** Resolve the programs used by every terminal start and auto-launch sweep. */
     public static function requiredRuntimePrograms(): array
     {
+        if (defined('AICLI_TEST_TMP') && self::$runtimeProgramsForTests !== null) return self::$runtimeProgramsForTests;
         $ttyd = '/usr/bin/ttyd';
         if (!is_callable(self::$requiredRuntimeProbe)) {
             $foundTtyd = trim((string)shell_exec('timeout 2 which ttyd 2>/dev/null'));
@@ -125,15 +135,22 @@ class TerminalService {
     /** Forgejo #521: seconds between the stop signal and the kill signal. */
     public const ENSURE_KILL_AFTER_SECONDS = 5;
 
-    /** R-115: nginx (user nobody) reaches the ttyd socket as its owner; no other user needs it. */
-    public const TTYD_SOCKET_MODE = 0660;
+    /**
+     * R-115, finding 2 of the review of the run user: the socket belongs to nobody and the group root, mode 600. No group
+     * has access. Before, the group was users (mode 660), and the run user has the group users (gid 100), so a process of
+     * the run user could connect to the terminal of every root workspace and type into its agent. The web server of the
+     * Unraid page reaches the socket as its owner: the nginx.conf says "user root", and its workers run as nobody on
+     * the checked host. In both cases the owner of the socket (nobody) or root is the one that connects; mode 600 allows the owner
+     * and root. What could not be proven here: the live connect of the page terminal on the host (a live check in the spec).
+     */
+    public const TTYD_SOCKET_MODE = 0600;
 
-    /** R-115: restrict the ttyd socket to its owner (nobody) and group (users). */
+    /** R-115: restrict the ttyd socket to its owner (nobody). The group is root, which has no other member. */
     public static function secureTtydSocket(string $sock): void
     {
         @chmod($sock, self::TTYD_SOCKET_MODE);
         @chown($sock, 'nobody');
-        @chgrp($sock, 'users');
+        @chgrp($sock, 'root');
     }
 
     /** Wrap the ensure-session command so it can never block the start request forever. */
@@ -148,10 +165,288 @@ class TerminalService {
      * and umask 022 from the PHP process. Under aicli-run that process runs below the caller's script.
      * $envStr is already shell-quoted (KEY='value' words).
      */
-    public static function ensureSessionCommand(string $activeSrc, string $username, string $envStr, string $shell): string
+    public static function ensureSessionCommand(string $activeSrc, string $username, string $envStr, string $shell, array $mountView = []): string
     {
-        return '/bin/bash ' . escapeshellarg($activeSrc . '/scripts/aicli-clean-exec.sh') . ' runuser -u ' . escapeshellarg($username)
+        $command = '/bin/bash ' . escapeshellarg($activeSrc . '/scripts/aicli-clean-exec.sh') . ' runuser -u ' . escapeshellarg($username)
             . " -- env $envStr /bin/bash " . escapeshellarg($shell) . ' --ensure-session';
+        if ($mountView === []) return $command;
+        // A restricted run gets its own mount, PID and network namespaces. The
+        // namespace supervisor stays alive after tmux starts, so the detached
+        // server remains inside the PID space until the cgroup is stopped.
+        $folder = trim((string)($mountView['folder'] ?? ''));
+        if ($folder === '' || $folder[0] !== '/' || strpos($folder, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $folder) === 1) return '';
+        $writable = !empty($mountView['writable']) ? '1' : '0';
+        $ns = trim((string)($mountView['nsFile'] ?? ''));
+        if ($ns === '' || $ns[0] !== '/' || strpos($ns, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $ns) === 1) return '';
+        $pidNs = trim((string)($mountView['pidNsFile'] ?? ''));
+        if ($pidNs === '' || $pidNs[0] !== '/' || strpos($pidNs, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $pidNs) === 1) return '';
+        $id = (string)($mountView['workspaceId'] ?? '');
+        $netns = (string)($mountView['networkNamespace'] ?? '');
+        if (preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $id) !== 1 || $netns !== RunUserService::networkNamespaceName($id)) return '';
+        $resolverFile = RunUserService::resolverFile($id);
+        $netnsFile = RunUserService::networkNamespaceFile($id);
+        $userns = RunUserService::userNsFile($id);
+        $ipcNs = RunUserService::ipcNsFile($id);
+        $utsNs = RunUserService::utsNsFile($id);
+        if ($resolverFile === '' || $netnsFile === '' || $userns === '' || $ipcNs === '' || $utsNs === '') return '';
+        $state = trim((string)($mountView['stateRoot'] ?? ''));
+        if ($state === '' || $state[0] !== '/' || strpos($state, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $state) === 1) return '';
+        $uid = (int)($mountView['uid'] ?? 0);
+        $gid = (int)($mountView['gid'] ?? 0);
+        $home = trim((string)($mountView['home'] ?? ''));
+        if ($uid < 1000 || $gid !== 100 || $home === '' || $home[0] !== '/' || strpos($home, '..') !== false) return '';
+        $setpriv = RunUserService::runtimeToolPath('setpriv');
+        if ($setpriv === '') return '';
+        // #929: root binds the private, home and task folders of THIS workspace into the view. Each one is a path with the device
+        // and inode that PHP read when it checked the owner and mode. An empty or malformed value fails closed.
+        $ids = (array)($mountView['ids'] ?? []);
+        $privateDir = trim((string)($mountView['privateDir'] ?? ''));
+        $privateDirId = trim((string)($mountView['privateDirId'] ?? ''));
+        $homeId = trim((string)($ids[$home] ?? ''));
+        $taskDir = trim((string)($mountView['taskDir'] ?? ''));
+        $taskId = $taskDir === '' ? '-' : trim((string)($ids[$taskDir] ?? ''));
+        $tmuxDir = trim((string)($mountView['tmuxDir'] ?? ''));
+        $tmuxDirId = trim((string)($mountView['tmuxDirId'] ?? ''));
+        $hidden = [];
+        foreach ([[$privateDir, $privateDirId], [$home, $homeId]] as [$hiddenPath, $hiddenId]) {
+            if ($hiddenPath === '' || $hiddenPath[0] !== '/' || strpos($hiddenPath, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $hiddenPath) === 1
+                || preg_match('/^[0-9]+:[0-9]+$/D', $hiddenId) !== 1) return '';
+            $hidden[] = escapeshellarg($hiddenPath);
+            $hidden[] = escapeshellarg($hiddenId);
+        }
+        if ($taskDir === '') {
+            $hidden[] = escapeshellarg('-');
+            $hidden[] = escapeshellarg('-');
+        } else {
+            if ($taskDir[0] !== '/' || strpos($taskDir, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $taskDir) === 1
+                || preg_match('/^[0-9]+:[0-9]+$/D', $taskId) !== 1) return '';
+            $hidden[] = escapeshellarg($taskDir);
+            $hidden[] = escapeshellarg($taskId);
+        }
+        // #929: the root-only host folder of the tmux sockets, bound onto <state>/tmux/s-<id> in the view.
+        if ($tmuxDir === '' || $tmuxDir[0] !== '/' || strpos($tmuxDir, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $tmuxDir) === 1
+            || preg_match('/^[0-9]+:[0-9]+$/D', $tmuxDirId) !== 1) return '';
+        $hidden[] = escapeshellarg($tmuxDir);
+        $hidden[] = escapeshellarg($tmuxDirId);
+        $binds = '';
+        foreach (['rw' => (array)($mountView['rw'] ?? []), 'ro' => (array)($mountView['ro'] ?? [])] as $mode => $paths) {
+            foreach ($paths as $p) {
+                $p = (string)$p;
+                if ($p === '' || $p[0] !== '/' || strpos($p, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $p) === 1) return '';
+                $binds .= ' --' . $mode . '=' . escapeshellarg($p);
+            }
+        }
+        // L2: the device and inode that PHP read when it checked owner, mode and link count of each path. The script compares them
+        // with the path before it binds, so a file swapped after the PHP check is refused.
+        foreach ($ids as $p => $idText) {
+            $p = (string)$p;
+            $idText = (string)$idText;
+            if ($p === '' || $p[0] !== '/' || strpos($p, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $p) === 1 || preg_match('/^[0-9]+:[0-9]+$/D', $idText) !== 1) return '';
+            $binds .= ' --expect-id=' . escapeshellarg($idText . '=' . $p);
+        }
+        foreach ((array)($mountView['protect'] ?? []) as $p) {
+            $p = (string)$p;
+            if ($p === '' || $p[0] !== '/' || strpos($p, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $p) === 1) return '';
+            $binds .= ' --protect=' . escapeshellarg($p);
+        }
+        foreach ((array)($mountView['readFolders'] ?? []) as $p) {
+            $p = (string)$p;
+            if ($p === '' || $p[0] !== '/' || strpos($p, '..') !== false || preg_match('/[\x00-\x1F\x7F]/', $p) === 1) return '';
+            $binds .= ' --read-folder=' . escapeshellarg($p);
+        }
+        $inner = escapeshellarg($setpriv) . ' --no-new-privs --reset-env -- ' . self::restrictedEnvPrefix()
+            . ' HOME=' . escapeshellarg($home) . ' AICLI_HOME=' . escapeshellarg($home) . ' USER=' . escapeshellarg(RunUserService::USER)
+            . ' LOGNAME=' . escapeshellarg(RunUserService::USER) . ' AICLI_STATE_ROOT=' . escapeshellarg($state)
+            . ' AICLI_RESTRICTED_RUN=1 ' . $envStr . ' /bin/bash '
+            . escapeshellarg($shell) . ' --ensure-session';
+        $inner = '/bin/bash ' . escapeshellarg($activeSrc . '/scripts/aicli-run-command.sh') . ' '
+            . escapeshellarg((string)$uid) . ' ' . escapeshellarg((string)$gid) . ' -- ' . $inner;
+        return self::restrictedEnvPrefix() . ' nsenter -t 1 -m -- /bin/bash '
+            . escapeshellarg($activeSrc . '/scripts/aicli-run-view.sh') . ' ' . escapeshellarg($id) . ' ' . escapeshellarg($ns)
+            . ' ' . escapeshellarg($pidNs) . ' ' . escapeshellarg($ipcNs) . ' ' . escapeshellarg($utsNs)
+            . ' ' . escapeshellarg($userns) . ' ' . escapeshellarg($netns) . ' ' . escapeshellarg($id)
+            . ' ' . escapeshellarg((string)$uid) . ' ' . escapeshellarg((string)$gid) . ' ' . implode(' ', $hidden)
+            . ' --folder=' . escapeshellarg($folder) . ' --writable=' . $writable . ' --state-root=' . escapeshellarg($state)
+            . ' --resolv-file=' . escapeshellarg($resolverFile) . $binds . ' -- ' . $inner;
+    }
+
+    /**
+     * The paths that the view binds back into the private state tree (docs/specs/AGENT_RUN_ENTRY_POINT.md R17, finding 3).
+     * Writable: the work folder and home of the run user, the private task folder of this run, the tmux folder of this
+     * session (made here, owned by the run user) and the PHP cache folder of the run user. Read-only: this run's args.json
+     * and env.sh files, the tmux quirk file of the agent and the terminfo folder. The root-owned mode 0400 sign-in marker
+     * stays out of the view. A durable run marker prevents a
+     * damaged workspace record from starting the folder as root. A may-change folder also gets read-only .git and .claude
+     * directories, the marker and MCP config. Nothing else of the state tree is in the view: not the root home, not the logs,
+     * not the other runs.
+     *
+     * @param array<string,mixed> $runMeta
+     * @param array<string,mixed> $account the result of RunUserService::status()
+     * @return array{rw:list<string>,ro:list<string>,protect:list<string>,readFolders:list<string>}|null null when a path cannot be made safely
+     */
+    private static function runUserBindPaths(string $id, string $username, string $agentId, array $runMeta, array $account, string $folder, ?string &$failure = null): ?array
+    {
+        $failure = '';
+        $state = rtrim(SecretPaths::stateRoot(), '/');
+        $uid = (int)($account['uid'] ?? 0);
+        $gid = (int)($account['gid'] ?? 0);
+        if ($uid < 1000 || $gid < 1) { $failure = 'run-user uid or gid is invalid'; return null; }
+        $rw = [];
+        $ro = [];
+        // L2: the device and inode of each bound path come from the SAME lstat that checked its owner, mode and link count.
+        // A second lstat later would accept a path that was renamed between the check and that second lstat.
+        $ids = [];
+        $readFolders = RunUserService::validatedListedFolders((array)($runMeta['readFolders'] ?? []));
+        if ($readFolders === null) { $failure = 'an authorised read folder is invalid'; return null; }
+        $home = RunUserService::sessionHomePath($id);
+        $homeStat = @lstat($home);
+        if (!is_array($homeStat) || is_link($home) || ($homeStat['mode'] & 0170000) !== 0040000
+            || (int)$homeStat['uid'] !== $uid || (int)$homeStat['gid'] !== $gid || ($homeStat['mode'] & 0777) !== 0700) {
+            $observedUid = is_array($homeStat) ? (string)(int)$homeStat['uid'] : 'missing';
+            $observedGid = is_array($homeStat) ? (string)(int)$homeStat['gid'] : 'missing';
+            $observedMode = is_array($homeStat) ? sprintf('%04o', (int)$homeStat['mode'] & 0777) : 'missing';
+            $observedType = !is_array($homeStat) ? 'missing'
+                : ((($homeStat['mode'] & 0170000) === 0040000) ? 'directory' : (is_link($home) ? 'symlink' : 'not-directory'));
+            $failure = 'private home mismatch: expected directory uid=' . $uid . ' gid=' . $gid . ' mode=0700; observed type='
+                . $observedType . ' uid='
+                . $observedUid . ' gid=' . $observedGid . ' mode=' . $observedMode;
+            return null;
+        }
+        $rw[] = $home;
+        $ids[$home] = (int)$homeStat['dev'] . ':' . (int)$homeStat['ino'];
+        if (self::$bindCheckSwapForTests !== null) (self::$bindCheckSwapForTests)($home);
+        $taskDir = (string)($runMeta['taskDir'] ?? '');
+        if ($taskDir !== '') {
+            $taskStat = @lstat($taskDir);
+            if (!is_array($taskStat) || ($taskStat['mode'] & 0170000) !== 0040000 || is_link($taskDir) || dirname($taskDir) !== RunUserService::taskRoot()) {
+                $failure = 'the private task folder is invalid';
+                return null;
+            }
+            $rw[] = $taskDir;
+            $ids[$taskDir] = (int)$taskStat['dev'] . ':' . (int)$taskStat['ino'];
+            if (self::$bindCheckSwapForTests !== null) (self::$bindCheckSwapForTests)($taskDir);
+        }
+        // The tmux folder of this session (#929). The shared parent <state>/tmux is sticky and open (workspaces that run as other users
+        // share it), so the sockets of a restricted run must not live there. The real folder is <state>/run-tmux/s-<id> under a
+        // root-only parent. Root binds it onto the empty root-owned mount point <state>/tmux/s-<id>, the path that tmux uses in the view.
+        $tmuxRoot = $state . '/tmux';
+        if (!is_dir($tmuxRoot)) @mkdir($tmuxRoot, 01777, true);
+        @chmod($tmuxRoot, 01777);
+        if (!RunUserService::ensureRunTmuxRootHidden()) { $failure = 'the root-only tmux parent is not available'; return null; }
+        $tmuxHost = RunUserService::runTmuxDir($id);
+        if ($tmuxHost === '') { $failure = 'the tmux folder path is invalid'; return null; }
+        if (!file_exists($tmuxHost) && !is_link($tmuxHost)) @mkdir($tmuxHost, 0700);
+        $tst = @lstat($tmuxHost);
+        if ($tst === false || ($tst['mode'] & 0170000) !== 0040000 || is_link($tmuxHost)) {
+            $failure = 'the tmux folder is not a real folder';
+            return null;
+        }
+        if ((int)$tst['uid'] === 0 && !RunUserService::handOver($tmuxHost, $uid, $gid, 0700)) {
+            $failure = 'the tmux folder could not be handed to the run user';
+            return null;
+        }
+        $tst = @lstat($tmuxHost);
+        if ($tst === false || (int)$tst['uid'] !== $uid) { $failure = 'the tmux folder owner is invalid'; return null; }
+        if (!RunUserService::prepareTmuxMountPoint($id)) { $failure = 'the tmux mount point could not be made'; return null; }
+        $tmuxDir = RunUserService::tmuxMountPoint($id);
+        $rw[] = $tmuxDir;
+        $tmuxHostId = (int)$tst['dev'] . ':' . (int)$tst['ino'];
+        $ids[$tmuxDir] = $tmuxHostId;
+        if (self::$bindCheckSwapForTests !== null) (self::$bindCheckSwapForTests)($tmuxHost);
+        $privateDir = RunUserService::privateDir($id);
+        if ($privateDir === '' || !is_dir($privateDir)) { $failure = 'the private flags folder is missing'; return null; }
+        // M2: the folder is root-owned mode 0711. Only the two files below belong to the run user (mode 0400).
+        // #929: the identity of the folder comes from the same lstat that checks owner and mode. Root binds this folder into the view
+        // (the parent run-private is closed on the host) and refuses a folder that was swapped after this check.
+        $privateDirId = RunUserService::sealedPrivateDirIdentity($id);
+        if ($privateDirId === '') { $failure = 'the private flags folder owner or mode is invalid'; return null; }
+        foreach (['args.json', 'env.sh'] as $privateName) {
+            $privateFile = $privateDir . '/' . $privateName;
+            $privateStat = @lstat($privateFile);
+            if (!is_array($privateStat) || is_link($privateFile) || (($privateStat['mode'] & 0170000) !== 0100000)
+                || (int)$privateStat['uid'] !== $uid || (int)$privateStat['gid'] !== $gid
+                || (int)$privateStat['nlink'] !== 1 || (((int)$privateStat['mode'] & 0777) !== 0400)) {
+                $failure = 'a private flags file owner, mode, or link count is invalid';
+                return null;
+            }
+            $ro[] = $privateFile;
+            $ids[$privateFile] = (int)$privateStat['dev'] . ':' . (int)$privateStat['ino'];
+            if (self::$bindCheckSwapForTests !== null) (self::$bindCheckSwapForTests)($privateFile);
+        }
+        $quirk = TmuxService::getQuirkPath($agentId);
+        $quirkStat = @lstat($quirk);
+        if (is_array($quirkStat) && ($quirkStat['mode'] & 0170000) === 0100000 && !is_link($quirk)) {
+            $ro[] = $quirk;
+            $ids[$quirk] = (int)$quirkStat['dev'] . ':' . (int)$quirkStat['ino'];
+            if (self::$bindCheckSwapForTests !== null) (self::$bindCheckSwapForTests)($quirk);
+        }
+        $terminfo = $state . '/terminfo';
+        $terminfoStat = @lstat($terminfo);
+        if (is_array($terminfoStat) && ($terminfoStat['mode'] & 0170000) === 0040000 && !is_link($terminfo)) {
+            $ro[] = $terminfo;
+            $ids[$terminfo] = (int)$terminfoStat['dev'] . ':' . (int)$terminfoStat['ino'];
+            if (self::$bindCheckSwapForTests !== null) (self::$bindCheckSwapForTests)($terminfo);
+        }
+        $runId = (string)($runMeta['runId'] ?? $runMeta['runUserSignIn']['runId'] ?? '');
+        $protect = RunUserService::prepareFolderGuards($id, $folder, $runId, !empty($runMeta['mountWritable']));
+        if ($protect === null) { $failure = 'the workspace folder guard rejected the launch folder'; return null; }
+        return ['rw' => $rw, 'ro' => $ro, 'protect' => $protect, 'readFolders' => $readFolders, 'ids' => $ids,
+            'privateDir' => $privateDir, 'privateDirId' => $privateDirId, 'taskDir' => $taskDir,
+            'tmuxDir' => $tmuxHost, 'tmuxDirId' => $tmuxHostId];
+    }
+
+    /**
+     * The environment of a restricted run as shell `export` lines, built by root from the same five tiers as
+     * effective-env-export.php (finding 12). The run user cannot read the vault, so it reads this file instead.
+     */
+    private static function restrictedEnvText(string $rootDir, string $agentId): string
+    {
+        $builder = method_exists(EnvService::class, 'buildLaunchEnv') ? 'buildLaunchEnv' : 'buildEffectiveEnv';
+        $text = '';
+        $env = EnvService::$builder($rootDir !== '' ? $rootDir : null, $agentId);
+        foreach ((array)$env as $key => $value) {
+            $key = (string)$key;
+            if (EnvService::isReservedKey($key) || preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $key) !== 1) continue;
+            $text .= 'export ' . $key . '=' . escapeshellarg((string)$value) . "\n";
+        }
+        return $text;
+    }
+
+    /**
+     * The command that starts the browser bridge (ttyd) of a restricted workspace: it first enters the view of the
+     * workspace, then runs the shell as the run user. $inner is the usual `runuser -u <user> -- env ... /bin/bash <shell>`.
+     * An empty string means that the view is missing, and the bridge must not start outside it.
+     */
+    public static function attachInViewCommand(string $nsFile, string $inner, string $workspaceId = ''): string
+    {
+        $id = preg_replace('/[^A-Za-z0-9_-]/', '', $workspaceId);
+        $mnt = RunUserService::nsFile($id);
+        $pidNs = RunUserService::pidNsFile($id);
+        $ipcNs = RunUserService::ipcNsFile($id);
+        $utsNs = RunUserService::utsNsFile($id);
+        $userns = RunUserService::childUserNsFile($id);
+        $netnsFile = RunUserService::networkNamespaceFile($id);
+        $nsenter = RunUserService::runtimeToolPath('nsenter');
+        $setpriv = RunUserService::runtimeToolPath('setpriv');
+        $account = RunUserService::status();
+        $files = [$mnt, $pidNs, $ipcNs, $utsNs, $userns, $netnsFile];
+        $filesReady = count(array_filter($files, static fn(string $file): bool => is_file($file) && !is_link($file))) === count($files);
+        if ($id === '' || $id !== $workspaceId || $nsFile !== $mnt || in_array('', $files, true)
+            || $nsenter === '' || $setpriv === '' || !$filesReady || empty($account['ready'])) return '';
+        return self::restrictedEnvPrefix() . ' /bin/bash ' . escapeshellarg(dirname(__DIR__, 2) . '/scripts/aicli-run-cgroup.sh')
+            . ' join ' . escapeshellarg($id) . ' ' . escapeshellarg($setpriv)
+            . ' --clear-groups --no-new-privs --'
+            . ' ' . escapeshellarg($nsenter) . ' --user=' . escapeshellarg($userns)
+            . ' --mount=' . escapeshellarg($mnt) . ' --pid=' . escapeshellarg($pidNs)
+            . ' --ipc=' . escapeshellarg($ipcNs) . ' --uts=' . escapeshellarg($utsNs)
+            . ' --net=' . escapeshellarg($netnsFile) . ' -S ' . escapeshellarg((string)(int)$account['uid'])
+            . ' -G ' . escapeshellarg((string)(int)$account['gid']) . ' --fork -- ' . $inner;
+    }
+
+    /** The empty environment with the allow list of a restricted run: a fixed PATH, TERM and LANG, nothing else. */
+    public static function restrictedEnvPrefix(): string
+    {
+        return 'env -i PATH=' . escapeshellarg(RunUserService::FIXED_PATH) . ' TERM=xterm-256color LANG=C.UTF-8';
     }
 
     /** True when `timeout` ended the command: 124 = stop signal, 137 = kill signal. */
@@ -187,6 +482,23 @@ class TerminalService {
      */
     public static function recordStartFailure(string $actId, string $agentName, string $sentence, string $recovery, array $meta, string $step = ''): void
     {
+        $workspaceId = (string)($meta['sessionId'] ?? '');
+        if ($workspaceId !== '') {
+            $restricted = RunUserService::isMarkedRestricted($workspaceId);
+            $runUserWorkspace = !empty($meta['_runUserWorkspace']) || $restricted;
+            $isSignInWorkspace = !empty($meta['_runUserSignIn']);
+            unset($meta['_runUserWorkspace'], $meta['_runUserSignIn']);
+            if ($restricted && $runUserWorkspace && !$isSignInWorkspace) {
+                // The start's captured state is authoritative even if its workspace record has since been removed.
+                RunUserService::clearSigninMarker($workspaceId);
+            }
+            if ($restricted) RunUserService::releaseWorkspace($workspaceId, $isSignInWorkspace);
+            // If release could not stop or save a sign-in run, it keeps the restricted mark and marker for retry.
+            // A failed start with no live restricted runtime must not leave a marker for a later non-sign-in run.
+            if ($runUserWorkspace) {
+                if (!RunUserService::isMarkedRestricted($workspaceId)) RunUserService::clearSigninMarker($workspaceId);
+            }
+        }
         $old = ActivityService::get($actId);
         ActivityService::register($actId, 'start', "$agentName did not start", [
             'status'   => 'failed',
@@ -260,17 +572,20 @@ class TerminalService {
         try {
             $agentName = UtilityService::trayAgentName($t['agentId']);
             self::recordStartFailure("start_$id", $agentName, "$agentName did not finish starting.", self::START_RECOVERY,
-                ['sessionId' => $id, 'agentId' => $t['agentId']]);
+                ['sessionId' => $id, 'agentId' => $t['agentId'],
+                    '_runUserWorkspace' => !empty($t['_runUserWorkspace']), '_runUserSignIn' => !empty($t['_runUserSignIn'])]);
         } catch (\Throwable $e) {
             // The log line above is the record. The tray is a courtesy.
         }
     }
 
     /** Set the trap for SIGTERM when the pcntl extension exists. Nested calls share one trap. */
-    private static function armLaunchTrap(string $id, string $agentId): void
+    private static function armLaunchTrap(string $id, string $agentId, array $runUserContext = []): void
     {
         if (self::$launchTrapDepth++ > 0) return;   // the outer launch owns the trap
-        self::$launchTrap = ['id' => $id, 'agentId' => $agentId, 'phase' => 'preparing'];
+        self::$launchTrap = ['id' => $id, 'agentId' => $agentId, 'phase' => 'preparing',
+            '_runUserWorkspace' => !empty($runUserContext['runUserWorkspace']),
+            '_runUserSignIn' => !empty($runUserContext['runUserSignIn'])];
         if (!function_exists('pcntl_signal') || !function_exists('pcntl_async_signals') || !defined('SIGTERM')) return;
         self::$launchTrapAsync = pcntl_async_signals();
         pcntl_async_signals(true);
@@ -299,16 +614,26 @@ class TerminalService {
 
     /** startTerminal() body. Call it only while this process holds the workspace's SessionLaunchLock. */
     private static function startTerminalLocked($id, $path, $chatId, $agentId, string $origin): array {
-        self::armLaunchTrap((string)$id, (string)$agentId);
+        $workspaceRecord = SpawnService::findRecord((string)$id);
+        $spawnMeta = is_array($workspaceRecord['spawn'] ?? null) ? $workspaceRecord['spawn'] : [];
+        $runMeta = is_array($spawnMeta['run'] ?? null) ? $spawnMeta['run'] : (is_array($spawnMeta['runUserSignIn'] ?? null) ? $spawnMeta['runUserSignIn'] : []);
+        $isRunUserSignIn = is_array($spawnMeta['runUserSignIn'] ?? null);
+        $markedRestricted = RunUserService::isMarkedRestricted((string)$id);
+        $runUserView = $isRunUserSignIn || (string)($workspaceRecord['runAs'] ?? '') === RunUserService::USER
+            || (string)($runMeta['runAs'] ?? '') === RunUserService::USER || $markedRestricted;
+        $runUserContext = ['record' => $workspaceRecord, 'spawn' => $spawnMeta, 'runMeta' => $runMeta,
+            'isRunUserSignIn' => $isRunUserSignIn, 'markedRestricted' => $markedRestricted,
+            'runUserWorkspace' => $runUserView, 'runUserSignIn' => $isRunUserSignIn];
+        self::armLaunchTrap((string)$id, (string)$agentId, $runUserContext);
         try {
-            return self::startTerminalSteps($id, $path, $chatId, $agentId, $origin);
+            return self::startTerminalSteps($id, $path, $chatId, $agentId, $origin, $runUserContext);
         } finally {
             self::disarmLaunchTrap();
         }
     }
 
     /** The steps of a start. Called by startTerminalLocked() only. */
-    private static function startTerminalSteps($id, $path, $chatId, $agentId, string $origin): array {
+    private static function startTerminalSteps($id, $path, $chatId, $agentId, string $origin, array $runUserContext): array {
         LogService::log("Initiating console session sequence for: $id (Agent: $agentId)...", LogService::LOG_INFO, "TerminalService");
         
         // 1. Pre-launch checks
@@ -408,10 +733,13 @@ class TerminalService {
         $startLabel = ($reattach ? 'Reconnecting to ' : 'Starting ') . $agentName;
         $wsGrey = $wsName !== '' ? $wsName : (string)$id;
         $startStep = static fn(string $words): string => self::startStepText($wsGrey, $words);
-        $startMeta = ['sessionId' => $id, 'agentId' => $agentId, 'path' => (string)($path ?? ''), 'origin' => $origin, 'reattach' => $reattach];
+        $startMeta = ['sessionId' => $id, 'agentId' => $agentId, 'path' => (string)($path ?? ''), 'origin' => $origin, 'reattach' => $reattach,
+            '_runUserWorkspace' => !empty($runUserContext['runUserWorkspace']),
+            '_runUserSignIn' => !empty($runUserContext['runUserSignIn'])];
+        $activityMeta = $startMeta;
+        unset($activityMeta['_runUserWorkspace'], $activityMeta['_runUserSignIn']);
         ActivityService::register($actId, 'start', $startLabel, [
-            'step' => $startStep('Preparing environment'), 'progress' => 5,
-            'meta' => $startMeta,
+            'step' => $startStep('Preparing environment'), 'progress' => 5, 'meta' => $activityMeta,
         ]);
 
         if (!$agent) {
@@ -438,9 +766,10 @@ class TerminalService {
             $activeSrc = '/usr/local/emhttp/plugins/unraid-aicliagents/src';
         }
         $shell = $activeSrc . "/scripts/aicli-shell.sh";
-        $sock = "/var/run/aicliterm-$id.sock";
-        $pidFile = "/var/run/unraid-aicliagents-$id.pid";
-        $logFile = "/tmp/ttyd-$id.log";
+        $testPaths = defined('AICLI_TEST_TMP') ? (self::$startPathsForTests ?? []) : [];
+        $sock = (string)($testPaths['socket'] ?? "/var/run/aicliterm-$id.sock");
+        $pidFile = (string)($testPaths['pid'] ?? "/var/run/unraid-aicliagents-$id.pid");
+        $logFile = (string)($testPaths['log'] ?? "/tmp/ttyd-$id.log");
 
         // Record this session's agent + workspace path to the parallel
         // /var/run metadata files. ProcessManager::stopTerminal already
@@ -480,6 +809,71 @@ class TerminalService {
 
         LogService::log("Found ttyd at: $ttyd", LogService::LOG_DEBUG, "TerminalService");
 
+        // R16: the workspace record and sign-in flag were captured before the launch trap was armed.
+        $workspaceRecord = $runUserContext['record'];
+        $spawnMeta = $runUserContext['spawn'];
+        $runMeta = $runUserContext['runMeta'];
+        $isRunUserSignIn = $runUserContext['isRunUserSignIn'];
+        // The mark is read from two places. A browser save can resend a record without the top-level field (the merge keeps
+        // only the spawn marks), and a missing mark would start the agent as root, outside the private disk view.
+        // Finding 11: and from a root-only mark in /var/run that the first restricted start wrote. A record that is gone (a
+        // damaged workspace file reads as an empty list) must not turn the workspace into one that starts as root.
+        $markedRestricted = $runUserContext['markedRestricted'];
+        $runUserView = $runUserContext['runUserWorkspace'];
+        if (!$runUserView && RunUserService::folderHasMayChangeRunMarker((string)$path)) {
+            LogService::log("Start of $id refused: the folder holds a marker from a restricted run that could change files.", LogService::LOG_ERROR, 'TerminalService');
+            self::recordStartFailure($actId, $agentName, 'This folder has a marker from a restricted run that could change files. Review the folder contents, then remove .aicli-run.json before you start it as root.', self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'run_user_folder_marker'];
+        }
+        if ($markedRestricted && $workspaceRecord === null) {
+            LogService::log("Start of $id refused: it is marked as a restricted run, but its workspace record is gone.", LogService::LOG_ERROR, 'TerminalService');
+            self::recordStartFailure($actId, $agentName, 'This workspace was a restricted script run, and its record is gone, so it was not started.', self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'run_user_record_missing'];
+        }
+        if (!$runUserView && $workspaceRecord === null && !empty($path)) {
+            // A folder under the temporary root with no record at all is the leftover of a restricted run, not a place for root.
+            $tempRoot = AgentRunService::tempRoot();
+            if (!isset($tempRoot['error']) && strpos((string)$path, rtrim((string)$tempRoot['path'], '/') . '/') === 0) {
+                LogService::log("Start of $id refused: no record, and the folder is a temporary run folder.", LogService::LOG_ERROR, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, 'This folder is a temporary run folder, and the workspace has no record, so it was not started.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_record_missing'];
+            }
+        }
+        if ($runUserView) {
+            // Only one restricted workspace is open at a time: they share one user id (finding 10). The check and the root-only
+            // mark are made under one lock (finding 15 of the second review).
+            $other = RunUserService::claimRestrictedStart((string)$id);
+            if ($other !== '') {
+                LogService::log("Start of $id refused: the restricted workspace $other is open.", LogService::LOG_WARN, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, 'Another script run as aicli-run is open. Only one runs at a time. Start this one when the other has closed.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_busy'];
+            }
+            // Findings 2 and 5 of the second review: no process of the run user is alive before the start, and the firewall
+            // rule that keeps it away from the services of this host is in place. Fail closed.
+            $notReady = RunUserService::readyForRestrictedStart(ProcessManager::isRunning((string)$id));
+            if ($notReady !== '') {
+                LogService::log("Start of $id refused: $notReady", LogService::LOG_ERROR, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, $notReady, self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_not_ready'];
+            }
+        }
+        if ($runUserView) {
+            $runUserStatus = RunUserService::status();
+            if (empty($runUserStatus['ready'])) {
+                LogService::log("Start of $id refused: " . (string)$runUserStatus['fault'], LogService::LOG_WARN, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, (string)$runUserStatus['fault'], self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_not_ready'];
+            }
+            if ($origin !== self::ORIGIN_BRIDGE_WARM && !ProcessManager::isRunning((string)$id)) {
+                $runtime = RunUserService::prepareRuntime((string)$id);
+                if (empty($runtime['ok'])) {
+                    LogService::log("Start of $id refused: " . (string)$runtime['reason'], LogService::LOG_ERROR, 'TerminalService');
+                    self::recordStartFailure($actId, $agentName, (string)$runtime['reason'], self::START_RECOVERY, $startMeta);
+                    return ['ok' => false, 'reason' => 'run_user_runtime_failed'];
+                }
+            }
+        }
+
         // D-195 / Bug #1053: any configured user that is not present in
         // /etc/passwd falls back to 'root'. ManagerConfigTab's user dropdown
         // historically saved the option INDEX (e.g. "4") instead of the
@@ -487,10 +881,10 @@ class TerminalService {
         // from the system since the setting was saved. Without this fallback,
         // runuser fails with "user X does not exist" and every terminal then
         // surfaces as "Terminal session not found".
-        $username = (string) ($config['user'] ?? '');
-        $userValid = $username !== ''
+        $username = $runUserView ? RunUserService::USER : (string) ($config['user'] ?? '');
+        $userValid = $runUserView || ($username !== ''
             && function_exists('posix_getpwnam')
-            && is_array(@posix_getpwnam($username));
+            && is_array(@posix_getpwnam($username)));
         if (!$userValid) {
             if ($username !== '' && $username !== 'root') {
                 LogService::log("Configured user '$username' does not exist on this system — falling back to root (Bug #1053)",
@@ -522,10 +916,17 @@ class TerminalService {
             @mkdir($userWorkDir, 0755, true);
         }
         $pw = function_exists('posix_getpwnam') ? @posix_getpwnam($username) : null;
-        if (is_array($pw)) {
+        // Finding 5 of the second review: root never changes the owner or mode of a path that the run user can replace with a
+        // link (chown and chmod follow a link). The folder is changed only while ROOT owns it: the run user cannot swap a
+        // folder that root owns, in the sticky parent. A link, or a folder that already belongs to the user, is left alone.
+        $workStat = @lstat($userWorkDir);
+        $rootOwnsWork = is_array($workStat) && !is_link($userWorkDir) && (int)$workStat['uid'] === 0 && ($workStat['mode'] & 0170000) === 0040000;
+        if (is_array($pw) && $rootOwnsWork) {
             @chown($userWorkDir, $pw['uid']);
             @chgrp($userWorkDir, $pw['gid']);
             @chmod($userWorkDir, 0755);
+        }
+        if (is_array($pw)) {
             // TERMINAL_FAST_ATTACH.md S5: the PHP file-cache folder of this user. Only root can make it.
             UtilityService::ensurePhpCacheDirFor((int)$pw["uid"]);
         }
@@ -570,13 +971,20 @@ class TerminalService {
             // when an administrator toggled a setting can be absent here — most
             // often because that projection ran against an unmounted home and
             // silently no-opped. Never blocks the launch.
-            \AICliAgents\Services\Hub\HubProjector::projectForLaunch((string)$agentId);
+            if ($runUserView) {
+                if ($isRunUserSignIn && !RunUserService::markSigninWorkspace((string)$id)) {
+                    self::recordStartFailure($actId, $agentName, 'A private sign-in marker could not be saved, so the sign-in workspace was not started.', self::START_RECOVERY, $startMeta);
+                    return ['ok' => false, 'reason' => 'run_user_signin_marker_failed'];
+                }
+            } else {
+                \AICliAgents\Services\Hub\HubProjector::projectForLaunch((string)$agentId);
+            }
 
             // Always-on Relay: give a never-configured workspace its default
             // subscription document now, so it actually receives messages.
             // Idempotent — an existing document, including a deliberately empty
-            // one, is left alone.
-            try { AgentRelayService::ensureWorkspaceSubscription((string)$id); }
+            // one, is left alone. A run as the run user has no Relay.
+            try { if (!$runUserView) AgentRelayService::ensureWorkspaceSubscription((string)$id); }
             catch (\Throwable $e) { LogService::log("Relay default subscription for $id failed: " . $e->getMessage(), LogService::LOG_WARN, "TerminalService"); }
         }
 
@@ -613,7 +1021,8 @@ class TerminalService {
             LogService::log("Start fresh for $id: $agentId at $path is shared with another open workspace, so folder-wide conversation discovery cannot be trusted", LogService::LOG_INFO, "TerminalService");
         }
 
-        if ($agentId === 'claude-code') {
+        if ($agentId === 'claude-code' && !$runUserView) {
+            // For the run user, the child process of run-user-prepare.php does this as the run user (finding 4).
             ClaudePluginPathService::repairHome(UtilityService::getWorkDir($username) . '/home');
         }
 
@@ -646,7 +1055,7 @@ class TerminalService {
                 $agent['resume_latest'] ?? ''
             ),
             'ENV_PREFIX'        => $agent['env_prefix'] ?? '',
-            'AICLI_HOME'        => UtilityService::getWorkDir($username) . "/home",
+            'AICLI_HOME'        => $runUserView ? RunUserService::sessionHomePath((string)$id) : UtilityService::getWorkDir($username) . "/home",
             'AICLI_ROOT'        => $path ?: '/mnt',
             // #110: the directory the agent actually runs IN. Identical to the
             // workspace path unless the operator opted into the pool path for
@@ -692,6 +1101,61 @@ class TerminalService {
         // BINARY, …) set above; the agent still gets its full env, just from the
         // environment (RUN_SCRIPT), never argv. See ENV_AND_SECRETS_TIERS.md.
 
+        if ($runUserView) {
+            // R18: a run as the run user cannot run the root commands and cannot read the plugin state, so it gets neither
+            // command. It gets the private task folder and the mark that the shell reads (it never creates a session).
+            unset($env['AICLI_RELAY_COMMAND'], $env['AICLI_ADMIN_COMMAND']);
+            $env['AICLI_TASK_DIR'] = (string)($runMeta['taskDir'] ?? '');
+            $env['AICLI_RESTRICTED_RUN'] = '1';
+            // Findings 7 and 12: root writes the flags and environment in a private folder. Before a new run starts,
+            // it hands only args.json and env.sh to aicli-run as read-only files. A bridge reconnect reuses the sealed files.
+            $privateDir = RunUserService::privateDir((string)$id);
+            $privateFilesReady = $privateDir !== '';
+            if ($privateFilesReady && $origin !== self::ORIGIN_BRIDGE_WARM) {
+                $argsSource = ArgsService::getIdArgsPath((string)$id);
+                $argsJson = is_file($argsSource) ? (string)@file_get_contents($argsSource) : '';
+                if ($argsJson === '' || json_decode($argsJson, true) === null) $argsJson = '{"args":""}';
+                $envText = self::restrictedEnvText((string)$path, (string)$agentId);
+                $privateFilesReady = RunUserService::writePrivateFile((string)$id, 'args.json', $argsJson)
+                    && RunUserService::writePrivateFile((string)$id, 'env.sh', $envText);
+            }
+            if (!$privateFilesReady || !RunUserService::preparePrivateDirForRunUser((string)$id, (int)$runUserStatus['uid'], (int)$runUserStatus['gid'])) {
+                LogService::log("Start of $id refused: the private flags and environment of the run could not be written.", LogService::LOG_ERROR, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, 'The private flags and environment of this run could not be written, so it was not started.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_private_failed'];
+            }
+            $env['AICLI_ARGS_ID_FILE'] = $privateDir . '/args.json';
+            $env['AICLI_ENV_FILE'] = $privateDir . '/env.sh';
+
+            // Create the private HOME after writePrivateFile() has replaced any old
+            // run-user-owned private folder. The HOME has its own path, but the
+            // view must validate it only after all start-time resets are complete.
+            // R16: the run user copies known sign-in files, then projects the user's
+            // Config Hub choices into this fresh home. A failure stops the start.
+            $runUserHome = RunUserService::sessionHomePath((string)$id);
+            $agentAlreadyRunning = $origin === self::ORIGIN_BRIDGE_WARM || ProcessManager::isRunning((string)$id);
+            $reusedSigninHome = false;
+            if (!$agentAlreadyRunning) {
+                if (is_array($spawnMeta['runUserSignIn'] ?? null)) {
+                    $runUserHome = RunUserService::existingSessionHome((string)$id, (int)$runUserStatus['uid'], (int)$runUserStatus['gid']);
+                    $reusedSigninHome = $runUserHome !== '';
+                }
+                if (!$reusedSigninHome) $runUserHome = RunUserService::prepareSessionHome((string)$id, (int)$runUserStatus['uid'], (int)$runUserStatus['gid']);
+            }
+            if ($runUserHome === '' || !is_dir($runUserHome) || is_link($runUserHome)) {
+                self::recordStartFailure($actId, $agentName, 'A fresh private home could not be made for this run.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_home_failed'];
+            }
+            $authHome = UtilityService::getWorkDir(RunUserService::USER) . '/home';
+            $prepared = ($agentAlreadyRunning || $reusedSigninHome)
+                ? ['ok' => true, 'reason' => $agentAlreadyRunning ? 'agent_alive' : 'reused_signin_home']
+                : RunUserService::prepareHomeAsRunUser((string)$agentId, $runUserHome, (string)$id, $authHome);
+            if (empty($prepared['ok'])) {
+                LogService::log("Run-user home preparation for $id failed ({$prepared['reason']}); the agent was not started.", LogService::LOG_ERROR, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, 'The sign-in files or Config Hub choices could not be prepared for this run.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_home_prepare_failed'];
+            }
+        }
         $envStrParts = [];
         foreach ($env as $k => $v) {
             $envStrParts[] = "$k=" . escapeshellarg($v);
@@ -708,7 +1172,35 @@ class TerminalService {
         // browser, so it survives the deploy and the sweep. ttyd's later attach
         // (interactive mode, on browser-connect) just connects to the live session.
         // Idempotent: if the session already exists this is a fast no-op.
-        $ensureCmd = self::ensureSessionCommand($activeSrc, $username, $envStr, $shell);
+        $mountView = [];
+        $viewNs = '';
+        $bindFailure = '';
+        $paths = null;   // set only for a run-user view; the failure text below reads it
+        if ($runUserView) {
+            // A bridge-only start keeps the view that the running agent has. Any other start builds a new view first.
+            $viewNs = $origin === self::ORIGIN_BRIDGE_WARM ? RunUserService::existingView((string)$id)
+                : RunUserService::prepareView((string)$id, $isRunUserSignIn);
+            $paths = $viewNs !== '' ? ($origin === self::ORIGIN_BRIDGE_WARM ? ['rw' => [], 'ro' => [], 'protect' => [], 'readFolders' => []] : self::runUserBindPaths((string)$id, $username, (string)$agentId, $runMeta, $runUserStatus, (string)$env['AICLI_CWD'], $bindFailure)) : null;
+            $sessionHome = RunUserService::sessionHomePath((string)$id);
+            $mountView = ['folder' => (string)$env['AICLI_CWD'], 'writable' => !empty($runMeta['mountWritable']), 'nsFile' => $viewNs,
+                'workspaceId' => (string)$id, 'pidNsFile' => RunUserService::pidNsFile((string)$id),
+                'networkNamespace' => RunUserService::networkNamespaceName((string)$id), 'uid' => (int)$runUserStatus['uid'],
+                'gid' => (int)$runUserStatus['gid'], 'home' => $sessionHome,
+                'stateRoot' => SecretPaths::stateRoot(), 'rw' => $paths['rw'] ?? [], 'ro' => $paths['ro'] ?? [], 'protect' => $paths['protect'] ?? [],
+                'readFolders' => $paths['readFolders'] ?? [], 'ids' => $paths['ids'] ?? [],
+                'privateDir' => $paths['privateDir'] ?? '', 'privateDirId' => $paths['privateDirId'] ?? '', 'taskDir' => $paths['taskDir'] ?? '',
+                'tmuxDir' => $paths['tmuxDir'] ?? '', 'tmuxDirId' => $paths['tmuxDirId'] ?? ''];
+            if ($viewNs === '' || $paths === null) $mountView['folder'] = '';   // fail closed below
+        }
+        $ensureCmd = self::ensureSessionCommand($activeSrc, $username, $envStr, $shell, $mountView);
+        if ($ensureCmd === '' && ($origin !== self::ORIGIN_BRIDGE_WARM || $viewNs === '')) {
+            // Fail closed: no private disk view, no agent. (A bridge reconnect runs no ensure command; it needs only the existing view.)
+            $viewFailure = $viewNs === '' ? 'namespace setup did not produce a view'
+                : ($paths === null ? ($bindFailure !== '' ? $bindFailure : 'the bind paths are invalid') : 'the view command inputs are invalid');
+            LogService::log("Start of $id refused: the folder for the private disk view is not valid ($viewFailure).", LogService::LOG_ERROR, 'TerminalService');
+            self::recordStartFailure($actId, $agentName, 'The private read-only disk view could not be prepared for this run.', self::START_RECOVERY, $startMeta);
+            return ['ok' => false, 'reason' => 'run_user_view_invalid'];
+        }
         $ensureLog = SecretPaths::stateRoot() . "/ensure-$id.log";
         ActivityService::update($actId, ['step' => $startStep('Launching agent'), 'progress' => 60]);
         $ensureRc = 0;
@@ -720,7 +1212,11 @@ class TerminalService {
             LogService::log("Bridge warm-up for $id: tmux session is live — launching the terminal bridge only.", LogService::LOG_INFO, "TerminalService");
         } else {
         LogService::log("Ensuring detached agent session (headless): $ensureCmd", LogService::LOG_DEBUG, "TerminalService");
-        exec(self::wrapEnsureTimeout($ensureCmd) . " > " . escapeshellarg($ensureLog) . " 2>&1", $ensureOut, $ensureRc);
+        if (defined('AICLI_TEST_TMP') && is_callable(self::$ensureRunnerForTests)) {
+            $ensureRc = (int)(self::$ensureRunnerForTests)($ensureCmd, $ensureLog);
+        } else {
+            exec(self::wrapEnsureTimeout($ensureCmd) . " > " . escapeshellarg($ensureLog) . " 2>&1", $ensureOut, $ensureRc);
+        }
         }
         if ($origin === self::ORIGIN_BRIDGE_WARM) {
             // No ensure-session ran; nothing to report.
@@ -732,6 +1228,11 @@ class TerminalService {
         } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
             LogService::log("ensure-session returned rc=$ensureRc for $id. Start aborted before ttyd. tail: $tail", LogService::LOG_ERROR, "TerminalService");
+            if ($runUserView) {
+                // R17: when the private disk view cannot be made, no agent starts (nothing runs outside the view).
+                self::recordStartFailure($actId, $agentName, 'The private read-only disk view could not be prepared for this run. Check the Debug Console.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_view_failed'];
+            }
             self::recordStartFailure($actId, $agentName, self::startFailureSentence('ensure_failed', $agentName), self::START_RECOVERY, $startMeta);
             return ['ok' => false, 'reason' => 'ensure_failed'];
         } else {
@@ -739,10 +1240,34 @@ class TerminalService {
         }
 
         self::launchStep('after ensure-session, before the ttyd start');
-        // D-207: Use runuser -u (non-login) to maintain inherited env if possible,
-        // but explicitly inject all AICli variables via the 'env' command wrapper.
-        $cmd = "$ttyd -i " . escapeshellarg($sock) . " -p 0 -W -d0 " .
-               "runuser -u " . escapeshellarg($username) . " -- env $envStr /bin/bash " . escapeshellarg($shell);
+        if ($runUserView) {
+            $account = RunUserService::status();
+            $home = RunUserService::sessionHomePath((string)$id);
+            $setpriv = RunUserService::runtimeToolPath('setpriv');
+            $env = RunUserService::runtimeToolPath('env');
+            if ($setpriv === '' || $env === '') {
+                self::recordStartFailure($actId, $agentName, 'A required isolation tool is missing, so this restricted workspace was not started.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_tool_missing'];
+            }
+            $inner = escapeshellarg($setpriv) . ' --no-new-privs --reset-env -- ' . escapeshellarg($env) . ' -i PATH='
+                . escapeshellarg(RunUserService::FIXED_PATH) . ' TERM=xterm-256color LANG=C.UTF-8 HOME=' . escapeshellarg($home)
+                . ' AICLI_HOME=' . escapeshellarg($home) . ' USER=' . escapeshellarg(RunUserService::USER) . ' LOGNAME=' . escapeshellarg(RunUserService::USER)
+                . ' AICLI_STATE_ROOT=' . escapeshellarg(SecretPaths::stateRoot()) . ' AICLI_RESTRICTED_RUN=1 '
+                . $envStr . ' /bin/bash ' . escapeshellarg($shell);
+        } else {
+            // Root and other configured users retain the existing terminal path.
+            $inner = "runuser -u " . escapeshellarg($username) . " -- env $envStr /bin/bash " . escapeshellarg($shell);
+        }
+        if ($runUserView) {
+            // The browser shell joins the same cgroup and saved namespaces as the detached agent.
+            $inner = self::attachInViewCommand($viewNs, $inner, (string)$id);
+            if ($inner === '') {
+                LogService::log("Start of $id refused: the view of the restricted run is missing, so the terminal cannot attach.", LogService::LOG_ERROR, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, 'The private view of this restricted run is missing. Restart the workspace from the plugin.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'run_user_view_missing'];
+            }
+        }
+        $cmd = "$ttyd -i " . escapeshellarg($sock) . " -p 0 -W -d0 " . $inner;
 
         LogService::log("Executing: $cmd", LogService::LOG_DEBUG, "TerminalService");
 
@@ -750,7 +1275,10 @@ class TerminalService {
         // #337: fully detached — an auto-launch runs from `plugin install`, and
         // ttyd must not keep the installer's output pipe open. `exec` keeps
         // the reported pid equal to ttyd's own.
-        $spawned = UtilityService::spawnDetached(['/bin/bash', '-c', 'exec ' . $cmd], $logFile, true);
+        $spawnArgv = ['/bin/bash', '-c', 'exec ' . $cmd];
+        $spawned = defined('AICLI_TEST_TMP') && is_callable(self::$spawnRunnerForTests)
+            ? (int)(self::$spawnRunnerForTests)($spawnArgv, $logFile, true)
+            : UtilityService::spawnDetached($spawnArgv, $logFile, true);
         $out = $spawned > 0 ? [(string)$spawned] : [];
         
         $pid = trim($out[0] ?? '');
@@ -1451,10 +1979,11 @@ class TerminalService {
 
         foreach ($tmuxSessions as $ts) {
             $sessName  = (string)($ts['name']      ?? '');
+            $tmuxSock  = (string)($ts['sock']      ?? '');
             $aicliHome = (string)($ts['aicliHome'] ?? '');
             $tmuxBin   = (string)($ts['tmuxBin']   ?? '');
 
-            if ($sessName === '' || $tmuxBin === '') continue;
+            if ($sessName === '' || $tmuxSock === '') continue;
             if ($aicliHome !== $homeMount) continue;
 
             // Extract the sessionId from aicli-agent-<agentId>-<sessionId>.
@@ -1497,9 +2026,7 @@ class TerminalService {
                 if (is_callable($closeSeam)) {
                     $closeSeam($sessionId);
                 } else {
-                    $escSess = escapeshellarg($sessName);
-                    // nosemgrep: php.lang.security.exec-use.exec-use
-                    @shell_exec("$tmuxBin kill-session -t $escSess 2>/dev/null");
+                    ProcessManager::runTmuxForSocket($tmuxSock, ['kill-session', '-t', $sessName], 8);
                 }
                 $closed++;
                 LogService::log(
@@ -1539,16 +2066,17 @@ class TerminalService {
     {
         $results = [];
         foreach (\AICliAgents\Services\ProcessManager::tmuxSocketPaths() as $sock) {
-            $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
-            // List all sessions matching aicli-agent-* prefix.
-            $raw = trim((string)@shell_exec("$tmuxBin ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-'"));
+            $tmuxBin = \AICliAgents\Services\ProcessManager::tmuxPrefixForSocket($sock);
+            $raw = \AICliAgents\Services\ProcessManager::runTmuxForSocket($sock, ['list-sessions', '-F', '#S'], 8);
+            if (!is_string($raw)) continue;
+            $raw = trim($raw);
             if ($raw === '') continue;
             foreach (explode("\n", $raw) as $line) {
                 $sessName = trim($line);
-                if ($sessName === '') continue;
+                if ($sessName === '' || strncmp($sessName, 'aicli-agent-', 12) !== 0) continue;
                 // Read AICLI_HOME from the session's environment.
-                $escSess = escapeshellarg($sessName);
-                $envLine = trim((string)@shell_exec("$tmuxBin showenv -t $escSess AICLI_HOME 2>/dev/null"));
+                $envLine = trim((string)(\AICliAgents\Services\ProcessManager::runTmuxForSocket($sock,
+                    ['showenv', '-t', '=' . $sessName, 'AICLI_HOME'], 8) ?? ''));
                 // showenv output: "AICLI_HOME=/path/to/mount"  (or "-AICLI_HOME" if unset)
                 $aicliHome = '';
                 if (preg_match('/^AICLI_HOME=(.+)$/', $envLine, $m)) {

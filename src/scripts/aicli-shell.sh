@@ -1,5 +1,11 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
+source "$(dirname "${BASH_SOURCE[0]}")/tmux-socket-safety.sh" || { echo 'tmux-socket-safety.sh missing' >&2; exit 1; }
+# CI test switch: a non-root process honours it; root honours it only with the CI marker file (a root-owned regular file that production never has).
+if [[ "${AICLI_TEST_TMP:-}" == 1 ]] && ((EUID == 0)) && ! [[ -f /run/aicli-ci-test-marker && ! -L /run/aicli-ci-test-marker && -O /run/aicli-ci-test-marker ]]; then
+    unset AICLI_TEST_TMP
+    printf "%s\n" "aicli-shell: the test switch is ignored for root without the CI marker" >&2
+fi
 # AICliAgents CLI Restricted Shell Wrapper
 # v2026.03.17.13 - Pure Terminal Wrapper (No Heartbeats)
 #
@@ -18,6 +24,20 @@ AICLI_ENSURE_ONLY=0
 case "$1" in
     --ensure-session) AICLI_ENSURE_ONLY=1 ;;
 esac
+
+# >>> RESTRICTED-PREAMBLE (docs/specs/AGENT_RUN_ENTRY_POINT.md R17, finding 5)
+# A restricted run (the run user aicli-run) runs this launcher inside its private disk view. The agent writes the folder
+# $AICLI_HOME/.local/bin, so no command of the browser attach may be found there: the PATH is fixed, and tmux is called by its
+# absolute path through a function (a function wins over the PATH lookup for every bare `tmux` below).
+if [ "${AICLI_RESTRICTED_RUN:-}" = "1" ]; then
+    export PATH="/usr/local/emhttp/plugins/unraid-aicliagents/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    AICLI_TMUX_BIN="/usr/local/emhttp/plugins/unraid-aicliagents/bin/tmux"
+    [ -x "$AICLI_TMUX_BIN" ] || AICLI_TMUX_BIN="/usr/bin/tmux"
+    # The unit test may point at a fake binary. Nothing else can: the CI marker is not set in a real launch.
+    [ "${AICLI_TEST_TMP:-}" = "1" ] && [ -n "${AICLI_TEST_TMUX:-}" ] && AICLI_TMUX_BIN="$AICLI_TEST_TMUX"
+    tmux() { "$AICLI_TMUX_BIN" "$@"; }
+fi
+# <<< RESTRICTED-PREAMBLE
 
 ID="${AICLI_SESSION_ID:-default}"
 AGENT_ID="${AGENT_ID:-gemini-cli}"
@@ -41,8 +61,14 @@ perf_log() {
     printf '%s %s %s %s\n' "$_t" "$1" "$AGENT_ID" "$ID" >> "$PERF_LOG" 2>/dev/null
 }
 # Rotate if log exceeds 256 KB (cheap, avoids growth across many sessions)
-[ -f "$PERF_LOG" ] && [ "$(stat -c %s "$PERF_LOG" 2>/dev/null || echo 0)" -gt 262144 ] && \
-    tail -c 131072 "$PERF_LOG" > "$PERF_LOG.tmp" 2>/dev/null && mv "$PERF_LOG.tmp" "$PERF_LOG" 2>/dev/null
+# The temporary file has a random name made with O_EXCL (mktemp). A fixed name in this world-writable folder could be a link
+# that another user planted, and the redirect would then write through it.
+if [ -f "$PERF_LOG" ] && [ ! -L "$PERF_LOG" ] && [ "$(stat -c %s "$PERF_LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    _perf_tmp="$(mktemp "$PERF_LOG.XXXXXX" 2>/dev/null)" && {
+        tail -c 131072 "$PERF_LOG" > "$_perf_tmp" 2>/dev/null && mv -f "$_perf_tmp" "$PERF_LOG" 2>/dev/null || rm -f "$_perf_tmp"
+    }
+    unset _perf_tmp
+fi
 perf_log shell.start
 
 # Ensure log directory exists
@@ -233,13 +259,18 @@ unset TMUX TMUX_PANE
 # that already has it. Only when it exists nowhere do we use the per-session
 # default set above. Ordering matters — the per-session location is preferred,
 # so a session already migrated is never dragged back to the shared server.
+# Second review, finding 1: root never runs a tmux client against a socket that the run user (aicli-run) can write. A fake server
+# on such a socket can order the client to start a program as root. Such a socket is skipped here; the processes of the run user
+# are ended by user id instead. When this script runs as the run user itself, nothing is skipped.
 adopt_existing_session_socket() {
-    local uid sock dir
+    local uid sock dir run_uid
     uid="$(id -u)"
+    run_uid="$(id -u aicli-run 2>/dev/null || true)"
     for sock in "$AICLI_TMUX_ROOT/s-$ID/tmux-$uid/default" \
                 "$AICLI_TMUX_ROOT"/s-*/tmux-"$uid"/default \
                 "$AICLI_TMUX_ROOT/tmux-$uid/default"; do
         [ -S "$sock" ] || continue
+        aicli_tmux_socket_skip_for_root "$sock" "$run_uid" && continue
         tmux -S "$sock" has-session -t "$SESSION" 2>/dev/null || continue
         # TMUX_TMPDIR is the grandparent of the socket (<dir>/tmux-<uid>/default).
         dir="$(dirname "$(dirname "$sock")")"
@@ -377,7 +408,8 @@ _aicli_tiers_stamp() {
 # exist, or the stamp is missing or has changed, this returns and the full path below runs.
 _aicli_fast_attach() {
     local _files _stamp
-    export PATH="${AICLI_HOME:-$USER_WORK_DIR/home}/.local/bin:/usr/local/emhttp/plugins/unraid-aicliagents/bin:$PATH"
+    # A restricted run keeps its fixed PATH: the folder .local/bin is written by the agent (finding 5).
+    [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] || export PATH="${AICLI_HOME:-$USER_WORK_DIR/home}/.local/bin:/usr/local/emhttp/plugins/unraid-aicliagents/bin:$PATH"
     command -v tmux >/dev/null 2>&1 || return 0
     tmux has-session -t "$SESSION" 2>/dev/null || return 0
     _files="$(tmux show-options -t "$SESSION" -qv @aicli_tiers_files 2>/dev/null)"
@@ -542,8 +574,15 @@ _ARGS_AGENT_FILE="$HOME_DIR/.aicli/args/args_agent_${AGENT_ID}.json"
 _ARGS_ID_SAFE=$(printf '%s' "$ID" | tr -cd 'A-Za-z0-9_-')
 _ARGS_ID_FILE=""
 [ -n "$_ARGS_ID_SAFE" ] && _ARGS_ID_FILE="$HOME_DIR/.aicli/args/args_id_${_ARGS_ID_SAFE}.json"
+# Finding 7: a restricted run does not read flags from its own home (it can write there, and root's flags file is in a home
+# it cannot see). Root writes the flags in a root-only folder that the view shows read-only, and names the file here.
+if [ "${AICLI_RESTRICTED_RUN:-}" = "1" ]; then
+    _ARGS_ID_FILE="${AICLI_ARGS_ID_FILE:-}"
+fi
 _load_args_with_warn() {
-    local _path="$1"
+    local _path="$1" _errfile
+    # A random name made with O_EXCL: the folder is world-writable, and a fixed name with the process id could be a planted link.
+    _errfile="$(mktemp "${MOUNT_ROOT}/.args-load-err.XXXXXX" 2>/dev/null)" || _errfile=/dev/null
     php -r "
         \$raw = @file_get_contents('$_path');
         if (\$raw === false) { fwrite(STDERR, 'unreadable'); exit; }
@@ -551,14 +590,17 @@ _load_args_with_warn() {
         if (\$d === null && trim(\$raw) !== '') { fwrite(STDERR, 'parse_error: ' . json_last_error_msg()); exit; }
         if (!is_array(\$d)) { fwrite(STDERR, 'not_array'); exit; }
         echo \$d['args'] ?? '';
-    " 2>${MOUNT_ROOT}/.args-load-err.$$
+    " 2>"$_errfile"
     local _err
-    _err="$(cat "${MOUNT_ROOT}/.args-load-err.$$" 2>/dev/null)"
-    rm -f "${MOUNT_ROOT}/.args-load-err.$$"
+    _err="$(cat "$_errfile" 2>/dev/null)"
+    # Finding 8 of the second review: when mktemp fails the fallback is /dev/null, and it must never be removed.
+    [ "$_errfile" = /dev/null ] || rm -f "$_errfile"
     [ -n "$_err" ] && log_aicli "WARN" 1 "Failed to load args from $_path: $_err — proceeding with empty args"
 }
 if [ -n "$_ARGS_ID_FILE" ] && [ -f "$_ARGS_ID_FILE" ]; then
     frozen_effective_args=$(_load_args_with_warn "$_ARGS_ID_FILE")
+elif [ "${AICLI_RESTRICTED_RUN:-}" = "1" ]; then
+    log_aicli "WARN" 1 "Restricted run $ID has no flags file; it starts without flags only if the profile has none."
 elif [ -f "$_ARGS_WS_FILE" ]; then
     frozen_effective_args=$(_load_args_with_warn "$_ARGS_WS_FILE")
 elif [ -f "$_ARGS_AGENT_FILE" ]; then
@@ -698,6 +740,15 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    # AGENT_RUN_ENTRY_POINT.md R17: a run as the run user lives in a private disk view that only the plugin's
+    # ensure-session step builds. The browser attach runs OUTSIDE that view, so it must never start a session. It
+    # refuses here, and the workspace is started again from the plugin, which builds the view first.
+    if [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] && [ "$AICLI_ENSURE_ONLY" -eq 0 ]; then
+        log_aicli "ERROR" 1 "Restricted run $ID has no live session. The attach does not start one outside the private disk view."
+        echo "This script run has no live session. Restart the workspace from the plugin."
+        sleep 5
+        exit 1
+    fi
     # Forgejo #433 (docs/specs/WORKSPACE_SESSION_END_TRACE.md): the session is gone. If the tmux server that held it
     # is gone too, with no "session closed" line in the debug log, it was killed from outside (a signal, the
     # out-of-memory killer) or the box restarted. Say so, so a vanished session can be explained.
@@ -708,7 +759,12 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
             log_aicli "WARN" 2 "The tmux server (pid $_OLD_SRV_PID) that held session $SESSION ended with no 'session closed' record. It was killed from outside or the box restarted. Last kernel kill lines: $(dmesg 2>/dev/null | grep -i -E 'killed process|out of memory' | tail -n 2 | tr '\n' ';')"
         fi
     fi
-    RUN_SCRIPT="$USER_WORK_DIR/aicli-run-$ID.sh"
+    if [ "${AICLI_RESTRICTED_RUN:-}" = "1" ]; then
+        # The run user's home is the only writable state path bound into its view.
+        RUN_SCRIPT="$AICLI_HOME/aicli-run-$ID.sh"
+    else
+        RUN_SCRIPT="$USER_WORK_DIR/aicli-run-$ID.sh"
+    fi
 
     # 1. Minimal Header (Safe injections only)
     # #638: this file will hold every secret. Create it private (umask 077, mode
@@ -825,12 +881,13 @@ PRIOEOF
     # One word, the executable script itself (it starts with "#!/usr/bin/env php"), so
     # "$AICLI_RELAY_COMMAND" inbox works quoted as well as unquoted (#735). A two-word
     # "php <path>" value fails when an agent quotes it.
-    printf 'export AICLI_RELAY_COMMAND=%q\n' "${AICLI_RELAY_COMMAND:-$PLUGIN_SRC/scripts/relay-agent.php}" >> "$RUN_SCRIPT"
+    # A restricted run gets neither command (R18, finding 13): PHP removed them, and a default value must not bring them back.
+    [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] || printf 'export AICLI_RELAY_COMMAND=%q\n' "${AICLI_RELAY_COMMAND:-$PLUGIN_SRC/scripts/relay-agent.php}" >> "$RUN_SCRIPT"
     # Plugin management (read-only) self-service, pinned the same way and for the
     # same reason. This is the fallback for an agent with no MCP support — pi-coder
     # is HubProjector::MCP_EXEMPT and will never read an MCP config file — and it is
     # also what a user's own script calls. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
-    printf 'export AICLI_ADMIN_COMMAND=%q\n' "${AICLI_ADMIN_COMMAND:-$PLUGIN_SRC/scripts/admin-agent.php}" >> "$RUN_SCRIPT"
+    [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] || printf 'export AICLI_ADMIN_COMMAND=%q\n' "${AICLI_ADMIN_COMMAND:-$PLUGIN_SRC/scripts/admin-agent.php}" >> "$RUN_SCRIPT"
     # (Relay 'watch' mode retired 2026-08-22: every agent now receives the
     # readiness-gated paste, so no per-session watcher command is injected here.
     # The old watcher env var + relay-watch.sh were removed — the watcher died on
@@ -915,6 +972,11 @@ PRIOEOF
     # Lets the user change workspace args from the UI and have them apply on
     # the next agent launch (no workspace destroy needed).
     printf 'export AICLI_ARGS_ID_FILE=%q\n' "$_ARGS_ID_FILE" >> "$RUN_SCRIPT"
+    if [ "${AICLI_RESTRICTED_RUN:-}" = "1" ]; then
+        # The run loop (inside tmux) needs these names: the first prompt is read from the private task folder.
+        printf 'export AICLI_RESTRICTED_RUN=1\n' >> "$RUN_SCRIPT"
+        printf 'export AICLI_TASK_DIR=%q\n' "${AICLI_TASK_DIR:-}" >> "$RUN_SCRIPT"
+    fi
     printf 'export AICLI_ARGS_WS_FILE=%q\n' "$_ARGS_WS_FILE" >> "$RUN_SCRIPT"
     printf 'export AICLI_ARGS_AGENT_FILE=%q\n' "$_ARGS_AGENT_FILE" >> "$RUN_SCRIPT"
     printf 'export DEBUG_LOG=%q\n' "$DEBUG_LOG" >> "$RUN_SCRIPT"
@@ -961,10 +1023,22 @@ PRIOEOF
     # dead-write gap where secrets.cfg was never sourced at launch.
     EXPORTED_KEYS_FILE="$HOME_DIR/.aicli/.exported_keys_${ENV_HASH}"
     mkdir -p "$(dirname "$EXPORTED_KEYS_FILE")" 2>/dev/null
+    if [ "${AICLI_RESTRICTED_RUN:-}" = "1" ]; then
+        # Finding 12: the run user cannot read the vault, so this process cannot build the environment. Root built the file
+        # before the start and the view shows it read-only. The lines are plain `export` statements.
+        if [ -n "${AICLI_ENV_FILE:-}" ] && [ -f "$AICLI_ENV_FILE" ] && [ ! -L "$AICLI_ENV_FILE" ]; then
+            cat "$AICLI_ENV_FILE" >> "$RUN_SCRIPT" 2>/dev/null
+        else
+            log_aicli "WARN" 1 "Restricted run $ID has no environment file; the agent starts without the keys of the vault."
+        fi
+        : > "$EXPORTED_KEYS_FILE" 2>/dev/null
+        log_aicli "INFO" 2 "Injected the environment file of the restricted run"
+    else
     php "$PLUGIN_SRC/scripts/user/effective-env-export.php" \
         "$PLUGIN_SRC/includes/AICliAgentsManager.php" startup \
         "$ROOT_DIR" "$AGENT_ID" "$EXPORTED_KEYS_FILE" >> "$RUN_SCRIPT" 2>/dev/null
     log_aicli "INFO" 2 "Injected effective env (5-tier merge via EnvService)"
+    fi
 
     # Export the tracker path + workspace path so the run-loop's
     # _aicli_load_envs can hot-apply changes without needing to recompute
@@ -1091,8 +1165,9 @@ _build_fresh_cmd() {
 }
 
 # docs/specs/AGENT_SPAWN_WORKSPACE.md R6 and R22: the first prompt of a helper workspace.
-# The spawn tool writes the fixed first line to <workspace>/.aicli-task/PROMPT.once and the mode
-# ("positional", "flag:<--name>" or "none") into the workspace id flags file. This helper prints the
+# The spawn tool writes the fixed first line to AICLI_TASK_DIR/PROMPT.once for a script run, or to
+# <workspace>/.aicli-task/PROMPT.once for a regular helper, and the mode ("positional", "flag:<--name>"
+# or "none") into the workspace id flags file. This helper prints the
 # quoted prompt as a suffix for the fresh-launch command. It renames the file to PROMPT.consumed, so
 # a relaunch or a resume never sends it twice. It prints nothing when there is no prompt to send.
 # The shell does this, not the saved arguments, because the argument check refuses a "$".
@@ -1101,10 +1176,17 @@ _build_fresh_cmd() {
 # in the outer script, so no helper and no script run ever got its first prompt.
 _aicli_task_prompt_suffix() {
     local _root="${ROOT_DIR:-${AICLI_WORKSPACE_PATH:-}}" _args="${_ARGS_ID_FILE:-${AICLI_ARGS_ID_FILE:-}}"
-    local _file="$_root/.aicli-task/PROMPT.once" _mode _flag _text
+    local _task_dir="${AICLI_TASK_DIR:-}" _file _mode _flag _text
+    [ -n "$_task_dir" ] || _task_dir="$_root/.aicli-task"
+    _file="$_task_dir/PROMPT.once"
     [ -n "$_root" ] && [ -n "$_args" ] && [ -f "$_args" ] && [ -f "$_file" ] || return 0
     # #865 review 3: a link is never a first prompt (a repo can commit one, and root would read its target).
-    [ ! -L "$_file" ] && [ ! -L "$_root/.aicli-task" ] || return 0
+    # A private task folder (restricted run) is not inside the run folder, so the link check of the run folder does not apply.
+    if [ -n "${AICLI_TASK_DIR:-}" ]; then
+        [ ! -L "$_file" ] || return 0
+    else
+        [ ! -L "$_file" ] && [ ! -L "$_root/.aicli-task" ] || return 0
+    fi
     # Same rule as AgentLaunchProfile::promptModeValid(): any other text means "no prompt".
     _mode=$(php -r '$d=json_decode(@file_get_contents($argv[1]),true);$m=is_array($d)?(string)($d["prompt_mode"]??""):"";echo preg_match("/^(positional|flag:--[a-z][a-z-]{0,30})$/D",$m)?$m:"";' "$_args" 2>/dev/null)
     case "$_mode" in
@@ -1114,7 +1196,7 @@ _aicli_task_prompt_suffix() {
     esac
     _text=$(cat "$_file" 2>/dev/null)
     [ -n "$_text" ] || return 0
-    mv -f "$_file" "$_root/.aicli-task/PROMPT.consumed" 2>/dev/null || rm -f "$_file" 2>/dev/null
+    mv -f "$_file" "$_task_dir/PROMPT.consumed" 2>/dev/null || rm -f "$_file" 2>/dev/null
     if [ -n "$_flag" ]; then
         printf ' %s %q' "$_flag" "$_text"
     else
@@ -1363,6 +1445,8 @@ _aicli_ensure_command_env() {
 # Single PHP invocation per iteration (~50 ms — negligible against agent
 # startup cost).
 _aicli_load_envs() {
+    # A restricted run keeps the environment that root wrote at the start (finding 12): this process cannot read the vault.
+    [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] && return 0
     # The reload file holds every secret. Make it with mktemp (mode 0600) in the
     # user's own .aicli folder, never in the shared /tmp (#638).
     local script

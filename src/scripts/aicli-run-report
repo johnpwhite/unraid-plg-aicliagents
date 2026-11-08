@@ -1,0 +1,4 @@
+#!/bin/bash
+# aicli-run-report: write a checked run result from a restricted run workspace.
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec /usr/bin/php "$HERE/aicli-run-report.php" "$@"

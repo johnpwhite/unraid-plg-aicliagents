@@ -546,6 +546,87 @@ class SpawnService
     }
 
     /**
+     * R18b (Decision 9): open a normal workspace that runs as the run user, in a new temporary folder, inside the private
+     * disk view, so a person can sign in to an agent once. The sign-in stays in the home of the run user. It does not
+     * count as a script run, it takes no report and it does not close itself. A person closes it after sign-in.
+     *
+     * @return array<string,mixed> The workspace (workspaceId) or ['error' => sentence].
+     */
+    public static function spawnRunUserSignIn(string $agentId): array
+    {
+        try {
+            $account = RunUserService::status();
+            if (empty($account['ready'])) return ['error' => (string)$account['fault']];
+            $agentId = trim($agentId);
+            $registry = AgentRegistry::getRegistry();
+            $installed = $agentId !== '' && isset($registry[$agentId])
+                && (self::installedProbe() !== null ? (bool)(self::installedProbe())($agentId) : !empty($registry[$agentId]['is_installed']));
+            if ($agentId === 'terminal' || !$installed) return ['error' => 'Choose an installed agent.'];
+            $uid = (int)$account['uid'];
+            $gid = (int)$account['gid'];
+            // One restricted workspace is open at a time (finding 10).
+            if (AgentRunService::restrictedRunOpen() || RunUserService::otherOpenRestricted('') !== '') {
+                return ['error' => 'A script run as aicli-run is open. Only one restricted workspace is open at a time. Close it first, then sign in.'];
+            }
+            $runId = 's' . bin2hex(random_bytes(5));
+            $temp = AgentRunService::makeRunUserTempFolder($runId, $uid, $gid);
+            if (isset($temp['error'])) return ['error' => (string)$temp['error']];
+            $task = RunUserService::createTaskFolder($runId);
+            if (isset($task['error'])) {
+                AgentRunService::discardRunTempFolder($runId);
+                return ['error' => (string)$task['error']];
+            }
+            $label = (string)($registry[$agentId]['name'] ?? $agentId);
+            $result = self::spawnCore([
+                'agentId' => $agentId, 'name' => 'Sign in for script runs', 'path' => $temp['path'],
+                'task' => 'A person signs in to ' . $label . ' here, for script runs. Wait for the person to finish. Do not read or change other files.',
+                'taskTitle' => 'Sign in for script runs', 'autoClose' => false,
+            ], 'person', 'person', [
+                'runAs' => RunUserService::USER, 'runUid' => $uid, 'runGid' => $gid, 'taskDir' => (string)$task['path'],
+                'runUserSignIn' => ['runId' => $runId, 'taskDir' => (string)$task['path'], 'mountWritable' => true, 'temp' => true],
+            ]);
+            if (isset($result['error'])) {
+                RunUserService::removeTaskFolder($runId);
+                AgentRunService::discardRunTempFolder($runId);
+            }
+            return $result;
+        } catch (\Throwable $e) {
+            return ['error' => 'The sign-in workspace could not be opened: ' . self::safeText($e->getMessage(), 300)];
+        }
+    }
+
+    /**
+     * A restricted workspace (a run or a sign-in) closed: free its persistent mount space, its root-only mark and its
+     * private flags and environment. Best effort; the sweep repeats it.
+     *
+     * @param array<string,mixed> $record
+     */
+    public static function releaseRestricted(array $record): void
+    {
+        $id = (string)($record['id'] ?? '');
+        $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
+        $restricted = (string)($record['runAs'] ?? '') === RunUserService::USER
+            || (string)($spawn['run']['runAs'] ?? '') === RunUserService::USER
+            || is_array($spawn['runUserSignIn'] ?? null);
+        if ($id === '' || !$restricted) return;
+        $isSignInWorkspace = is_array($spawn['runUserSignIn'] ?? null);
+        try { RunUserService::releaseWorkspace($id, $isSignInWorkspace); } catch (\Throwable $e) { /* the sweep tries again */ }
+    }
+
+    /** R18b: save known sign-in files before release removes the temporary home. @param array<string,mixed> $spawn */
+    private static function afterSignInClosed(array $spawn, string $workspaceId): bool
+    {
+        $signIn = is_array($spawn['runUserSignIn'] ?? null) ? $spawn['runUserSignIn'] : null;
+        if ($signIn === null) return true;
+        if (!RunUserService::persistSigninFilesFromSession($workspaceId)) {
+            error_log('aicli-run: sign-in files for workspace ' . $workspaceId . ' could not be saved; its private home stays in place');
+            return false;
+        }
+        try { RunUserService::removeTaskFolder((string)($signIn['runId'] ?? '')); } catch (\Throwable $e) { /* the sweep or the next start tries again */ }
+        return true;
+    }
+
+    /**
      * The shared part of spawn() and spawnForRun(): checks, then side effects.
      *
      * @param array<string,mixed> $p
@@ -555,6 +636,19 @@ class SpawnService
     private static function spawnCore(array $p, string $callerId, string $callerName, array $run): array
     {
         $isRun = !empty($run['isRun']);
+        // R16: the run user. It is root or aicli-run. A run as aicli-run needs the account to be ready.
+        $runAs = (string)($run['runAs'] ?? 'root');
+        if (!in_array($runAs, ['root', RunUserService::USER], true)) return ['error' => 'The workspace run user must be root or aicli-run.'];
+        $taskDir = (string)($run['taskDir'] ?? '');
+        if ($runAs === RunUserService::USER) {
+            $account = RunUserService::status();
+            if (empty($account['ready'])) return ['error' => (string)$account['fault']];
+            if ($taskDir === '' || (int)($run['runUid'] ?? 0) !== (int)$account['uid'] || (int)($run['runGid'] ?? 0) !== (int)$account['gid']) {
+                return ['error' => 'A run as aicli-run needs its private task folder and the ids of the run user.'];
+            }
+        } elseif ($taskDir !== '') {
+            return ['error' => 'Only a run as aicli-run uses a private task folder.'];
+        }
         // For the undo in the catch below: what this call has made so far.
         $id = '';
         $madeWorktree = null;
@@ -622,7 +716,7 @@ class SpawnService
                 $versionError = AgentLaunchProfile::versionError($agentId, (string)($registry[$agentId]['version'] ?? ''), $profile);
                 if ($versionError !== null) return ['error' => $versionError];
             }
-            $flags =AgentLaunchProfile::flags($agentId, $model, $effort, $unattended, $profile, $readOnly, (string)($run["mcpConfig"] ?? ""), (string)($run["dataDir"] ?? ""));
+            $flags =AgentLaunchProfile::flags($agentId, $model, $effort, $unattended, $profile, $readOnly, (string)($run["mcpConfig"] ?? ""), (string)($run["dataDir"] ?? ""), $runAs === RunUserService::USER);
             if (isset($flags['error'])) return $flags;
             $promptMode = AgentLaunchProfile::promptMode($agentId, $profile);
 
@@ -686,6 +780,7 @@ class SpawnService
                 'spawned' => true,
                 'spawn' => self::newSpawnMeta($callerId, $callerName, $title, $autoClose, $unattended, $wtMeta, $model, $effort, $maxMinutes),
             ];
+            if ($runAs !== 'root') $record['runAs'] = $runAs;
             if ($isRun) {
                 // R28: the mark "started by script <label>" for the drawer. The label comes from the list, not from the caller.
                 $record['createdBy'] = 'run:' . self::safeText((string)($run['label'] ?? 'script'), 60);
@@ -693,6 +788,14 @@ class SpawnService
                     'runId' => (string)$run['runId'], 'mode' => (string)($run['mode'] ?? 'read-only'),
                     'script' => self::safeText((string)($run['script'] ?? ''), 300), 'key' => self::safeText((string)($run['key'] ?? ''), 200),
                 ];
+                if ($runAs !== 'root') {
+                    $record['spawn']['run'] += ['runAs' => $runAs, 'taskDir' => $taskDir, 'runUid' => (int)$run['runUid'], 'runGid' => (int)$run['runGid'],
+                        'mountWritable' => !empty($run['mountWritable']), 'temp' => !empty($run['temp']),
+                        'readFolders' => array_values(array_filter((array)($run['readFolders'] ?? []), 'is_string'))];
+                }
+            } elseif (is_array($run['runUserSignIn'] ?? null)) {
+                // R18b: the sign-in workspace of the run user. It is a normal workspace that a person controls.
+                $record['spawn']['runUserSignIn'] = $run['runUserSignIn'] + ['runAs' => $runAs];
             }
             if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
                 // #865 third review 1: no record exists, so only the mark, the worktree and the branch of this call are undone.
@@ -702,10 +805,25 @@ class SpawnService
             if (!ArgsService::saveIdArgs($id, (string)$flags['args'], $promptMode)) {
                 return ['error' => 'The flags of the sub-agent workspace could not be written. ' . self::rollbackSpawn($id, $worktree)];
             }
-            $filesNote = self::writeTaskFiles($folder, $task, $promptMode !== AgentLaunchProfile::PROMPT_NONE, $worktree, $agentId);
+            // R18: the first line of a run as the run user names the private task file and the report command.
+            $firstLine = $taskDir === ''
+                ? self::FIRST_LINE
+                // Finding 13 of the second review: a read-only run has no shell, so it cannot call the command. It reports with the
+                // report tool of the MCP server; a run that may change files reports with the command.
+                : ('Your task is in ' . $taskDir . '/TASK.md. Read it, do it, then report with '
+                    . (!empty($run['readOnly']) ? 'the report tool (mcp__aicli-run-report__report).' : 'aicli-run-report.'));
+            if (is_array($run['runUserSignIn'] ?? null)) {
+                $firstLine = 'Your task is in ' . $taskDir . '/TASK.md. Read it, then wait for the person to sign in. Do not call a report tool.';
+            }
+            $filesNote = self::writeTaskFiles($folder, $task, $promptMode !== AgentLaunchProfile::PROMPT_NONE, $worktree, $agentId,
+                $taskDir, (int)($run['runUid'] ?? 0), (int)($run['runGid'] ?? 0), $firstLine);
             if (isset($filesNote['error'])) {
                 // #865 review 3: undo what this call made, so no record with flags (unattended, prompt mode) is left over.
                 return ['error' => $filesNote['error'] . ' ' . self::rollbackSpawn($id, $worktree)];
+            }
+            // The task folder is complete: hand it to the run user, once. The agent starts only after this.
+            if ($taskDir !== '' && !RunUserService::finalizeTaskFolder($taskDir, (int)$run['runUid'], (int)$run['runGid'])) {
+                return ['error' => 'The private task folder could not be handed to the run user. ' . self::rollbackSpawn($id, $worktree)];
             }
 
             // R20: no "Trust this folder?" question for a worktree that this tool made. R21: the agent's commands keep
@@ -714,7 +832,8 @@ class SpawnService
             if ($wtMeta !== null && AgentLaunchProfile::trustMode($agentId, $profile) === 'codex_toml') {
                 $trust = !empty(CodexTrustService::trustWorktree($wtMeta)['ok']) ? 'trusted' : 'failed';
             }
-            $relayEnv = AgentCommandEnvService::ensure($agentId, CodexTrustService::$homeForTests)['state'];
+            // A run as the run user has no Relay and no admin command (R18), so its command environment is not written.
+            $relayEnv = $runAs === RunUserService::USER ? 'restricted_run_user' : AgentCommandEnvService::ensure($agentId, CodexTrustService::$homeForTests)['state'];
 
             AutoLaunchSuppression::clear($id);
             $started = self::startWorkspaceProcess($id, $folder, $agentId, true);
@@ -722,10 +841,10 @@ class SpawnService
             $delivery = $promptMode !== AgentLaunchProfile::PROMPT_NONE ? 'initial_prompt' : 'pane_input';
             $deliveryNote = '';
             if ($started['ok'] && $promptMode === AgentLaunchProfile::PROMPT_NONE) {
-                $typed = self::typeFirstLine($agentId, $id);
+                $typed = self::typeFirstLine($agentId, $id, $firstLine);
                 if (!$typed) {
                     $delivery = 'pane_input_pending';
-                    $deliveryNote = 'The pane was not ready in time, so the first line was not typed. Use aicli_send_input to send: ' . self::FIRST_LINE;
+                    $deliveryNote = 'The pane was not ready in time, so the first line was not typed. Use aicli_send_input to send: ' . $firstLine;
                 }
             } elseif (!$started['ok']) {
                 $delivery = 'not_started';
@@ -742,7 +861,7 @@ class SpawnService
                 'id' => $id, 'workspaceId' => $id, 'name' => $name, 'path' => $folder, 'agentId' => $agentId,
                 'started' => (bool)$started['ok'], 'taskDelivery' => $delivery,
                 'children' => $mine2 . '/' . self::cap('spawn_max_children'),
-                'autoClose' => $autoClose, 'taskFile' => $folder . '/' . self::TASK_DIR . '/TASK.md',
+                'autoClose' => $autoClose, 'taskFile' => ($taskDir !== '' ? $taskDir : $folder . '/' . self::TASK_DIR) . '/TASK.md',
                 'parentName' => $callerName, 'taskTitle' => $title, 'model' => $model, 'effort' => $effort,
                 'state' => (string)($created['spawn']['state'] ?? 'starting'),
                 'trust' => $trust, 'relayEnv' => $relayEnv, 'maxMinutes' => $maxMinutes,
@@ -775,7 +894,7 @@ class SpawnService
      * Type the fixed first line into the pane of an agent that has no prompt flag (R22), as soon as the pane
      * is ready. The wait is bounded; the call does not block longer than PANE_WAIT_SECONDS.
      */
-    private static function typeFirstLine(string $agentId, string $id): bool
+    private static function typeFirstLine(string $agentId, string $id, string $firstLine = self::FIRST_LINE): bool
     {
         $wait = self::$paneWaitSeconds ?? self::PANE_WAIT_SECONDS;
         $deadline = self::now() + $wait;
@@ -784,8 +903,8 @@ class SpawnService
             $gate = self::gate($agentId, $id);
             if ($gate['ready']) {
                 $res = self::$paneTyper !== null
-                    ? (self::$paneTyper)($agentId, $id, self::FIRST_LINE, true)
-                    : TmuxService::pasteAndConfirm($agentId, $id, self::FIRST_LINE, true);
+                    ? (self::$paneTyper)($agentId, $id, $firstLine, true)
+                    : TmuxService::pasteAndConfirm($agentId, $id, $firstLine, true);
                 return ($res['status'] ?? '') === 'ok';
             }
             $sleep(1000);
@@ -1179,8 +1298,21 @@ class SpawnService
      *
      * @return array{note?:string}|array{error:string}
      */
-    private static function writeTaskFiles(string $folder, string $task, bool $withPrompt, ?array $worktree = null, string $agentId = ''): array
+    private static function writeTaskFiles(string $folder, string $task, bool $withPrompt, ?array $worktree = null, string $agentId = '',
+        string $taskDir = '', int $uid = 0, int $gid = 0, string $firstLine = self::FIRST_LINE): array
     {
+        if ($taskDir !== '') {
+            // R18: the task of a run as the run user goes to its private folder (root owned until it is handed over).
+            // Nothing is written into the run folder, which the run user can change.
+            $private = ['TASK.md' => $task . "\n"];
+            if ($withPrompt) $private['PROMPT.once'] = $firstLine;
+            foreach ($private as $name => $body) {
+                if (!RunUserService::writeTaskFile($taskDir, $name, $body, $uid, $gid)) {
+                    return ['error' => "Could not write '$name' in the private task folder."];
+                }
+            }
+            return [];
+        }
         $files = ['TASK.md' => $task . "\n" . ($worktree !== null ? self::branchRules($worktree, $agentId) : ''), '.gitignore' => self::IGNORE_ALL];
         if ($withPrompt) $files['PROMPT.once'] = self::FIRST_LINE;
         $err = self::writeInTaskDir($folder, $files);
@@ -1346,6 +1478,9 @@ class SpawnService
             $callerId = self::callerId();
             $record = self::findRecord($callerId);
             $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
+            if (is_array($spawn['runUserSignIn'] ?? null)) {
+                return ['error' => 'A sign-in workspace does not report a script run. Close it after sign-in.'];
+            }
             $runId = (string)($spawn['run']['runId'] ?? '');
             if ($runId !== '') {
                 if ($callerId === '' || !self::isHelper($record)) {
@@ -1434,25 +1569,32 @@ class SpawnService
         if ($record === null || (string)($record['spawn']['run']['runId'] ?? '') !== $runId) {
             return ['error' => 'The run workspace is no longer open.'];
         }
+        // R18, R22: a run as the run user has a private task folder that it owns. Root writes nothing there; the caller
+        // keeps a result copy in the state folder of the plugin.
+        $private = (string)($record['spawn']['run']['taskDir'] ?? '') !== '';
         $existing = $record['spawn']['report'] ?? null;
         if (is_array($existing)) {
             if ((string)($existing['status'] ?? '') === $status && ((string)($existing['summary'] ?? '') === $summary
                 || (string)($existing['summary_sha'] ?? '') === hash('sha256', $summary))) {
-                return ['resultFile' => rtrim((string)$record['path'], '/') . '/' . self::TASK_DIR . '/RESULT.json', 'report' => $existing];
+                return ['resultFile' => $private ? '' : rtrim((string)$record['path'], '/') . '/' . self::TASK_DIR . '/RESULT.json', 'report' => $existing];
             }
             return ['error' => 'This run already has a report.'];
         }
         $report = ['status' => $status, 'summary' => $summary, 'at' => $at];
         $dir = rtrim((string)($record['path'] ?? ''), '/') . '/' . self::TASK_DIR;
-        $json = json_encode($report + ['workspaceId' => $workspaceId, 'taskTitle' => (string)($record['spawn']['task_title'] ?? '')], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-        if (!is_string($json)) return ['error' => 'The report could not be encoded.'];
-        $writeError = self::writeInTaskDir((string)($record['path'] ?? ''), ['RESULT.json' => $json . "\n"]);
-        if ($writeError !== null) return ['error' => $writeError];
-        // #915: the workspace list keeps a short copy. The whole report is in RESULT.json and on the Notebook card,
-        // so the list (saved often, and copied to flash) does not grow by up to 200,000 characters per run.
+        if (!$private) {
+            $json = json_encode($report + ['workspaceId' => $workspaceId, 'taskTitle' => (string)($record['spawn']['task_title'] ?? '')], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            if (!is_string($json)) return ['error' => 'The report could not be encoded.'];
+            $writeError = self::writeInTaskDir((string)($record['path'] ?? ''), ['RESULT.json' => $json . "\n"]);
+            if ($writeError !== null) return ['error' => $writeError];
+        }
+        // #915: the workspace list keeps a short copy. The whole report is in RESULT.json (or, for a run as the run user,
+        // in the private result copy of the plugin) and on the Notebook card, so the list (saved often, and copied to
+        // flash) does not grow by up to 200,000 characters per run.
         $stored = $report;
         if (self::length($summary) > self::MAX_SUMMARY_CHARS) {
-            $stored['summary'] = mb_substr($summary, 0, self::MAX_SUMMARY_CHARS) . ' [The whole report is in RESULT.json and on the Notebook card.]';
+            $stored['summary'] = mb_substr($summary, 0, self::MAX_SUMMARY_CHARS)
+                . ($private ? ' [The whole report is on the Notebook card.]' : ' [The whole report is in RESULT.json and on the Notebook card.]');
             $stored['summary_sha'] = hash('sha256', $summary);
         }
         $saved = self::updateRecord($workspaceId, static function (array $rec) use ($runId, $stored): array {
@@ -1463,7 +1605,7 @@ class SpawnService
             return $rec;
         });
         if (!$saved) return ['error' => 'The run workspace could not be updated.'];
-        return ['resultFile' => $dir . '/RESULT.json', 'report' => $report];
+        return ['resultFile' => $private ? '' : $dir . '/RESULT.json', 'report' => $report];
     }
 
     /**
@@ -1499,6 +1641,11 @@ class SpawnService
                 return ['error' => (string)($closed['message'] ?? "Workspace '$name' could not be closed.")];
             }
         }
+        if (!self::afterSignInClosed($spawn, $id)) {
+            ConfigService::clearWorkspaceDeleting($id);
+            self::undoOwnMark($id, $wasSuppressed);
+            return ['error' => 'The sign-in files could not be saved. The workspace and its private home stay available for another attempt.'];
+        }
         try { AgentRelayService::forgetSessionRelayTraces($id); } catch (\Throwable $e) { /* best effort */ }
 
         $workspaces = ConfigService::getWorkspaces();
@@ -1514,6 +1661,7 @@ class SpawnService
         }
         $runId = (string)($spawn['run']['runId'] ?? '');
         if ($runId !== '') AgentRunService::workspaceClosed($runId, $id);
+        self::releaseRestricted($record);
         if (class_exists('\\AICliAgents\\Services\\EventSubscriptionStore')) {
             try { EventSubscriptionStore::reapStale(array_column($remaining, 'id')); } catch (\Throwable $e) { /* best effort */ }
         }
@@ -1706,6 +1854,10 @@ class SpawnService
             ArgsService::deleteIdArgs($id);
             $runId = (string)($spawn['run']['runId'] ?? '');
             if ($runId !== '') AgentRunService::workspaceClosed($runId, $id);
+            if (!self::afterSignInClosed($spawn, $id)) {
+                return ['helper' => true, 'error' => 'The sign-in files could not be saved. The private home stays in place.'];
+            }
+            self::releaseRestricted($record);
             self::untrustWorktreeOf($spawn, $agentId);
             $worktree = self::cleanupWorktree(is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null);
             if ($runId === '') {
@@ -1767,7 +1919,12 @@ class SpawnService
                     if (self::now() - (int)($data['queued_at'] ?? 0) > 86400) { @unlink($file); } else { $waiting++; }
                     continue;
                 }
-                self::afterPersonClosed($record);
+                $result = self::afterPersonClosed($record);
+                if (!empty($result['error'])) {
+                    error_log('aicli-spawn: workspace ' . $id . ' close cleanup will retry: ' . (string)$result['error']);
+                    $waiting++;
+                    continue;
+                }
                 @unlink($file);
                 $done[] = $id;
             }

@@ -723,12 +723,14 @@ mkdir -p "$UPPER_DIR" "$WORK_DIR" "$MNT_POINT"
 # Empty OWNER (agent overlays) skips this block and preserves root-write.
 if [ -n "$OWNER" ] && [ "$OWNER" != "root" ] && id "$OWNER" >/dev/null 2>&1; then
     chown -R "$OWNER" "$UPPER_DIR" "$WORK_DIR" 2>/dev/null || true
-    chown "$OWNER" "$MNT_POINT" 2>/dev/null || true
+    # Finding 5 of the second review: chown -h never follows a link, and a path that is a link is skipped. The run user can
+    # replace the name of a folder it owns with a link; a plain chown would then change the owner of the target.
+    [ -L "$MNT_POINT" ] || chown -h "$OWNER" "$MNT_POINT" 2>/dev/null || true
     # Parent of MNT_POINT (e.g. ${MOUNT_ROOT}/work/<user>/) holds
     # per-session run scripts written by aicli-shell.sh — chown so the agent
     # can mkdir/write alongside its home mount.
     PARENT_DIR="$(dirname "$MNT_POINT")"
-    [ -d "$PARENT_DIR" ] && chown "$OWNER" "$PARENT_DIR" 2>/dev/null || true
+    if [ -d "$PARENT_DIR" ] && [ ! -L "$PARENT_DIR" ]; then chown -h "$OWNER" "$PARENT_DIR" 2>/dev/null || true; fi
 fi
 
 # 3. Discover Lower Layers (SquashFS volumes), newest-first.

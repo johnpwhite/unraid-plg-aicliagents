@@ -2,6 +2,9 @@
 _INSTALLER_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh"
 [ -f "$_INSTALLER_RESOLVER" ] || _INSTALLER_RESOLVER="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/storage/resolve_paths.sh"
 source "$_INSTALLER_RESOLVER" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
+_SOCKET_SAFETY="$(dirname "${BASH_SOURCE[0]}")/../tmux-socket-safety.sh"
+[ -f "$_SOCKET_SAFETY" ] || _SOCKET_SAFETY="${EMHTTP_DEST:-/usr/local/emhttp/plugins/unraid-aicliagents}/src/scripts/tmux-socket-safety.sh"
+source "$_SOCKET_SAFETY" || { echo 'tmux-socket-safety.sh missing' >&2; exit 1; }
 # AICliAgents Installer: Pre-Upgrade Process Eviction & Session Backup (v41)
 
 # Bug #1043: route tmux at the plugin-private socket dir (see aicli-shell.sh).
@@ -495,17 +498,27 @@ log_step "Evicting legacy processes for a clean upgrade..."
 graceful_kill "ttyd.*aicliterm-"
 
 # --- 4. Kill Active Agent tmux Sessions & Node Binaries ---
+# Second review, finding 1: root never runs a tmux client against a socket that the run user (aicli-run) can write. A fake server
+# on such a socket can order the client to start a program as root. Such a socket is skipped here; the processes of the run user
+# are ended by user id instead. When this script runs as the run user itself, nothing is skipped.
+_run_uid="$(id -u aicli-run 2>/dev/null || true)"
 if command -v tmux > /dev/null 2>&1; then
     # Non-root audit: iterate every per-uid tmux socket so non-root sessions
     # get killed too.
     # Bug #141: sessions now each own a private server under s-<sid>/tmux-<uid>;
     # pre-#141 sessions may still be live on the legacy shared socket. Cover both.
+    # #929: the sockets of a restricted workspace are in the root-only ${MOUNT_ROOT}/run-tmux. The safety check skips them (the
+    # folder and the socket belong to the run user); the kill by user id below ends those servers.
     for _sock in "${MOUNT_ROOT}"/tmux/s-*/tmux-*/default \
+                 "${MOUNT_ROOT}"/run-tmux/s-*/tmux-*/default \
                  "${MOUNT_ROOT}"/tmux/tmux-*/default; do
         [ -S "$_sock" ] || continue
+        aicli_tmux_socket_skip_for_root "$_sock" "$_run_uid" && continue
         tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep "^aicli-agent-" | xargs -r -I {} tmux -S "$_sock" kill-session -t "{}" > /dev/null 2>&1 || true
     done
 fi
+# Every process of the run user ends here, counted by user id (not by tmux session).
+[ -n "$_run_uid" ] && { pkill -KILL -U "$_run_uid" 2>/dev/null; pkill -KILL -u "$_run_uid" 2>/dev/null; } || true
 # Path-anchored pattern: only match node processes whose command line contains
 # a plugin-owned path. Prevents the previous agent-name regex from accidentally
 # matching unrelated host Node services (e.g. a `node /opt/factory-bot/...`).

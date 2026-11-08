@@ -53,6 +53,7 @@ final class AgentRunService
 
     public const MODES = ['read-only', 'may-change'];
     public const NOTIFY_SCRIPT = '/usr/local/emhttp/webGui/scripts/notify';
+    public const MAY_CHANGE_RESTRICTED_WARNING = 'In a restricted run, the run marker, Git hooks and config, Claude settings and MCP config stay read-only. A root run can change them and may leave commands for a later root workspace.';
 
     /** Defaults of the settings that slice 1 reads. The values are the strings the .cfg file stores. */
     public const SETTING_DEFAULTS = [
@@ -385,14 +386,14 @@ final class AgentRunService
         $mode = (string)($flags['mode'] ?? 'read-only');
         if (!in_array($mode, self::MODES, true)) return ['error' => 'The mode is read-only or may-change.'];
 
-        // Slice 1 runs the agent as root. The run user is the default in the spec (Decision 10) and comes in slice 2.
-        $user = (string)($flags['user'] ?? 'root');
-        if ($user !== 'root') return ['error' => 'The run user comes in a later slice of this feature. Use --user=root or leave the option out.'];
+        // R3, Decision 10: the default is the restricted run user. A script may ask for root; its list entry decides.
+        $user = (string)($flags['user'] ?? RunUserService::USER);
+        if (!in_array($user, ['root', RunUserService::USER], true)) return ['error' => 'Use --user=aicli-run (the default) or --user=root.'];
 
         $model = trim((string)($flags['model'] ?? ''));
         $effort = trim((string)($flags['effort'] ?? ''));
         // The launch profile decides now if this agent can do what was asked: a model, an effort and the read-only mode.
-        $flagCheck = AgentLaunchProfile::flags($agent, $model, $effort, false, null, $mode === 'read-only', '/placeholder/run.mcp.json');
+        $flagCheck = AgentLaunchProfile::flags($agent, $model, $effort, false, null, $mode === 'read-only', '/placeholder/run.mcp.json', '', $user === RunUserService::USER);
         if (isset($flagCheck['error'])) return ['error' => (string)$flagCheck['error']];
 
         $key = (string)($flags['key'] ?? '');
@@ -507,12 +508,16 @@ final class AgentRunService
      *
      * @return array{path:string}|array{error:string}
      */
-    private static function makeTempFolder(string $runId, string $expected): array
+    private static function makeTempFolder(string $runId, string $expected, int $uid = 0, int $gid = 0, bool $mayChange = false): array
     {
         $root = self::tempRoot();
         if (isset($root['error'])) return ['error' => (string)$root['error']];
         $path = $root['path'] . '/' . $runId;
         if ($path !== $expected) return ['error' => 'The temporary folder changed after the call was checked. Call again.'];
+        // R20: a folder for the run user. The levels that the plugin makes can be entered (not listed) by every user, and
+        // an existing level must allow the same, else the run user cannot reach its own folder.
+        $forRunUser = $uid > 0;
+        $levelMode = $forRunUser ? 0711 : 0700;
         // Make each missing level of the root. An existing level must be a real folder, never a link.
         $level = '';
         foreach (explode('/', ltrim($root['path'], '/')) as $part) {
@@ -530,11 +535,17 @@ final class AgentRunService
             }
             $old = umask(0);
             try {
-                $made = @mkdir($level, 0700);
+                $made = @mkdir($level, $levelMode);
             } finally {
                 umask($old);
             }
             if (!$made && !is_dir($level)) return ['error' => 'The temporary folder root could not be made.'];
+        }
+        if ($forRunUser) {
+            $blocked = RunUserService::firstLevelNotEnterable($root['path']);
+            if ($blocked !== null) {
+                return ['error' => "The run user cannot enter the folder '" . self::cut($blocked, 150) . "'. Allow all users to enter it (mode o+x), or choose another folder for temporary run folders in Settings."];
+            }
         }
         $rootReal = @realpath($root['path']);
         $rootSt = @lstat($root['path']);
@@ -558,9 +569,12 @@ final class AgentRunService
         }
         $now = self::now();
         $keep = self::intSetting('run_temp_keep_hours', 1, 720);
-        $marker = ['runId' => $runId, 'created' => $now, 'expires' => $now + self::intSetting('run_max_minutes', 1, 1440) * 60 + $keep * 3600];
+        $marker = ['runId' => $runId, 'created' => $now, 'expires' => $now + self::intSetting('run_max_minutes', 1, 1440) * 60 + $keep * 3600,
+            'restricted' => $forRunUser, 'mayChange' => $forRunUser && $mayChange];
         $json = json_encode($marker, JSON_UNESCAPED_SLASHES);
-        if ($json === false || !SpawnService::writeNoFollow($path . '/' . self::TEMP_MARKER, $json . "\n", 0600)) {
+        // The marker holds no secret. For the run user it is readable (mode 644), because root reads a marker inside a
+        // folder that the run user owns only through a child process that runs as the run user.
+        if ($json === false || !SpawnService::writeNoFollow($path . '/' . self::TEMP_MARKER, $json . "\n", $forRunUser ? 0644 : 0600)) {
             self::removeTreeNoFollow($path);
             return ['error' => 'The marker of the temporary folder could not be written, so the folder was removed.'];
         }
@@ -568,7 +582,26 @@ final class AgentRunService
         if ($after === false || ($after['mode'] & 0170000) !== 0040000 || @realpath($path) !== $real) {
             return ['error' => 'The temporary folder changed while it was made. Call again.'];
         }
+        if ($forRunUser && !RunUserService::handOver($real, $uid, $gid, 0700)) {
+            // The folder is still root owned, so root removes it the plain way.
+            self::removeTreeNoFollow($real);
+            return ['error' => 'The temporary folder could not be handed to the run user. The folder root must be a real folder that only the plugin user can change.'];
+        }
         return ['path' => $real];
+    }
+
+    /**
+     * R20 for the run user and for the sign-in workspace (R18b): make <root>/<runId>, owned by the run user, mode 700,
+     * with the marker. Public so SpawnService can make the folder of a sign-in workspace the same way.
+     *
+     * @return array{path:string}|array{error:string}
+     */
+    public static function makeRunUserTempFolder(string $runId, int $uid, int $gid): array
+    {
+        if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $runId) !== 1 || $uid < 1) return ['error' => 'The temporary folder needs a valid run id and run user.'];
+        $root = self::tempRoot();
+        if (isset($root['error'])) return ['error' => (string)$root['error']];
+        return self::makeTempFolder($runId, $root['path'] . '/' . $runId, $uid, $gid, true);
     }
 
     /**
@@ -581,20 +614,69 @@ final class AgentRunService
     private static function readTempMarker(string $dir, string $runId): ?array
     {
         $file = $dir . '/' . self::TEMP_MARKER;
-        $l = @lstat($file);
-        if ($l === false || ($l['mode'] & 0170000) !== 0100000 || $l['nlink'] > 1 || $l['size'] > 4096) return null;
-        $h = @fopen($file, 'rb');
-        if ($h === false) return null;
-        $f = fstat($h);
-        $raw = null;
-        if ($f !== false && ($f['mode'] & 0170000) === 0100000 && $f['dev'] === $l['dev'] && $f['ino'] === $l['ino']) {
-            $c = stream_get_contents($h, 4097);
-            $raw = is_string($c) && strlen($c) <= 4096 ? $c : null;
+        $dst = @lstat($dir);
+        if ($dst !== false && (int)$dst['uid'] !== self::pluginUid()) {
+            // The run user owns this folder and can swap the marker for a link or a FIFO. Root does not open it: a
+            // child process as the run user reads it, with a time limit.
+            $account = RunUserService::status();
+            if (empty($account['ready']) || (int)$dst['uid'] !== (int)$account['uid']) return null;
+            $raw = RunUserService::readMarkerFile($file, (int)$account['uid']);
+        } else {
+            $l = @lstat($file);
+            if ($l === false || ($l['mode'] & 0170000) !== 0100000 || $l['nlink'] > 1 || $l['size'] > 4096) return null;
+            $h = @fopen($file, 'rb');
+            if ($h === false) return null;
+            $f = fstat($h);
+            $raw = null;
+            if ($f !== false && ($f['mode'] & 0170000) === 0100000 && $f['dev'] === $l['dev'] && $f['ino'] === $l['ino']) {
+                $c = stream_get_contents($h, 4097);
+                $raw = is_string($c) && strlen($c) <= 4096 ? $c : null;
+            }
+            fclose($h);
         }
-        fclose($h);
         $d = $raw !== null ? json_decode($raw, true) : null;
         if (!is_array($d) || ($d['runId'] ?? null) !== $runId || !is_int($d['created'] ?? null) || !is_int($d['expires'] ?? null)) return null;
         return ['runId' => $runId, 'created' => $d['created'], 'expires' => $d['expires']];
+    }
+
+    /** True while a script run as the run user is starting or open (finding 10: one restricted workspace at a time). */
+    public static function restrictedRunOpen(): bool
+    {
+        foreach (self::runsSince(0, '') as $r) {
+            if ((string)($r['user'] ?? '') === RunUserService::USER && in_array((string)($r['state'] ?? ''), ['starting', 'started'], true) && self::isOpen($r)) return true;
+        }
+        return false;
+    }
+
+    /** Remove the temporary folder of a sign-in workspace that did not start (R18b). Only a folder with a valid marker goes. */
+    public static function discardRunTempFolder(string $runId): void
+    {
+        if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $runId) !== 1) return;
+        $root = self::tempRoot();
+        if (isset($root['error'])) return;
+        self::discardTemp($runId, $root['path'] . '/' . $runId);
+    }
+
+    /** The user id that runs the plugin (root). */
+    private static function pluginUid(): int
+    {
+        return \function_exists('posix_geteuid') ? (int)posix_geteuid() : 0;
+    }
+
+    /**
+     * Remove a temporary run folder. A folder that the plugin user owns goes the plain way, without following links.
+     * A folder that the run user owns is emptied by a child process as the run user (it cannot be led out of the
+     * folder by a link that the run user plants), then the empty folder is removed. A folder of any other owner stays.
+     */
+    private static function removeTempTree(string $dir): void
+    {
+        $st = @lstat($dir);
+        if ($st === false) return;
+        if ((int)$st['uid'] === self::pluginUid()) {
+            self::removeTreeNoFollow($dir);
+            return;
+        }
+        RunUserService::removeOwnedTree($dir, (int)$st['uid']);
     }
 
     /** Remove the temporary folder of a run that never got a workspace. Only a folder with a valid marker goes. */
@@ -606,7 +688,7 @@ final class AgentRunService
             $st = @lstat($folder);
             if ($st === false || ($st['mode'] & 0170000) !== 0040000) return;
             if (self::readTempMarker($folder, $runId) === null) return;
-            self::removeTreeNoFollow($folder);
+            self::removeTempTree($folder);
         } catch (\Throwable $e) {
             // The supervisor sweep removes it later.
         }
@@ -650,7 +732,7 @@ final class AgentRunService
                     }
                     if ($closedAt <= 0 || $now < $closedAt + $keep) continue;
                 }
-                self::removeTreeNoFollow($dir);
+                self::removeTempTree($dir);
                 if (!file_exists($dir)) $removed[] = $name;
             }
         } catch (\Throwable $e) {
@@ -769,13 +851,13 @@ final class AgentRunService
         $maxMode = (string)($e['maxMode'] ?? 'read-only');
         if (!in_array($maxMode, self::MODES, true)) return ['error' => 'The highest mode is read-only or may-change.'];
         $users = [];
-        foreach ((array)($e['users'] ?? ['root']) as $u) {
+        foreach ((array)($e['users'] ?? ['aicli-run']) as $u) {
             $u = trim((string)$u);
             if ($u === '') continue;
             if (preg_match('/^[a-z_][a-z0-9_-]{0,31}$/D', $u) !== 1) return ['error' => 'A run user name is not valid.'];
             $users[] = $u;
         }
-        if ($users === []) $users = ['root'];
+        if ($users === []) $users = ['aicli-run'];
         $perDay = $e['maxPerDay'] ?? 6;
         if (!is_scalar($perDay) || preg_match('/^\d{1,4}$/D', (string)$perDay) !== 1 || (int)$perDay < 1 || (int)$perDay > 1000) return ['error' => 'Runs each day is a number from 1 to 1000.'];
         $id = (string)($e['id'] ?? '');
@@ -1132,7 +1214,7 @@ final class AgentRunService
         $entry = [
             'id' => $old['id'] ?? '', 'label' => (string)($in['label'] ?? ''), 'description' => (string)($in['description'] ?? ''), 'path' => $path, 'sha256' => $hash,
             'agents' => $csv($in['agents'] ?? ''), 'folders' => $folders, 'maxMode' => (string)($in['maxMode'] ?? 'read-only'),
-            'users' => $csv($in['users'] ?? 'root'), 'maxPerDay' => $in['maxPerDay'] ?? 6,
+            'users' => $csv($in['users'] ?? RunUserService::USER), 'maxPerDay' => $in['maxPerDay'] ?? 6,
             'allowTemp' => !empty($old['allowTemp']),
             'addedAt' => $old['addedAt'] ?? 0, 'addedBy' => $old['addedBy'] ?? HumanIdentity::name(),
             'trustedAt' => $trustChanged ? self::now() : ($old['trustedAt'] ?? 0),
@@ -1416,10 +1498,17 @@ final class AgentRunService
         $saved = SpawnService::recordRunReport($workspaceId, $runId, $status, $summary, self::now());
         if (isset($saved['error'])) return self::reply('error', (string)$saved['error'], self::EXIT_INTERNAL, $runId, $workspaceId);
 
+        $resultFile = (string)$saved['resultFile'];
+        if ((string)($record['user'] ?? 'root') === RunUserService::USER) {
+            // R22: the task folder of a run as the run user is removed when the run closes, so a small copy of the result
+            // stays in the private state of the plugin. Root writes it here, never in the folder of the run user.
+            $resultFile = self::archiveResult($runId, $workspaceId, $status, $summary);
+            if ($resultFile === '') return self::reply('error', 'The run result could not be kept after the workspace closes.', self::EXIT_INTERNAL, $runId, $workspaceId);
+        }
         $record['state'] = $status;
         $record['summary'] = $summary;
         $record['reportedAt'] = self::now();
-        $record['resultFile'] = (string)$saved['resultFile'];
+        $record['resultFile'] = $resultFile;
         if ($clipped) $record['summaryClipped'] = true;
         $record['notebookCard'] = self::upsertNotebookCard($record);
         $record['notebookScope'] = self::$lastCardScope;
@@ -1428,7 +1517,7 @@ final class AgentRunService
         $who = self::runActor($record);
         self::emit('run.reported', 'script ' . (string)($record['script'] ?? ''), 'Run reported ' . $status . ': ' . self::cut($summary, 2000),
             ['runId' => $runId, 'workspaceId' => $workspaceId, 'key' => (string)($record['key'] ?? ''), 'status' => $status,
-                'label' => (string)($record['label'] ?? ''), 'resultFile' => (string)$saved['resultFile']], $who);
+                'label' => (string)($record['label'] ?? ''), 'resultFile' => $resultFile], $who);
         self::reportTrayRecord($runId, $status, $summary, $workspaceId, $record);
         $noticeSummary = preg_replace('/\s+/u', ' ', $summary);
         if (!is_string($noticeSummary)) $noticeSummary = $summary;
@@ -1449,6 +1538,58 @@ final class AgentRunService
         return self::waitReply($record);
     }
 
+    /** R22: one small result file in the private state folder (mode 600, never through a link). '' on a fault. */
+    private static function archiveResult(string $runId, string $workspaceId, string $status, string $summary): string
+    {
+        $dir = self::runsDir();
+        if (!is_dir($dir)) @mkdir($dir, 0700, true);
+        $st = @lstat($dir);
+        if ($st === false || ($st['mode'] & 0170000) !== 0040000) return '';
+        $file = rtrim($dir, '/') . '/' . $runId . '.result.json';
+        $body = json_encode(['status' => $status, 'summary' => $summary, 'at' => self::now(), 'workspaceId' => $workspaceId], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        return is_string($body) && SpawnService::writeNoFollow($file, $body . "\n", 0600) ? $file : '';
+    }
+
+    /**
+     * R18: read the report that a run as the run user wrote with aicli-run-report. The file is checked (a small plain
+     * file with one name, owned by the run user, exactly the two keys, a valid status, plain text) and read by a child
+     * process as the run user. A good report is saved like a root report. A bad file leaves one tray notice and is
+     * ignored; the run keeps going until a good report or the time limit.
+     *
+     * @param array<string,mixed> $record
+     */
+    private static function readRunUserReport(array $record): void
+    {
+        $runId = (string)($record['runId'] ?? '');
+        $workspaceId = (string)($record['workspaceId'] ?? '');
+        $uid = (int)($record['runUid'] ?? 0);
+        $taskDir = RunUserService::taskDirFor($runId);
+        if ($runId === '' || $workspaceId === '' || $taskDir === '' || $uid < 1) return;
+        $file = $taskDir . '/RESULT.json';
+        if (!file_exists($file) && !is_link($file)) return;
+        $read = RunUserService::readReportFile($file, $uid, $workspaceId);
+        if (isset($read['report'])) {
+            self::reportFromWorkspace($workspaceId, $runId, (string)$read['report']['status'], (string)$read['report']['summary']);
+            return;
+        }
+        if (!empty($record['badReportNoted'])) return;
+        $first = self::withRunLock(function () use ($runId): array {
+            $fresh = self::loadRun($runId);
+            if ($fresh === null || !empty($fresh['badReportNoted'])) return self::reply('closed', '', self::EXIT_OK, $runId);
+            self::updateRun($runId, ['badReportNoted' => true]);
+            return self::reply('closed', '', self::EXIT_OK, $runId, '', ['first' => true]);
+        });
+        if (empty($first['reply']['first'])) return;
+        try {
+            $id = 'runreport_bad_' . $runId;
+            ActivityService::register($id, 'admin', 'A run report was ignored', ['actor' => 'script ' . (string)($record['script'] ?? ''), 'meta' => [
+                'tool' => 'aicli_run', 'kind' => 'notice', 'workspaceId' => $workspaceId,
+                'by' => ['agentName' => 'Script run', 'workspaceName' => ''],
+            ]]);
+            ActivityService::finish($id, self::safeText((string)$read['error'], 300) . ' The run goes on until a good report or the time limit.');
+        } catch (\Throwable $e) { /* best effort */ }
+    }
+
     /**
      * The Notebook that gets the card of a run (#915): the Notebook of the run folder when that folder has one
      * (the rule of the workspace Notebook), else the Global Notebook. A temporary folder is removed later, so its
@@ -1466,9 +1607,14 @@ final class AgentRunService
         return NotebookService::contextFor('global');
     }
 
-    /** True when the result file of the run is in a temporary run folder (it has the marker of R19). @param array<string,mixed> $record */
+    /**
+     * True when the run used a temporary run folder: the run record says so (#745: a run as the run user keeps its
+     * result in the private state folder, not in the run folder), or the result file is in a folder with the marker of R19.
+     * @param array<string,mixed> $record
+     */
     private static function isTempRun(array $record): bool
     {
+        if (!empty($record['temp'])) return true;
         $resultFile = (string)($record['resultFile'] ?? '');
         return $resultFile !== '' && is_file(dirname($resultFile, 2) . '/.aicli-run.json');
     }
@@ -1499,9 +1645,11 @@ final class AgentRunService
             $where = '';
             if ($resultFile !== '') {
                 $where = 'The whole report is on this card. The result file is `' . $resultFile . '`. '
-                    . (self::isTempRun($record)
+                    . ((string)($record['user'] ?? 'root') === RunUserService::USER
+                        ? 'That file is in the private state folder of the plugin (only root can read it). The task folder of the run user is removed when the run closes. This card stays.'
+                        : (self::isTempRun($record)
                         ? 'That file is in a temporary run folder. The plugin removes the folder ' . self::intSetting('run_temp_keep_hours', 1, 720) . ' hours after the run closes. This card stays.'
-                        : 'That file stays in the run folder until a person removes the folder.')
+                        : 'That file stays in the run folder until a person removes the folder.'))
                     . "\n\n";
             }
             $clip = !empty($record['summaryClipped'])
@@ -1598,6 +1746,13 @@ final class AgentRunService
                     continue;
                 }
                 $state = (string)($record['state'] ?? '');
+                // Finding 9 of the second review: an expired run is timed out BEFORE its report is read. The read has its own
+                // deadline now, but the time limit must not wait for it.
+                if ($state === 'started' && (string)($record['user'] ?? '') === RunUserService::USER && !self::runExpired($record)) {
+                    self::readRunUserReport($record);
+                    $record = self::loadRun($runId) ?? $record;
+                    $state = (string)($record['state'] ?? '');
+                }
                 if ($state === 'started' && self::runExpired($record)) {
                     $result = self::timeoutRun($runId);
                     if (($result['reply']['state'] ?? '') === 'timed_out') $timedOut[] = $runId;
@@ -1749,6 +1904,14 @@ final class AgentRunService
         if (!in_array($req['user'], $entry['users'], true)) {
             return "The script '$label' may not run the agent as '{$req['user']}'. Its list allows: " . implode(', ', $entry['users']) . '.';
         }
+        if ($req['user'] === RunUserService::USER) {
+            if (RunUserService::validatedListedFolders((array)($entry['folders'] ?? [])) === null) {
+                return "The script '$label' has a folder that is missing, outside /mnt, or reached through a symlink. Update its folder list before starting a restricted run.";
+            }
+            // R15: a call that needs the run user is refused, with the fault, when the account is not ready.
+            $account = RunUserService::status();
+            if (empty($account['ready'])) return (string)$account['fault'];
+        }
         $used = array_filter(self::runsSince(self::now() - 86400, $entry['path']), static fn(array $r): bool => (string)$r['runId'] !== $excludeRunId);
         if (count($used) >= $entry['maxPerDay']) {
             return "The script '$label' has used its {$entry['maxPerDay']} runs for the last 24 hours.";
@@ -1799,6 +1962,18 @@ final class AgentRunService
         $maxOpen = self::intSetting('run_max_concurrent', 1, 10);
         if ($open >= $maxOpen) {
             return ['state' => 'held', 'reason' => "$open runs are open. The limit is $maxOpen. Call again later.", 'exit' => self::EXIT_HELD];
+        }
+        // Finding 10: one restricted workspace is open at a time. They share one user id, so a run could read the task folder
+        // of another and drive its tmux socket. The call is held, and the script may call again.
+        if ((string)($req['user'] ?? '') === RunUserService::USER) {
+            foreach ($records as $r) {
+                if ((string)($r['user'] ?? '') === RunUserService::USER && in_array((string)($r['state'] ?? ''), ['starting', 'started'], true) && self::isOpen($r)) {
+                    return ['state' => 'held', 'reason' => 'Another script run as aicli-run is open (run ' . (string)$r['runId'] . '). Only one restricted run is open at a time. Call again later.', 'exit' => self::EXIT_HELD];
+                }
+            }
+            if (RunUserService::otherOpenRestricted('') !== '') {
+                return ['state' => 'held', 'reason' => 'A restricted workspace (the sign-in workspace of the run user) is open. Close it first, then call again.', 'exit' => self::EXIT_HELD];
+            }
         }
         $daily = self::intSetting('run_daily_budget', 1, 500);
         $today = count(array_filter(self::runsSince($now - 86400, ''), static fn(array $r): bool => (string)$r['runId'] !== $excludeRunId));
@@ -1859,6 +2034,11 @@ final class AgentRunService
             return self::reply('duplicate', $reason, self::EXIT_DUPLICATE, $callId, $ws, $extra);
         };
         if (preg_match('/^[A-Za-z0-9]{6,32}$/D', $openId) !== 1) return $notSent('the open run has no valid id.');
+        if ((string)($record['user'] ?? 'root') === RunUserService::USER && (string)$req['data'] !== '') {
+            // The data folder of a run is in the state folder, which the run user cannot read, and root does not write
+            // in the folder of the run user. A follow-up message with text only is delivered.
+            return $notSent('a run as aicli-run takes no data in a follow-up message. Send the text only, or start a new run after this one closes.');
+        }
         $dataFile = '';
         if ((string)$req['data'] !== '') {
             $dir = self::runsDir() . '/' . $openId . '.d';
@@ -1950,7 +2130,7 @@ final class AgentRunService
                 . '. Caller user id: ' . $who['uid'] . '. Process chain: ' . $params['chain'] . '. Request: agent ' . $req['agent']
                 . ', folder ' . (!empty($req['temp']) ? 'a temporary folder' : $req['folder']) . ', mode ' . $req['mode'] . ', title "' . $req['title'] . '". Approve stores the hash. '
                 . 'Each later read-only call of this script starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : 6) . ' runs a day. '
-                . ($changed ? 'The limits of the old entry stay.' : (!empty($req['temp']) ? 'The new entry may start this agent in a temporary folder only, read-only, as root.' : 'The new entry may start this agent in this folder, read-only, as root.'));
+                . ($changed ? 'The limits of the old entry stay.' : (!empty($req['temp']) ? 'The new entry may start this agent in a temporary folder only, read-only, as aicli-run.' . ($req['user'] === 'root' ? ' The script asked for root: Approve does not give it. A person adds root in Settings, Script runs.' : '') : 'The new entry may start this agent in this folder, read-only, as aicli-run.' . ($req['user'] === 'root' ? ' The script asked for root: Approve does not give it. A person adds root in Settings, Script runs.' : '')));
             $perDay = $changed ? (int)$entry['maxPerDay'] : 6;
             $temp = !empty($req['temp']);
             $card = [
@@ -1962,7 +2142,7 @@ final class AgentRunService
                     ['label' => 'Limit', 'value' => self::perDayText($perDay)],
                 ],
                 'effect' => 'If you approve: each later read-only call of this script starts the agent at once, with no more approval, up to ' . self::perDayText($perDay) . '. '
-                    . ($changed ? 'The limits of the old entry stay.' : ($temp ? 'The script may start this agent in a temporary folder only, as root.' : 'The script may start this agent in this folder only, as root.')),
+                    . ($changed ? 'The limits of the old entry stay.' : ($temp ? 'The script may start this agent in a temporary folder only, as aicli-run.' : 'The script may start this agent in this folder only, as aicli-run.') . ($req['user'] === 'root' ? ' It asked for root: Approve does not give it.' : '')),
                 'technical' => self::techRows($who, $changed ? (string)$entry['sha256'] : ''),
             ];
             if ((string)$req['title'] !== '') $card['quotes'] = [['label' => 'The script says (not checked)', 'text' => 'Title: ' . (string)$req['title'] . ($request['prompt'] !== '' ? "\n" . $request['prompt'] : '')]];
@@ -2198,7 +2378,7 @@ final class AgentRunService
                 ['status' => 'done', 'step' => 'Replaced by a request for access', 'meta' => ['kind' => 'record']]);
             $access = ['label' => $label, 'description' => $req['description']] + $asked;
             $request = ['agent' => (string)$req['agents'][0], 'folder' => (string)($req['folders'][0] ?? ''), 'temp' => $req['temp'], 'mode' => $req['maxMode'],
-                'user' => 'root', 'title' => 'Request for access', 'key' => '', 'model' => '', 'effort' => '', 'prompt' => ''];
+                'user' => RunUserService::USER, 'title' => 'Request for access', 'key' => '', 'model' => '', 'effort' => '', 'prompt' => ''];
             $params = [
                 'path' => $path, 'sha256' => $sha, 'oldSha256' => $changed ? $entry['sha256'] : '', 'label' => $label, 'userScript' => $who['userScript'],
                 'uid' => $who['uid'], 'chain' => RunCallerIdentity::chainText($who['chain']), 'request' => $request, 'access' => $access,
@@ -2209,6 +2389,8 @@ final class AgentRunService
                 . '. New hash: ' . $sha . ($changed ? '. Old hash: ' . $entry['sha256'] : '') . '. Caller user id: ' . $who['uid'] . '. Process chain: ' . $params['chain']
                 . '. Accept stores the hash and ' . ($changed ? 'keeps the limits of the old entry (' . self::limitsText(['agents' => $entry['agents'], 'folders' => $entry['folders'], 'allowTemp' => $entry['allowTemp'], 'maxMode' => $entry['maxMode'], 'maxPerDay' => $entry['maxPerDay']]) . '; you can change them in Settings, Script runs)' : 'adds the script with these limits')
                 . '. Each later read-only call of this script then starts the agent at once, with no further approval, up to ' . ($changed ? (int)$entry['maxPerDay'] : (int)$req['maxPerDay']) . ' runs a day. Decline turns the request away.';
+            $shareWarning = self::userShareWarning((array)$req['folders']);
+            $statement .= $shareWarning;
             $shownMax = $changed ? (int)$entry['maxPerDay'] : (int)$req['maxPerDay'];
             $places = array_merge((array)$req['folders'], !empty($req['temp']) ? ['Temporary folder'] : []);
             $card = [
@@ -2221,7 +2403,9 @@ final class AgentRunService
                 ],
                 'effect' => 'If you approve: each later read-only call of this script starts the agent at once, with no more approval, up to ' . self::perDayText($shownMax) . '. '
                     . ((string)($changed ? $entry['maxMode'] : $req['maxMode']) === 'may-change' ? 'A call that may change things still waits for your approval each time. ' : '')
-                    . ($changed ? 'The limits of the old entry stay. You can change them in Settings, Script runs.' : 'The script is added to the Authorised scripts list with these limits.'),
+                    . 'When it runs as aicli-run (restricted), it sees only its run folder and the folders listed on the Authorised scripts entry under /mnt. Listed folders are read-only. Other paths under /mnt stay hidden. An allowed temporary run folder can be written; other run folders can be written only for a may-change run. The view does not use /mnt/user unless the run folder or a listed folder is under it. '
+                    . ($changed ? 'The limits of the old entry stay. You can change them in Settings, Script runs.' : 'The script is added to the Authorised scripts list with these limits.')
+                    . $shareWarning,
                 'technical' => self::techRows($who, $changed ? (string)$entry['sha256'] : ''),
             ];
             if ((string)$req['description'] !== '') $card['quotes'] = [['label' => 'The script says (not checked)', 'text' => (string)$req['description']]];
@@ -2239,6 +2423,26 @@ final class AgentRunService
     }
 
     // ---- A may-change run waits for a person (R13) ----
+
+    /** @param list<string> $paths */
+    private static function userShareWarning(array $paths): string
+    {
+        $shareRoots = ['/mnt/user'];
+        // Test folders use a private mount root. Map its `user` directory to /mnt/user only inside tests.
+        if (defined('AICLI_TEST_TMP') && is_array(RunUserService::$pathsForTests)) {
+            $mountRoot = rtrim((string)(RunUserService::$pathsForTests['mountRoot'] ?? ''), '/');
+            if ($mountRoot !== '' && $mountRoot !== '/mnt') $shareRoots[] = $mountRoot . '/user';
+        }
+        foreach ($paths as $path) {
+            $path = rtrim(trim((string)$path), '/');
+            foreach ($shareRoots as $root) {
+                if ($path === $root || strpos($path, $root . '/') === 0) {
+                    return " Warning: /mnt/user is an Unraid shared FUSE file system. File locks or delays can affect other work on the share. This warning does not prevent the script from listing the folder.";
+                }
+            }
+        }
+        return '';
+    }
 
     /**
      * @param array<string,mixed> $req
@@ -2285,7 +2489,8 @@ final class AgentRunService
         // No record means no count for the caps, the budget and the key. A run without a record does not start.
         $saved = self::storeRun(['runId' => $runId, 'ts' => self::now(), 'script' => $who['path'], 'sha256' => $who['sha256'], 'label' => $entry['label'],
             'uid' => (int)$who['uid'], 'userScript' => (string)$who['userScript'], 'title' => $req['title'],
-            'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'state' => 'starting', 'opId' => '', 'workspaceId' => '',
+            'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'user' => $req['user'], 'temp' => !empty($req['temp']),
+            'state' => 'starting', 'opId' => '', 'workspaceId' => '',
             'startingAt' => self::now(), 'startingPid' => self::myPid(), 'startingPidStart' => self::processStart(self::myPid())]);
         if (!$saved) {
             self::removeRunFiles($runId);
@@ -2312,11 +2517,17 @@ final class AgentRunService
             'userScript' => $who['userScript'], 'uid' => $who['uid'], 'expiresAt' => $expiresAt,
         ];
         $readOnly = $req['mode'] === 'read-only';
+        $sharePaths = array_merge([(string)$req['folder']], array_map('strval', (array)($entry['folders'] ?? [])));
+        $shareWarning = self::userShareWarning($sharePaths);
         $statement = "The script '{$entry['label']}' ({$who['path']}) asks to run the agent '{$req['agent']}' in {$req['folder']} as {$req['user']}. "
             . ($readOnly
-                ? 'It asks for a read-only run. The agent may only read: it gets the tools Read, Grep and Glob, kept to the run folder and the data folder of the run, no shell and no file editing, it ignores the settings files of the run folder, and it gets only the read tools of the two plugin servers (plugin tools that change things are denied; it can still report with aicli_finish_task). In this version the agent runs as root, and these limits come from the start options of the agent, not from a lock on the disks. The plugin writes the folder .aicli-task into that folder. '
-                : 'It may change files. After Approve the agent runs without asking for permission (when it has such flags). ')
-            . 'Title: "' . $req['title'] . '". Prompt: ' . self::safeText($req['prompt'], 2000)
+                ? ($req['user'] === RunUserService::USER
+                    ? 'It asks for a read-only run. The agent may only read: it gets the tools Read, Grep and Glob, kept to the run folder and the task folder, no shell and no file editing, and it ignores the settings files of the run folder. It runs as aicli-run in a private disk view. It sees only its run folder and the folders listed on the Authorised scripts entry under /mnt. The listed folders are read-only. Every other path under /mnt is hidden. An allowed temporary run folder can be written; every other run folder stays read-only in this mode. The view does not use /mnt/user unless the run folder or a listed folder is under it. It gets no admin and no Relay tool of the plugin; its one extra tool is a small report tool that saves the result. The plugin keeps the task files in its own state folder, outside the run folder. '
+                    : 'It asks for a read-only run. The agent may only read: it gets the tools Read, Grep and Glob, kept to the run folder and the data folder of the run, no shell and no file editing, it ignores the settings files of the run folder, and it gets only the read tools of the two plugin servers (plugin tools that change things are denied; it can still report with aicli_finish_task). The agent runs as root, so these limits come from the start options of the agent, not from a lock on the disks. The plugin writes the folder .aicli-task into that folder. ')
+                : ($req['user'] === RunUserService::USER
+                    ? 'It may change files in ' . (!empty($req['temp']) ? 'a temporary folder' : (string)$req['folder']) . '. After Approve the agent runs as aicli-run without asking for permission (when it has such flags). In its private disk view it sees only the run folder and the folders listed on the Authorised scripts entry under /mnt. The listed folders are read-only, and every other path under /mnt is hidden. That run folder is the only place it can write. The view does not use /mnt/user unless the run folder or a listed folder is under it. ' . self::MAY_CHANGE_RESTRICTED_WARNING . ' '
+                    : 'It may change files. After Approve the agent runs as root without asking for permission (when it has such flags). ' . self::MAY_CHANGE_RESTRICTED_WARNING . ' '))
+            . $shareWarning . ' Title: "' . $req['title'] . '". Prompt: ' . self::safeText($req['prompt'], 2000)
             . ($dataBytes > 0 ? ' Data from the script (' . $dataBytes . ' bytes) is in a file that the task names. Start of the data: "' . $dataPreview . '".' : '')
             . ' No answer in ' . $hours . ' hours ends the run.';
         $facts = [
@@ -2335,7 +2546,7 @@ final class AgentRunService
             'quotes' => $quotes,
             'effect' => $readOnly
                 ? 'If you approve: the agent starts at once and may only read. It cannot run a shell or change a file. No answer in ' . $hours . ' hours ends the run.'
-                : 'If you approve: the agent starts at once and works without asking for permission. It may change files. No answer in ' . $hours . ' hours ends the run.',
+                : 'If you approve: the agent starts at once and works without asking for permission. It may change files. ' . self::MAY_CHANGE_RESTRICTED_WARNING . ' No answer in ' . $hours . ' hours ends the run.' . $shareWarning,
             'technical' => self::techRows($who),
         ];
         $tray = ActivityService::propose($opId, 'aicli_run_start', $statement, $params, [], ['label' => 'Approve run: ' . $req['title'] . '?', 'card' => $card]);
@@ -2346,7 +2557,8 @@ final class AgentRunService
         ActivityService::update($opId, ['actor' => 'script ' . $who['path']]);
         self::storeRun(['runId' => $runId, 'ts' => self::now(), 'script' => $who['path'], 'sha256' => $who['sha256'], 'label' => $entry['label'],
             'uid' => (int)$who['uid'], 'userScript' => (string)$who['userScript'], 'title' => $req['title'],
-            'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'state' => 'pending_approval', 'opId' => $opId, 'workspaceId' => '', 'expiresAt' => $expiresAt]);
+            'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'], 'user' => $req['user'], 'temp' => !empty($req['temp']),
+            'state' => 'pending_approval', 'opId' => $opId, 'workspaceId' => '', 'expiresAt' => $expiresAt]);
         self::emit('run.approval_needed', 'script ' . $who['path'], "Approval needed for run: {$req['title']}", ['runId' => $runId, 'opId' => $opId, 'label' => $entry['label'], 'agent' => $req['agent'], 'key' => $req['key']], $who);
         self::notifyOnce($req['key'] !== '' ? $req['key'] : $runId, 'approval', 'AICliAgents: a run needs your approval', "The script '{$entry['label']}' asks to run {$req['agent']} (" . $req['mode'] . '). Approve or reject it in the Activity tray.', 'warning');
         return self::reply('pending_approval', 'A person must approve this run in the Activity tray.', self::EXIT_PENDING, $runId, '', ['opId' => $opId]);
@@ -2395,7 +2607,8 @@ final class AgentRunService
                 self::emit('run.refused', 'script ' . $who['path'], 'Approved run not started: ' . $reason, ['runId' => $runId, 'reason' => 'recheck'], $who);
                 return ['error' => $reason];
             }
-            $entry = ['label' => (string)$check['reply']['entry']['label'], 'path' => $who['path']];
+            $entry = ['label' => (string)$check['reply']['entry']['label'], 'path' => $who['path'],
+                'folders' => (array)($check['reply']['entry']['folders'] ?? [])];
             $res = self::startRun($runId, $req, $who, $entry, true);
             if (($res['exit'] ?? 1) !== self::EXIT_OK) return ['error' => (string)$res['reply']['reason']];
             self::emit('run.approved', 'script ' . $who['path'], 'Run approved: ' . (string)($req['title'] ?? ''), ['runId' => $runId, 'approvedBy' => HumanIdentity::name()], $who);
@@ -2462,10 +2675,34 @@ final class AgentRunService
     {
         $readOnly = $req['mode'] === 'read-only';
         $madeTemp = false;
+        // R14 to R16: a run as the run user needs the account to be ready. The user ids come from the account.
+        $user = (string)($req['user'] ?? 'root');
+        $uid = 0;
+        $gid = 0;
+        $readFolders = [];
+        if ($user === RunUserService::USER) {
+            $account = RunUserService::status();
+            if (empty($account['ready'])) {
+                self::updateRun($runId, ['state' => 'failed']);
+                self::removeRunFiles($runId);
+                self::emit('run.refused', 'script ' . $who['path'], 'Run not started: ' . (string)$account['fault'], ['runId' => $runId, 'reason' => 'run_user'], $who);
+                return self::reply('refused', (string)$account['fault'], self::EXIT_REFUSED, $runId);
+            }
+            $uid = (int)$account['uid'];
+            $gid = (int)$account['gid'];
+            $readFolders = RunUserService::validatedListedFolders((array)($entry['folders'] ?? []));
+            if ($readFolders === null) {
+                self::updateRun($runId, ['state' => 'failed']);
+                self::removeRunFiles($runId);
+                self::emit('run.refused', 'script ' . $who['path'], 'Run not started: an authorised folder is missing, outside /mnt, or reached through a symlink.', ['runId' => $runId, 'reason' => 'run_user_folder'], $who);
+                return self::reply('refused', 'An authorised folder is missing, outside /mnt, or reached through a symlink. Update the folder list before starting a restricted run.', self::EXIT_REFUSED, $runId);
+            }
+        }
         if (!empty($req['temp'])) {
             // R19, R20: the temporary folder is made now, when the run really starts. A request that waits, is rejected or
             // runs out of time never makes one.
-            $made = self::makeTempFolder($runId, (string)$req['folder']);
+            $made = self::makeTempFolder($runId, (string)$req['folder'], $uid, $gid,
+                $uid > 0 && (!empty($req['temp']) || $req['mode'] === 'may-change'));
             if (isset($made['error'])) {
                 self::updateRun($runId, ['state' => 'failed']);
                 self::removeRunFiles($runId);
@@ -2475,7 +2712,42 @@ final class AgentRunService
             $req['folder'] = $made['path'];
             $madeTemp = true;
         }
-        $task = self::composeTask((string)$req['prompt'], (string)($req['dataFile'] ?? ''), (string)$req['mode']);
+        // R18: a run as the run user keeps its task files in a private folder outside the run folder. Root fills it while it
+        // is root owned; SpawnService hands it to the run user once, before the agent starts. Root writes nothing in it later.
+        $taskDir = '';
+        $dataFile = (string)($req['dataFile'] ?? '');
+        if ($user === RunUserService::USER) {
+            $taskFolder = RunUserService::createTaskFolder($runId);
+            // #929: the root of the task folders is closed to the run user on the host. Root binds this run's folder into the view,
+            // so the run user is not expected to enter the levels above it any more.
+            if (isset($taskFolder['error'])) {
+                self::updateRun($runId, ['state' => 'failed']);
+                self::removeRunFiles($runId);
+                if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
+                return self::reply('held', (string)$taskFolder['error'], self::EXIT_HELD, $runId);
+            }
+            $taskDir = (string)$taskFolder['path'];
+            if ($dataFile !== '') {
+                // The data file is in the state folder, which the run user cannot read. A copy goes into the task folder.
+                $data = self::readLimited($dataFile, self::MAX_DATA_BYTES * 2);
+                if (!is_string($data) || !RunUserService::writeTaskFile($taskDir, 'DATA.md', $data, $uid, $gid)) {
+                    self::updateRun($runId, ['state' => 'failed']);
+                    RunUserService::removeTaskFolder($runId);
+                    self::removeRunFiles($runId);
+                    if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
+                    return self::reply('held', 'The data of the call could not be made available to the agent.', self::EXIT_HELD, $runId);
+                }
+                $dataFile = $taskDir . '/DATA.md';
+            }
+        }
+        $task = self::composeTask((string)$req['prompt'], $dataFile, (string)$req['mode']);
+        if ($user === RunUserService::USER) {
+            // A read-only run has no shell: it reports with the tool `report` of the server aicli-run-report. A run that may
+            // change files has a shell and uses the command.
+            $task .= $readOnly
+                ? "\n\nReport with the tool `report` of the server aicli-run-report: status is done, failed or blocked, summary is a short text of at most 2000 characters. Call it once, when you are finished. Do not call aicli_finish_task: it is for root runs only."
+                : "\n\nReport with `aicli-run-report <done|failed|blocked> <summary>` (a short summary of at most 2000 characters). Do not call aicli_finish_task: it is for root runs only.";
+        }
         $spawn = ['agentId' => $req['agent'], 'path' => $req['folder'], 'task' => $task, 'taskTitle' => $req['title'], 'model' => $req['model'], 'effort' => $req['effort'], 'name' => self::cut($req['title'], 60)];
         // Decision 13: only an approved may-change run goes unattended, and only when the agent has such flags.
         $unattended = false;
@@ -2485,13 +2757,31 @@ final class AgentRunService
             if ($unattended) $spawn['unattended'] = true;
         }
         $run = ['runId' => $runId, 'label' => (string)$entry['label'], 'readOnly' => $readOnly, 'unattended' => $unattended, 'mode' => $req['mode'], 'script' => (string)$who['path'], 'key' => $req['key']];
+        if ($user === RunUserService::USER) {
+            // R17: in a read-only run nothing under /mnt is writable except the temporary folder; in a may-change run the
+            // named folder is writable too.
+            $run += ['runAs' => $user, 'runUid' => $uid, 'runGid' => $gid, 'taskDir' => $taskDir, 'temp' => !empty($req['temp']),
+                'mountWritable' => !empty($req['temp']) || $req['mode'] === 'may-change', 'readFolders' => $readFolders];
+        }
         if ($readOnly) {
-            // A read-only run reads only the two plugin MCP servers, from a file of its own (mode 600).
-            $mcpFile = self::runsDir() . '/' . $runId . '.mcp.json';
-            $json = json_encode(AgentLaunchProfile::readOnlyMcpConfig(), JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            // A read-only run reads only the two plugin MCP servers, from a file of its own (mode 600). The run user gets
+            // no plugin server (R18): its file holds no server, and it sits in the task folder that the run user can read.
+            $mcpFile = $user === RunUserService::USER ? $taskDir . '/readonly-mcp.json' : self::runsDir() . '/' . $runId . '.mcp.json';
+            // The run user gets no admin and no Relay server (R18). Its one server is the small report server (finding 8); the
+            // task folder travels in the env block, because an MCP host does not pass the whole environment on.
+            $restrictedMcp = ['mcpServers' => ['aicli-run-report' => [
+                'command' => '/usr/bin/php',
+                'args' => [dirname(__DIR__, 2) . '/scripts/run-report-mcp.php'],
+                'env' => ['AICLI_TASK_DIR' => $taskDir, 'AICLI_RESTRICTED_RUN' => '1'],
+            ]]];
+            $json = json_encode($user === RunUserService::USER ? $restrictedMcp : AgentLaunchProfile::readOnlyMcpConfig(), JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
             if (!is_dir(self::runsDir())) @mkdir(self::runsDir(), 0700, true);
-            if ($json === false || !SpawnService::writeNoFollow($mcpFile, $json, 0600)) {
+            $mcpWritten = $json !== false && ($user === RunUserService::USER
+                ? RunUserService::writeTaskFile($taskDir, 'readonly-mcp.json', $json, $uid, $gid)
+                : SpawnService::writeNoFollow($mcpFile, $json, 0600));
+            if (!$mcpWritten) {
                 self::updateRun($runId, ['state' => 'failed']);
+                if ($user === RunUserService::USER) RunUserService::removeTaskFolder($runId);
                 self::removeRunFiles($runId);
                 if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
                 return self::reply('held', 'The MCP file of the read-only run could not be written.', self::EXIT_HELD, $runId);
@@ -2499,8 +2789,8 @@ final class AgentRunService
             $run['mcpConfig'] = $mcpFile;
             // The data folder of the run (mode 700) is always made and passed, also when the first call had no data: a
             // later follow-up message (#839) writes its data file there, and the read-only agent may read only this folder.
-            $dataDir = self::runsDir() . '/' . $runId . '.d';
-            if (!is_dir($dataDir)) {
+            $dataDir = $user === RunUserService::USER ? $taskDir : self::runsDir() . '/' . $runId . '.d';
+            if ($user !== RunUserService::USER && !is_dir($dataDir)) {
                 $oldMask = umask(0);
                 try {
                     @mkdir($dataDir, 0700, true);
@@ -2522,6 +2812,7 @@ final class AgentRunService
         if (isset($started['error'])) {
             self::updateRun($runId, ['state' => 'failed']);
             self::removeRunFiles($runId);
+            if ($user === RunUserService::USER && self::workspaceOfRun($runId) === '') RunUserService::removeTaskFolder($runId);
             if ($madeTemp) self::discardTemp($runId, (string)$req['folder']);
             self::emit('run.refused', 'script ' . $who['path'], 'Run not started: ' . (string)$started['error'], ['runId' => $runId, 'reason' => 'start'], $who);
             return self::reply('held', (string)$started['error'], self::EXIT_HELD, $runId);
@@ -2531,6 +2822,7 @@ final class AgentRunService
         self::storeRun(['runId' => $runId, 'ts' => $existing['ts'] ?? self::now(), 'script' => $who['path'], 'sha256' => $who['sha256'], 'label' => $entry['label'],
             'uid' => (int)($existing['uid'] ?? $who['uid']), 'userScript' => (string)($existing['userScript'] ?? $who['userScript']),
             'title' => (string)($existing['title'] ?? $req['title']), 'key' => $req['key'], 'agent' => $req['agent'], 'folder' => $req['folder'], 'mode' => $req['mode'],
+            'user' => $user, 'runUid' => $uid, 'taskDir' => $taskDir, 'temp' => !empty($req['temp']),
             'state' => 'started', 'startedAt' => self::now(), 'opId' => $existing['opId'] ?? '', 'workspaceId' => $wsId]);
         self::emit('run.started', 'script ' . $who['path'], "Run started: {$req['title']}", ['runId' => $runId, 'workspaceId' => $wsId, 'agent' => $req['agent'], 'mode' => $req['mode'], 'key' => $req['key'], 'label' => $entry['label'], 'sha256' => $who['sha256']], $who);
         // The title, the folder and the path can hold a secret (the title and the folder come from the caller): redact them.
@@ -2594,7 +2886,9 @@ final class AgentRunService
                     'label' => $label, 'description' => $description, 'path' => $path, 'sha256' => $hash,
                     'agents' => isset($req['agent']) ? [(string)$req['agent']] : [],
                     'folders' => isset($req['folder']) && (string)$req['folder'] !== '' ? [(string)$req['folder']] : [],
-                    'maxMode' => 'read-only', 'users' => ['root'], 'maxPerDay' => 6,
+                    // R10, finding 14: a new entry gets the run user only, also when the script asked for root. A person adds root in
+                    // Settings, Script runs; one Approve must not give a script root.
+                    'maxMode' => 'read-only', 'users' => [RunUserService::USER], 'maxPerDay' => 6,
                     'addedBy' => HumanIdentity::name(),
                     'trustedAt' => $trustedAt, 'trustedBy' => $trustedBy,
                 ];
@@ -2763,6 +3057,9 @@ final class AgentRunService
         $dir = self::runsDir() . '/' . $runId . '.d';
         self::removeTreeNoFollow($dir);
         @unlink(self::runsDir() . '/' . $runId . '.mcp.json');
+        // R26: the private task folder of a run as the run user goes with the other private files. The result copy
+        // (<runId>.result.json) stays.
+        RunUserService::removeTaskFolder($runId);
     }
 
     /** Remove one run folder without following a link at any depth. */
@@ -2803,7 +3100,7 @@ final class AgentRunService
     {
         try {
             foreach ((ConfigService::getWorkspaces()['sessions'] ?? []) as $w) {
-                if (is_array($w) && (string)($w['spawn']['run']['runId'] ?? '') === $runId) return (string)($w['id'] ?? '?');
+                if (is_array($w) && ((string)($w['spawn']['run']['runId'] ?? '') === $runId || (string)($w['spawn']['runUserSignIn']['runId'] ?? '') === $runId)) return (string)($w['id'] ?? '?');
             }
         } catch (\Throwable $e) {
             return '?';

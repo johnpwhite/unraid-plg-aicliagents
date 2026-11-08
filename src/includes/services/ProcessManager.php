@@ -44,6 +44,9 @@ class ProcessManager {
      */
     public static $paneLivenessProbe = null;
 
+    /** @var callable|null fn(string $socket, list<string> $args, int $seconds): ?string  Test seam for bounded tmux clients. */
+    public static $tmuxCommandRunnerForTests = null;
+
     /** @var (callable(string):array<int,int>)|null Test seam for exact session-environment process discovery. */
     public static $sessionPidProbe = null;
 
@@ -198,6 +201,7 @@ class ProcessManager {
      */
     public static function resetProbes(): void {
         self::$commandRunner = null;
+        self::$tmuxCommandRunnerForTests = null;
         self::$tmuxLivenessProbe = null;
         self::$ttydPidProbe = null;
         self::$ttydChildrenProbe = null;
@@ -602,17 +606,23 @@ class ProcessManager {
     public static function removeDeadSessionTmuxDir(string $sessionId, ?string $root = null, ?callable $serverAlive = null, int $waitMs = 1000): bool {
         $root ??= self::tmuxRoot();
         $dir = $root . substr(self::sessionTmuxTmpdir($sessionId), strlen(self::tmuxRoot()));
+        // #929: the root-only folder of a restricted workspace is removed too, after its server is gone.
+        $restrictedRoot = self::restrictedTmuxRoot($root);
+        $restrictedDir = $restrictedRoot === '' ? '' : $restrictedRoot . substr(self::sessionTmuxTmpdir($sessionId), strlen(self::tmuxRoot()));
+        if ($restrictedDir !== '' && is_dir($restrictedDir) && !is_link($restrictedDir)) {
+            // The folder is the bind source of the live view: while the view of this workspace exists it stays.
+            $restrictedId = substr(basename($restrictedDir), 2);
+            if ($restrictedId !== '' && RunUserService::existingView($restrictedId) !== '') return false;
+            $serverAlive ??= static fn(string $sock): bool => self::runTmuxForSocket($sock, ['list-sessions'], 8) !== null;
+            $alive = false;
+            foreach (glob($restrictedDir . '/tmux-*/default') ?: [] as $sock) if ($serverAlive($sock)) { $alive = true; break; }
+            if ($alive) return false;
+            $rst = @lstat($restrictedDir);
+            if (is_array($rst)) RunUserService::removeOwnedTree($restrictedDir, (int)$rst['uid']);
+            if (file_exists($restrictedDir)) return false;
+        }
         if (!is_dir($dir) || is_link($dir)) return !file_exists($dir);
-        $serverAlive ??= static function (string $sock): bool {
-            if (self::$commandRunner !== null) {
-                // #916 test seam: the runner prints the exit status of the probe.
-                return trim(self::runCommand('tmux -S ' . escapeshellarg($sock) . ' list-sessions > /dev/null 2>&1; echo $?')) === '0';
-            }
-            $rc = 1; $out = [];
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            @exec('tmux -S ' . escapeshellarg($sock) . ' list-sessions > /dev/null 2>&1', $out, $rc);
-            return $rc === 0;
-        };
+        $serverAlive ??= static fn(string $sock): bool => self::runTmuxForSocket($sock, ['list-sessions'], 8) !== null;
         $deadline = microtime(true) + max(0, $waitMs) / 1000;
         do {
             $alive = false;
@@ -623,6 +633,12 @@ class ProcessManager {
             if (microtime(true) >= $deadline) return false;
             usleep(100000);
         } while (true);
+        // Finding 12: root does not walk a folder the run user owns (the walk can be steered by a swapped link). It uses the removal
+        // that never follows a link.
+        $st = @lstat($dir);
+        if (is_array($st) && (int)$st['uid'] !== 0) {
+            return \AICliAgents\Services\RunUserService::removeOwnedTree($dir, (int)$st['uid']) && !file_exists($dir);
+        }
         $it = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
             \RecursiveIteratorIterator::CHILD_FIRST
@@ -633,6 +649,42 @@ class ProcessManager {
         }
         @rmdir($dir);
         return !file_exists($dir);
+    }
+
+    /**
+     * The tmux command prefix root may use for a socket. Root never runs a tmux client against a socket the run user can write: a
+     * fake server there can order the client to start a program as root (second review, finding 1). For such a socket the client
+     * runs AS the run user inside the view of the workspace (RunUserService::viewTmuxCommand). '' means: do not talk to it.
+     */
+    public static function tmuxPrefixForSocket(string $sock): string {
+        if (!\AICliAgents\Services\RunUserService::socketIsRunUserControlled($sock)) return 'tmux -S ' . escapeshellarg($sock);
+        return '';
+    }
+
+    /** Build a direct argv for a bounded client. A restricted socket uses its own PID, mount and network spaces. */
+    public static function tmuxArgvForSocket(string $sock, array $args, int $deadlineSeconds = 8): ?array
+    {
+        if (RunUserService::socketIsRunUserControlled($sock)) {
+            $id = self::workspaceIdForSocket($sock);
+            return $id === '' ? null : RunUserService::restrictedTmuxArgv($id, $args, $deadlineSeconds);
+        }
+        return array_merge(['tmux'], $sock !== '' ? ['-S', $sock] : [], array_values(array_map('strval', $args)));
+    }
+
+    /** Run one direct tmux argv and enforce a deadline for root and restricted sockets. */
+    public static function runTmuxForSocket(string $sock, array $args, int $deadlineSeconds = 8): ?string
+    {
+        if (defined('AICLI_TEST_TMP') && is_callable(self::$tmuxCommandRunnerForTests)) {
+            return call_user_func(self::$tmuxCommandRunnerForTests, $sock, array_values(array_map('strval', $args)), $deadlineSeconds);
+        }
+        $argv = self::tmuxArgvForSocket($sock, $args, $deadlineSeconds);
+        return $argv === null ? null : RunUserService::runChild($argv, $deadlineSeconds);
+    }
+
+    /** Workspace id encoded in a per-session tmux socket path. */
+    private static function workspaceIdForSocket(string $sock): string
+    {
+        return preg_match('#/s-([A-Za-z0-9_-]+)/#', $sock, $m) === 1 ? $m[1] : '';
     }
 
     /**
@@ -655,7 +707,22 @@ class ProcessManager {
         foreach (glob($root . '/tmux-*', GLOB_ONLYDIR) ?: [] as $dir) {
             if (file_exists($dir . '/default')) $socks[] = $dir . '/default';
         }
+        // #929: a restricted workspace keeps its sockets in the root-only parent <state>/run-tmux (a sibling of the tmux root). Root
+        // finds them there, and never talks to them directly: the client runs inside the view (socketIsRunUserControlled).
+        $restricted = self::restrictedTmuxRoot($root);
+        if ($restricted !== '') {
+            foreach (glob($restricted . '/s-*/tmux-*', GLOB_ONLYDIR) ?: [] as $dir) {
+                if (file_exists($dir . '/default')) $socks[] = $dir . '/default';
+            }
+        }
         return $socks;
+    }
+
+    /** The root-only parent of the sockets of restricted workspaces that belongs to a tmux root, or '' when the root is not the tmux folder. */
+    public static function restrictedTmuxRoot(?string $root = null): string {
+        $root = rtrim($root ?? self::tmuxRoot(), '/');
+        if ($root === self::tmuxRoot()) return RunUserService::runTmuxRoot();
+        return basename($root) === 'tmux' ? dirname($root) . '/run-tmux' : '';
     }
 
     /**
@@ -749,31 +816,15 @@ class ProcessManager {
         }
         if ($live === []) return [];
 
-        $marker = '@@AICLI_SOCK ';
-        $script = '';
-        foreach ($live as $sock) {
-            $esc = escapeshellarg($sock);
-            $script .= 'printf ' . escapeshellarg($marker . '%s\n') . " $esc; "
-                . "tmux -S $esc ls -F '#{session_name}|#{session_created}|#{session_path}' 2>/dev/null; ";
-        }
-        // nosemgrep: php.lang.security.exec-use.exec-use
-        $raw = (string) @shell_exec($script);
-
         $rows = [];
-        $sock = '';
-        foreach (explode("\n", $raw) as $line) {
-            if (strncmp($line, $marker, strlen($marker)) === 0) {
-                $sock = substr($line, strlen($marker));
-                continue;
+        foreach ($live as $sock) {
+            $raw = self::runTmuxForSocket($sock, ['list-sessions', '-F', '#{session_name}|#{session_created}|#{session_path}'], 8);
+            if (!is_string($raw)) continue;
+            foreach (explode("\n", $raw) as $line) {
+                if (strncmp($line, 'aicli-agent-', 12) !== 0) continue;
+                $parts = explode('|', $line, 3);
+                $rows[] = ['name' => $parts[0], 'sock' => $sock, 'created' => (int)($parts[1] ?? 0), 'path' => (string)($parts[2] ?? '')];
             }
-            if ($sock === '' || strncmp($line, 'aicli-agent-', 12) !== 0) continue;
-            $parts = explode('|', $line, 3);
-            $rows[] = [
-                'name'    => $parts[0],
-                'sock'    => $sock,
-                'created' => (int)($parts[1] ?? 0),
-                'path'    => (string)($parts[2] ?? ''),
-            ];
         }
         return $rows;
     }
@@ -1037,7 +1088,7 @@ class ProcessManager {
         if ($safeId === '') return false;
         if (!self::hasLiveTmuxSession($safeId)) return false;
 
-        [$sessName, , $tmuxBin] = self::findTmuxSessionForId($safeId);
+        [$sessName, $sock, $tmuxBin] = self::findTmuxSessionForId($safeId);
         if ($sessName === '') {
             // Test seam path (tmuxLivenessProbe forced true with no real session):
             // fall back to the pane probe with the synthetic name so injected
@@ -1052,7 +1103,7 @@ class ProcessManager {
             return true;
         }
 
-        return self::paneHasLiveAgent($sessName, $tmuxBin);
+        return self::paneHasLiveAgent($sessName, $tmuxBin, RunUserService::isMarkedRestricted($safeId) ? $safeId : '', $sock);
     }
 
     /**
@@ -1080,14 +1131,14 @@ class ProcessManager {
      *
      * @phpstan-impure
      */
-    public static function paneHasLiveAgent(string $sessName, string $tmuxBin = 'tmux'): bool {
+    public static function paneHasLiveAgent(string $sessName, string $tmuxBin = 'tmux', string $workspaceId = '', string $sock = ''): bool {
         if (is_callable(self::$paneLivenessProbe)) {
             return (bool) call_user_func(self::$paneLivenessProbe, $sessName, $tmuxBin);
         }
-        $escSess = escapeshellarg($sessName);
-        $fmt = escapeshellarg('#{pane_pid} #{pane_dead} #{pane_current_command}');
-        // nosemgrep: php.lang.security.exec-use.exec-use
-        $out = trim((string) @shell_exec("$tmuxBin list-panes -t $escSess -F $fmt 2>/dev/null | head -n1"));
+        $format = '#{pane_pid} #{pane_dead} #{pane_current_command}';
+        $raw = self::runTmuxForSocket($sock, ['list-panes', '-t', '=' . $sessName, '-F', $format], 8);
+        $out = trim((string)$raw);
+        if (strpos($out, "\n") !== false) $out = strstr($out, "\n", true) ?: '';
         if ($out === '') {
             // Could not read the pane (session vanished mid-probe). Treat as not
             // alive — the session-existence gate already ran; a race here favours
@@ -1103,6 +1154,12 @@ class ProcessManager {
             return false;
         }
 
+        $hostPid = $panePid;
+        if ($workspaceId !== '') {
+            $hostPid = RunUserService::hostPidForRunUserNamespacePid($workspaceId, $panePid) ?? 0;
+            if ($hostPid < 1) return false;
+        }
+
         // Foreground command is not a bare shell -> an agent (or its bash -c
         // wrapper mid-exec) is on the pane.
         if ($paneCmd !== '' && !self::isBareShellCommand($paneCmd)) {
@@ -1111,10 +1168,10 @@ class ProcessManager {
 
         // Bare shell on the pane: alive only if it has a live child (the agent /
         // its subtree). The parked run-loop blocked on `read` has none.
-        if ($panePid > 0) {
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            $kids = trim((string) @shell_exec('pgrep -P ' . $panePid . ' 2>/dev/null'));
-            return $kids !== '';
+        if ($hostPid > 0) {
+            if ($workspaceId !== '') return RunUserService::hostChildrenOfRunUserProcess($hostPid) !== [];
+            $children = @file_get_contents('/proc/' . $hostPid . '/task/' . $hostPid . '/children');
+            return is_string($children) && trim($children) !== '';
         }
         return false;
     }
@@ -1261,8 +1318,12 @@ class ProcessManager {
             // 'tmux' tmuxBin when nothing matches — falls through harmlessly.
             [$sessName, $tmuxSock, $tmuxBin] = self::findTmuxSessionForId($id);
             if ($sessName !== '') {
-                $escSess = escapeshellarg($sessName);
-                self::runCommand("$tmuxBin kill-session -t $escSess > /dev/null 2>&1");
+                self::runTmuxForSocket($tmuxSock, ['kill-session', '-t', $sessName], 8);
+            }
+            if (RunUserService::isMarkedRestricted($id)) {
+                $workspaceRecord = SpawnService::findRecord((string)$id);
+                $spawn = is_array($workspaceRecord['spawn'] ?? null) ? $workspaceRecord['spawn'] : [];
+                RunUserService::releaseWorkspace($id, is_array($spawn['runUserSignIn'] ?? null));
             }
             // The session's own tmux server exits with its last session, but
             // its s-<id> socket folder stayed behind: 97 of them had piled up
@@ -1506,11 +1567,14 @@ class ProcessManager {
         if ($safeId === '') return ['', '', 'tmux'];
         foreach (self::sessionSocketCandidates($safeId) as $sock) {
             if (!self::isLiveUnixSocket($sock)) continue;
-            $cmd = 'tmux -S ' . escapeshellarg($sock) . " ls -F '#S' 2>/dev/null | grep -- '-" . escapeshellarg($safeId) . "\$' | head -n1";
-            $name = trim(self::runCommand($cmd));
-            $name = trim($name, "' \t\n");
-            if ($name !== '') {
-                return [$name, $sock, 'tmux -S ' . escapeshellarg($sock)];
+            $prefix = self::tmuxPrefixForSocket($sock);
+            $raw = self::runTmuxForSocket($sock, ['list-sessions', '-F', '#S'], 8);
+            if (!is_string($raw)) continue;
+            foreach (explode("\n", trim($raw)) as $name) {
+                $name = trim($name, "' \t\r\n");
+                if ($name !== '' && preg_match('/^aicli-agent-[A-Za-z0-9_-]+-' . preg_quote($safeId, '/') . '$/D', $name) === 1) {
+                    return [$name, $sock, $prefix];
+                }
             }
         }
         return ['', '', 'tmux'];
@@ -1530,10 +1594,12 @@ class ProcessManager {
         $all = self::tmuxSocketPaths($root);
         if ($safeId === '') return $all;
         $ownPrefix = $root . '/s-' . $safeId . '/';
+        $restrictedRoot = self::restrictedTmuxRoot($root);
+        $ownRestricted = $restrictedRoot === '' ? '' : $restrictedRoot . '/s-' . $safeId . '/';
         $own = [];
         $rest = [];
         foreach ($all as $sock) {
-            if (strncmp($sock, $ownPrefix, strlen($ownPrefix)) === 0) $own[] = $sock;
+            if (strncmp($sock, $ownPrefix, strlen($ownPrefix)) === 0 || ($ownRestricted !== '' && strncmp($sock, $ownRestricted, strlen($ownRestricted)) === 0)) $own[] = $sock;
             else $rest[] = $sock;
         }
         return array_merge($own, $rest);
@@ -1559,10 +1625,12 @@ class ProcessManager {
      */
     public static function killAllAgentSessions(): void {
         foreach (self::tmuxSocketPaths() as $sock) {
-            $tmuxBin = 'tmux -S ' . escapeshellarg($sock);
-            $cmd = "$tmuxBin ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | xargs -r -I {} $tmuxBin kill-session -t {} > /dev/null 2>&1";
-            // nosemgrep: php.lang.security.exec-use.exec-use
-            @shell_exec($cmd);
+            $raw = self::runTmuxForSocket($sock, ['list-sessions', '-F', '#S'], 8);
+            if (!is_string($raw)) continue;
+            foreach (explode("\n", trim($raw)) as $name) {
+                if (preg_match('/^aicli-agent-[A-Za-z0-9_-]+$/D', $name) !== 1) continue;
+                self::runTmuxForSocket($sock, ['kill-session', '-t', $name], 8);
+            }
         }
     }
 

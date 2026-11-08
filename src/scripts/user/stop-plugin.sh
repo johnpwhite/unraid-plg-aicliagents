@@ -1,5 +1,6 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
+source "$(dirname "${BASH_SOURCE[0]}")/../tmux-socket-safety.sh" || { echo 'tmux-socket-safety.sh missing' >&2; exit 1; }
 # AICliAgents Graceful Stop Utility
 # Called by event/stopping when the array stops or server shuts down.
 #
@@ -142,18 +143,36 @@ stop_plugin_agents
 safe_pkill 'secret-service-daemon'
 safe_pkill 'dbus-daemon .*unraid-aicliagents/secret-service'
 # Now kill tmux sessions (the children are already dead)
+# Second review, finding 1: root never runs a tmux client against a socket that the run user (aicli-run) can write. A fake server
+# on such a socket can order the client to start a program as root. Such a socket is skipped here; the processes of the run user
+# are ended by user id instead. When this script runs as the run user itself, nothing is skipped.
+_run_uid="$(id -u aicli-run 2>/dev/null || true)"
 if command -v tmux >/dev/null 2>&1; then
     # Non-root audit: iterate every per-uid tmux socket so non-root sessions
     # get killed too.
     # Bug #141: per-session servers (s-<sid>/tmux-<uid>) plus any pre-#141
     # session still live on the legacy shared socket.
+    # #929: the sockets of a restricted workspace are in the root-only ${MOUNT_ROOT}/run-tmux. The safety check skips them (the
+    # folder and the socket belong to the run user); the kill by user id below ends those servers.
     for _sock in "${MOUNT_ROOT}"/tmux/s-*/tmux-*/default \
+                 "${MOUNT_ROOT}"/run-tmux/s-*/tmux-*/default \
                  "${MOUNT_ROOT}"/tmux/tmux-*/default; do
         [ -S "$_sock" ] || continue
+        aicli_tmux_socket_skip_for_root "$_sock" "$_run_uid" && continue
         tmux -S "$_sock" ls -F '#S' 2>/dev/null | grep -E '^aicli-agent-' | while read -r sess; do
             tmux -S "$_sock" kill-session -t "$sess" >/dev/null 2>&1
         done
     done
+fi
+
+# Finding 11 of the second review: end every process of the run user (counted by user id, not by tmux session), then clean each
+# cgroup, network namespace and private mount space. Keep these resources when any process is still alive.
+if [ -n "$_run_uid" ]; then
+    pkill -KILL -U "$_run_uid" 2>/dev/null
+    pkill -KILL -u "$_run_uid" 2>/dev/null
+fi
+if ! /bin/bash "$EMHTTP_DEST/src/scripts/aicli-run-cleanup.sh" stop >>"$LOG_FILE" 2>&1; then
+    warn "Restricted runtime cleanup could not confirm that every run process stopped; its network guard and view stay in place."
 fi
 
 # ── Step 2: Wait for process table cleanup ──

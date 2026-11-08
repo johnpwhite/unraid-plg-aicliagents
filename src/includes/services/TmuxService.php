@@ -2198,8 +2198,10 @@ class TmuxService {
         // live agent read as "no-live-agent" from the web request, wrongly refusing
         // Continue + relay paste delivery with "busy or mid-prompt". Thread the
         // resolved socket through, the same way tmuxSessionHasLiveAgent() does.
-        $tmuxBin = $sock !== '' ? 'tmux -S ' . escapeshellarg($sock) : 'tmux';
-        if (!\AICliAgents\Services\ProcessManager::paneHasLiveAgent($name, $tmuxBin)) {
+        $tmuxBin = $sock !== '' ? ProcessManager::tmuxPrefixForSocket($sock) : 'tmux';
+        $workspaceId = RunUserService::isMarkedRestricted($sessionId) ? $sessionId : '';
+        if ($tmuxBin === '' && $workspaceId === '') return [$name, $sock, 'no-live-agent'];
+        if (!\AICliAgents\Services\ProcessManager::paneHasLiveAgent($name, $tmuxBin, $workspaceId, $sock)) {
             return [$name, $sock, 'no-live-agent'];
         }
         return [$name, $sock, ''];
@@ -3707,6 +3709,12 @@ class TmuxService {
     private static function runTmuxAt(string $sock, array $args, ?string $stdin = null): array {
         if (is_callable(self::$tmuxRunner)) return call_user_func(self::$tmuxRunner, $sock, $args, $stdin);
         $argv = array_merge(['tmux'], $sock !== '' ? ['-S', $sock] : [], $args);
+        // Second review, finding 1: root never runs a tmux client against a socket the run user can write (a fake server there
+        // can order the client to start a program as root). Such a call runs AS the run user in the view of the workspace.
+        if ($sock !== '' && RunUserService::socketIsRunUserControlled($sock)) {
+            $argv = ProcessManager::tmuxArgvForSocket($sock, $args, max(1, (int)ceil(self::$tmuxTimeoutSeconds)));
+            if ($argv === null) return ['rc' => -1, 'out' => '', 'err' => 'restricted socket: the view of the workspace is not available'];
+        }
         $desc = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
         if ($stdin !== null) $desc[0] = ['pipe', 'r'];
         // nosemgrep: php.lang.security.exec-use.exec-use

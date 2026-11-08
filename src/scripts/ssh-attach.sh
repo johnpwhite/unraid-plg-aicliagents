@@ -1,5 +1,6 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
+source "$(dirname "${BASH_SOURCE[0]}")/tmux-socket-safety.sh" || { echo 'tmux-socket-safety.sh missing' >&2; exit 1; }
 # AICliAgents SSH Forced-Command Attach Script — chmod 0755
 #
 # Installed as the forced-command in authorized_keys for SSH launch links (#747).
@@ -39,10 +40,15 @@ SESSION_PATTERN='^aicli-agent-[A-Za-z0-9_.-]+$'
 _socket_paths() {
     local _s
     for _s in "$TMUX_TMPDIR"/s-*/tmux-*/default "$TMUX_TMPDIR"/tmux-*/default; do
+        aicli_tmux_socket_skip_for_root "$_s" "$_run_uid" && continue
         [ -S "$_s" ] && printf '%s\n' "$_s"
     done
 }
 
+# Second review, finding 1: root never runs a tmux client against a socket that the run user (aicli-run) can write. A fake server
+# on such a socket can order the client to start a program as root. Such a socket is skipped here; the processes of the run user
+# are ended by user id instead. When this script runs as the run user itself, nothing is skipped.
+_run_uid="$(id -u aicli-run 2>/dev/null || true)"
 _list_sessions() {
     local _s
     while IFS= read -r _s; do

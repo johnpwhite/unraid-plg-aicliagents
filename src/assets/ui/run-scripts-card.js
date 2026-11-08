@@ -5,11 +5,14 @@
     var list = document.getElementById('aicli-runs-list');
     if (!list) return;
 
-    var state = { scripts: [], agentChoices: [], userScripts: null, enabled: false, loadError: false, open: null };
+    var state = { scripts: [], agentChoices: [], userScripts: null, runUser: null, shareWarnings: [], temporaryRoot: '', enabled: false, loadError: false, open: null };
     var addButton = document.getElementById('aicli-runs-add');
     var message = document.getElementById('aicli-runs-msg');
     var template = document.getElementById('aicli-runs-dialog-tpl');
     var switchControl = document.querySelector('select[name="run_enabled"]');
+    var runPassword = document.getElementById('aicli-run-password');
+    var signInAgent = document.getElementById('aicli-run-sign-in-agent');
+    var signInButton = document.getElementById('aicli-run-sign-in');
 
     function q(selector, root) { return (root || (state.open && state.open.dialog) || document).querySelector(selector); }
     function qa(selector, root) { return Array.prototype.slice.call((root || (state.open && state.open.dialog) || document).querySelectorAll(selector)); }
@@ -55,6 +58,72 @@
         if (window.aicliCards && typeof window.aicliCards.setStatus === 'function') window.aicliCards.setStatus('script-runs', status);
         var off = document.getElementById('aicli-runs-off');
         if (off) off.hidden = state.enabled || count === 0;
+    }
+    function renderRunUser() {
+        var box = document.getElementById('aicli-run-user-state');
+        if (box) box.textContent = state.runUser && state.runUser.ready
+            ? 'Ready. Script runs use aicli-run unless an authorised entry selects root.'
+            : ((state.runUser && state.runUser.fault) || 'The run user status is not available. Script runs as aicli-run are refused.');
+        var warningList = document.getElementById('aicli-run-share-warnings');
+        if (warningList) {
+            clear(warningList);
+            state.shareWarnings.forEach(function (warning) { warningList.appendChild(make('li', '', warning.message || 'Check SMB access for this share.')); });
+            warningList.hidden = !state.shareWarnings.length;
+        }
+        var tempRoot = document.getElementById('aicli-run-temp-root');
+        if (tempRoot) tempRoot.textContent = state.temporaryRoot ? 'Temporary run folders are made under ' + state.temporaryRoot + '.' : 'Temporary folders are unavailable until the appdata pool path can be resolved.';
+        if (signInAgent) {
+            var current = signInAgent.value;
+            clear(signInAgent);
+            state.agentChoices.filter(function (choice) { return choice.installed; }).forEach(function (choice) {
+                var option = make('option', '', choice.name);
+                option.value = choice.id;
+                signInAgent.appendChild(option);
+            });
+            if (Array.prototype.some.call(signInAgent.options, function (option) { return option.value === current; })) signInAgent.value = current;
+        }
+        if (signInButton) signInButton.disabled = !(state.runUser && state.runUser.ready && signInAgent && signInAgent.value);
+    }
+    function generateRunPassword() {
+        if (!runPassword || !window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+            say('This browser cannot make a secure password. Use a password manager.', true);
+            return;
+        }
+        var alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%*+-_';
+        var bytes = new Uint8Array(32);
+        window.crypto.getRandomValues(bytes);
+        var password = '';
+        for (var i = 0; i < 24; i++) password += alphabet.charAt(bytes[i] % alphabet.length);
+        runPassword.value = password;
+        runPassword.hidden = false;
+        var copy = document.getElementById('aicli-run-password-copy');
+        if (copy) copy.hidden = false;
+        say('Password made in this page. Paste it into the Users page. It is not sent or saved here.');
+    }
+    function copyRunPassword() {
+        if (!runPassword || !runPassword.value) return;
+        runPassword.select();
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(runPassword.value);
+            else document.execCommand('copy');
+            say('Password copied. Paste it into the Users page.');
+        } catch (e) { say('Select and copy the password into the Users page.', true); }
+    }
+    function openSignInWorkspace() {
+        if (!signInAgent || !signInAgent.value || signInButton.disabled) return;
+        signInButton.disabled = true;
+        var status = document.getElementById('aicli-run-sign-in-message');
+        if (status) status.textContent = 'Opening the sign-in workspace…';
+        post('run_scripts_sign_in', { agentId: signInAgent.value }).then(function (answer) {
+            if (!answer || answer.status !== 'ok') throw new Error((answer && answer.message) || 'The sign-in workspace could not be opened.');
+            var workspace = answer.workspace || {};
+            var workspaceId = String(workspace.workspaceId || workspace.id || '');
+            if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId)) throw new Error('The sign-in workspace opened, but its terminal link is missing.');
+            if (status) status.textContent = 'Sign-in workspace opened. Complete sign-in there, then close it.';
+            window.open('/AICliAgents#aicli-workspace=' + encodeURIComponent(workspaceId), '_self');
+        }).catch(function (error) {
+            if (status) status.textContent = error.message || 'The sign-in workspace could not be opened.';
+        }).then(renderRunUser);
     }
     function statusTag(script) {
         var value = script.attention || '';
@@ -119,8 +188,12 @@
             if (!answer || answer.status !== 'ok') throw new Error((answer && answer.message) || 'The list could not be loaded.');
             state.scripts = Array.isArray(answer.scripts) ? answer.scripts : [];
             state.agentChoices = Array.isArray(answer.agentChoices) ? answer.agentChoices : [];
+            state.runUser = answer.runUser || null;
+            state.shareWarnings = Array.isArray(answer.shareWarnings) ? answer.shareWarnings : [];
+            state.temporaryRoot = typeof answer.temporaryRoot === 'string' ? answer.temporaryRoot : '';
             state.enabled = !!answer.enabled;
             state.loadError = false;
+            renderRunUser();
             renderList();
             if (state.open && state.open.id) {
                 var latest = state.scripts.find(function (item) { return item.id === state.open.id; });
@@ -171,6 +244,7 @@
         setText('[data-view="agents"]', (script.agentNames && script.agentNames.length ? script.agentNames : (script.agents || []).map(nameForAgent)).join(', ') || 'No agent');
         setText('[data-view="folders"]', (script.folders || []).join('\n') + (script.folders && script.folders.length && script.allowTemp ? '\nand a temporary folder' : '') || 'A temporary folder only. The plugin makes a new empty folder for each run.');
         setText('[data-view="mode"]', script.maxMode === 'may-change' ? 'May change files: waits for your approval each time.' : 'Read-only: starts at once and only reads files.');
+        setText('[data-view="users"]', (script.users || ['root']).map(function (user) { return user === 'aicli-run' ? 'aicli-run (restricted)' : user; }).join(', '));
         setText('[data-view="perday"]', 'Up to ' + Number(script.maxPerDay || 6) + ' runs in 24 hours.');
 
         var callout = q('[data-role="stale-callout"]');
@@ -215,6 +289,10 @@
             label.appendChild(make('span', '', name));
             box.appendChild(label);
         });
+    }
+    function appendRunUserChoices(script) {
+        var users = script && Array.isArray(script.users) && script.users.length ? script.users : ['aicli-run'];
+        qa('[data-user-id]').forEach(function (check) { check.checked = users.indexOf(check.getAttribute('data-user-id')) !== -1; });
     }
     function updateDescriptionCount() {
         var input = q('#runs-edit-description');
@@ -310,6 +388,7 @@
         var trust = q('[data-control="trust"]');
         if (trust) trust.checked = !!state.open.trustChecked;
         appendAgentChoices(adding ? { agents: state.open.formAgents || [] } : entry);
+        appendRunUserChoices(adding ? { users: state.open.formUsers || ['aicli-run'] } : entry);
         var mode = adding ? (state.open.formMode || 'read-only') : (entry.maxMode || 'read-only');
         qa('[data-mode]').forEach(function (radio) { radio.checked = radio.getAttribute('data-mode') === mode; });
         updateDescriptionCount();
@@ -522,6 +601,7 @@
             agents: qa('[data-agent-id]:checked').map(function (node) { return node.value; }).sort(),
             folders: (q('#runs-edit-folders').value || '').trim(),
             maxMode: (q('[data-mode]:checked') || {}).getAttribute ? q('[data-mode]:checked').getAttribute('data-mode') : 'read-only',
+            users: qa('[data-user-id]:checked').map(function (node) { return node.getAttribute('data-user-id'); }).sort(),
             maxPerDay: q('#runs-edit-perday').value || '6',
             trust: !!q('[data-control="trust"]') && q('[data-control="trust"]').checked
         };
@@ -559,7 +639,7 @@
             agents: values.agents.join(', '),
             folders: values.folders,
             maxMode: values.maxMode,
-            users: 'root',
+            users: values.users.length ? values.users.join(', ') : 'aicli-run',
             maxPerDay: values.maxPerDay,
             authoriseCurrent: values.trust ? '1' : ''
         };
@@ -814,6 +894,12 @@
 
     if (addButton) addButton.addEventListener('click', openAdd);
     if (switchControl) switchControl.addEventListener('change', setStatus);
+    var generatePasswordButton = document.getElementById('aicli-run-password-generate');
+    if (generatePasswordButton) generatePasswordButton.addEventListener('click', generateRunPassword);
+    var copyPasswordButton = document.getElementById('aicli-run-password-copy');
+    if (copyPasswordButton) copyPasswordButton.addEventListener('click', copyRunPassword);
+    if (signInButton) signInButton.addEventListener('click', openSignInWorkspace);
+    if (signInAgent) signInAgent.addEventListener('change', renderRunUser);
     renderList();
     loadList();
 }());

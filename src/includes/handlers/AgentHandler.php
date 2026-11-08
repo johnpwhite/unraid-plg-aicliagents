@@ -742,45 +742,64 @@ class AgentHandler {
             // Non-root audit: shared multi-user lookup (capture-PIDs pass).
             [$sessName, $tmuxSock, $tmuxBin] = \AICliAgents\Services\ProcessManager::findTmuxSessionForId($safeId);
             if ($sessName === '') continue;
-            $escSess = escapeshellarg($sessName);
-
-            $paneOut = (string) shell_exec("$tmuxBin list-panes -t $escSess -F '#{pane_pid}' 2>/dev/null");
+            $restricted = \AICliAgents\Services\RunUserService::isMarkedRestricted($safeId);
+            $paneOut = \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock,
+                ['list-panes', '-t', '=' . $sessName, '-F', '#{pane_pid}'], 8) ?? '';
             foreach (explode("\n", trim($paneOut)) as $panePidStr) {
-                $panePid = (int) $panePidStr;
+                $namespacePid = (int)$panePidStr;
+                if ($namespacePid <= 1) continue;
+                $panePid = $restricted
+                    ? (\AICliAgents\Services\RunUserService::hostPidForRunUserNamespacePid($safeId, $namespacePid) ?? 0)
+                    : $namespacePid;
                 if ($panePid <= 1) continue;
-                $survivorPids[] = $panePid;
-                $children = (string) shell_exec("pgrep -P " . escapeshellarg((string)$panePid) . " 2>/dev/null");
-                foreach (explode("\n", trim($children)) as $childPidStr) {
-                    $childPid = (int) $childPidStr;
-                    if ($childPid > 1) $survivorPids[] = $childPid;
+                if ($restricted && !\AICliAgents\Services\RunUserService::isRunUserHostPid($panePid)) continue;
+                $survivorPids[$panePid] = $restricted;
+                if ($restricted) {
+                    foreach (\AICliAgents\Services\RunUserService::hostChildrenOfRunUserProcess($panePid) as $childPid) {
+                        $survivorPids[$childPid] = true;
+                    }
+                } else {
+                    $children = @file_get_contents('/proc/' . $panePid . '/task/' . $panePid . '/children');
+                    foreach (preg_split('/\s+/', trim((string)$children), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $childPidStr) {
+                        $childPid = (int)$childPidStr;
+                        if ($childPid > 1) $survivorPids[$childPid] = false;
+                    }
                 }
             }
 
-            @shell_exec("$tmuxBin kill-session -t $escSess 2>/dev/null");
+            \AICliAgents\Services\ProcessManager::runTmuxForSocket($tmuxSock, ['kill-session', '-t', $sessName], 8);
         }
 
         // Escalate on any captured PID still alive after kill-session.
         // Claude Code is the known offender - its claude.exe catches SIGHUP
         // and continues running orphaned after its pty closes.
-        $survivorPids = array_unique($survivorPids);
         if (!empty($survivorPids)) {
             usleep(300000); // SIGHUP takes a moment on well-behaved agents.
-            foreach ($survivorPids as $pid) {
+            foreach ($survivorPids as $pid => $restricted) {
                 if ($pid <= 1) continue;
-                $probe = (string) shell_exec("kill -0 " . escapeshellarg((string)$pid) . " 2>&1; echo _$?");
-                if (strpos($probe, '_0') !== false) {
+                if ((!$restricted || \AICliAgents\Services\RunUserService::isRunUserHostPid((int)$pid))
+                    && function_exists('posix_kill') && @posix_kill((int)$pid, 0)) {
                     aicli_log("Upgrade: PID $pid survived kill-session for $agentId - sending SIGTERM", AICLI_LOG_WARN);
-                    @shell_exec("kill -TERM " . escapeshellarg((string)$pid) . " 2>/dev/null");
+                    @posix_kill((int)$pid, 15);
                 }
             }
             usleep(500000);
-            foreach ($survivorPids as $pid) {
+            foreach ($survivorPids as $pid => $restricted) {
                 if ($pid <= 1) continue;
-                $probe = (string) shell_exec("kill -0 " . escapeshellarg((string)$pid) . " 2>&1; echo _$?");
-                if (strpos($probe, '_0') !== false) {
+                if ((!$restricted || \AICliAgents\Services\RunUserService::isRunUserHostPid((int)$pid))
+                    && function_exists('posix_kill') && @posix_kill((int)$pid, 0)) {
                     aicli_log("Upgrade: PID $pid survived SIGTERM for $agentId - sending SIGKILL", AICLI_LOG_WARN);
-                    @shell_exec("kill -KILL " . escapeshellarg((string)$pid) . " 2>/dev/null");
+                    @posix_kill((int)$pid, 9);
                 }
+            }
+        }
+
+        foreach ($sessions as $s) {
+            $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', $s['id']);
+            if (\AICliAgents\Services\RunUserService::isMarkedRestricted($safeId)) {
+                $workspaceRecord = \AICliAgents\Services\SpawnService::findRecord($safeId);
+                $spawn = is_array($workspaceRecord['spawn'] ?? null) ? $workspaceRecord['spawn'] : [];
+                \AICliAgents\Services\RunUserService::releaseWorkspace($safeId, is_array($spawn['runUserSignIn'] ?? null));
             }
         }
 

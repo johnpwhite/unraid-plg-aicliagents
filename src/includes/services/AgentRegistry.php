@@ -632,7 +632,9 @@ class AgentRegistry {
                     // so a read-only run could never report. The same run also denies the tools that change files or plugin state: the file tools and the shell,
                     // and every plugin tool of the tiers "change" and "destructive" (except aicli_finish_task, the report)
                     // and the Relay tools that send or change things. See AgentLaunchProfile::denyList().
-                    'readonly'   => ['flags' => '--allowedTools=Read,Grep,Glob,mcp__aicli-admin__aicli_finish_task --permission-mode dontAsk', 'tools' => 'Read,Grep,Glob', 'mcp_servers' => true, 'setting_sources' => 'user', 'restricted' => true, 'min_version' => '2.1.302', 'deny_tools' => ['Edit', 'Write', 'NotebookEdit', 'Bash'], 'deny_plugin_tools' => true],
+                    // run_user_flags (finding 8): a read-only run as the restricted user has no shell and no root report tool. It reports with
+                    // the one tool of scripts/run-report-mcp.php, which writes the checked RESULT.json as the run user.
+                    'readonly'   => ['flags' => '--allowedTools=Read,Grep,Glob,mcp__aicli-admin__aicli_finish_task --permission-mode dontAsk', 'run_user_flags' => '--allowedTools=Read,Grep,Glob,mcp__aicli-run-report__report --permission-mode dontAsk', 'tools' => 'Read,Grep,Glob', 'mcp_servers' => true, 'setting_sources' => 'user', 'restricted' => true, 'min_version' => '2.1.302', 'deny_tools' => ['Edit', 'Write', 'NotebookEdit', 'Bash'], 'deny_plugin_tools' => true],
                     'prompt'     => ['mode' => 'positional'],
                 ],
                 // T-07: Claude Code requires extended-keys on + terminal-features xterm*:extkeys

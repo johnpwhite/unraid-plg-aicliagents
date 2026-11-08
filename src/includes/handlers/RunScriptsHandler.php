@@ -14,21 +14,25 @@
 namespace AICliAgents\Handlers;
 
 use AICliAgents\Services\AgentRunService;
+use AICliAgents\Services\RunUserService;
+use AICliAgents\Services\SpawnService;
 
 class RunScriptsHandler {
 
     public static function actions(): array {
-        return ['run_scripts_list', 'run_scripts_save', 'run_scripts_remove', 'run_scripts_hash', 'run_scripts_user_scripts', 'run_scripts_repoint'];
+        return ['run_scripts_list', 'run_scripts_save', 'run_scripts_remove', 'run_scripts_hash', 'run_scripts_user_scripts', 'run_scripts_repoint', 'run_scripts_sign_in'];
     }
 
     public static function handle(string $action, string $id): ?array {
         switch ($action) {
-            case 'run_scripts_list':   return ['status' => 'ok', 'enabled' => AgentRunService::enabled(), 'scripts' => AgentRunService::describeList(), 'agentChoices' => AgentRunService::agentChoices()];
+            case 'run_scripts_list':   return ['status' => 'ok', 'enabled' => AgentRunService::enabled(), 'scripts' => AgentRunService::describeList(), 'agentChoices' => AgentRunService::agentChoices(),
+                'runUser' => RunUserService::status(), 'shareWarnings' => RunUserService::shareWarnings(), 'temporaryRoot' => (string)(AgentRunService::tempRoot()['path'] ?? '')];
             case 'run_scripts_save':   return self::save();
             case 'run_scripts_remove': return self::remove();
             case 'run_scripts_hash':   return self::hash();
             case 'run_scripts_user_scripts': return self::userScripts();
             case 'run_scripts_repoint': return self::repoint();
+            case 'run_scripts_sign_in': return self::signIn();
             default:                   return null;
         }
     }
@@ -78,5 +82,11 @@ class RunScriptsHandler {
         return isset($res['error'])
             ? ['status' => 'error', 'message' => (string)$res['error']]
             : ['status' => 'ok', 'entry' => $res['entry'], 'merged' => !empty($res['merged'])];
+    }
+
+    private static function signIn(): array {
+        $agent = isset($_POST['agentId']) && is_scalar($_POST['agentId']) ? (string)$_POST['agentId'] : '';
+        $result = SpawnService::spawnRunUserSignIn($agent);
+        return isset($result['error']) ? ['status' => 'error', 'message' => (string)$result['error']] : ['status' => 'ok', 'workspace' => $result];
     }
 }

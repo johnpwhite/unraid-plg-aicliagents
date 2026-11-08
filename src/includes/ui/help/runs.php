@@ -12,7 +12,8 @@
 return [
     'card-script-runs' => <<<'HTML'
 <p>Let your own scripts on this server start an agent for you, while you stay in control of what each script may do. A script on this server can start an agent with the command <code>aicli-run</code>. Only scripts on the list below may do it. A read-only run starts at once. A run that may change files waits for your approval in the Activity tray.</p>
-<p>The plugin writes the task into a folder named .aicli-task inside the folder of the run. The data of a call goes to a private file in the plugin's own state folder.</p>
+<p>A run uses the restricted user aicli-run unless the entry of the script says root. The restricted user sees only the run folder and the folders listed on the Authorised scripts entry under /mnt. The listed folders are read-only, and every other path under /mnt stays hidden. An allowed temporary run folder can be written. Otherwise, the run folder can be written only for a May change run. The plugin keeps the task of a restricted run in its own private folder, outside the folder of the run. A run as root has its task in a folder named .aicli-task inside the folder of the run. The data of a call goes to a private file in the plugin's own state folder.</p>
+<p>Create the user aicli-run on the Users page first. The button <strong>Open sign-in workspace</strong> below lets you sign in to an agent for this user once.</p>
 HTML,
     'adv-script-runs' => <<<'HTML'
 <p>Inside: how many runs may be open, how many may start in one day, and how long a person has to approve a run. Also the switch for the start notice.</p>
@@ -49,10 +50,10 @@ HTML,
 HTML,
     'run-script-mode' => <<<'HTML'
 <p>A read-only run starts at once, with no approval. A run that may change files waits in the Activity tray until you approve it. For a read-only run, the agent may use only the tools Read, Grep and Glob and the read tools of the plugin. It has no shell and no file editing, and the plugin tools that change things are denied. The file tools stay in the run folder, and the agent ignores the settings files of that folder. It can still report its result.</p>
-<p>The agent still runs as root. These options come from the agent itself, so they are not a lock on the disks. Because of this, a read-only run still counts against all the limits, and the Activity tray shows it as started. A May change run goes without permission questions after you approve it.</p>
+<p>The user under Run as sets the limit on the disks. The restricted user aicli-run sees only its run folder and the folders listed on the Authorised scripts entry under /mnt. The listed folders are read-only. Every other path under /mnt stays hidden. An allowed temporary run folder can be written. Otherwise, the run folder can be written only for a May change run. The view does not use /mnt/user unless the run folder or a listed folder is under it. A run as root has only the limits of the agent itself, which are not a lock on the disks. A read-only run still counts against all the limits, and the Activity tray shows it as started. A May change run goes without permission questions after you approve it.</p>
 HTML,
     'run-script-users' => <<<'HTML'
-<p>The user the agent may run as. Today the only user is root. A restricted run user comes in a later version.</p>
+<p>The user the agent may run as. aicli-run is the restricted user and the default: it gets the private disk view. Choose root only for a script that you trust and that needs it. A script that does not name a user gets aicli-run, and a call is refused when the entry does not allow it.</p>
 HTML,
     'run-script-perday' => <<<'HTML'
 <p>The most runs this script may start in 24 hours. A call over the limit is refused.</p>

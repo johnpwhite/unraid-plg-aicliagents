@@ -17,6 +17,7 @@ require_once dirname(__DIR__, 2) . '/includes/AICliAgentsManager.php';
 
 use AICliAgents\Services\EventActor;
 use AICliAgents\Services\AgentRunService;
+use AICliAgents\Services\RunUserService;
 use AICliAgents\Services\SpawnService;
 
 if (class_exists('\AICliAgents\Services\EventActor')) {
@@ -30,6 +31,8 @@ try {
     AgentRunService::sweepTimeouts();
     // R20: a temporary run folder goes run_temp_keep_hours after its run closed (a valid marker, never through a link).
     AgentRunService::sweepTempFolders();
+    // A restricted workspace that is not running keeps no mount space alive (the view is rebuilt at the next start).
+    RunUserService::sweepViews();
     // Script runs also close after a report when helper work is off; this sweep selects only run workspaces.
     SpawnService::sweepAutoClose(true);
     // The switch is read like every other one: only the string "1" means on. When it is off, a helper that

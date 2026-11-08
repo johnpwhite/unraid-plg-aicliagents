@@ -71,6 +71,11 @@ if [ -f "$EMHTTP_DEST/src/scripts/aicli-run" ]; then
     ln -sf "$EMHTTP_DEST/src/scripts/aicli-run" "/usr/local/bin/aicli-run"
     log_ok "aicli-run command available."
 fi
+if [ -f "$EMHTTP_DEST/src/scripts/aicli-run-report" ]; then
+    chmod +x "$EMHTTP_DEST/src/scripts/aicli-run-report"
+    ln -sf "$EMHTTP_DEST/src/scripts/aicli-run-report" "/usr/local/bin/aicli-run-report"
+    log_ok "aicli-run-report command available."
+fi
 
 # --- PHP Post-Install Tasks ---
 log_step "Initializing plugin services..."

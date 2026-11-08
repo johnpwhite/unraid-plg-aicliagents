@@ -195,7 +195,7 @@ class AgentLaunchProfile
      *                    that key is refused: the plugin never runs a read-only request without a way to enforce it.
      * @return array{args:string}|array{error:string}
      */
-    public static function flags(string $agentId, ?string $model, ?string $effort, bool $unattended, ?array $profile = null, bool $readOnly = false, string $mcpConfigPath = "", string $dataDir = ""): array
+    public static function flags(string $agentId, ?string $model, ?string $effort, bool $unattended, ?array $profile = null, bool $readOnly = false, string $mcpConfigPath = "", string $dataDir = "", bool $restrictedUser = false): array
     {
         $profile = $profile ?? self::profileFor($agentId);
         $parts = [];
@@ -235,6 +235,14 @@ class AgentLaunchProfile
             $flags = $profile['readonly']['flags'] ?? null;
             if (!is_string($flags) || trim($flags) === '') {
                 return ['error' => "The agent '$agentId' has no read-only mode in its launch profile, so it cannot run read-only. Use another agent, or ask for may-change (a person must approve it)."];
+            }
+            if ($restrictedUser) {
+                // Finding 8: the run user has no plugin report tool and, in a read-only run, no shell. Its allowed list names
+                // the one tool of the small report server (scripts/run-report-mcp.php). An agent without that list is refused.
+                $flags = $profile['readonly']['run_user_flags'] ?? null;
+                if (!is_string($flags) || trim($flags) === '') {
+                    return ['error' => "The agent '$agentId' has no way to report from a read-only run as the restricted user. Use may-change (a person must approve it), --user=root, or another agent."];
+                }
             }
             if ($unattended) {
                 return ['error' => 'A read-only run cannot also be unattended.'];
