@@ -759,9 +759,8 @@ class AgentHandler {
                         $survivorPids[$childPid] = true;
                     }
                 } else {
-                    $children = @file_get_contents('/proc/' . $panePid . '/task/' . $panePid . '/children');
-                    foreach (preg_split('/\s+/', trim((string)$children), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $childPidStr) {
-                        $childPid = (int)$childPidStr;
+                    // #935: childPidsOf() also works without the kernel children file (Unraid 6.18).
+                    foreach (\AICliAgents\Services\ProcessManager::childPidsOf($panePid) as $childPid) {
                         if ($childPid > 1) $survivorPids[$childPid] = false;
                     }
                 }

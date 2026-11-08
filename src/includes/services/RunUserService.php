@@ -2282,11 +2282,10 @@ final class RunUserService
     {
         if ($hostPid < 1) return [];
         $proc = self::path('procRoot', '/proc');
-        $raw = @file_get_contents($proc . '/' . $hostPid . '/task/' . $hostPid . '/children');
-        if (!is_string($raw)) return [];
         $out = [];
-        foreach (preg_split('/\s+/', trim($raw), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $pid) {
-            if (ctype_digit($pid) && self::isRunUserHostPid((int)$pid)) $out[] = (int)$pid;
+        // #935: ProcessManager::childPidsOf() also works without the kernel children file.
+        foreach (ProcessManager::childPidsOf($hostPid, $proc) as $pid) {
+            if (self::isRunUserHostPid($pid)) $out[] = $pid;
         }
         return $out;
     }

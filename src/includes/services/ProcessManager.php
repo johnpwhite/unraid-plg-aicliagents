@@ -1170,10 +1170,44 @@ class ProcessManager {
         // its subtree). The parked run-loop blocked on `read` has none.
         if ($hostPid > 0) {
             if ($workspaceId !== '') return RunUserService::hostChildrenOfRunUserProcess($hostPid) !== [];
-            $children = @file_get_contents('/proc/' . $hostPid . '/task/' . $hostPid . '/children');
-            return is_string($children) && trim($children) !== '';
+            return self::childPidsOf($hostPid) !== [];   // #935: the 6.18 kernel has no children file
         }
         return false;
+    }
+
+    /**
+     * #935: the direct child pids of one process. The kernel file
+     * /proc/<pid>/task/<pid>/children exists only with CONFIG_PROC_CHILDREN,
+     * and the Unraid 6.18 kernel does not have it. Without the file, every
+     * process in $procRoot is read once and kept when field 4 of its stat
+     * line (the parent pid) is $pid. The command name in the stat line can
+     * hold spaces and ")", so the fields are read after the LAST ")".
+     *
+     * @return list<int>
+     * @phpstan-impure
+     */
+    public static function childPidsOf(int $pid, string $procRoot = '/proc'): array {
+        if ($pid < 1) return [];
+        $raw = @file_get_contents($procRoot . '/' . $pid . '/task/' . $pid . '/children');
+        if (is_string($raw)) {
+            $out = [];
+            foreach (preg_split('/\s+/', trim($raw), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $child) {
+                if (ctype_digit($child) && (int)$child > 0) $out[] = (int)$child;
+            }
+            return $out;
+        }
+        $out = [];
+        foreach (@scandir($procRoot) ?: [] as $entry) {
+            if (!ctype_digit($entry) || (int)$entry === $pid) continue;
+            $stat = @file_get_contents($procRoot . '/' . $entry . '/stat');
+            if (!is_string($stat)) continue;
+            $close = strrpos($stat, ')');
+            if ($close === false) continue;
+            $fields = preg_split('/\s+/', trim(substr($stat, $close + 1)), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            if (isset($fields[1]) && ctype_digit($fields[1]) && (int)$fields[1] === $pid) $out[] = (int)$entry;
+        }
+        sort($out);
+        return $out;
     }
 
     /**
