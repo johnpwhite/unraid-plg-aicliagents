@@ -826,7 +826,15 @@ class AdminMcpTools {
                     $result = self::flat(AdminService::stopWorkspace((string)($args['id'] ?? '')));
                     break;
                 case 'aicli_finish_task':
-                    $result = self::flat(AdminService::finishTask((string)($args['status'] ?? ''), (string)($args['summary'] ?? '')));
+                    $finished = AdminService::finishTask((string)($args['status'] ?? ''), (string)($args['summary'] ?? ''));
+                    // #932: a script run's report gives its run state (done, failed, blocked, timed_out) in `status`.
+                    // That key is the tool status here, and any value but `ok` marks the MCP result as an error.
+                    // Give the run state as `taskStatus`, the same key as a sub-agent report.
+                    if (!array_key_exists('error', $finished) && array_key_exists('status', $finished)) {
+                        $finished['taskStatus'] = $finished['taskStatus'] ?? (string)$finished['status'];
+                        unset($finished['status']);
+                    }
+                    $result = self::flat($finished);
                     break;
 
                 // ---- Notebook / artefacts (ARTEFACTS.md). The notebook is the
