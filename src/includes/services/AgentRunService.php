@@ -429,6 +429,9 @@ final class AgentRunService
         return ['request' => [
             'agent' => $agent, 'folder' => $folder, 'prompt' => $prompt, 'title' => $title, 'mode' => $mode, 'user' => $user,
             'model' => $model, 'effort' => $effort, 'key' => $key, 'data' => trim($data) === '' ? '' : $data,
+            // #944: whether the call named a user. A call with no --user from a script approved before the run user
+            // existed runs as root, as it did then (see userForEntry()).
+            'userAsked' => array_key_exists('user', $flags),
             'waitRequested' => $waitRequested, 'waitSeconds' => $waitSeconds, 'onDuplicate' => $onDuplicate === 'send' ? 'send' : '', 'temp' => $temp, 'tempRoot' => $tempRoot,
         ]];
     }
@@ -1275,6 +1278,26 @@ final class AgentRunService
     // ======================================================================
 
     /**
+     * #944: the user of a call that names no user. The default is the run user (Decision 10). An entry whose list does
+     * not allow the run user and allows root was approved before the run user existed (the old default was root, and
+     * Approve stored root only): the call runs as root, as it did then. This gives no new right: a person approved root
+     * for this script. A call that names a user keeps it, and the limits decide.
+     *
+     * @param array<string,mixed> $entry
+     * @param array<string,mixed> $req
+     * @return array<string,mixed>
+     */
+    public static function userForEntry(array $entry, array $req): array
+    {
+        if (!empty($req['userAsked'])) return $req;
+        $users = (array)($entry['users'] ?? []);
+        if (in_array(RunUserService::USER, $users, true) || !in_array('root', $users, true)) return $req;
+        $req['user'] = 'root';
+        $req['userLegacy'] = true;
+        return $req;
+    }
+
+    /**
      * Check one request from one caller and act on it.
      *
      * @param array<string,mixed> $req The request that parseArgs() returned.
@@ -1305,6 +1328,13 @@ final class AgentRunService
         $entry = self::findEntry($path);
         if ($entry === null || $entry['sha256'] !== $who['sha256']) {
             return self::refuseUnknown($runId, $req, $who, $entry);
+        }
+        $req = self::userForEntry($entry, $req);
+        if (!empty($req['userLegacy'])) {
+            // The parser checked the launch flags for the run user. A root run has no read-only mount view, so the
+            // launch profile alone must make it read-only: check again for root.
+            $flagCheck = AgentLaunchProfile::flags((string)$req['agent'], (string)$req['model'], (string)$req['effort'], false, null, $req['mode'] === 'read-only', '/placeholder/run.mcp.json', '', false);
+            if (isset($flagCheck['error'])) return self::reply('refused', (string)$flagCheck['error'], self::EXIT_REFUSED, $runId);
         }
 
         // The checks and the record of the run are one step under the run lock, so two calls with the same key

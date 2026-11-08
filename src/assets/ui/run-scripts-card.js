@@ -244,7 +244,11 @@
         setText('[data-view="agents"]', (script.agentNames && script.agentNames.length ? script.agentNames : (script.agents || []).map(nameForAgent)).join(', ') || 'No agent');
         setText('[data-view="folders"]', (script.folders || []).join('\n') + (script.folders && script.folders.length && script.allowTemp ? '\nand a temporary folder' : '') || 'A temporary folder only. The plugin makes a new empty folder for each run.');
         setText('[data-view="mode"]', script.maxMode === 'may-change' ? 'May change files: waits for your approval each time.' : 'Read-only: starts at once and only reads files.');
-        setText('[data-view="users"]', (script.users || ['root']).map(function (user) { return user === 'aicli-run' ? 'aicli-run (restricted)' : user; }).join(', '));
+        var users = script.users || ['root'];
+        // #944: an entry that allows root and not the run user was approved before restricted runs. A call that names no user runs as root.
+        var legacyRoot = users.indexOf('root') !== -1 && users.indexOf('aicli-run') === -1;
+        setText('[data-view="users"]', users.map(function (user) { return user === 'aicli-run' ? 'aicli-run (restricted)' : user; }).join(', ')
+            + (legacyRoot ? '. A call that names no user runs as root. To run it restricted, tick aicli-run (restricted).' : ''));
         setText('[data-view="perday"]', 'Up to ' + Number(script.maxPerDay || 6) + ' runs in 24 hours.');
 
         var callout = q('[data-role="stale-callout"]');

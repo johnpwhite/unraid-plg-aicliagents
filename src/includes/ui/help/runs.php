@@ -53,7 +53,7 @@ HTML,
 <p>The user under Run as sets the limit on the disks. The restricted user aicli-run sees only its run folder and the folders listed on the Authorised scripts entry under /mnt. The listed folders are read-only. Every other path under /mnt stays hidden. An allowed temporary run folder can be written. Otherwise, the run folder can be written only for a May change run. The view does not use /mnt/user unless the run folder or a listed folder is under it. A run as root has only the limits of the agent itself, which are not a lock on the disks. A read-only run still counts against all the limits, and the Activity tray shows it as started. A May change run goes without permission questions after you approve it.</p>
 HTML,
     'run-script-users' => <<<'HTML'
-<p>The user the agent may run as. aicli-run is the restricted user and the default: it gets the private disk view. Choose root only for a script that you trust and that needs it. A script that does not name a user gets aicli-run, and a call is refused when the entry does not allow it.</p>
+<p>The user the agent may run as. aicli-run is the restricted user and the default: it gets the private disk view. Choose root only for a script that you trust and that needs it. A script that does not name a user gets aicli-run, and a call is refused when the entry does not allow it. An entry that allows root and not aicli-run was approved before restricted runs: a call that names no user runs as root, as it did then.</p>
 HTML,
     'run-script-perday' => <<<'HTML'
 <p>The most runs this script may start in 24 hours. A call over the limit is refused.</p>
