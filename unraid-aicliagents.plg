@@ -3,6 +3,29 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.11.09.04" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.11.09.04
+
+**Agents and workspaces**
+
+- **Feat: an agent can send a direct command to a helper it started, with your approval.** For example, it can open the helper's model menu. The Activity tray and an Unraid notification ask you: Allow once, Always allow for those two workspaces, or Block. You can see and remove the saved rules in the helper's menu.
+- **Improve: text that another workspace types into a helper now shows who sent it.**
+- **Feat: an OpenCode 2 helper can work without permission questions and gets its task when it starts.** This needs the setting "Let sub-agents run without asking".
+- **Fix: running agents no longer look busy on newer Unraid kernels,** so dictated text, Relay messages, Continue and a helper's first task reach the agent again.
+
+**Script runs**
+
+- **Feat: scripts can start agents as a restricted user that sees only the folders you allow** (Settings, Script runs). A script that was approved before this update keeps running as root when it names no user.
+- **Fix: the finish step of a script run reports errors correctly.**
+
+**Storage**
+
+- **Fix: a home backup that a plugin update or restart interrupts runs once more,** so the day's backup is not lost. A second interruption ends it and records the reason.
+
+**Config Hub and Notebook**
+
+- **Fix: the Config drift list keeps keyboard focus when it loads again.**
+- **Fix: Notebook buttons, table filter chips and heading links are full size and easy to tap on a touch screen.**
+
 ## 2026.11.07.03
 
 **Dictation**
