@@ -691,7 +691,7 @@ class AgentRegistry {
                 // no effort flag here, and a spawn that asks for an effort is refused. #865 item 6: the unattended
                 // flag is `--auto` ("auto-approve permissions that are not explicitly denied"; explicit deny rules
                 // still hold). Official docs: https://opencode.ai/docs/permissions/ . Also seen in `opencode --help`
-                // of the installed build. OpenCode 2 has no profile: its flag is not verified.
+                // of the installed build. OpenCode 2 has its own profile (#946), below.
                 'launch_profile' => [
                     'model'  => ['flag' => '-m {model}'],
                     'unattended' => ['flags' => '--auto', 'needs_setting' => 'spawn_allow_unattended'],
@@ -722,6 +722,16 @@ class AgentRegistry {
                 'changelog_url' => 'https://github.com/anomalyco/opencode/releases',
                 // Same variable as OpenCode 1. The string is in the 2.2.0 binary (grep, 27 Oct 2026); the effect is not run.
                 'default_envs' => ['OPENCODE_DISABLE_AUTOUPDATE' => 'true'],
+                // #946: the interactive start of 2.2.6 has `--auto` and `--prompt` and NO model flag (`opencode --help`
+                // on prod01, 9 Nov 2026; only `opencode run` has -m). Run on prod01 in a private tmux pane:
+                // `--standalone --auto --prompt "<task>"` sent the task at once and wrote a file with no permission
+                // question. The model comes from the `model` key of $XDG_CONFIG_HOME/opencode/opencode.json, so
+                // the profile has no model flag; `model.note` tells a caller where to set it instead.
+                'launch_profile' => [
+                    'model'      => ['note' => 'OpenCode 2 takes its model from the "model" key in ~/.local/share/opencode2-xdg/config/opencode/opencode.json.'],
+                    'unattended' => ['flags' => '--auto', 'needs_setting' => 'spawn_allow_unattended'],
+                    'prompt'     => ['mode' => 'flag:--prompt'],
+                ],
             ],
             'kilocode' => [
                 'id' => 'kilocode',

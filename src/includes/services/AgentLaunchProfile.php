@@ -203,7 +203,9 @@ class AgentLaunchProfile
         if ($model !== null && $model !== '') {
             $rule = $profile['model']['flag'] ?? null;
             if (!is_string($rule) || strpos($rule, '{model}') === false) {
-                return ['error' => "The agent '$agentId' has no model flag in its launch profile, so a model cannot be chosen for it. Leave out the model."];
+                $note = $profile['model']['note'] ?? '';
+                $note = is_string($note) && $note !== '' ? ' ' . $note : '';
+                return ['error' => "The agent '$agentId' has no model flag in its launch profile, so a model cannot be chosen for it. Leave out the model." . $note];
             }
             if (preg_match(self::MODEL_PATTERN, $model) !== 1) {
                 return ['error' => 'The model name may use letters, digits and the characters . _ : / - only, up to 80 characters.'];
