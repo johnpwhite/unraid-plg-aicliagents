@@ -263,6 +263,9 @@ class ActivityService {
             if (isset($row['lines']) || isset($row['value'])) $tech[] = $row;
         }
         if ($tech !== []) $out['technical'] = $tech;
+        // AGENT_COMMAND_INJECTION.md R5: the answers the row offers instead of Approve and Reject. Only the three known words stay.
+        $actions = array_values(array_intersect(['once', 'always', 'block'], is_array($card['actions'] ?? null) ? array_map('strval', array_filter($card['actions'], 'is_scalar')) : []));
+        if ($actions !== []) $out['actions'] = $actions;
         if (!isset($out['subject']) && !isset($out['facts'])) return null;
         return $out;
     }
@@ -765,6 +768,15 @@ class ActivityService {
                 \AICliAgents\Services\UpgradeRelaunchService::reapStaleInstallMarkers();
             } catch (\Throwable $e) {
                 // Best-effort — same reasoning.
+            }
+        }
+
+        // AGENT_COMMAND_INJECTION.md R9: a command request that nobody answered in 30 minutes ends "Expired".
+        if (class_exists('\AICliAgents\Services\CommandApprovalService')) {
+            try {
+                \AICliAgents\Services\CommandApprovalService::sweepExpired();
+            } catch (\Throwable $e) {
+                // Best-effort — the next sweep tries again.
             }
         }
 

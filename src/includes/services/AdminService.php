@@ -2111,6 +2111,10 @@ class AdminService {
      * a control character other than newline/tab, or (S7) a call to the SAME
      * target workspace within SEND_INPUT_MIN_GAP_SECONDS of the last one.
      *
+     * With $command (AGENT_COMMAND_INJECTION.md) the text is ONE direct command line for a sub-agent that the
+     * caller started: no parent tag, and it is typed only when a saved rule matches or a person allows it in the
+     * Activity tray. See CommandApprovalService.
+     *
      * A refused call (an 'error' key) never reaches the pane and is never
      * ledgered — the same convention every other Tier 2 method here follows.
      * A processed call (delivered or deferred by the readiness gate) always
@@ -2118,11 +2122,19 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function sendInput(string $workspaceId, string $text, bool $enter = true, bool $force = false, bool $answerPrompt = false): array {
+    public static function sendInput(string $workspaceId, string $text, bool $enter = true, bool $force = false, bool $answerPrompt = false, bool $command = false): array {
         try {
             $session = self::findSession($workspaceId);
             if ($session === null) {
                 return ['error' => "No workspace with id '$workspaceId' was found."];
+            }
+            // AGENT_COMMAND_INJECTION.md: a direct command line, typed with no parent tag, only to the caller's own
+            // sub-agent, and only after a rule matches or a person allows it. It never uses force or a prompt answer.
+            if ($command) {
+                if ($force) return ['error' => 'A command cannot use force. It always waits for a ready pane.'];
+                if ($answerPrompt) return ['error' => 'A command cannot answer a prompt. Use answerPrompt without command for that.'];
+                if (!$enter) return ['error' => 'A command always presses Enter. Do not set enter to false.'];
+                return CommandApprovalService::submit($workspaceId, $text, fn(): bool => self::sendInputGateOpen($workspaceId));
             }
             // AGENT_SPAWN_WORKSPACE.md R13: a parent answers a permission prompt of a helper that it started. That path
             // has its own rules (allow-once answers only, the pane must show a question now, a deny list for the prompt).
@@ -3118,7 +3130,26 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function approvePending(string $opId): array {
+    public static function approvePending(string $opId, string $mode = ''): array {
+        // AGENT_COMMAND_INJECTION.md: a mode (once | always) belongs to a command request only. It is checked BEFORE the
+        // item is claimed, so a wrong mode leaves the request pending. An old request is ended "Expired", not typed.
+        $peek = ActivityService::get($opId);
+        if ($peek !== null && (string)($peek['status'] ?? '') === ActivityService::STATUS_PENDING_APPROVAL) {
+            $peekTool = (string)($peek['meta']['tool'] ?? '');
+            if ($peekTool !== CommandApprovalService::TOOL && $mode !== '') {
+                return ['error' => 'A mode applies only to a command request.'];
+            }
+            if ($peekTool === CommandApprovalService::TOOL) {
+                if ($mode === '') $mode = 'once';
+                if (!in_array($mode, CommandApprovalService::MODES, true)) {
+                    return ['error' => "'$mode' is not a way to allow a command. Use once or always."];
+                }
+                if (CommandApprovalService::isExpired($peek)) {
+                    CommandApprovalService::expire($peek);
+                    return ['error' => 'This request is older than 30 minutes, so it expired. Nothing was typed.'];
+                }
+            }
+        }
         $entry = ActivityService::approve($opId);
         if ($entry === null) {
             return ['error' => "No pending approval item with id '$opId' was found (it may already have been approved, rejected, or dismissed)."];
@@ -3126,6 +3157,15 @@ class AdminService {
         $meta   = is_array($entry['meta'] ?? null) ? $entry['meta'] : [];
         $tool   = (string)($meta['tool'] ?? '');
         $params = is_array($meta['params'] ?? null) ? $meta['params'] : [];
+        if ($tool === CommandApprovalService::TOOL) {
+            $result = CommandApprovalService::executeApproved($params, $mode !== '' ? $mode : 'once');
+            if (isset($result['error'])) {
+                ActivityService::fail($opId, (string)$result['error'], null, ['step' => '']);
+                return ['error' => (string)$result['error']];
+            }
+            ActivityService::finish($opId, 'Approved and done · ' . (string)($result['finishText'] ?? 'typed'));
+            return ['opId' => $opId, 'tool' => $tool, 'result' => $result];
+        }
         $method = self::TIER3_EXECUTORS[$tool] ?? null;
         if ($method === null) {
             // The tool name goes to the log; the tray gets one plain sentence (R1, R5).
@@ -3152,7 +3192,15 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function rejectPending(string $opId, string $reason = ''): array {
+    public static function rejectPending(string $opId, string $reason = '', string $mode = ''): array {
+        // AGENT_COMMAND_INJECTION.md: Block is a reject of a command request. Nothing was typed.
+        $peek = ActivityService::get($opId);
+        $isCommand = $peek !== null && (string)($peek['status'] ?? '') === ActivityService::STATUS_PENDING_APPROVAL
+            && (string)($peek['meta']['tool'] ?? '') === CommandApprovalService::TOOL;
+        if ($mode !== '' && (!$isCommand || $mode !== 'block')) {
+            return ['error' => 'A mode applies only to a command request, and the only mode of a reject is block.'];
+        }
+        if ($isCommand && $reason === '') $reason = 'Blocked';
         $ok = ActivityService::reject($opId, $reason !== '' ? $reason : 'Rejected');
         if (!$ok) {
             return ['error' => "No pending approval item with id '$opId' was found (it may already have been approved, rejected, or dismissed)."];
@@ -3160,9 +3208,10 @@ class AdminService {
         // ACTIVITY_TRAY_PLAIN_NOTICES.md R6: a rejection is a grey "Rejected" record, not a red failure.
         // ActivityService::reject() keeps its signature and writes status failed + the reason as the
         // error, so the row is turned into a finished record here.
-        $fields = ['status' => 'done', 'error' => null, 'step' => 'Rejected', 'meta' => ['kind' => 'record']];
+        $fields = ['status' => 'done', 'error' => null, 'step' => $isCommand ? 'Blocked' : 'Rejected', 'meta' => ['kind' => 'record']];
         if ($reason !== '') $fields['meta']['rejectReason'] = $reason;
         ActivityService::update($opId, $fields);
+        if ($isCommand) CommandApprovalService::recordBlocked(is_array($peek['meta']['params'] ?? null) ? $peek['meta']['params'] : []);
         return ['opId' => $opId, 'rejected' => true];
     }
 

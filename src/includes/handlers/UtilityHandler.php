@@ -329,7 +329,8 @@ class UtilityHandler {
     }
 
     private static function getWorkspaces() {
-        return aicli_get_workspaces();
+        // The rule list `commandAllow` is server-owned and does not go to the browser (it has its own list action).
+        return \AICliAgents\Services\ConfigService::stripServerOwned(aicli_get_workspaces());
     }
 
     private static function saveWorkspaces() {
@@ -373,7 +374,7 @@ class UtilityHandler {
             \AICliAgents\Services\AgentRelayService::reAdoptOwnersByIdentity();
             // Return the authoritative registry. In particular this restores a
             // Relay-managed actor immediately if an old drawer tried to close it.
-            return ['status' => 'ok', 'workspaces' => aicli_get_workspaces()];
+            return ['status' => 'ok', 'workspaces' => \AICliAgents\Services\ConfigService::stripServerOwned(aicli_get_workspaces())];
         }
         return ['status' => 'error', 'message' => 'Invalid Workspace data'];
     }

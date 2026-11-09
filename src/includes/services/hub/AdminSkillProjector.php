@@ -475,7 +475,20 @@ few seconds.
 
 If the target is a sub-agent that YOU started, the plugin puts a fixed tag in front
 of your text: `[from parent <your name>] `. The sub-agent knows the words come from
-you, and the terminal shows who typed them.
+you, and the terminal shows who typed them. Text from any other workspace to a
+sub-agent carries the tag `[from <that workspace's name>] ` (or `[from an agent] `), so it
+is never read as a command of the agent.
+
+To send a sub-agent that YOU started one direct command line, for example `/models`
+in OpenCode 2, pass `command:true` (CLI: `--command`). The plugin types the line as
+it is, with NO parent tag, so the agent reads it as its own command. A command is
+one line of up to 300 characters, and it cannot use `force`, `enter:false` or
+`answerPrompt`. Send a command only because the person in this session asked for
+it. Nothing is typed at once, unless the person saved an Always allow rule for you
+and that command. The call returns `status:"pending_approval"` with an `opId`; the
+person then sees Allow once, Always allow and Block in the Activity tray, and has 30
+minutes to answer. Do not poll the tray: the answer arrives in the event ledger as
+`workspace.command` with an `outcome` of typed, blocked, failed or expired.
 
 A sub-agent may stop on a permission prompt, for example to read a folder outside
 its own. You may answer it for a sub-agent that you started: pass `answerPrompt:true`

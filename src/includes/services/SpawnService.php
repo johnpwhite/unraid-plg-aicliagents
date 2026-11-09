@@ -237,7 +237,7 @@ class SpawnService
     // ======================================================================
 
     /** The text with secrets replaced, cut to $max characters. '' when the redaction cannot run (fail closed). */
-    private static function safeText(string $text, int $max): string
+    public static function safeText(string $text, int $max): string
     {
         $text = trim($text);
         if ($text === '') return '';
@@ -457,7 +457,7 @@ class SpawnService
     }
 
     /** @return array{ready:bool,reason:string} */
-    private static function gate(string $agentId, string $id): array
+    public static function gate(string $agentId, string $id): array
     {
         if (self::$paneGate !== null) return (self::$paneGate)($agentId, $id);
         return TmuxService::paneAcceptsInput($agentId, $id);
@@ -892,11 +892,12 @@ class SpawnService
 
     /**
      * Type the fixed first line into the pane of an agent that has no prompt flag (R22), as soon as the pane
-     * is ready. The wait is bounded; the call does not block longer than PANE_WAIT_SECONDS.
+     * is ready. The wait is bounded; the call does not block longer than PANE_WAIT_SECONDS (or $waitSeconds, 0 for
+     * one check). CommandApprovalService types an approved command line through this method too.
      */
-    private static function typeFirstLine(string $agentId, string $id, string $firstLine = self::FIRST_LINE): bool
+    public static function typeFirstLine(string $agentId, string $id, string $firstLine = self::FIRST_LINE, ?int $waitSeconds = null): bool
     {
-        $wait = self::$paneWaitSeconds ?? self::PANE_WAIT_SECONDS;
+        $wait = $waitSeconds ?? self::$paneWaitSeconds ?? self::PANE_WAIT_SECONDS;
         $deadline = self::now() + $wait;
         $sleep = self::$sleeper ?? static function (int $ms): void { usleep($ms * 1000); };
         do {
@@ -1718,7 +1719,7 @@ class SpawnService
     /**
      * An Unraid notification. Unraid's own notification settings decide whether and where it shows. Best effort.
      */
-    private static function systemNotify(string $subject, string $description): void
+    public static function systemNotify(string $subject, string $description): void
     {
         try {
             if (self::$systemNotifier !== null) {
@@ -2136,18 +2137,27 @@ class SpawnService
 
     /**
      * R22: text that the CREATOR of a sub-agent types into it gets the fixed tag in front, so the sub-agent knows the
-     * words come from its parent and a person reading the terminal sees who typed them. Any other text stays
-     * as it is.
+     * words come from its parent and a person reading the terminal sees who typed them. Text from any other caller
+     * gets the tag "[from <caller name>] " (or "[from an agent] "). Text for a workspace that is not a sub-agent
+     * stays as it is.
      *
      * @param array<string,mixed> $record The target workspace record.
      */
     public static function tagForTarget(array $record, string $text): string
     {
+        if (!self::isHelper($record)) return $text;
         $caller = self::callerId();
-        if ($caller !== '' && self::isHelper($record) && (string)($record['createdBy'] ?? '') === $caller) {
+        if ($caller !== '' && (string)($record['createdBy'] ?? '') === $caller) {
             return self::parentTag($record) . $text;
         }
-        return $text;
+        // AGENT_COMMAND_INJECTION.md: text from any other caller is tagged too. Without a tag, a line such as /models
+        // would run as a command of the agent CLI with no approval. A caller that is empty or unknown is "an agent".
+        $name = '';
+        if ($caller !== '') {
+            $rec = self::findRecord($caller);
+            $name = $rec !== null ? trim((string)preg_replace('/[^A-Za-z0-9 ._-]/', '', (string)($rec['name'] ?? ''))) : '';
+        }
+        return '[from ' . ($name !== '' ? $name : 'an agent') . '] ' . $text;
     }
 
     /**

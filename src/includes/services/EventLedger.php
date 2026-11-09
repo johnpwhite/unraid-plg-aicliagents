@@ -322,6 +322,12 @@ final class EventLedger {
                     $where = (string)($payload['name'] ?? $payload['workspaceId'] ?? 'a workspace');
                     $chars = (int)($payload['chars'] ?? 0);
                     return trim("$agentId typed $chars chars into $where");
+                // AGENT_COMMAND_INJECTION.md: a direct command from a parent to its sub-agent.
+                case $kind === 'workspace.command':
+                    $outcome = (string)($payload['outcome'] ?? 'requested');
+                    $caller = (string)($payload['caller'] ?? 'an agent');
+                    $where = (string)($payload['name'] ?? $payload['workspaceId'] ?? 'a workspace');
+                    return trim("Command from $caller to $where: $outcome");
                 case $kind === 'agent.action':
                     $tool = (string)($payload['tool'] ?? 'an agent tool');
                     $outcome = (string)($payload['outcome'] ?? 'ran');

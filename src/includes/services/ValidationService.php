@@ -41,6 +41,8 @@ class ValidationService {
         'set_home_backup_setting', 'restore_home', 'delete_backup_snapshot', 'clear_halt', 'restore_from_sibling',
         'auto_heal_agent_install', 'history_move', 'history_bring_back', 'execute_migrate',
         'execute_storage_backend', 'storage_backend_migration_recovery', 'execute_upper_mode',
+        // AGENT_COMMAND_INJECTION.md: a person removes a saved command rule.
+        'remove_command_rule',
     ];
 
     /**

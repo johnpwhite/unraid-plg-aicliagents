@@ -130,6 +130,12 @@
         var hasFacts = Array.isArray(c.facts) && c.facts.length > 0;
         return (hasName || hasFacts) ? c : null;
     }
+    // AGENT_COMMAND_INJECTION.md R5: true when the card asks for the three answers (Allow once, Always allow, Block).
+    function threeWay(a) {
+        var c = a && a.meta && a.meta.card;
+        var acts = c && Array.isArray(c.actions) ? c.actions : [];
+        return acts.indexOf('once') !== -1 && acts.indexOf('always') !== -1 && acts.indexOf('block') !== -1;
+    }
     function cardFactHtml(f) {
         if (!f || typeof f !== 'object' || !f.label) return '';
         var v = '';
@@ -825,7 +831,7 @@
 
         // ---- actions ---------------------------------------------------------
 
-        _action(action, opId, isLocal) {
+        _action(action, opId, isLocal, mode) {
             var self = this;
             if (isLocal && (action === 'dismiss_activity')) {
                 delete this._local[opId];
@@ -848,7 +854,10 @@
                 self._render();
                 self._poll();
             };
-            fetch(ajaxUrl(action, { opId: opId }))
+            // AGENT_COMMAND_INJECTION.md: a command request answers once, always or block. The server checks the mode.
+            var query = { opId: opId };
+            if (mode) query.mode = mode;
+            fetch(ajaxUrl(action, query))
                 .then(function (r) {
                     // A login page or a proxy error page is not JSON: treat it as no answer.
                     return Promise.resolve().then(function () { return r.json(); }).then(
@@ -1154,7 +1163,7 @@
                         });
                         return;
                     }
-                    self._action(act, opId, isLocal);
+                    self._action(act, opId, isLocal, el.getAttribute('data-mode') || '');
                 });
             });
         }
@@ -1177,7 +1186,15 @@
             // Cancel until it ends: a Dismiss now would drop the outcome of the action.
             var approved = a.status === 'approved';
             var btns = '';
-            if (pending) {
+            if (pending && threeWay(a)) {
+                // AGENT_COMMAND_INJECTION.md R5: a command request has three answers. Block is a reject with mode=block.
+                btns += '<button class="btn approve" data-act="approve_activity" data-mode="once" data-opid="' + esc(a.opId) + '"'
+                    + ' title="Types the line now. Nothing is saved.">Allow once</button>';
+                btns += '<button class="btn approve" data-act="approve_activity" data-mode="always" data-opid="' + esc(a.opId) + '"'
+                    + ' title="Types the line now. From now on this command, with any words after it, is typed without asking again for these two workspaces. You can remove the rule in the workspace menu.">Always allow</button>';
+                btns += '<button class="btn" data-act="reject_activity" data-mode="block" data-opid="' + esc(a.opId) + '"'
+                    + ' title="Types nothing.">Block</button>';
+            } else if (pending) {
                 btns += '<button class="btn approve" data-act="approve_activity" data-opid="' + esc(a.opId) + '">Approve</button>';
                 btns += '<button class="btn" data-act="reject_activity" data-opid="' + esc(a.opId) + '">Reject</button>';
             }
@@ -1282,7 +1299,7 @@
     // Pure row rules (ACTIVITY_TRAY_PLAIN_NOTICES.md), read by ui-build/src/__tests__/activityTrayRows.test.ts.
     AicliActivityTray.rules = {
         stepText: stepText, pillWord: pillWord, greyLine: greyLine, actorLine: actorLine, ageText: ageText,
-        isRecord: isRecord, showsCancel: showsCancel, statementText: statementText, cardOf: cardOf
+        isRecord: isRecord, showsCancel: showsCancel, statementText: statementText, cardOf: cardOf, threeWay: threeWay
     };
 
     if (!customElements.get('aicli-activity-tray')) {

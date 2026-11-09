@@ -149,7 +149,7 @@
  *                                overrides the configured voice for this one
  *                                call. `--workspace` is OPTIONAL — omitted
  *                                defaults to the calling workspace.
- *   send-input <workspaceId> [--no-enter] [--force] <text...>
+ *   send-input <workspaceId> [--no-enter] [--force] [--command] <text...>
  *                                CHANGES state (WORKSPACE_SEND_INPUT.md).
  *                                Types `text` into a RUNNING workspace's
  *                                terminal and presses Enter. Every argument
@@ -452,7 +452,7 @@ const ADMIN_AGENT_USAGE = [
     'set-setting' => 'set-setting <key> <value> -- CHANGES state; key must be on the allow-list',
     'preview-voice' => 'preview-voice <voiceId> [text...] [--speed=<0.5-2.0>] [--workspace=<id>] -- CHANGES state; speaks one short line in that voice so you can hear it, saves nothing',
     'speak' => 'speak [--voice=<id>] [--workspace=<id>] <text...> -- CHANGES state; speaks on every voice-enabled tab',
-    'send-input' => 'send-input <workspaceId> [--no-enter] [--force] [--answer] <text...> -- CHANGES state; types into a running workspace and presses Enter; --answer gives an allow-once answer to a permission prompt of a sub-agent that you started',
+    'send-input' => 'send-input <workspaceId> [--no-enter] [--force] [--answer] [--command] <text...> -- CHANGES state; types into a running workspace and presses Enter; --answer gives an allow-once answer to a permission prompt of a sub-agent that you started; --command sends one direct command line (no tag) to a sub-agent that you started, after a person allows it in the Activity tray',
     'favourite-add' => 'favourite-add <workspaceId> -- CHANGES state; bookmarks a workspace\'s agent and folder',
     'favourite-remove' => 'favourite-remove <id> -- CHANGES state; removes one favourite by id',
     'voicemail-heard' => 'voicemail-heard <id> | voicemail-heard --workspace=<id> --all -- CHANGES state; marks voice mail heard on every device',
@@ -844,6 +844,7 @@ try {
             $siEnter = true;
             $siForce = false;
             $siAnswer = false;
+            $siCommand = false;
             $siWorkspace = null;
             $siWords = [];
             foreach (array_slice($argv, 2) as $a) {
@@ -851,6 +852,7 @@ try {
                 if ($a === '--no-enter') { $siEnter = false; continue; }
                 if ($a === '--force') { $siForce = true; continue; }
                 if ($a === '--answer') { $siAnswer = true; continue; }
+                if ($a === '--command') { $siCommand = true; continue; }
                 if ($siWorkspace === null) { $siWorkspace = $a; continue; }
                 $siWords[] = $a;
             }
@@ -860,6 +862,7 @@ try {
                 'enter' => $siEnter,
                 'force' => $siForce,
                 'answerPrompt' => $siAnswer,
+                'command' => $siCommand,
             ]);
             break;
         case 'favourite-add':

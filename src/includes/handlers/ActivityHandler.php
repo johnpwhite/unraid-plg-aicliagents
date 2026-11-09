@@ -40,6 +40,9 @@ class ActivityHandler
             case 'approve_activity': return self::approveActivity();
             case 'reject_activity':  return self::rejectActivity();
             case 'deliver_relay_waiting': return self::deliverRelayWaiting();
+            // AGENT_COMMAND_INJECTION.md R7, R8: the "Always allow" rules of one workspace. A person in the Manager UI only.
+            case 'list_command_rules':  return self::listCommandRules($id);
+            case 'remove_command_rule': return self::removeCommandRule($id);
             default:                 return null;
         }
     }
@@ -47,7 +50,7 @@ class ActivityHandler
     /** Actions handled by this handler. */
     public static function actions(): array
     {
-        return ['list_activities', 'cancel_activity', 'dismiss_activity', 'retry_auto_launch', 'approve_activity', 'reject_activity', 'deliver_relay_waiting'];
+        return ['list_activities', 'cancel_activity', 'dismiss_activity', 'retry_auto_launch', 'approve_activity', 'reject_activity', 'deliver_relay_waiting', 'list_command_rules', 'remove_command_rule'];
     }
 
     /**
@@ -304,7 +307,8 @@ class ActivityHandler
     {
         $opId = (string)($_REQUEST['opId'] ?? '');
         if ($opId === '') return ['status' => 'error', 'message' => 'opId required'];
-        $result = AdminService::approvePending($opId);
+        // AGENT_COMMAND_INJECTION.md: `mode` (once | always) is for a command request. AdminService checks it.
+        $result = AdminService::approvePending($opId, (string)($_REQUEST['mode'] ?? ''));
         return isset($result['error'])
             ? ['status' => 'error', 'message' => (string)$result['error']]
             : ['status' => 'ok'] + $result;
@@ -322,9 +326,39 @@ class ActivityHandler
         $opId = (string)($_REQUEST['opId'] ?? '');
         if ($opId === '') return ['status' => 'error', 'message' => 'opId required'];
         $reason = (string)($_REQUEST['reason'] ?? '');
-        $result = AdminService::rejectPending($opId, $reason);
+        $result = AdminService::rejectPending($opId, $reason, (string)($_REQUEST['mode'] ?? ''));
         return isset($result['error'])
             ? ['status' => 'error', 'message' => (string)$result['error']]
             : ['status' => 'ok'] + $result;
+    }
+
+    /**
+     * AGENT_COMMAND_INJECTION.md R7: the saved "Always allow" rules of one workspace, for its menu.
+     * The workspace id is `id`.
+     */
+    private static function listCommandRules($id): array
+    {
+        $ws = (string)($id ?? $_REQUEST['id'] ?? '');
+        if (preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $ws) !== 1) return ['status' => 'error', 'message' => 'A workspace id is required.'];
+        return ['status' => 'ok', 'rules' => \AICliAgents\Services\CommandApprovalService::rules($ws)];
+    }
+
+    /**
+     * AGENT_COMMAND_INJECTION.md R7, R8: a person removes one rule (POST, with the CSRF token like every
+     * action). Fields: `id` (the workspace), `caller` (the workspace that may send) and `key` (the command).
+     * No tool or CLI verb reaches this action.
+     */
+    private static function removeCommandRule($id): array
+    {
+        $ws = (string)($id ?? $_REQUEST['id'] ?? '');
+        $caller = (string)($_REQUEST['caller'] ?? '');
+        $key = (string)($_REQUEST['key'] ?? '');
+        if (preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $ws) !== 1 || preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $caller) !== 1 || $key === '') {
+            return ['status' => 'error', 'message' => 'The workspace, the caller and the command are required.'];
+        }
+        if (!\AICliAgents\Services\CommandApprovalService::removeRule($ws, $caller, $key)) {
+            return ['status' => 'error', 'message' => 'That rule was not found, or it could not be removed.'];
+        }
+        return ['status' => 'ok', 'rules' => \AICliAgents\Services\CommandApprovalService::rules($ws)];
     }
 }

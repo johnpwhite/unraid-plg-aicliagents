@@ -1558,6 +1558,43 @@ class ConfigService {
         }
     }
 
+    /** True only while updateCommandAllow() saves. See mergeWorkspaceSnapshot(). */
+    private static bool $commandAllowWriter = false;
+
+    /**
+     * AGENT_COMMAND_INJECTION.md: the ONLY way to change the `commandAllow` rule list of a workspace. The read, the
+     * change and the write are one step under the workspaces lock. No other save path can replace the list.
+     *
+     * @param callable(list<array<string,mixed>>):list<array<string,mixed>> $change
+     */
+    public static function updateCommandAllow(string $id, callable $change): bool {
+        $busy = false;
+        $ok = self::withWorkspacesLock(static function () use ($id, $change): bool {
+            $record = null;
+            foreach ((self::getWorkspaces()['sessions'] ?? []) as $w) {
+                if (is_array($w) && (string)($w['id'] ?? '') === $id) { $record = $w; break; }
+            }
+            if ($record === null) return false;
+            $rules = array_values(array_filter(is_array($record['commandAllow'] ?? null) ? $record['commandAllow'] : [], 'is_array'));
+            $record['commandAllow'] = array_values($change($rules));
+            self::$commandAllowWriter = true;
+            try {
+                return (bool)self::saveWorkspaces(['sessions' => [$record]], []);
+            } finally {
+                self::$commandAllowWriter = false;
+            }
+        }, $busy);
+        return $ok === true && !$busy;
+    }
+
+    /** Remove the server-owned keys from the workspace list before it goes to a browser. */
+    public static function stripServerOwned(array $workspaces): array {
+        foreach (($workspaces['sessions'] ?? []) as $i => $s) {
+            if (is_array($s)) unset($workspaces['sessions'][$i]['commandAllow']);
+        }
+        return $workspaces;
+    }
+
     private static function saveWorkspacesLocked($data, array $removedIds, bool $publish) {
         $file = self::getUserStatePath() . "/workspaces.json";
         // #666 R-155: getWorkspaces() turns a file it cannot parse into the empty
@@ -1822,13 +1859,21 @@ class ConfigService {
                 // ordinary workspace (no autoClose, no parent, no spawn rules).
                 // AGENT_RUN_ENTRY_POINT.md R16: the same for the run user mark, so a browser save never turns a run as
                 // aicli-run into a workspace that starts as root outside the private disk view.
+                // AGENT_COMMAND_INJECTION.md: `commandAllow` (the "Always allow" rules) belongs to the server. Every save
+                // keeps the value that is on disk now (this merge runs under the save lock). Only updateCommandAllow() may
+                // replace it, so a stale tab or a writer that read the record earlier cannot bring back a removed rule.
+                if (!self::$commandAllowWriter) {
+                    if (array_key_exists('commandAllow', $prior)) $session['commandAllow'] = $prior['commandAllow'];
+                    else unset($session['commandAllow']);
+                }
                 foreach (['spawned', 'spawn', 'runAs'] as $spawnKey) {
                     if (!array_key_exists($spawnKey, $session) && array_key_exists($spawnKey, $prior)) {
                         $session[$spawnKey] = $prior[$spawnKey];
                     }
                 }
             } else {
-                // A genuinely new workspace — stamp it now if the caller did not.
+                // A genuinely new workspace — stamp it now if the caller did not. It has no rules.
+                if (!self::$commandAllowWriter) unset($session['commandAllow']);
                 if (!array_key_exists('createdAt', $session)) $session['createdAt'] = $now;
                 if (!array_key_exists('createdBy', $session)) $session['createdBy'] = self::currentActorSessionId();
             }
