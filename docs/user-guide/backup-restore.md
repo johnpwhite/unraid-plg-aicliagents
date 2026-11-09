@@ -108,6 +108,8 @@ The checkbox **Tell an agent to continue if it was working when the backup start
 
 The plugin owns one scheduled job for each home that has a schedule. A home with **Off** has none. The schedule runs the same backup as **Back up now**, with the mode you chose. The scheduled job waits until the backup ends, and then reports the real result: it shows as failed when the backup fails. A backup of a very large home can take hours. The job gives up and reports a failure after 6 hours. If a scheduled backup fails, the plugin writes the reason to the log.
 
+A plugin update, a restart or an out-of-memory stop can interrupt a backup that runs. Then the plugin runs the same backup once more, about a minute later. The scheduled job waits for that second run and reports its result. If the second run is interrupted too, the backup ends as failed, and **Last config backup failed** says that the plugin restarted while the backup ran. Press **Back up now** when the server is quiet.
+
 The Health check for backups warns when the last snapshot of a home is older than twice the schedule interval. Without a schedule, it warns after 7 days. The text reads, for example, "root's last home backup was 3.2 day(s) ago". See [Health, Activity and troubleshooting](health-and-troubleshooting.md).
 
 ### Retention
@@ -294,6 +296,7 @@ A backup is a job in the same queue as saves and merges. Only one storage job ru
 <details>
 <summary>Change history</summary>
 
+- **2026-11-09** — A backup that a plugin update, a restart or an out-of-memory stop interrupts runs once more, about a minute later. A second interruption ends it as failed, with the reason. Spec `docs/specs/HOME_BACKUP.md`, issue #942.
 - **2026-10-23** — The tab **Home Storage** is called **Storage** in this guide. Spec `docs/specs/SETTINGS_PAGE_FIRST_CLASS_REDESIGN.md`, issue #750.
 - **2026-10-22** — A backup place on a network share is checked before each backup and each restore: the share must be mounted, and a backup writes a small test file. A share that is not mounted is refused with one sentence, and no snapshot is deleted. Spec `docs/specs/HOME_BACKUP.md`, issue #749.
 

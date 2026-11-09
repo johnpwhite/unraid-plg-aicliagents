@@ -3391,9 +3391,25 @@ _job_runner_alive() {
 # An entry that changed less than <grace_s> seconds ago is left alone (default
 # 30; start-up passes 0). A history runner that outlived the supervisor keeps
 # its entry until it ends. Prints how many entries it ended.
+# _reap_orphan_can_requeue <op> <job_id> <attempt> — #942. True when an orphaned
+# running job may run once more: its op is in REAP_REQUEUE_OPS (default: backup,
+# which takes a new snapshot and so is safe to repeat), it is on its first
+# attempt, and a backup still has its options file. Consolidate, restore and the
+# history moves are not repeated: a half-done run must be looked at first.
+_reap_orphan_can_requeue() {
+    local op="$1" jid="$2" attempt="$3"
+    case " ${REAP_REQUEUE_OPS-backup} " in *" $op "*) : ;; *) return 1 ;; esac
+    [ "$attempt" -lt 2 ] 2>/dev/null || return 1
+    if [ "$op" = "backup" ]; then
+        declare -f _backup_options_path >/dev/null 2>&1 || return 1
+        [ -f "$(_backup_options_path "$jid")" ] || return 1
+    fi
+    return 0
+}
+
 _reap_orphan_running_jobs() {
     local grace="${1:-30}" f jid state now updated age n=0
-    local ent op type id attempt queued_at started_at trace epoch
+    local ent op type id attempt queued_at started_at trace epoch jreason trace_kv
     [ -d "$JOBS_DIR" ] || { echo 0; return 0; }
     declare -f job_ledger_write >/dev/null 2>&1 || { echo 0; return 0; }
     now=$(date +%s)
@@ -3416,12 +3432,44 @@ _reap_orphan_running_jobs() {
         started_at="$(queue_read_field "$f" started_at 2>/dev/null)"
         trace="$(queue_read_field "$f" trace 2>/dev/null)"
         epoch="$(queue_read_field "$f" consolidate_epoch 2>/dev/null)"
+        case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
+        # #942: a job that is safe to repeat (a backup takes a new snapshot) is
+        # queued once more with the same job id, so a plugin update, kill or
+        # out-of-memory restart during the run does not lose the day's backup.
+        # The scheduled-backup wait sees the job still active and gets the
+        # result of the second run. A second orphan of the same job fails.
+        if _reap_orphan_can_requeue "$op" "$jid" "$attempt"; then
+            jreason="$(queue_read_field "$f" reason 2>/dev/null)"
+            mkdir -p "$JOB_RETRY_DIR" 2>/dev/null || true
+            trace_kv=""
+            [ -n "$trace" ] && trace_kv=",\"trace\":\"$trace\""
+            if _atomic_json_write "$JOB_RETRY_DIR/${jid}.retry" \
+                "$(printf '{"job_id":"%s","type":"%s","id":"%s","op":"%s","reason":"%s","priority":%d,"retry_at":%d%s}' \
+                    "$jid" "$type" "$id" "$op" "$jreason" 5 "$(( now + ${REAP_REQUEUE_DELAY_S:-60} ))" "$trace_kv")" \
+               && job_ledger_write "$jid" "$op" "$type" "$id" "queued" "" "supervisor_restart" \
+                    "$(( attempt + 1 ))" "$queued_at" "" "" "$jreason" "$trace" "$epoch"; then
+                n=$((n + 1))
+                log_warn "Job $jid ($ent, op=$op) was running when the supervisor stopped — queued again (attempt $(( attempt + 1 )))"
+                lifecycle_log "warn" "supervisor" "job_orphan_requeued" \
+                    "{\"job_id\":\"$jid\",\"entity\":\"$ent\",\"op\":\"$op\",\"attempt\":$(( attempt + 1 ))}" 2>/dev/null || true
+                continue
+            fi
+            rm -f "$JOB_RETRY_DIR/${jid}.retry" 2>/dev/null || true
+        fi
         job_ledger_write "$jid" "$op" "$type" "$id" "failed" "1" "" \
             "$attempt" "$queued_at" "$started_at" "$now" "supervisor_restart" "$trace" "$epoch" || continue
         n=$((n + 1))
         log_warn "Job $jid ($ent, op=$op) was running when the supervisor stopped — marked failed (supervisor_restart)"
         lifecycle_log "warn" "supervisor" "job_orphan_failed" \
             "{\"job_id\":\"$jid\",\"entity\":\"$ent\",\"op\":\"$op\"}" 2>/dev/null || true
+        # #942: a failed backup leaves a result record that says why, so the
+        # Settings card and the scheduled-backup wait report the cause.
+        if [ "$op" = "backup" ] && declare -f _backup_ledger >/dev/null 2>&1; then
+            _backup_ledger "storage.backup.failed" "$id" \
+                "home backup of $id failed: the plugin restarted while the backup ran" \
+                "{\"cause\":\"supervisor_restart\",\"job_id\":\"$jid\",\"attempt\":$attempt}"
+            declare -f _backup_delete_options >/dev/null 2>&1 && _backup_delete_options "$jid"
+        fi
     done
     [ "$n" -gt 0 ] && _publish_storage_status
     echo "$n"
