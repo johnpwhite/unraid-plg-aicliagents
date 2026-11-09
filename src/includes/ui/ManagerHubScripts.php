@@ -1001,6 +1001,7 @@
     var DRIFT_MODES = ['compare', 'adopt', 'overwrite', 'release'];
     var DRIFT_LABELS = { compare: 'Compare', adopt: 'Adopt', overwrite: 'Overwrite', release: 'Release' };
     var hubDriftTipKeys = false;
+    var hubDriftLastKey = null;
 
     function hubDriftSay(text) {
         var live = document.getElementById('hub-drift-live');
@@ -1079,7 +1080,27 @@
         return i;
     }
 
+    /**
+     * #945: the page loads the drift list on page load and again when the Config Hub tab opens.
+     * The same data is not drawn again, and a redraw gives keyboard focus back to the button with
+     * the same label (mode, file, block), so focus and its help sentence stay where the person is.
+     */
     function hubRenderDrift(drift) {
+        var list = document.getElementById('hub-drift-list');
+        var key = JSON.stringify(drift || []);
+        if (list && list.firstChild && key === hubDriftLastKey) return;
+        hubDriftLastKey = key;
+        var had = document.activeElement;
+        var label = (had && list && list.contains(had) && had.getAttribute) ? had.getAttribute('aria-label') : null;
+        hubDriftRenderRows(drift);
+        if (!label || !list) return;
+        var again = Array.prototype.filter.call(list.querySelectorAll('button'), function (b) {
+            return b.getAttribute('aria-label') === label;
+        })[0];
+        if (again) again.focus();
+    }
+
+    function hubDriftRenderRows(drift) {
         var banner = document.getElementById('hub-drift-banner');
         var list = document.getElementById('hub-drift-list');
         clearNode(list);
