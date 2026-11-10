@@ -1,5 +1,7 @@
 #!/bin/bash
-source "$(dirname "${BASH_SOURCE[0]}")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
+# finalize.sh installs this script as the symlink /usr/local/bin/aicli-repair, so resolve the
+# link first: through the link, BASH_SOURCE[0] is /usr/local/bin/aicli-repair (GitHub #38).
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../storage/resolve_paths.sh" || { echo 'resolve_paths.sh missing' >&2; exit 1; }
 # AICliAgents current-architecture repair utility (#96).
 #
 # This command is deliberately fail-closed. It never formats, deletes, migrates,
