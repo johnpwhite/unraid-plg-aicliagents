@@ -1587,7 +1587,67 @@ class ConfigService {
         return $ok === true && !$busy;
     }
 
+    /** True only while updateParentTie() saves. See mergeWorkspaceSnapshot(). */
+    private static bool $parentTieWriter = false;
+
+    /**
+     * WORKSPACE_REPARENT.md R13: the ONLY way to change the tie between a helper and its parent: `createdBy`, `spawned`,
+     * the presence of `spawn`, `spawn.parent`, `spawn.parent_name`, and `commandAllow`. The read, the change and the
+     * write are one step under the workspaces lock. Every other save of the record keeps the values that are on disk.
+     * (The spawn tool makes a NEW record, and a new record is not checked.)
+     *
+     * $change gets the stored record and the stored list of records. It returns the whole new record, or null to
+     * refuse. Nothing is written for null. Returns true only when the record was saved.
+     *
+     * @param callable(array<string,mixed>,list<array<string,mixed>>):(array<string,mixed>|null) $change
+     */
+    public static function updateParentTie(string $id, callable $change): bool {
+        $busy = false;
+        $ok = self::withWorkspacesLock(static function () use ($id, $change): bool {
+            $all = [];
+            $record = null;
+            foreach ((self::getWorkspaces()['sessions'] ?? []) as $w) {
+                if (!is_array($w)) continue;
+                $all[] = $w;
+                if ((string)($w['id'] ?? '') === $id) $record = $w;
+            }
+            if ($record === null) return false;
+            $next = $change($record, $all);
+            if (!is_array($next) || (string)($next['id'] ?? '') !== $id) return false;
+            self::$parentTieWriter = true;
+            try {
+                $saved = (bool)self::saveWorkspaces(['sessions' => [$next]], []);
+            } finally {
+                self::$parentTieWriter = false;
+            }
+            if (!$saved) return false;
+            // The retained Relay snapshot of a topic owner must not bring the old parent back after a close.
+            if (self::getManagedWorkspace($id) !== null) self::rememberRelayManagedWorkspace($next);
+            // A change of `createdBy` alone is not a field of the diff (it is volatile): the drawer still needs the event.
+            if (self::diffWorkspaceSnapshot([$record], [$next], [])['updated'] === [] && class_exists('\\AICliAgents\\Services\\EventBus')) {
+                EventBus::publish('workspace', [], ['event' => 'updated', 'id' => $id, 'fields' => ['createdBy']]);
+            }
+            return true;
+        }, $busy);
+        return $ok === true && !$busy;
+    }
+
+    /**
+     * True when an incoming `spawn` block is from another generation than the stored one: `started_at` or `moved_at`
+     * differs. A promote and a move make a new block, so a copy read before them holds old sub-fields (report,
+     * auto_close, max_minutes, worktree) that must not come back. A block with neither key is a partial update: not old.
+     *
+     * @param array<string,mixed> $stored
+     * @param array<string,mixed> $incoming
+     */
+    private static function spawnGenerationDiffers(array $stored, array $incoming): bool {
+        if (!array_key_exists('started_at', $incoming) && !array_key_exists('moved_at', $incoming)) return false;
+        return ($stored['started_at'] ?? null) !== ($incoming['started_at'] ?? null)
+            || ($stored['moved_at'] ?? null) !== ($incoming['moved_at'] ?? null);
+    }
+
     /** Remove the server-owned keys from the workspace list before it goes to a browser. */
+
     public static function stripServerOwned(array $workspaces): array {
         foreach (($workspaces['sessions'] ?? []) as $i => $s) {
             if (is_array($s)) unset($workspaces['sessions'][$i]['commandAllow']);
@@ -1832,8 +1892,9 @@ class ConfigService {
             $prior = $existingById[$id] ?? null;
             if ($prior !== null) {
                 // An existing record the drawer resent without these fields
-                // (older browser state) keeps its original stamp — explicit
-                // values on $session still win, they are never overwritten.
+                // (older browser state) keeps its original stamp. createdAt from the incoming
+                // record still wins. createdBy does not: it is server-owned and the tie block
+                // below keeps the stored value (WORKSPACE_REPARENT.md R13).
                 if (!array_key_exists('createdBy', $session) && array_key_exists('createdBy', $prior)) {
                     $session['createdBy'] = $prior['createdBy'];
                 }
@@ -1862,14 +1923,36 @@ class ConfigService {
                 // AGENT_COMMAND_INJECTION.md: `commandAllow` (the "Always allow" rules) belongs to the server. Every save
                 // keeps the value that is on disk now (this merge runs under the save lock). Only updateCommandAllow() may
                 // replace it, so a stale tab or a writer that read the record earlier cannot bring back a removed rule.
-                if (!self::$commandAllowWriter) {
+                if (!self::$commandAllowWriter && !self::$parentTieWriter) {
                     if (array_key_exists('commandAllow', $prior)) $session['commandAllow'] = $prior['commandAllow'];
                     else unset($session['commandAllow']);
                 }
-                foreach (['spawned', 'spawn', 'runAs'] as $spawnKey) {
-                    if (!array_key_exists($spawnKey, $session) && array_key_exists($spawnKey, $prior)) {
-                        $session[$spawnKey] = $prior[$spawnKey];
+                // WORKSPACE_REPARENT.md R13: the tie to the parent is server-owned. Only updateParentTie() may change it.
+                // Every other save keeps `createdBy`, `spawned`, the presence of `spawn`, `spawn.parent` and
+                // `spawn.parent_name` as they are on disk now (this merge runs under the save lock). Other fields INSIDE
+                // `spawn` (report, close_pending and so on) still come from the incoming record.
+                if (!self::$parentTieWriter) {
+                    foreach (['createdBy', 'spawned'] as $tieKey) {
+                        if (array_key_exists($tieKey, $prior)) $session[$tieKey] = $prior[$tieKey];
+                        else unset($session[$tieKey]);
                     }
+                    if (!is_array($prior['spawn'] ?? null)) {
+                        unset($session['spawn']);
+                    } elseif (!is_array($session['spawn'] ?? null)) {
+                        $session['spawn'] = $prior['spawn'];
+                    } elseif (self::spawnGenerationDiffers($prior['spawn'], $session['spawn'])) {
+                        // The record was promoted or moved after this copy was read. Its whole `spawn` is old: keep the stored one.
+                        $session['spawn'] = $prior['spawn'];
+                    } else {
+                        foreach (['parent', 'parent_name'] as $tieSub) {
+                            if (array_key_exists($tieSub, $prior['spawn'])) $session['spawn'][$tieSub] = $prior['spawn'][$tieSub];
+                            else unset($session['spawn'][$tieSub]);
+                        }
+                    }
+                    if (!array_key_exists('runAs', $session) && array_key_exists('runAs', $prior)) $session['runAs'] = $prior['runAs'];
+                } else {
+                    // The writer sends the whole record: a key it leaves out is removed, but runAs is not part of the tie.
+                    if (!array_key_exists('runAs', $session) && array_key_exists('runAs', $prior)) $session['runAs'] = $prior['runAs'];
                 }
             } else {
                 // A genuinely new workspace — stamp it now if the caller did not. It has no rules.

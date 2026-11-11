@@ -43,6 +43,8 @@ class ValidationService {
         'execute_storage_backend', 'storage_backend_migration_recovery', 'execute_upper_mode',
         // AGENT_COMMAND_INJECTION.md: a person removes a saved command rule.
         'remove_command_rule',
+        // WORKSPACE_REPARENT.md: a person promotes a sub-agent or moves a workspace under a parent.
+        'workspace_promote', 'workspace_move_under',
     ];
 
     /**

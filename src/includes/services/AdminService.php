@@ -1203,6 +1203,12 @@ class AdminService {
      */
     public static function createWorkspace(string $path, string $agentId, string $name = '', ?string $favouriteId = null): array {
         try {
+            $createdBy = self::callerIdentity()['workspaceId'];
+            // One level only: a sub-agent workspace cannot create workspaces (WORKSPACE_REPARENT.md, a parent can change).
+            $callerIsHelper = static fn(): bool => $createdBy !== '' && SpawnService::isHelper(SpawnService::findRecord($createdBy));
+            if ($callerIsHelper()) {
+                return ['error' => 'A sub-agent workspace cannot create another workspace. Only a workspace that a person opened may do that.'];
+            }
             $favourite = null;
             $voice = null;
             if ($favouriteId !== null && $favouriteId !== '') {
@@ -1245,15 +1251,22 @@ class AdminService {
             // would stamp the same defaults for a browser-created record that
             // omits them; setting them here means an admin-tool creation never
             // depends on that fallback running first.
-            $createdBy = self::callerIdentity()['workspaceId'];
             $record = [
                 'id' => $id, 'name' => $name, 'path' => $resolved, 'agentId' => $agentId, 'lastActive' => null,
                 'createdBy' => $createdBy !== '' ? $createdBy : 'human', 'createdAt' => time(),
             ];
             if ($voice !== null) $record['voice'] = $voice;
-            $ok = ConfigService::saveWorkspaces(['sessions' => [$record]], []);
+            $helperNow = false;
+            $lockBusy = false;
+            $ok = ConfigService::withWorkspacesLock(static function () use ($record, $callerIsHelper, &$helperNow): bool {
+                if ($callerIsHelper()) { $helperNow = true; return false; }
+                return (bool)ConfigService::saveWorkspaces(['sessions' => [$record]], []);
+            }, $lockBusy);
+            if ($helperNow) {
+                return ['error' => 'A sub-agent workspace cannot create another workspace. Only a workspace that a person opened may do that.'];
+            }
             if (!$ok) {
-                return ['error' => ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the new workspace.'];
+                return ['error' => $lockBusy ? 'The workspace list is busy with another save, so this change was not saved. Retry in a moment.' : (ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the new workspace.')];
             }
             if ($favourite !== null) {
                 \AICliAgents\Services\FavouritesService::touch($favouriteId);

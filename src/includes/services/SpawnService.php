@@ -475,8 +475,12 @@ class SpawnService
             if (!is_array($w) || !self::isHelper($w)) continue;
             $wid = (string)($w['id'] ?? '');
             if ($wid === '' || !ProcessManager::isRunning($wid)) continue;
+            $parentOf = (string)($w['spawn']['parent'] ?? $w['createdBy'] ?? '');
+            if ($parentOf === $parentId) $mine++;
+            // A workspace that a person moved under a parent is not a sub-agent that this tool started: it does not use the
+            // total or the per-agent limit (WORKSPACE_REPARENT.md).
+            if (!empty($w['spawn']['moved_at'])) continue;
             $all++;
-            if ((string)($w['spawn']['parent'] ?? $w['createdBy'] ?? '') === $parentId) $mine++;
             if ((string)($w['agentId'] ?? '') === $agentId) $kind++;
         }
         return [$all, $mine, $kind];
@@ -797,9 +801,20 @@ class SpawnService
                 // R18b: the sign-in workspace of the run user. It is a normal workspace that a person controls.
                 $record['spawn']['runUserSignIn'] = $run['runUserSignIn'] + ['runAs' => $runAs];
             }
-            if (!ConfigService::saveWorkspaces(['sessions' => [$record]], [])) {
+            // WORKSPACE_REPARENT.md: a person can move the caller under a parent while this call runs. The caller is checked again
+            // under the save lock, so a sub-agent never starts a sub-agent (one level only).
+            $callerNowHelper = false;
+            $lockBusy = false;
+            $saved = ConfigService::withWorkspacesLock(static function () use ($record, $callerId, $isRun, &$callerNowHelper): bool {
+                if (!$isRun && $callerId !== '' && self::isHelper(self::findRecord($callerId))) { $callerNowHelper = true; return false; }
+                return (bool)ConfigService::saveWorkspaces(['sessions' => [$record]], []);
+            }, $lockBusy);
+            if ($callerNowHelper) {
+                return ['error' => 'The workspace that asked became a sub-agent while this call ran, and a sub-agent workspace cannot start another sub-agent workspace. ' . self::undoWithoutRecord($id, $madeWorktree)];
+            }
+            if (!$saved) {
                 // #865 third review 1: no record exists, so only the mark, the worktree and the branch of this call are undone.
-                return ['error' => (ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the sub-agent workspace.') . ' ' . self::undoWithoutRecord($id, $madeWorktree)];
+                return ['error' => ($lockBusy ? 'The workspace list is busy with another save, so this change was not saved. Retry in a moment.' : (ConfigService::lastWorkspaceSaveMessage() ?? 'Could not save the sub-agent workspace.')) . ' ' . self::undoWithoutRecord($id, $madeWorktree)];
             }
             $recordSaved = true;
             if (!ArgsService::saveIdArgs($id, (string)$flags['args'], $promptMode)) {
@@ -2264,7 +2279,9 @@ class SpawnService
         if (!self::isHelper($record)) return ['status' => 'ok', 'isHelper' => false, 'needsConfirm' => false, 'reasons' => []];
         $spawn = is_array($record['spawn'] ?? null) ? $record['spawn'] : [];
         $reasons = [];
-        if (($spawn['state'] ?? '') !== 'reported_done') {
+        // A workspace that a person moved under a parent has no task to report (WORKSPACE_REPARENT.md).
+        $hasTask = trim((string)($spawn['task_title'] ?? '')) !== '' && empty($spawn['moved_at']);
+        if ($hasTask && ($spawn['state'] ?? '') !== 'reported_done') {
             $reasons[] = 'The task is not reported as done yet. The sub-agent has not called aicli_finish_task.';
         }
         $wt = is_array($spawn['worktree'] ?? null) ? $spawn['worktree'] : null;

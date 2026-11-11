@@ -490,6 +490,12 @@ person then sees Allow once, Always allow and Block in the Activity tray, and ha
 minutes to answer. Do not poll the tray: the answer arrives in the event ledger as
 `workspace.command` with an `outcome` of typed, blocked, failed or expired.
 
+A person can change the parent of a workspace in the Manager (promote a sub-agent
+to a top-level workspace, or move a workspace under a parent). So your parent, and
+the sub-agents you started, can change while you work. Do not rely on what you
+remember about them: the server's answer to each call decides. A call that was
+allowed before can be refused later, and the reverse.
+
 A sub-agent may stop on a permission prompt, for example to read a folder outside
 its own. You may answer it for a sub-agent that you started: pass `answerPrompt:true`
 (CLI: `--answer`) and a short allow-once answer such as `1` or `yes`. Read the

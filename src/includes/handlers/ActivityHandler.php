@@ -43,6 +43,9 @@ class ActivityHandler
             // AGENT_COMMAND_INJECTION.md R7, R8: the "Always allow" rules of one workspace. A person in the Manager UI only.
             case 'list_command_rules':  return self::listCommandRules($id);
             case 'remove_command_rule': return self::removeCommandRule($id);
+            // WORKSPACE_REPARENT.md R1, R2: a person changes the parent of a workspace. Manager UI only.
+            case 'workspace_promote':    return self::promoteWorkspace($id);
+            case 'workspace_move_under': return self::moveWorkspaceUnder($id);
             default:                 return null;
         }
     }
@@ -50,7 +53,7 @@ class ActivityHandler
     /** Actions handled by this handler. */
     public static function actions(): array
     {
-        return ['list_activities', 'cancel_activity', 'dismiss_activity', 'retry_auto_launch', 'approve_activity', 'reject_activity', 'deliver_relay_waiting', 'list_command_rules', 'remove_command_rule'];
+        return ['list_activities', 'cancel_activity', 'dismiss_activity', 'retry_auto_launch', 'approve_activity', 'reject_activity', 'deliver_relay_waiting', 'list_command_rules', 'remove_command_rule', 'workspace_promote', 'workspace_move_under'];
     }
 
     /**
@@ -341,6 +344,31 @@ class ActivityHandler
         $ws = (string)($id ?? $_REQUEST['id'] ?? '');
         if (preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $ws) !== 1) return ['status' => 'error', 'message' => 'A workspace id is required.'];
         return ['status' => 'ok', 'rules' => \AICliAgents\Services\CommandApprovalService::rules($ws)];
+    }
+
+    /** A workspace id: letters, digits, underscore and dash, up to 128 characters. */
+    private static function validWorkspaceId(string $ws): bool
+    {
+        return preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $ws) === 1;
+    }
+
+    /** WORKSPACE_REPARENT.md R4 to R7: make a sub-agent a top-level workspace (POST, CSRF). Field: `id`. */
+    private static function promoteWorkspace($id): array
+    {
+        $ws = (string)($id ?? $_REQUEST['id'] ?? '');
+        if (!self::validWorkspaceId($ws)) return ['status' => 'error', 'message' => 'A workspace id is required.'];
+        $r = \AICliAgents\Services\WorkspaceReparentService::promote($ws);
+        return isset($r['error']) ? ['status' => 'error', 'message' => (string)$r['error']] : $r;
+    }
+
+    /** WORKSPACE_REPARENT.md R8 to R10: move a top-level workspace under a parent (POST, CSRF). Fields: `id`, `parent`. */
+    private static function moveWorkspaceUnder($id): array
+    {
+        $ws = (string)($id ?? $_REQUEST['id'] ?? '');
+        $parent = (string)($_REQUEST['parent'] ?? '');
+        if (!self::validWorkspaceId($ws) || !self::validWorkspaceId($parent)) return ['status' => 'error', 'message' => 'The workspace and the parent are required.'];
+        $r = \AICliAgents\Services\WorkspaceReparentService::moveUnder($ws, $parent);
+        return isset($r['error']) ? ['status' => 'error', 'message' => (string)$r['error']] : $r;
     }
 
     /**

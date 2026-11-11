@@ -339,6 +339,38 @@ class CommandApprovalService
     }
 
     // ======================================================================
+    // A parent change (WORKSPACE_REPARENT.md R5)
+    // ======================================================================
+
+    /**
+     * R5: a person changed the parent of a workspace. End every open command request for it whose sender is not its
+     * parent now. The row ends "Blocked" and nothing is typed. executeApproved() checks the creator again, so an answer
+     * that arrives in the same moment also types nothing. Never throws. Returns the number of requests ended.
+     */
+    public static function endPendingForTarget(string $targetId, string $currentParentId): int
+    {
+        $n = 0;
+        try {
+            foreach (ActivityService::listAll() as $e) {
+                if ((string)($e['status'] ?? '') !== ActivityService::STATUS_PENDING_APPROVAL) continue;
+                if ((string)($e['meta']['tool'] ?? '') !== self::TOOL) continue;
+                $p = is_array($e['meta']['params'] ?? null) ? $e['meta']['params'] : [];
+                if ((string)($p['targetId'] ?? '') !== $targetId) continue;
+                if ($currentParentId !== '' && (string)($p['callerId'] ?? '') === $currentParentId) continue;
+                $opId = (string)($e['opId'] ?? '');
+                if ($opId === '') continue;
+                $done = ActivityService::transitionIf($opId, [ActivityService::STATUS_PENDING_APPROVAL],
+                    ['status' => 'done', 'error' => null, 'step' => 'Blocked', 'meta' => ['kind' => 'record', 'rejectReason' => 'The parent of this workspace changed.']]);
+                if ($done === null) continue;
+                self::recordBlocked($p);
+                $n++;
+            }
+        } catch (\Throwable $e) {
+            // The creator check at approval time is the safety net.
+        }
+        return $n;
+    }
+    // ======================================================================
     // The "always allow" rules (R4, R7). They live on the TARGET workspace record, key commandAllow.
     // ======================================================================
 

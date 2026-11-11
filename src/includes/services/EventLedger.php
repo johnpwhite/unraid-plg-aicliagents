@@ -328,6 +328,10 @@ final class EventLedger {
                     $caller = (string)($payload['caller'] ?? 'an agent');
                     $where = (string)($payload['name'] ?? $payload['workspaceId'] ?? 'a workspace');
                     return trim("Command from $caller to $where: $outcome");
+                // WORKSPACE_REPARENT.md: a person promoted a sub-agent or moved a workspace under a parent.
+                case $kind === 'workspace.reparented':
+                    $where = (string)($payload['name'] ?? $payload['workspaceId'] ?? 'a workspace');
+                    return (string)($payload['action'] ?? '') === 'move' ? "A person moved $where under a parent" : "A person made $where a top-level workspace";
                 case $kind === 'agent.action':
                     $tool = (string)($payload['tool'] ?? 'an agent tool');
                     $outcome = (string)($payload['outcome'] ?? 'ran');
