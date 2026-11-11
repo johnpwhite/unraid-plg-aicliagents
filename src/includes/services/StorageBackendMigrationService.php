@@ -214,7 +214,7 @@ final class StorageBackendMigrationService
         $now = (int)($seams['now'] ?? time());
         $snapshot = $seams['snapshot'] ?? BootSpaceService::read();
         if (!is_array($snapshot) || BootSpaceService::isStale($snapshot, $now) || !array_key_exists('partial', $snapshot) || !empty($snapshot['partial'])) {
-            return ['status' => 'error', 'message' => 'The Boot disk space report is missing, old or incomplete. Refresh that report before you try the engine change.'];
+            return ['status' => 'error', 'reason' => 'boot_report_stale', 'message' => 'The Boot disk space report is missing, more than 10 minutes old or incomplete. Open the Storage tab, find the Boot disk space card and press Measure now. Then try the engine change again.'];
         }
         $agentPath = trim((string)($verdicts['agent']['path'] ?? ''));
         if ($agentPath === '') $agentPath = trim((string)($config['agent_storage_path'] ?? '')) ?: StoragePathResolver::pluginBase();
@@ -225,7 +225,7 @@ final class StorageBackendMigrationService
         if (($measuredAgentPath !== '' && $measuredAgentPath !== $agentPath)
             || ($measuredHomePath !== '' && $measuredHomePath !== $homePath)
             || (($measuredAgentPath === '' || $measuredHomePath === '') && $agentPath !== $homePath)) {
-            return ['status' => 'error', 'message' => 'The Boot disk space report does not match both current storage paths. Refresh that report before you try the engine change.'];
+            return ['status' => 'error', 'reason' => 'boot_report_paths', 'message' => 'The Boot disk space report does not match both current storage paths. Open the Storage tab, find the Boot disk space card and press Measure now. Then try the engine change again.'];
         }
 
         $agents = [];
@@ -280,7 +280,7 @@ final class StorageBackendMigrationService
                     $forwardBytes = max(0, (int)($row['current_bytes'] ?? 0));
                     $rollbackBytes = $forwardBytes;
                 } elseif (!in_array($storage, ['layers', 'plain'], true)) {
-                    return ['status' => 'error', 'message' => 'The Boot disk space report cannot identify the storage for agent ' . $id . '. Refresh that report before you try the engine change.'];
+                    return ['status' => 'error', 'reason' => 'boot_report_stale', 'message' => 'The Boot disk space report cannot identify the storage for agent ' . $id . '. Open the Storage tab, find the Boot disk space card and press Measure now. Then try the engine change again.'];
                 }
             } else {
                 $layerKey = 'home:' . $id . ':layers';

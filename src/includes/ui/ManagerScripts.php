@@ -394,6 +394,18 @@ function aicliClearJobNotices() {
     window._aicliKindNoticeJob = {};
     aicliSyncStorageControls();
 }
+// #953: the server refuses an engine change when the Boot disk space report is old, partial or for other paths.
+function aicliIsBootReportReason(r) { return !!(r && (r.reason === 'boot_report_stale' || r.reason === 'boot_report_paths')); }
+
+// #953: measure the boot disk ONCE with the shared helper of the Boot disk space card, then call again(). No loop:
+// the caller allows one retry only. done(false) means the helper is missing or the measure failed.
+function aicliMeasureBootThen(again, failed) {
+    var bs = window.aicliBootSpace;
+    if (!bs || typeof bs.measureNow !== 'function') { failed(); return; }
+    swal({ title: "Measuring the boot disk first...", text: "This takes a short time. The storage change continues by itself.", type: "info", showConfirmButton: false });
+    bs.measureNow(function (answer) { if (answer) again(); else failed(); });
+}
+
 function aicliIsJobReason(r) { return !!(r && (r.reason === 'storage_job_active' || r.reason === 'storage_change_interrupted' || r.reason === 'storage_migration' || r.reason === 'storage_items_differ')); }
 
 // The value the drop-down shows when nothing is pending: the real state, not only the saved setting.
@@ -597,7 +609,7 @@ function aicliSaveStorageSetting(kind, mode) {
 
 // Convert one kind (homes or agents) to newMode. Only the Apply button calls it. The kind may be mixed: then only
 // the items that are not on newMode yet convert.
-function aicliChangeStorageKind(kind, newMode, curMode, form) {
+function aicliChangeStorageKind(kind, newMode, curMode, form, retried) {
     if (aicliKindBusy(kind)) return;
     aicliSetKindBusy(kind, true);
     aicliSyncStorageControls();
@@ -608,12 +620,24 @@ function aicliChangeStorageKind(kind, newMode, curMode, form) {
     $.getJSON('/plugins/unraid-aicliagents/AICliAjax.php?action=preflight_storage_backend' + q + '&csrf_token=' + csrf, function(pf) {
         // #880: "another job runs" is a sentence under the drop-down, not an error dialog.
         if (pf.status !== 'ok' && aicliIsJobReason(pf)) { restoreEngine(); aicliJobNotice(kind, pf.message); return; }
+        if (pf.status !== 'ok' && aicliIsBootReportReason(pf) && !retried) {
+            // #953: measure once, then send the same request once more. A second refusal shows the server message.
+            aicliMeasureBootThen(function () { restoreEngine(); aicliChangeStorageKind(kind, newMode, curMode, form, true); },
+                function () { restoreEngine(); swal("Error", pf.message || "Storage check failed", "error"); });
+            return;
+        }
         if (pf.status !== 'ok') { restoreEngine(); swal("Error", pf.message || "Storage check failed", "error"); return; }
         var msg = pf.message || ('This will convert ' + word + ' to ' + aicliKindModeLabel(newMode).toLowerCase() + '.');
         aicliGuardedSwal({ title: "Change " + word + "?", text: msg, type: "warning", showCancelButton: true, confirmButtonText: kind === 'agents' ? "Convert agents" : "Convert homes", cancelButtonText: "Cancel", closeOnConfirm: false, showLoaderOnConfirm: true }, restoreEngine, function() {
             sessionStorage.removeItem('aicli_backend_migration_dismissed');
             renderBackendMigrationStatus({ status: 'queued', kind: kind, target: newMode, message: 'Starting the migration…' });
-            aicliAjax('execute_storage_backend', { mode: newMode, kind: kind, ack_wear: 1 }, function(r) {
+            var sendExecute = function (executeRetried) { aicliAjax('execute_storage_backend', { mode: newMode, kind: kind, ack_wear: 1 }, function(r) {
+                if (aicliIsBootReportReason(r) && !executeRetried) {
+                    // #953: the report went old while the dialog was open. Measure once and send once more.
+                    aicliMeasureBootThen(function () { renderBackendMigrationStatus({ status: 'queued', kind: kind, target: newMode, message: 'Starting the migration…' }); sendExecute(true); },
+                        function () { restoreEngine(); renderBackendMigrationStatus({ status: 'error', kind: kind, from: curMode, target: newMode, message: r.message || 'Storage migration failed.' }); swal("Migration Failed", r.message || "Check debug.log", "error"); });
+                    return;
+                }
                 if (r.status === 'accepted') {
                     window._aicliBackendMigrationStartedHere = true;
                     // The record on the server now holds the lock of this kind; the page reads it from there.
@@ -646,7 +670,8 @@ function aicliChangeStorageKind(kind, newMode, curMode, form) {
                 aicliSetKindBusy(kind, false);
                 if (typeof swal.close === 'function') swal.close();
                 updateBackendMigrationStatus();
-            });
+            }); };
+            sendExecute(false);
         });
     }).fail(function() { restoreEngine(); swal("Error", "Could not check the change. Try again.", "error"); });
 }
