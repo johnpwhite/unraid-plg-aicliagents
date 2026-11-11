@@ -447,10 +447,20 @@ home_cache_reapply() {
     home_cache_apply "$id" "$owner" "$mnt" "$persist" "$(home_cache_location_setting)" "$(home_cache_path_setting)" || true
 }
 
+# #949: a RAM record whose cache folder (root=) is gone belongs to a removed home. It is
+# skipped, so no action runs on a dead home. The record is not removed here. A pool record
+# stays listed even when its folder is missing: a reapply then falls back to RAM, and
+# home_cache_apply itself stops for a home that has no folder (#914).
 home_cache_state_ids() {
-    local f
+    local f id root
     for f in "$(home_cache_ram_base)"/.state/*; do
-        [ -f "$f" ] && basename "$f"
+        [ -f "$f" ] || continue
+        id="$(basename "$f")"
+        if [ "$(_hc_state_get "$id" location)" = "ram" ]; then
+            root="$(_hc_state_get "$id" root)"
+            { [ -n "$root" ] && [ -d "$root" ]; } || continue
+        fi
+        printf '%s\n' "$id"
     done
 }
 

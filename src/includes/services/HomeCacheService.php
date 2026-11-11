@@ -169,7 +169,10 @@ class HomeCacheService
         $caps = [];
         foreach (@glob($base . '/.state/*') ?: [] as $f) {
             $kv = @parse_ini_file($f);
-            if (is_array($kv) && ($kv['location'] ?? '') === 'ram') {
+            // #949: a record whose cache folder is gone is a left-over of a removed home.
+            // It holds no RAM, so it is not counted. This code deletes nothing.
+            $root = is_array($kv) ? (string)($kv['root'] ?? '') : '';
+            if (is_array($kv) && ($kv['location'] ?? '') === 'ram' && $root !== '' && is_dir($root)) {
                 $caps[basename($f)] = $mb * 1048576;
             }
         }
