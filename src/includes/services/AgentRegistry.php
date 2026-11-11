@@ -416,12 +416,17 @@ class AgentRegistry {
      * #827: the installed version inside one generation, from its npm package.json,
      * or '' when it cannot be read (a non-npm agent, or an unreadable tree).
      */
-    public static function generationVersion(string $agentId, string $gen, string $npmPackage): string {
+    public static function generationVersion(string $agentId, string $gen, string $npmPackage, array $replacedPackages = [], ?string $base = null): string {
         if ($npmPackage === '' || !preg_match(self::AGENT_ID_RE, $agentId) || !preg_match('/^[A-Za-z0-9._@-]+$/D', $gen)) return '';
-        $json = @file_get_contents(self::agentBase() . "/.versions/$agentId/$gen/node_modules/$npmPackage/package.json");
-        $d = is_string($json) ? json_decode($json, true) : null;
-        $v = is_array($d) ? (string)($d['version'] ?? '') : '';
-        return self::isSafeVersionString($v) ? $v : '';
+        // #957: a kept generation from before a package move holds only the old package.
+        foreach (array_merge([$npmPackage], $replacedPackages) as $pkg) {
+            if (!is_string($pkg) || !preg_match('#^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$#D', $pkg)) continue;
+            $json = @file_get_contents(($base ?? self::agentBase()) . "/.versions/$agentId/$gen/node_modules/$pkg/package.json");
+            $d = is_string($json) ? json_decode($json, true) : null;
+            $v = is_array($d) ? (string)($d['version'] ?? '') : '';
+            if (self::isSafeVersionString($v)) return $v;
+        }
+        return '';
     }
 
     /**
@@ -765,9 +770,21 @@ class AgentRegistry {
                 'data_dir_env' => ['PI_CODING_AGENT_DIR' => 'Relocates ALL pi-coder state away from ~/.pi/agent. Leave unset: a path outside the plugin home is not saved by the persistent storage of the plugin, so sessions and keys vanish on reboot.'],
                 'name' => 'Pi Coder',
                 'description' => 'Specialized Python and Data Science agent with deep tool integration.',
-                'npm_package' => '@mariozechner/pi-coding-agent',
+                // Forgejo #957 (docs/specs/PI_CODER_PACKAGE_MOVE.md): the project moved from
+                // badlogic/pi-mono to earendil-works/pi. The old npm package is deprecated and
+                // frozen at 0.73.1. The maintained package needs Node 22.19 or newer (the
+                // plugin ships 22.22.0). dist/cli.js is the start file in every version of the new
+                // package (0.74.0 and up, checked in the tarballs); only later versions (for example 1.5.2) also have
+                // dist/bundle/cli.js. NpmSource::stage() also reads the bin of the installed package.json.
+                'npm_package' => '@earendil-works/pi-coding-agent',
+                // An upgrade installs into the folder of the old install. NpmSource removes these
+                // packages after the new one is in place, so the old tree does not stay behind.
+                'replaces_npm_packages' => ['@mariozechner/pi-coding-agent'],
                 'icon_url' => '/plugins/unraid-aicliagents/src/assets/icons/picoder.png',
-                'binary' => "$agentBase/pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+                'binary' => "$agentBase/pi-coder/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                // A rollback to a version from before the move has only the old package. The
+                // launcher uses this path when the primary path does not exist.
+                'binary_fallback' => "$agentBase/pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
                 // WP #932: pi-coder's --resume opens an interactive session
                 // picker (blocks indefinitely in our SSH-attach flow with no
                 // TTY input). Direct-ID resume is --session; continue-last is
@@ -775,7 +792,7 @@ class AgentRegistry {
                 'resume_cmd' => "{binary} {args} --session {chatId}",
                 'resume_latest' => "{binary} {args} --continue",
                 'env_prefix' => 'PI_CODER',
-                'changelog_url' => 'https://github.com/badlogic/pi-mono/releases',
+                'changelog_url' => 'https://github.com/earendil-works/pi/releases',
                 // AGENT_SELF_UPDATE_SUPPRESSION.md (2026-09-10): official docs
                 // (https://pi.dev/docs/latest/settings) — "Set PI_SKIP_VERSION_CHECK=1
                 // to disable the Pi version update check." We use the narrow flag

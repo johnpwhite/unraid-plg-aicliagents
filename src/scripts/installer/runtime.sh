@@ -188,15 +188,22 @@ cleanup_stale_runtime_archives() {
     for pattern in \
         'node-v*-linux-x64.tar.gz' \
         'tmux-v*.gz' \
+        'tmux-*.txz' \
         'fd-v*-x86_64-unknown-linux-musl.tar.gz' \
         'ripgrep-*-x86_64-unknown-linux-musl.tar.gz' \
         'git-lfs-linux-amd64-v*.tar.gz' \
         'squashfs-tools-*.txz'; do
         current_cached=0
         for keep in "$@"; do
-            case "$keep" in
-                $pattern) [ -f "$cache_dir/$keep" ] && current_cached=1 ;;
-            esac
+            if [ "$pattern" = 'tmux-v*.gz' ]; then
+                case "$keep" in
+                    tmux-*.txz) [ -f "$cache_dir/$keep" ] && current_cached=1 ;;
+                esac
+            else
+                case "$keep" in
+                    $pattern) [ -f "$cache_dir/$keep" ] && current_cached=1 ;;
+                esac
+            fi
         done
         if [ "$current_cached" -ne 1 ]; then
             log_status "Keeping cached $pattern archives because the current archive is unavailable."
@@ -221,6 +228,25 @@ cleanup_stale_runtime_archives() {
 NODE_TAR="node-v22.22.0-linux-x64.tar.gz"
 NODE_URL="https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.gz"
 NODE_SHA256="c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744"
+# The lowest Node version that every agent accepts. pi-coder 1.x needs >=22.19.0 (engines field).
+NODE_MIN_VERSION="22.19.0"
+
+# node_version_at_least <have> <want>: true when dotted version <have> is not older than <want>.
+node_version_at_least() {
+    local have="${1#v}" want="${2#v}" i h w
+    local -a H W
+    IFS=. read -r -a H <<< "$have"
+    IFS=. read -r -a W <<< "$want"
+    for i in 0 1 2; do
+        h="${H[$i]:-0}"; w="${W[$i]:-0}"
+        h="${h%%[!0-9]*}"; w="${w%%[!0-9]*}"
+        [[ "$h" =~ ^[0-9]+$ ]] || return 1
+        [[ "$w" =~ ^[0-9]+$ ]] || w=0
+        [ "$((10#$h))" -gt "$((10#$w))" ] && return 0
+        [ "$((10#$h))" -lt "$((10#$w))" ] && return 1
+    done
+    return 0
+}
 
 USE_SYSTEM_NODE=1
 REAL_NODE=""
@@ -242,8 +268,10 @@ for node_tool in node npm npx; do
         npx) REAL_NPX="$real" ;;
     esac
 done
-NODE_VER=$("${REAL_NODE:-/nonexistent}" -v 2>/dev/null | sed 's/v//' | cut -d. -f1) || NODE_VER=0
-if ! [[ "$NODE_VER" =~ ^[0-9]+$ ]] || [ "$NODE_VER" -lt 22 ]; then USE_SYSTEM_NODE=0; fi
+NODE_VER=$("${REAL_NODE:-/nonexistent}" -v 2>/dev/null) || NODE_VER=""
+NODE_VER="${NODE_VER#v}"
+# #959: a system Node must reach the minimum of the newest agent (pi 1.x: >=22.19.0), not only major 22.
+if ! node_version_at_least "$NODE_VER" "$NODE_MIN_VERSION"; then USE_SYSTEM_NODE=0; fi
 
 log_step "Node.js runtime..."
 if [ "$USE_SYSTEM_NODE" -eq 1 ]; then
@@ -308,10 +336,43 @@ fi
 [ -x "$GLOBAL_BIN_DIR/npm" ] || ln -sfn "$BIN_DEST/npm" "$GLOBAL_BIN_DIR/npm"
 [ -x "$GLOBAL_BIN_DIR/npx" ] || ln -sfn "$BIN_DEST/npx" "$GLOBAL_BIN_DIR/npx"
 
-# --- 2. tmux (v3.6a) ---
-TMUX_TAR="tmux-v3.6a.gz"
-TMUX_URL="https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6a/tmux.linux-amd64.gz"
-TMUX_SHA256="e6e1b346af08e17f47b66571a50fa76ed499e6a1cd000519f5f9e04c4722b7be"
+# --- 2. tmux (Slackware 3.8) ---
+TMUX_TAR="tmux-3.8-x86_64-1.txz"
+TMUX_URL="https://mirrors.slackware.com/slackware/slackware64-current/slackware64/ap/$TMUX_TAR"
+# GIT_URL comes from the .plg and points to the matching private or storefront tree.
+TMUX_VENDOR_BASE="${GIT_URL:-https://forgejo.johnpwhite.com/unraid/unraid-plg-aicliagents/raw/branch/master}"
+TMUX_URL_ALT="${TMUX_VENDOR_BASE%/}/third_party/slackware/$TMUX_TAR"
+TMUX_SHA256="9f246361fe6a9c34a9fb1ba4a0e94b538b70cf82767c5273daf215bbd3a89d33"
+
+install_tmux_runtime() {
+    local system_tmux="$1" tmux_extract tmux_candidate
+    if [ -n "$system_tmux" ] && [ -x "$system_tmux" ] && timeout 5 "$system_tmux" -V >/dev/null 2>&1; then
+        log_ok "System tmux found at $system_tmux."
+        ln -sfn "$system_tmux" "$BIN_DEST/tmux" || return 1
+    else
+        log_status "    > Downloading the verified Slackware tmux package..."
+        download_verified "$CONFIG_DIR/$TMUX_TAR" "$TMUX_SHA256" "tmux" "$TMUX_URL" "$TMUX_URL_ALT" || return 1
+        tmux_extract="$RUNTIME_WORK/tmux-package"
+        mkdir -p "$tmux_extract" || return 1
+        if ! tar -xf "$CONFIG_DIR/$TMUX_TAR" -C "$tmux_extract" --no-same-owner; then
+            log_fail "Slackware tmux package extraction failed."
+            return 1
+        fi
+        tmux_candidate="$tmux_extract/usr/bin/tmux"
+        if [ ! -s "$tmux_candidate" ]; then
+            log_fail "Slackware tmux package does not contain usr/bin/tmux."
+            return 1
+        fi
+        chmod +x "$tmux_candidate" || { log_fail "Could not mark Slackware tmux executable."; return 1; }
+        # Publish on every install. This replaces the old static plugin binary on update.
+        publish_binary "$tmux_candidate" "$RUNTIME_BASE/bin/tmux" -V || return 1
+        log_ok "Slackware tmux installed."
+        ln -sfn "$RUNTIME_BASE/bin/tmux" "$BIN_DEST/tmux" || return 1
+    fi
+    if [ ! -x "$GLOBAL_BIN_DIR/tmux" ]; then
+        ln -sfn "$BIN_DEST/tmux" "$GLOBAL_BIN_DIR/tmux" || return 1
+    fi
+}
 
 log_step "tmux..."
 TMUX_FOUND=$(command -v tmux 2>/dev/null || true)
@@ -319,28 +380,7 @@ REAL_TMUX=$(readlink -f "$TMUX_FOUND" 2>/dev/null || true)
 case "$REAL_TMUX" in
     "$BIN_DEST"/*|"$RUNTIME_BASE"/*) REAL_TMUX="" ;;
 esac
-if [ -n "$REAL_TMUX" ] && [ -x "$REAL_TMUX" ] && timeout 5 "$REAL_TMUX" -V >/dev/null 2>&1; then
-    log_ok "System tmux found at $REAL_TMUX."
-    ln -sfn "$REAL_TMUX" "$BIN_DEST/tmux"
-else
-    if [ ! -x "$RUNTIME_BASE/bin/tmux" ] || ! timeout 5 "$RUNTIME_BASE/bin/tmux" -V >/dev/null 2>&1; then
-        log_status "    > Downloading portable tmux..."
-        download_verified "$CONFIG_DIR/$TMUX_TAR" "$TMUX_SHA256" "tmux" "$TMUX_URL" || exit 1
-        if ! gunzip -c "$CONFIG_DIR/$TMUX_TAR" > "$RUNTIME_WORK/tmux"; then
-            log_fail "tmux archive extraction failed."
-            exit 1
-        fi
-        chmod +x "$RUNTIME_WORK/tmux" || { log_fail "Could not mark the tmux candidate executable."; exit 1; }
-        publish_binary "$RUNTIME_WORK/tmux" "$RUNTIME_BASE/bin/tmux" -V || exit 1
-        log_ok "Portable tmux installed."
-    else
-        log_ok "Portable tmux found in plugin root."
-    fi
-    ln -sfn "$RUNTIME_BASE/bin/tmux" "$BIN_DEST/tmux"
-fi
-if [ ! -x "$GLOBAL_BIN_DIR/tmux" ]; then
-    ln -sfn "$BIN_DEST/tmux" "$GLOBAL_BIN_DIR/tmux"
-fi
+install_tmux_runtime "$REAL_TMUX" || exit 1
 if ! timeout 5 "$BIN_DEST/tmux" -V >/dev/null 2>&1; then
     log_fail "Required tmux runtime failed its executable check."
     exit 1
@@ -353,9 +393,9 @@ FD_SHA256="2b6bfaae8c48f12050813c2ffe1884c61ea26e750d803df9c9114550a314cd14"
 RG_TAR="ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz"
 RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/$RG_TAR"
 RG_SHA256="f84757b07f425fe5cf11d87df6644691c644a5cd2348a2c670894272999d3ba7"
-GIT_LFS_TAR="git-lfs-linux-amd64-v3.7.0.tar.gz"
-GIT_LFS_URL="https://github.com/git-lfs/git-lfs/releases/download/v3.7.0/$GIT_LFS_TAR"
-GIT_LFS_SHA256="e7ebba491af8a54e560be3a00666fa97e4cf2bbbb223178a0934b8ef74cf9bed"
+GIT_LFS_TAR="git-lfs-linux-amd64-v3.8.1.tar.gz"
+GIT_LFS_URL="https://github.com/git-lfs/git-lfs/releases/download/v3.8.1/$GIT_LFS_TAR"
+GIT_LFS_SHA256="e72cf723a4a660438862282e8aecf3885fc8123e88bfcad534cf6b941a354b75"
 
 # Resolve a tool the plugin ships, without ever adopting our own shim.
 #
@@ -540,13 +580,15 @@ cleanup_stale_runtime_archives "$CONFIG_DIR" "$NODE_TAR" "$TMUX_TAR" "$FD_TAR" "
 log_step "Agent proxy wrappers..."
 
 create_proxy() {
-    local cmd=$1 pkg_path=$2
+    local cmd=$1 pkg_path=$2 alt_path="${3:-}"
     local wrapper="$BIN_DEST/$cmd"
     local wrapper_tmp="$wrapper.tmp.$$"
     local target="$EMHTTP_DEST/agents/$pkg_path"
     local bin_dest="$BIN_DEST"
+    local alt_target=""
+    [ -n "$alt_path" ] && alt_target="$EMHTTP_DEST/agents/$alt_path"
 
-    cat <<'PROXYEOF' | sed -e "s|__BIN_DEST__|${bin_dest}|g" -e "s|__TARGET__|${target}|g" -e "s|__CMD__|${cmd}|g" -e "s|__PKG_PATH__|${pkg_path}|g" > "$wrapper_tmp"
+    cat <<'PROXYEOF' | sed -e "s|__BIN_DEST__|${bin_dest}|g" -e "s|__TARGET__|${target}|g" -e "s|__CMD__|${cmd}|g" -e "s|__PKG_PATH__|${pkg_path}|g" -e "s|__ALT_TARGET__|${alt_target}|g" > "$wrapper_tmp"
 #!/bin/bash
 # AICliAgents Proxy Wrapper for __CMD__
 # The entry point is baked at plugin-install time, but npm packages occasionally
@@ -556,6 +598,9 @@ create_proxy() {
 export PATH="__BIN_DEST__:$PATH"
 NODE="__BIN_DEST__/node"
 TARGET="__TARGET__"
+ALT_TARGET="__ALT_TARGET__"
+# A kept version from before a package move has only the old entry point (pi-coder, #957).
+if [ ! -e "$TARGET" ] && [ -n "$ALT_TARGET" ] && [ -e "$ALT_TARGET" ]; then TARGET="$ALT_TARGET"; fi
 
 if [ ! -e "$TARGET" ]; then
     d=$(dirname "$TARGET")
@@ -601,7 +646,9 @@ create_proxy "claude" "claude-code/node_modules/@anthropic-ai/claude-code/bin/cl
 create_proxy "opencode" "opencode/node_modules/opencode-ai/bin/opencode"
 create_proxy "opencode2" "opencode2/node_modules/@opencode/cli/bin/opencode.exe"
 create_proxy "kilo" "kilocode/node_modules/@kilocode/cli/bin/kilo"
-create_proxy "pi" "pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
+# pi-coder moved to @earendil-works/pi-coding-agent (#957). A version kept from before the move
+# has only the old package, so the proxy tries the old path (third argument) when the new one is absent.
+create_proxy "pi" "pi-coder/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "pi-coder/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
 create_proxy "codex" "codex-cli/node_modules/.bin/codex"
 create_proxy "droid" "factory-cli/node_modules/.bin/droid"
 create_proxy "nanocoder" "nanocoder/node_modules/.bin/nanocoder"

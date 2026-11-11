@@ -81,7 +81,7 @@ class AgentRelayService {
         'goose'           => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'grok-build'      => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
         'kimi-code'       => ['paste',  'No verified facility for surfacing background command output mid-turn.'],
-        'pi-coder'        => ['paste',  'Refuses MCP on principle, so the paste is its only push path.'],
+        'pi-coder'        => ['paste',  'The plugin does not project MCP for it (pi 0.73.1 has none; 1.x has; the first version with MCP is not verified; projection does not follow the installed version yet, #961), so the paste is its only push path.'],
     ];
 
     /** Delivery mode for an agent; unknown ids fall back to the safe, noisy default. */

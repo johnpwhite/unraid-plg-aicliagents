@@ -885,7 +885,7 @@ PRIOEOF
     [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] || printf 'export AICLI_RELAY_COMMAND=%q\n' "${AICLI_RELAY_COMMAND:-$PLUGIN_SRC/scripts/relay-agent.php}" >> "$RUN_SCRIPT"
     # Plugin management (read-only) self-service, pinned the same way and for the
     # same reason. This is the fallback for an agent with no MCP support — pi-coder
-    # is HubProjector::MCP_EXEMPT and will never read an MCP config file — and it is
+    # is HubProjector::MCP_EXEMPT (the plugin projects no MCP config for it) — and it is
     # also what a user's own script calls. Spec: docs/specs/PLUGIN_MANAGEMENT_TOOLS.md
     [ "${AICLI_RESTRICTED_RUN:-}" = "1" ] || printf 'export AICLI_ADMIN_COMMAND=%q\n' "${AICLI_ADMIN_COMMAND:-$PLUGIN_SRC/scripts/admin-agent.php}" >> "$RUN_SCRIPT"
     # (Relay 'watch' mode retired 2026-08-22: every agent now receives the

@@ -423,7 +423,8 @@ class AgentHandler {
         if ($versionOf === null) {
             $agent = \AICliAgents\Services\AgentRegistry::getDefaultAgents()[$agentId] ?? null;
             $pkg = \AICliAgents\Services\VersionCheckService::npmPackageOf($agent);
-            $versionOf = static fn(string $g): string => \AICliAgents\Services\AgentRegistry::generationVersion($agentId, $g, $pkg);
+            $replaced = is_array($agent) ? (array)($agent['replaces_npm_packages'] ?? []) : [];
+            $versionOf = static fn(string $g): string => \AICliAgents\Services\AgentRegistry::generationVersion($agentId, $g, $pkg, $replaced);
         }
         $v = (string)$versionOf($oldest);
         $which = $v !== '' ? "The oldest version, v$v," : 'The oldest version';

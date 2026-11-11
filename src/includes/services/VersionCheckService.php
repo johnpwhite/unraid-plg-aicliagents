@@ -27,6 +27,18 @@ class VersionCheckService {
         return is_string($v) && preg_match('/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/D', $v) === 1;
     }
 
+    /**
+     * #957: the npm deprecation message in an `npm view --json` answer, or null. Pure.
+     * Control characters are removed and the text is cut to 300 characters.
+     */
+    public static function deprecationOf(array $npmView): ?string
+    {
+        $d = $npmView['deprecated'] ?? null;
+        if (!is_string($d)) return null;
+        $d = trim((string)preg_replace('/[\x00-\x1f\x7f]+/', ' ', $d));
+        return $d === '' ? null : substr($d, 0, 300);
+    }
+
     /** R-171: keep only the dist-tags whose name and version are safe. */
     public static function cleanDistTags($tags): array {
         $clean = [];
@@ -213,7 +225,15 @@ class VersionCheckService {
                         'check_error' => null,
                         'dist_tags' => $distTags,
                         'versions' => $versions,
+                        // #957: npm marks a retired package with a "deprecated" message. Keep it,
+                        // so a retired registry package is visible and not silently frozen.
+                        'deprecated' => self::deprecationOf($data),
+                        // #957: the package these tags belong to. An entry of another package is dropped.
+                        'package' => $pkg,
                     ];
+                    if ($cache[$id]['deprecated'] !== null) {
+                        LogService::log("Package $pkg of $id is deprecated on npm: " . $cache[$id]['deprecated'], LogService::LOG_WARN, "VersionCheck");
+                    }
                     $updated = true;
                     LogService::log("Version check OK for $id: " . count($versions) . " versions, " . count($distTags) . " tags.", LogService::LOG_DEBUG, "VersionCheck");
                 }
@@ -504,6 +524,22 @@ class VersionCheckService {
      */
     public static function resolveInstallTarget(string $agentId, ?string $explicitTarget): array
     {
+        $r = self::resolveInstallTargetUnchecked($agentId, $explicitTarget);
+        // #957: a pinned or chosen version that the package does not publish is refused in plain words.
+        if ($r['target'] !== null && $r['error'] === null && ($r['explicit'] || $r['channel'] === 'pinned')) {
+            try {
+                $agent = AgentRegistry::getDefaultAgents()[$agentId] ?? null;
+                $pkg = is_array($agent) ? self::npmPackageOf($agent) : '';
+                $refusal = $pkg !== '' ? self::pinRefusal((string)$r['target'], self::getCachedResults()[$agentId] ?? null, $pkg) : null;
+                if ($refusal !== null) { $r['target'] = null; $r['error'] = $refusal; }
+            } catch (\Throwable $e) { /* the install goes on; npm answers */ }
+        }
+        return $r;
+    }
+
+    /** The target choice of resolveInstallTarget() before the publish check. */
+    private static function resolveInstallTargetUnchecked(string $agentId, ?string $explicitTarget): array
+    {
         if ($explicitTarget !== null && $explicitTarget !== '') {
             $target = $explicitTarget;
             if (!AgentRegistry::isSafeVersionString($target)) {
@@ -771,7 +807,46 @@ class VersionCheckService {
         $path = self::cachePath();
         if (!file_exists($path)) return [];
         $data = @json_decode(@file_get_contents($path), true);
-        return is_array($data) ? $data : [];
+        if (!is_array($data)) return [];
+        try { return self::dropForeignPackageEntries($data, AgentRegistry::getDefaultAgents()); }
+        catch (\Throwable $e) { return $data; }
+    }
+
+    /**
+     * #957: drop a cache entry whose npm package is not the package of the agent now (an agent moved
+     * to a new package). An entry with no `package` is dropped only for an agent that declares
+     * `replaces_npm_packages`, because such an entry was written before the move. Pure.
+     * @param array<string,array> $cache
+     * @param array<string,array> $agents registry entries by id
+     * @return array<string,array>
+     */
+    public static function dropForeignPackageEntries(array $cache, array $agents): array {
+        foreach ($cache as $id => $entry) {
+            $agent = $agents[$id] ?? null;
+            if (!is_array($agent) || !is_array($entry)) continue;
+            $pkg = self::npmPackageOf($agent);
+            if ($pkg === '') continue;
+            $has = isset($entry['package']) ? (string)$entry['package'] : null;
+            if ($has !== null ? $has !== $pkg : !empty($agent['replaces_npm_packages'])) unset($cache[$id]);
+        }
+        return $cache;
+    }
+
+    /**
+     * #957: a plain refusal when the version to install is not published under the package, or null.
+     * Only a cache entry of this package with a non-empty version list can refuse; with no list the
+     * install goes on and npm answers. Pure.
+     * @param array|null $entry the version cache entry of the agent
+     */
+    public static function pinRefusal(string $target, ?array $entry, string $pkg): ?string {
+        if (!is_array($entry) || (string)($entry['package'] ?? '') !== $pkg) return null;
+        $all = array_values(array_filter(array_map(
+            static fn($r) => is_array($r) ? (string)($r['version'] ?? '') : (string)$r,
+            (array)($entry['versions'] ?? [])
+        ), static fn($v) => $v !== ''));
+        if ($all === [] || in_array($target, $all, true)) return null;
+        usort($all, 'version_compare');
+        return "Version $target is not published under the package $pkg. The oldest published version is {$all[0]}.";
     }
 
     public static function isCacheFresh(int $maxAge = 3600): bool {

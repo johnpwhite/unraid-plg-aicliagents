@@ -53,7 +53,7 @@ class HubProjector {
      * @var array<string,string> agentId => reason
      */
     const MCP_EXEMPT = [
-        'pi-coder' => 'Author intentionally omits MCP ("pi does not and will not support MCP" — mariozechner.at); no native config file to project. The third-party pi-mcp-adapter (~/.pi/agent/mcp.json) is opt-in and cannot be assumed installed.',
+        'pi-coder' => 'Pi 0.73.1 has no MCP; pi 1.x has; the first version with MCP is not verified. Pi 1.x reads MCP servers from ~/.pi/agent/mcp.json (https://github.com/earendil-works/pi docs/mcp.md), but the plugin does not project it until projection follows the installed version (#958, #961).',
     ];
 
     /** Agents with no verified global instruction-file surface. */
@@ -558,7 +558,7 @@ class HubProjector {
      * Every agent id with ANY hub surface (MCP, instruction, skills, or commands),
      * install-agnostic. Unions all three projector registries (MCP + instruction +
      * tree via servedAgentIds) so an MCP-EXEMPT agent is still a projection candidate:
-     * pi-coder refuses MCP but reads ~/.pi/agent/AGENTS.md, ~/.pi/agent/skills, and
+     * pi-coder is MCP-exempt (the plugin projects no MCP for it) but reads ~/.pi/agent/AGENTS.md, ~/.pi/agent/skills, and
      * ~/.pi/agent/prompts. (When this union was MCP-only, pi-coder was filtered out of
      * the projection scope and its non-MCP surfaces silently never projected.)
      */

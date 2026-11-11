@@ -144,7 +144,7 @@ See [Home backup and restore](backup-restore.md) and [Home and agent storage](st
 ## Two ways to call the same tools
 
 - **As MCP tools.** The plugin adds an MCP server named `aicli-admin` to every supported agent. The agent shows the tools in its own list.
-- **As shell commands.** Every workspace has the variable `$AICLI_ADMIN_COMMAND`. An agent runs `$AICLI_ADMIN_COMMAND overview`, or another command from the tables above. Pi Coder has no MCP support, so it uses the commands. A script of your own can use them too. The command `help` prints every command and its arguments. If the variable is empty, the workspace started before you turned the tools on. The agent can then run `php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php <command>`.
+- **As shell commands.** Every workspace has the variable `$AICLI_ADMIN_COMMAND`. An agent runs `$AICLI_ADMIN_COMMAND overview`, or another command from the tables above. The plugin writes no MCP entry for Pi Coder, so it uses the commands. A script of your own can use them too. The command `help` prints every command and its arguments. If the variable is empty, the workspace started before you turned the tools on. The agent can then run `php /usr/local/emhttp/plugins/unraid-aicliagents/src/scripts/admin-agent.php <command>`.
 
 The commands print JSON. A command that cannot do its job prints a clear message and ends with an error code.
 
@@ -216,7 +216,7 @@ The plugin keeps one list of tools and gives it three ways in: MCP, the shell co
 | What you see | What it means | What to do |
 | :-- | :-- | :-- |
 | An agent says "Plugin management tools are turned off". | The switch is Off. | Turn on **Let agents manage the plugin** and restart the workspace. |
-| An agent has no `aicli_` tools. | The workspace started before you turned the tools on, or the agent has no MCP support. | Restart the workspace. For Pi Coder, use `$AICLI_ADMIN_COMMAND`. |
+| An agent has no `aicli_` tools. | The workspace started before you turned the tools on, or the plugin writes no MCP entry for the agent. | Restart the workspace. For Pi Coder, use `$AICLI_ADMIN_COMMAND`. |
 | `$AICLI_ADMIN_COMMAND` is empty. | The workspace started before the tools existed. | Restart the workspace, or run the script by its full path (see above). |
 | A proposal stays in the tray. | It waits for you. | Read it and press **Approve** or **Reject**. |
 | An approved upgrade shows "waiting". | A session still uses the old agent. | Close that session. The plugin finishes the upgrade at once after that. |

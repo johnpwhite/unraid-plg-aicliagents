@@ -52,7 +52,7 @@ The table shows what each agent can receive. "Yes" means the Config Hub can writ
 
 Notes on the table:
 
-- **Pi Coder has no MCP support.** The author of Pi Coder chose not to add it. The Config Hub does not pretend that it does.
+- **Pi Coder: the Config Hub writes no MCP servers for it.** Pi Coder 0.73.1 has no MCP and version 1.x has. The first version with MCP is not verified. Version 1.x can read MCP servers, but the Config Hub does not write them until it follows the version that you installed. Agents use the Relay and admin commands in the meantime.
 - **NanoCoder** reads only files inside a project folder, not global files. The Config Hub does not write into a project folder.
 - **Grok Build** reads the instruction file of a project, not a global one. It receives skills and commands.
 - **Codex CLI** has no commands in the Config Hub, because Codex uses skills in place of commands.
@@ -376,6 +376,8 @@ The Config Hub keeps its store in the agent home, in a folder that is part of th
 
 <details>
 <summary>Change history</summary>
+
+- **2026-11-11** — Note on Pi Coder corrected: Pi Coder 0.73.1 has no MCP, version 1.x has (the first version with MCP is not verified), and the Config Hub writes no MCP servers for it until it follows the installed version. Spec `docs/specs/PI_CODER_PACKAGE_MOVE.md`, issues #957 and #961.
 
 - **2026-11-01** — New row state **Linked folder, not written**. The Config Hub no longer writes, overwrites or deletes a skill or command through a link. Spec `docs/specs/AGENT_CONFIG_HUB.md`, issue #849.
 - **2026-10-28** — A first OpenCode 2 install selects OpenCode 2 wherever OpenCode is selected, and for Global Instructions. The Config Hub does not write an OpenCode 2 file that is a link out of its own folder. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issues #832 and #833.

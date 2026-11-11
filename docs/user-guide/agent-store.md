@@ -473,6 +473,8 @@ If the problem stays, open the **Debug Console** tab (see [Health, Activity and 
 <details>
 <summary>Change history</summary>
 
+- **2026-11-11** — Pi Coder installs from its maintained package. The old package was frozen at version 0.73.1 and never offered an update. The next upgrade of Pi Coder moves your install over to the new package and removes the old files. The (i) button shows the new package name. A kept older version still starts. Spec `docs/specs/PI_CODER_PACKAGE_MOVE.md`, issue #957.
+
 - **2026-11-07** — The release notes of an update load for agents with a long release list, such as Codex. When they cannot load, the dialog now says so instead of saying that there are none. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issue #926.
 - **2026-10-27** — New agent **OpenCode 2**, the new version of OpenCode. It installs beside OpenCode and keeps its own data. Spec `docs/specs/OPENCODE_V2_AGENT.md`, issue #822.
 - **2026-10-27** — The card header shows the version you run and the new version in full, with the new version as a button that opens the dialog **Update <agent>** (release notes, open workspaces, **Keep a copy**, **Update now**). **Upgrade** shows when you point at the card. **Uninstall** moved to the foot as a link, and the foot says what **Remove old versions** and **Uninstall** free. The card keeps its height during an install. Spec `docs/specs/AGENT_STORE_CARD_HEADER.md`, issues #793 and #795.
