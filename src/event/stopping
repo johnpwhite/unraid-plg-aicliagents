@@ -4,6 +4,8 @@
 #
 # Three scenarios:
 # 1. Storage ON array/pool → full stop (persist + kill all + unmount + emergency flag)
+#    "Storage" is the agent images OR the homes (home_storage_path): a home on a
+#    pool holds that pool even when the agent images are on flash.
 # 2. Storage on Flash, SERVER shutting down → full stop (persist + kill all + unmount)
 # 3. Storage on Flash, ARRAY stopping → selective: kill only sessions whose workspace
 #    paths are on the array/pool. Leave sessions on /root, /boot, /tmp running.
@@ -192,7 +194,22 @@ PERSIST_PATH=$(agent_persist_path 2>/dev/null)
 [ -z "$PERSIST_PATH" ] && PERSIST_PATH="$PLUGIN_BASE"
 STORAGE_CLASS=$(classify "$PERSIST_PATH")
 log "Storage path: $PERSIST_PATH (classified: $STORAGE_CLASS)"
-lifecycle_log "info" "event_stopping" "shutdown_event_received" "{\"storage_class\":\"$STORAGE_CLASS\",\"persist_path\":\"$PERSIST_PATH\"}" 2>/dev/null || true
+# The homes have their own storage path. A home on the array or a pool holds that
+# pool even when the agent images are on flash: the home mount, the cache mounts
+# inside it (on a shared pool mount they show up inside the pool too) and every
+# session, whose HOME is that mount. Scenario 3 below left them all mounted, and
+# emhttpd looped on "umount /mnt/cache: target is busy". The start guards already
+# count the homes (StorageMountService::storageBlockedByArrayStop, the supervisor's
+# _do_start), so the stop counts them too.
+HOME_PERSIST_PATH=$(home_persist_path root 2>/dev/null)
+HOME_STORAGE_CLASS=$(classify "$HOME_PERSIST_PATH")
+[ "$HOME_STORAGE_CLASS" = "$STORAGE_CLASS" ] || log "Home storage path: $HOME_PERSIST_PATH (classified: $HOME_STORAGE_CLASS)"
+lifecycle_log "info" "event_stopping" "shutdown_event_received" "{\"storage_class\":\"$STORAGE_CLASS\",\"persist_path\":\"$PERSIST_PATH\",\"home_storage_class\":\"$HOME_STORAGE_CLASS\"}" 2>/dev/null || true
+
+# storage_needs_array: the agent images or the homes depend on the array or a pool.
+storage_needs_array() {
+    needs_array "$STORAGE_CLASS" || needs_array "$HOME_STORAGE_CLASS"
+}
 
 # (#910: the shutdown check and the .system_shutdown flag moved up, next to the
 # .array_stopping flag, so the flag exists before the first session closes.)
@@ -239,9 +256,10 @@ run_full_stop() {
 # #824: an agent install still writing its layer gets up to a third of the
 # budget (max 30 s) to finish. If it cannot, it is recorded on flash, so the
 # next boot says the upgrade was stopped, and stopped cleanly.
-# Only when the install cannot go on: a server shutdown, or storage on the array.
+# Only when the install cannot go on: a server shutdown, or storage on the array
+# (the agent images or the homes). Those are the cases that run the full stop.
 if declare -f _shutdown_settle_agent_installs >/dev/null 2>&1 \
-    && { [ "$IS_SHUTDOWN" = true ] || needs_array "$STORAGE_CLASS"; }; then
+    && { [ "$IS_SHUTDOWN" = true ] || storage_needs_array; }; then
     _SI_WAIT=$(( SHUTDOWN_BUDGET / 3 ))
     [ "$_SI_WAIT" -gt 30 ] && _SI_WAIT=30
     _shutdown_settle_agent_installs "$_SI_WAIT" "${MOUNT_ROOT}/activity" "${PLUGIN_BASE}/state"
@@ -260,7 +278,7 @@ if declare -f _capture_resume_before_stop >/dev/null 2>&1; then
     : > "${MOUNT_ROOT}/.resume_captured" 2>/dev/null || true
 fi
 
-if needs_array "$STORAGE_CLASS"; then
+if storage_needs_array; then
     # ── Scenario 1: Storage on array/pool — full stop ──
     log "Storage depends on array/pool. Running full stop + persist..."
     nchan_notify
