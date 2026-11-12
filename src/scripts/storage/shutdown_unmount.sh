@@ -16,11 +16,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/resolve_paths.sh" || { echo 'resolve_path
 # Step 8 (which does the same thing) is harmless. Mirrors stop-plugin.sh 8c/8d.
 
 # Free the individual squashfs loop mounts and detach the loop devices backing our
-# .sqsh files. $1 (optional) overrides the mount base — for tests only; production
-# always uses the real path.
+# .sqsh files. $1 is the mount base (${MOUNT_ROOT}/mnt); tests pass their own.
+# event/stopping runs this function in a `bash -c` child. MOUNT_ROOT is a plain
+# (not exported) variable of resolve_paths.sh, so the child had no MOUNT_ROOT and
+# the base became "/mnt": the loop below unmounted every disk, pool and share
+# mounted under /mnt (/mnt/user, /mnt/cache, /mnt/disks, ...), lazily when busy,
+# while Docker and the VMs still ran. The caller passes the base now, and the
+# system /mnt is never a base.
 _reserve_unmount_squashfs_loops() {
-    local base="${1:-${MOUNT_ROOT}/mnt}"
-    if [ -d "$base" ]; then
+    local base="${1:-${MOUNT_ROOT:+${MOUNT_ROOT}/mnt}}"
+    case "$base" in
+        ''|/|/mnt|/mnt/) base="" ;;
+    esac
+    if [ -n "$base" ] && [ -d "$base" ]; then
         local mnt
         for mnt in "$base"/*; do
             mountpoint -q "$mnt" 2>/dev/null || continue

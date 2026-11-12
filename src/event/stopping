@@ -229,7 +229,10 @@ run_full_stop() {
 
     if [ "$reserve" -gt 0 ] && declare -f _reserve_unmount_squashfs_loops >/dev/null 2>&1; then
         # Bounded and idempotent — lazy unmounts + loop detach only.
-        timeout "$reserve" bash -c "$(declare -f _reserve_unmount_squashfs_loops); _reserve_unmount_squashfs_loops" 2>/dev/null || true
+        # The child shell has no MOUNT_ROOT (it is not exported), so the base is
+        # passed as $1. Without it the base was /mnt (see shutdown_unmount.sh).
+        timeout "$reserve" bash -c "$(declare -f _reserve_unmount_squashfs_loops)"'; _reserve_unmount_squashfs_loops "$1"' \
+            _ "${MOUNT_ROOT}/mnt" 2>/dev/null || true
     fi
 }
 
