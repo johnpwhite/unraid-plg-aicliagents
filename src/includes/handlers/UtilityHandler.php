@@ -21,7 +21,10 @@ class UtilityHandler {
             case 'save_vault':       return self::saveVault();
             case 'get_workspaces':   return self::getWorkspaces();
             case 'save_workspaces':  return self::saveWorkspaces();
-            case 'get_env':          return self::getEnv();
+            case 'set_guard_exempt': return self::setGuardExempt();   // the old action, an alias for one release
+            case 'set_workspace_protections': return self::setWorkspaceProtections();
+            case 'get_workspace_protections': return self::getWorkspaceProtections();
+            case 'get_env':         return self::getEnv();
             case 'save_env':         return self::saveEnv();
             case 'filetree':         return null; // Handled via rawFiletree()
             case 'list_dir':         return self::listDir();
@@ -61,7 +64,7 @@ class UtilityHandler {
 
     /** Actions handled by this handler. */
     public static function actions() {
-        return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'get_env', 'save_env',
+        return ['debug', 'save', 'save_vault', 'get_workspaces', 'save_workspaces', 'set_guard_exempt', 'set_workspace_protections', 'get_workspace_protections', 'get_env', 'save_env',
                 'filetree', 'list_dir', 'create_dir', 'picker_create_folder', 'check_path', 'save_file', 'save_file_chunk',
                 'get_upload_limits', 'save_pasted_image', 'perf_log', 'log_client_error', 'get_secrets_dir'];
     }
@@ -172,6 +175,12 @@ class UtilityHandler {
         }
         // NOTEBOOK_HANG_OBSERVABILITY.md R12: the Debug Console switch posts only 1 or 0.
         if (array_key_exists('perf_trace', $_POST)) $_POST['perf_trace'] = ((string)$_POST['perf_trace'] === '1') ? '1' : '0';
+        // SHFS_RECURSIVE_READ_GUARD.md R13: the guard switch posts only 1 or 0.
+        if (array_key_exists('shfs_guard', $_POST)) $_POST['shfs_guard'] = ((string)$_POST['shfs_guard'] === '0') ? '0' : '1';
+        // R18: each protection default posts only 1 or 0 (a missing value keeps the stored one).
+        foreach (\AICliAgents\Services\GuardPolicy::serverKeys() as $guardKey) {
+            if (array_key_exists($guardKey, $_POST)) $_POST[$guardKey] = ((string)$_POST[$guardKey] === '0') ? '0' : '1';
+        }
         // Quiet hours: HH:MM-HH:MM (may wrap midnight) or empty. A bad value keeps the stored one.
         if (array_key_exists('notebook_quiet_hours', $_POST)) {
             $nbQuiet = trim((string)$_POST['notebook_quiet_hours']);
@@ -377,6 +386,91 @@ class UtilityHandler {
             return ['status' => 'ok', 'workspaces' => \AICliAgents\Services\ConfigService::stripServerOwned(aicli_get_workspaces())];
         }
         return ['status' => 'error', 'message' => 'Invalid Workspace data'];
+    }
+
+    /** One stored workspace record by id, or null. @return array<string,mixed>|null */
+    private static function workspaceRecordById(string $id): ?array {
+        foreach ((\AICliAgents\Services\ConfigService::getWorkspaces()['sessions'] ?? []) as $w) {
+            if (is_array($w) && (string)($w['id'] ?? '') === $id) return $w;
+        }
+        return null;
+    }
+
+    /**
+     * SHFS_RECURSIVE_READ_GUARD.md R18 (#972): what the "Protection settings" dialog needs. The overrides of the workspace,
+     * the server default of each protection for this kind of workspace (helper or top-level), and the master switch.
+     * Read only.
+     */
+    private static function getWorkspaceProtections() {
+        $id = trim((string)($_GET['id'] ?? $_POST['id'] ?? ''));
+        if ($id === '' || !preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $id)) {
+            return ['status' => 'error', 'message' => 'Workspace id is required'];
+        }
+        $record = self::workspaceRecordById($id);
+        if ($record === null) return ['status' => 'error', 'message' => 'Workspace not found'];
+        return [
+            'status' => 'ok',
+            'protections' => (object)\AICliAgents\Services\GuardPolicy::overrides($record),
+            'defaults' => \AICliAgents\Services\GuardPolicy::serverDefaults(\AICliAgents\Services\SpawnService::hasParent($record)),
+            'masterOn' => \AICliAgents\Services\GuardPolicy::masterOn(),
+        ];
+    }
+
+    /**
+     * SHFS_RECURSIVE_READ_GUARD.md R18 (#972): a person sets the per-workspace overrides of the guard protections, in the
+     * "Protection settings" dialog of the UI. The post holds `id` and `protections`: a JSON object (or a form array) of
+     * protection name => default, on or off. It is the whole set: a name that is left out goes back to the server default.
+     * This browser action is the only caller of ConfigService::setWorkspaceProtections(): no MCP tool and no admin-agent.php
+     * verb reaches it. The change applies when the workspace starts again. One tray record for each real change.
+     */
+    private static function setWorkspaceProtections() {
+        $id = trim((string)($_POST['id'] ?? ''));
+        if ($id === '' || !preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $id)) {
+            return ['status' => 'error', 'message' => 'Workspace id is required'];
+        }
+        $raw = $_POST['protections'] ?? null;
+        if (is_string($raw)) $raw = json_decode($raw, true);
+        [$new, $err] = \AICliAgents\Services\GuardPolicy::validateOverrides($raw);
+        if ($err !== null) return ['status' => 'error', 'message' => $err];
+        if (self::workspaceRecordById($id) === null) return ['status' => 'error', 'message' => 'Workspace not found'];
+        $before = \AICliAgents\Services\ConfigService::getWorkspaceProtections($id);
+        $changed = [];
+        foreach (\AICliAgents\Services\GuardPolicy::NAMES as $name) {
+            if (($before[$name] ?? 'default') !== ($new[$name] ?? 'default')) $changed[] = $name;
+        }
+        // A record that still holds the old `guardExempt` is written in the new form even when no value changes.
+        $legacy = (self::workspaceRecordById($id)['guardExempt'] ?? null) !== null;
+        if ($changed === [] && !$legacy) {
+            return ['status' => 'ok', 'protections' => (object)$new, 'changed' => []];
+        }
+        if (!\AICliAgents\Services\ConfigService::setWorkspaceProtections($id, $new)) {
+            return ['status' => 'error', 'message' => 'Could not save the protection settings for this workspace. Retry in a moment.'];
+        }
+        foreach ($changed as $name) {
+            \AICliAgents\Services\GuardEventService::recordProtectionChange($id, $name, $before[$name] ?? 'default', $new[$name] ?? 'default');
+        }
+        return ['status' => 'ok', 'protections' => (object)$new, 'changed' => $changed];
+    }
+
+    /**
+     * The old single exemption, kept for one release as an alias of setWorkspaceProtections(): `exempt=1` sets the shell
+     * guard and the agent tool guard to off, `exempt=0` sets both back to the server default.
+     */
+    private static function setGuardExempt() {
+        $id = trim((string)($_POST['id'] ?? ''));
+        if ($id === '' || !preg_match('/^[A-Za-z0-9_.-]{1,128}$/D', $id)) {
+            return ['status' => 'error', 'message' => 'Workspace id is required'];
+        }
+        $on = ((string)($_POST['exempt'] ?? '0')) === '1';
+        $over = \AICliAgents\Services\ConfigService::getWorkspaceProtections($id);
+        if ($on) { $over['shell'] = 'off'; $over['hooks'] = 'off'; } else { unset($over['shell'], $over['hooks']); }
+        $_POST['protections'] = $over;
+        $r = self::setWorkspaceProtections();
+        if (($r['status'] ?? '') === 'ok') {
+            $r['guardExempt'] = $on;
+            $r['changed'] = !empty($r['changed']);
+        }
+        return $r;
     }
 
     private static function getEnv() {

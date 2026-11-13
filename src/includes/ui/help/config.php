@@ -155,6 +155,32 @@ HTML,
     'admin-tools' => <<<'HTML'
 <p>Gives agents tools to read the plugin's state and make routine changes. Reads change nothing. Changes appear in the Activity tray. Delete, upgrade, back up, restore and merge only propose, and wait for your approval. Off by default.</p>
 HTML,
+    'shfs-guard' => <<<'HTML'
+<p>Refuses a command that reads a whole folder tree over the share filesystem (/mnt/user), a network mount or a folder above them. A command like that can freeze the whole server. The agent gets the reason and the pool path to use instead. On by default.</p>
+<p>This is the master switch. Off turns every protection below off, for every workspace. On lets each protection below follow its own setting. Each refusal shows in the Activity tray.</p>
+<p>Each protection below is a server default. A workspace can set its own value in its menu, under "Protection settings". A change applies when the workspace starts again.</p>
+HTML,
+    'guard-shell' => <<<'HTML'
+<p>On: the shell of a workspace refuses commands such as find, grep -r and du over the share filesystem or a network mount. The agent gets the reason and the pool path to use. Off: the shell runs those commands. On by default.</p>
+HTML,
+    'guard-hooks' => <<<'HTML'
+<p>On: the agent's own tools (Claude Code, OpenCode and OpenCode 2) refuse the same recursive reads before they run. Off: those tools run them. On by default.</p>
+HTML,
+    'guard-view-helpers' => <<<'HTML'
+<p>On: a helper workspace sees an empty /mnt/user and no network mounts. Only its own folder and the paths its task names are there. Off: a helper sees the whole disk like its parent. On by default.</p>
+HTML,
+    'guard-view-parents' => <<<'HTML'
+<p>The same hidden view for a workspace that you started yourself. Off by default, because these workspaces often need the whole disk. Turn it on to lock one down.</p>
+HTML,
+    'guard-view-ssh' => <<<'HTML'
+<p>On: the hidden view has no ssh keys, so the agent cannot ssh to this server or to another host. Off: the keys stay visible. This applies only to a workspace with the hidden view. On by default.</p>
+HTML,
+    'guard-view-docker' => <<<'HTML'
+<p>On: the docker command in the hidden view refuses a mount of a share, / or /mnt. Off: docker mounts anything. This applies only to a workspace with the hidden view. On by default.</p>
+HTML,
+    'guard-view-caps' => <<<'HTML'
+<p>On: the hidden view drops the admin powers that could undo it, and blocks new privileges. Off: the powers stay. This applies only to a workspace with the hidden view. On by default.</p>
+HTML,
     'spawn-enabled' => <<<'HTML'
 <p>Lets an agent start a sub-agent workspace with one tool call. The sub-agent gets its own folder, task and agent. Each start shows in the Activity tray and names the agent that asked. Off by default. An agent can still start a workspace that already exists when this is off.</p>
 HTML,

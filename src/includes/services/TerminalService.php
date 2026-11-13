@@ -857,6 +857,9 @@ class TerminalService {
                 return ['ok' => false, 'reason' => 'run_user_not_ready'];
             }
         }
+        // Set for every start, so the later `if ($runUserView)` blocks never read an undefined variable (PHPStan loses
+        // track of it across this long function after the #972 guard blocks). It is read only when $runUserView is true.
+        $runUserStatus = ['ready' => false, 'fault' => '', 'uid' => 0, 'gid' => 0];
         if ($runUserView) {
             $runUserStatus = RunUserService::status();
             if (empty($runUserStatus['ready'])) {
@@ -1074,6 +1077,14 @@ class TerminalService {
             // instead of the literal AGENT_BASE path.
             'NODE_PATH'         => AgentRegistry::agentPath($agentId) . "/node_modules"
         ];
+        // SHFS_RECURSIVE_READ_GUARD.md R13 (#972): a workspace that a person exempted gets no shell wrappers and no hook
+        // (aicli-shell.sh does not export AICLI_GUARD for it). One line only; the AICLI_ prefix is reserved, so no env tier can set it.
+        // R18 (#972): what is on for this workspace is decided here, once, from the master switch, the server defaults and the
+        // workspace's own overrides (GuardPolicy). aicli-shell.sh builds the shell wrappers only for AICLI_GUARD_SHELL=1 and
+        // exports AICLI_GUARD_HOOKS=1 for the agent hooks. The AICLI_ prefix is reserved: no env tier can set these.
+        $guardOn = GuardPolicy::effectiveProtections((array)$workspaceRecord);
+        $env['AICLI_GUARD_SHELL'] = $guardOn['shell'] ? '1' : '0';
+        $env['AICLI_GUARD_HOOKS'] = $guardOn['hooks'] ? '1' : '0';
 
         // Merge the full 5-tier effective env from EnvService — single source
         // of truth shared with aicli-shell.sh (which also re-reads it per loop
@@ -1156,6 +1167,16 @@ class TerminalService {
                 return ['ok' => false, 'reason' => 'run_user_home_prepare_failed'];
             }
         }
+        // #972 layer 1 (docs/specs/SHFS_RECURSIVE_READ_GUARD.md): a workspace whose effective `view`
+        // protection is on (R18: a helper by default, a top-level workspace when a person turns it on) starts its tmux server in
+        // the hidden view (guarded roots covered, only the named paths bound back). Restricted runs keep their own view. The plan is made here, and the command below is wrapped with the mount script (fail closed).
+        $shfsPlan = null;
+        if (!$runUserView && $origin !== self::ORIGIN_BRIDGE_WARM && !empty($path) && $guardOn['view']) {
+            $shfsPlan = ShfsView::planForRecord((array)$workspaceRecord, (string)$path);
+            $env['AICLI_GUARD_VIEW'] = '1';
+            $env['AICLI_GUARD_VIEW_DOCKER'] = $guardOn['viewDocker'] ? '1' : '0';
+            $env['AICLI_GUARD_VIEW_ROOTS'] = implode(':', $shfsPlan['covers']);
+        }
         $envStrParts = [];
         foreach ($env as $k => $v) {
             $envStrParts[] = "$k=" . escapeshellarg($v);
@@ -1201,6 +1222,15 @@ class TerminalService {
             self::recordStartFailure($actId, $agentName, 'The private read-only disk view could not be prepared for this run.', self::START_RECOVERY, $startMeta);
             return ['ok' => false, 'reason' => 'run_user_view_invalid'];
         }
+        if ($shfsPlan !== null && $ensureCmd !== '') {
+            [$wrapped, $viewWhy] = ShfsView::wrapCommand($activeSrc, (string)$id, $ensureCmd, $shfsPlan, ShfsView::sshHideFolders($username), ['ssh' => $guardOn['viewSsh'], 'caps' => $guardOn['viewCaps']]);
+            if ($wrapped === '') {
+                LogService::log("Start of $id refused: the hidden share view could not be prepared ($viewWhy).", LogService::LOG_ERROR, 'TerminalService');
+                self::recordStartFailure($actId, $agentName, 'The private disk view of this helper workspace could not be prepared (' . $viewWhy . '), so it was not started.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'shfs_view_failed', 'viewReason' => $viewWhy];
+            }
+            $ensureCmd = $wrapped;
+        }
         $ensureLog = SecretPaths::stateRoot() . "/ensure-$id.log";
         ActivityService::update($actId, ['step' => $startStep('Launching agent'), 'progress' => 60]);
         $ensureRc = 0;
@@ -1228,6 +1258,11 @@ class TerminalService {
         } elseif ($ensureRc !== 0) {
             $tail = file_exists($ensureLog) ? trim((string)shell_exec("tail -n 5 " . escapeshellarg($ensureLog))) : '';
             LogService::log("ensure-session returned rc=$ensureRc for $id. Start aborted before ttyd. tail: $tail", LogService::LOG_ERROR, "TerminalService");
+            if ($shfsPlan !== null && preg_match('/\[aicli-guard-view\] failed: ([^\r\n]{1,200})/', $tail, $vm) === 1) {
+                // #972: the hidden view could not be built, so no agent runs outside it.
+                self::recordStartFailure($actId, $agentName, 'The private disk view of this helper workspace could not be built (' . $vm[1] . '), so it was not started.', self::START_RECOVERY, $startMeta);
+                return ['ok' => false, 'reason' => 'shfs_view_failed', 'viewReason' => trim($vm[1])];
+            }
             if ($runUserView) {
                 // R17: when the private disk view cannot be made, no agent starts (nothing runs outside the view).
                 self::recordStartFailure($actId, $agentName, 'The private read-only disk view could not be prepared for this run. Check the Debug Console.', self::START_RECOVERY, $startMeta);
@@ -1353,7 +1388,7 @@ class TerminalService {
             self::recordStartFailure($actId, $agentName, self::startFailureSentence('terminal_no_launch', $agentName), self::START_RECOVERY, $startMeta);
             return ['ok' => false, 'reason' => 'terminal_no_launch'];
         }
-        return ['ok' => true, 'reason' => 'started'];
+        return $shfsPlan !== null ? ['ok' => true, 'reason' => 'started', 'viewStatus' => 'built'] : ['ok' => true, 'reason' => 'started'];
     }
 
     /**

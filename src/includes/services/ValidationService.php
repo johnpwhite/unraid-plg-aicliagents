@@ -35,6 +35,7 @@ class ValidationService {
      * browser history. The browser helper aicliAjax() (CommonLogging.php) keeps the same list.
      */
     public const POST_ONLY_ACTIONS = [
+        'set_workspace_protections', 'set_guard_exempt', // #972 R18: only a person loosens a protection, by POST
         'persist_agent', 'persist_home', 'consolidate_storage', 'convert_storage', 'remove_old_versions',
         'clear_home_caches', 'convert_agents', 'graduate_storage', 'repair_agent_storage', 'repair_home_storage',
         'delete_home_storage', 'wipe_storage', 'nuclear_rebuild_storage', 'purge_artifacts', 'backup_home',

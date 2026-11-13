@@ -170,7 +170,7 @@
  *                                running workspace.
  *   spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>] [--sparse=<dir,dir>])
  *         [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended]
- *         [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...]
+ *         [--no-auto-close] [--max-minutes=<1-1440>] [--host-paths=<path>[:ro|:rw],...] [--file=<task file>] [task words...]
  *                                CHANGES state (AGENT_SPAWN_WORKSPACE.md). Starts a
  *                                sub-agent workspace in ONE call: it makes the workspace,
  *                                builds the launch flags from --model, --effort and
@@ -460,7 +460,7 @@ const ADMIN_AGENT_USAGE = [
     'schedule-continue' => 'schedule-continue <workspaceId> <at-epoch> [none|daily|weekly] [reason] [message] -- CHANGES state; ADD a Continue at a wall-clock time (e.g. when the quota resets); prints its entryId',
     'list-scheduled-continues' => 'list-scheduled-continues [workspaceId] -- the scheduled Continues of one workspace, or of all',
     'clear-scheduled-continue' => 'clear-scheduled-continue <workspaceId> [entryId] -- CHANGES state; remove one scheduled Continue, or all of the workspace when no entryId is given',
-    'spawn' => 'spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>] [--sparse=<dir,dir>]) [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended] [--no-auto-close] [--max-minutes=<1-1440>] [--file=<task file>] [task words...] -- CHANGES state; starts a sub-agent workspace; the task is --file, the words, or stdin',
+    'spawn' => 'spawn --agent=<id> (--path=<folder> | --repo=<repo> --branch=<name> [--base=<ref>] [--sparse=<dir,dir>]) [--name=<text>] [--model=<m>] [--effort=<e>] [--title=<text>] [--unattended] [--no-auto-close] [--max-minutes=<1-1440>] [--host-paths=<path>[:ro|:rw],...] [--file=<task file>] [task words...] -- CHANGES state; starts a sub-agent workspace; the task is --file, the words, or stdin',
     'start-workspace' => 'start-workspace <id> -- CHANGES state; starts a closed workspace that you created (or any, for a person)',
     'stop-workspace' => 'stop-workspace <id> -- CHANGES state; closes a workspace that you created; a sub-agent with autoClose also leaves the list and its merged, clean worktree is removed',
     'finish-task' => 'finish-task <done|failed|blocked> <summary...> -- CHANGES state; a sub-agent workspace reports that its task is over; the parent gets a Relay message',
@@ -924,7 +924,7 @@ try {
         case 'spawn':
             // AGENT_SPAWN_WORKSPACE.md. The task is --file=<path>, or the words after the flags, or stdin.
             [$spf, $spw] = adminAgentSplitFlags(array_slice($argv, 2),
-                ['agent', 'name', 'path', 'repo', 'branch', 'base', 'sparse', 'model', 'effort', 'title', 'file', 'unattended', 'no-auto-close', 'max-minutes']);
+                ['agent', 'name', 'path', 'repo', 'branch', 'base', 'sparse', 'model', 'effort', 'title', 'file', 'unattended', 'no-auto-close', 'max-minutes', 'host-paths']);
             // #896: --file, then the words, then stdin. Read stdin only with no words: an open pipe must not replace or block them.
             $spTask = ($spw !== [] && empty($spf['file'])) ? implode(' ', $spw) : adminAgentReadBody($spf['file'] ?? null);
             $spArgs = ['agentId' => (string)($spf['agent'] ?? ''), 'task' => (string)($spTask ?? '')];
@@ -937,6 +937,17 @@ try {
                 if (isset($spf['sparse']) && is_string($spf['sparse']) && $spf['sparse'] !== '') $spArgs['worktree']['sparse'] = array_values(array_filter(array_map('trim', explode(',', $spf['sparse'])), static fn($p) => $p !== ''));
             }
             if (isset($spf['max-minutes']) && is_string($spf['max-minutes']) && $spf['max-minutes'] !== '') $spArgs['maxMinutes'] = $spf['max-minutes'];
+            // #972: --host-paths=<path>[:ro|:rw],<path>... (a path with a comma or a colon needs the MCP tool).
+            if (isset($spf['host-paths']) && is_string($spf['host-paths']) && $spf['host-paths'] !== '') {
+                $spArgs['hostPaths'] = [];
+                foreach (explode(',', $spf['host-paths']) as $hp) {
+                    $hp = trim($hp);
+                    if ($hp === '') continue;
+                    $hpMode = 'ro';
+                    if (preg_match('/^(.*):(ro|rw)$/D', $hp, $hpm) === 1) { $hp = $hpm[1]; $hpMode = $hpm[2]; }
+                    $spArgs['hostPaths'][] = ['path' => $hp, 'mode' => $hpMode];
+                }
+            }
             if (!empty($spf['unattended'])) $spArgs['unattended'] = true;
             if (!empty($spf['no-auto-close'])) $spArgs['autoClose'] = false;
             $result = AdminMcpTools::call('aicli_spawn_workspace', $spArgs);

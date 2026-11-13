@@ -1993,6 +1993,7 @@ class AgentRelayService {
                 && self::closedContactHidden($id, $activity[$id] ?? null, RelayPeerService::isPeerContactId($id) ? RelayPeerService::contactSyncState($id) : null, $readable, ProcessManager::isRunning($id))) continue;
             $row=['session_id'=>$id,'name'=>$name,'agent_id'=>$labels[$id]['agent_id'] ?? '','online'=>isset($remoteOnline[$id]) ? $remoteOnline[$id] : ProcessManager::isRunning($id)];
             if (RelayPeerService::isPeerContactId($id)) $row=RelayPeerService::decorateHistoryContact($row);
+            if (isset($historyOnly[$id]) && self::localRecipientGone($id)) $row['state']='gone'; // #973: a send to it is refused
             $restart=self::conversationRestart($id); if ($restart!==null) $row['fresh_context_since']=(string)$restart['restarted_at']; // DRAWER_RESTART_AS_NEW.md
             $out[]=$row;
         }
@@ -2218,12 +2219,7 @@ class AgentRelayService {
     public static function directMessage(string $sender, string $recipient, string $summary, string $threadId = ''): array {
         $sender=self::cleanId($sender); $recipient=self::cleanId($recipient); $summary=trim($summary);
         if (empty(self::settings()['direct_messages_enabled'])) return ['status'=>'error','message'=>'Private Relay messages are disabled by the administrator.'];
-        // Distinct messages per failure mode. A single conflated string
-        // ("Choose another saved workspace and a 1–2048 byte message") made an
-        // ARGUMENT error read as a WORKSPACE-VALIDITY error: an agent that invoked
-        // the CLI with flags (`direct --to=X --message=Y`) instead of positionals
-        // got empty recipient/summary and the "choose another workspace" wording,
-        // and wrongly concluded same-workspace peers were forbidden (#145 report).
+        // One message per failure mode: an argument error must not read as a workspace error (#145).
         if ($sender==='') return ['status'=>'error','message'=>'Could not determine the sending workspace session.'];
         if ($recipient==='') return ['status'=>'error','message'=>'No recipient given. Usage: direct <recipient_session_id> <message> — or, to stay in an existing thread, reply <thread_id> <message> <recipient_session_id> (the recipient is the LAST argument). Both take positional arguments, not --flags. Run "contacts" to list valid recipient session ids.'];
         if ($sender===$recipient) return ['status'=>'error','message'=>'Cannot send a private message to your own workspace session.'];
@@ -2238,9 +2234,53 @@ class AgentRelayService {
         // RELAY_LINKED_BOXES.md §4: a `peer_…__…` recipient is a workspace on a
         // linked box. Keep the sender's copy here and queue it for that box.
         if (RelayPeerService::isPeerContactId($recipient)) return RelayPeerService::sendDirect($message);
+        // #973: an id that is no workspace here (closed or moved) is refused; nothing is stored.
+        if (self::localRecipientGone($recipient)) return self::goneEnvelope($sender,$recipient);
         $envelope=self::storeAndDeliverDirect($message);
         $note=self::freshContextNote($sender,$recipient); if ($note!==null) $envelope['recipient_context']=$note; // DRAWER_RESTART_AS_NEW.md
         return $envelope;
+    }
+
+    /**
+     * #973: true when a LOCAL recipient id is not a workspace of this server: not saved, not a retained
+     * (managed) workspace, not a configured remote client, not a subscriber or topic actor, and not running.
+     * A linked-box id is never gone here: its own box decides.
+     */
+    public static function localRecipientGone(string $recipient): bool {
+        $recipient=self::cleanId($recipient); if ($recipient==='') return false;
+        if (RelayPeerService::isPeerContactId($recipient)) return false;
+        foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) { if (self::cleanId((string)($w['id'] ?? ''))===$recipient) return false; }
+        foreach (array_keys(ConfigService::getManagedWorkspaces()) as $mid) { if (self::cleanId((string)$mid)===$recipient) return false; }
+        foreach (self::httpClients() as $rc) { if (self::cleanId((string)$rc['id'])===$recipient) return false; }
+        if (is_file(self::path("subscriptions/$recipient.json"))) return false;
+        foreach ((self::actors()['actors'] ?? []) as $actor) { $oid=is_array($actor)?(string)($actor['session_id'] ?? ''):(string)$actor; if (self::cleanId($oid)===$recipient) return false; }
+        return !ProcessManager::isRunning($recipient);
+    }
+
+    /** #973: the reply for a gone recipient, with the current address when exactly one contact has the same name. */
+    private static function goneEnvelope(string $sender, string $recipient): array {
+        $name=self::dmPeerName($recipient);
+        $env=['status'=>'recipient_gone','delivered'=>false,'recipient_online'=>false];
+        $msg='That workspace no longer exists on this server (it was closed or moved). The message was not sent.';
+        if ($name!=='') {
+            $plain=fn(string $n): string => trim(explode(' @ ',$n)[0]);
+            $match=[];
+            foreach (self::agentContacts($sender,false) as $c) {
+                if ($c['session_id']===$recipient || $c['session_id']===$sender || ($c['state'] ?? '')==='gone') continue;
+                if (strcasecmp($plain((string)($c['name'] ?? '')),$plain($name))===0) $match[]=$c;
+            }
+            if (count($match)===1) {
+                $c=$match[0]; $box=(string)($c['box'] ?? 'this server');
+                $env['suggested_recipient']=$c['session_id'];
+                $msg.=' A workspace named '.$plain($name).' now runs at '.$c['session_id'].' ('.$box.'). Send it there.';
+            } else {
+                $msg.=' No current workspace is named '.$plain($name).'. Run "contacts" to find the right id.';
+            }
+        } else {
+            $msg.=' Run "contacts" to find the right id.';
+        }
+        $env['message']=$msg;
+        return $env;
     }
 
     /**

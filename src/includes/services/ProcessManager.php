@@ -312,6 +312,10 @@ class ProcessManager {
         'terminfo/tmux.terminfo',
         'scripts/user/apply-tmux-json.php',
         'includes/services/TmuxService.php',
+        // #972: named by _aicli_guard_setup, which is defined above the new-session block (the test reads text).
+        'scripts/guard/aicli-guard-shim',
+        'scripts/guard/aicli-guard-render.sh',
+        'scripts/guard/aicli-guard-docker',
     ];
 
     /** Forgejo #364: for these attach files only the named `const` declarations are digested. */

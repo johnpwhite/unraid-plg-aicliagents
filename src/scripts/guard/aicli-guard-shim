@@ -1,0 +1,336 @@
+#!/bin/bash
+# aicli-guard-shim: layer 2 of the share-filesystem guard (docs/specs/SHFS_RECURSIVE_READ_GUARD.md, #972).
+#
+# One script, many names: aicli-shell.sh makes a link for each guarded command (find, grep, rg, du, ...) in a folder that
+# is first on the workspace PATH. The script switches on the name it was called by. It refuses a recursive read over the
+# Unraid share filesystem or a network mount (exit 126, a plain reason on stderr), and it runs the real program at once
+# in every other case.
+#
+# Pure bash. It makes NO file system call on a guarded path to decide (no stat, no realpath). The one exception is a
+# link argument outside the guarded roots: one `readlink -f` to see where it points (R15).
+#
+# Environment:
+#   AICLI_GUARD=1                 the guard is on (aicli-shell.sh sets it). Anything else: run the real program at once.
+#   AICLI_GUARD_FILE              the context file written by aicli-guard-render.sh.
+#   AICLI_GUARD_REAL_<NAME>       the real program (NAME upper case, - becomes _). Unset: search PATH without this folder.
+#   AICLI_GUARD_TEST=1 + AICLI_GUARD_CWD=<path>   unit tests only: use this string as the current folder.
+# This is a seat belt, not a lock (spec section "What each layer can and cannot stop").
+
+set -f                                  # no glob expansion of the unquoted splits below
+shopt -u patsub_replacement 2>/dev/null # bash 5.2: "&" in a replacement text must stay a plain "&"
+
+_name="${0##*/}"
+_gdir="${0%/*}"
+[ "$_gdir" = "$0" ] && _gdir=""
+
+_up="${_name^^}"; _up="${_up//-/_}"
+_rv="AICLI_GUARD_REAL_$_up"
+_real="${!_rv:-}"
+# A real-program value that points into this folder would call the wrapper again. Ignore it.
+if [ -n "$_real" ] && [ -n "$_gdir" ] && [[ "$_real" == "$_gdir"/* ]]; then _real=""; fi
+
+_find_real() {
+    # The first executable $_name on PATH that is not in this folder and is not this script.
+    local d c IFS=:
+    for d in $PATH; do
+        [ -n "$d" ] || continue
+        [ -n "$_gdir" ] && [ "$d" = "$_gdir" ] && continue
+        c="$d/$_name"
+        if [ -x "$c" ] && [ ! -d "$c" ] && [ ! "$c" -ef "$0" ]; then _real="$c"; return 0; fi
+    done
+    return 1
+}
+
+_run_real() {
+    [ -n "$_real" ] || _find_real || { printf '%s: command not found\n' "$_name" >&2; exit 127; }
+    exec "$_real" "$@"
+}
+
+if [ "$_name" = "aicli-guard-shim" ]; then
+    printf 'aicli-guard-shim: call it through a link named after a command (find, grep, ...).\n' >&2
+    exit 2
+fi
+
+# Off, or no readable context: run the real program. A broken guard never blocks a command.
+[ "${AICLI_GUARD:-}" = "1" ] || _run_real "$@"
+[ -r "${AICLI_GUARD_FILE:-}" ] || _run_real "$@"
+# shellcheck disable=SC1090
+. "$AICLI_GUARD_FILE" 2>/dev/null || _run_real "$@"
+[ "${#AICLI_GUARD_ROOTS[@]}" -gt 0 ] || _run_real "$@"
+
+_cwd="$PWD"
+if [ "${AICLI_GUARD_TEST:-}" = "1" ] && [ -n "${AICLI_GUARD_CWD:-}" ]; then _cwd="$AICLI_GUARD_CWD"; fi
+
+# ---- string helpers (no file system call) ---------------------------------------------------------------------
+
+# _g_norm <path>: REPLY = absolute path with . .. and // resolved, by string rules. A relative path joins to the current folder.
+_g_norm() {
+    local p="$1" part
+    local -a out=()
+    [[ "$p" == /* ]] || p="$_cwd/$p"
+    local IFS=/
+    for part in $p; do
+        case "$part" in
+            ''|.) ;;
+            ..) [ "${#out[@]}" -gt 0 ] && unset 'out[-1]' ;;
+            *) out+=("$part") ;;
+        esac
+    done
+    REPLY="/${out[*]}"
+}
+
+# _g_classify <normalised path>: return 0 when the path is guarded (equal to or under a guarded root, and not under a
+# mount of a safe type inside it). Sets GKIND (pool|array|network), GROOT, GPOOL.
+_g_classify() {
+    local p="$1" i r best="" bi=-1 m rest share sub
+    for i in "${!AICLI_GUARD_ROOTS[@]}"; do
+        r="${AICLI_GUARD_ROOTS[$i]}"
+        if [[ "$p" == "$r" || "$p" == "$r"/* ]] && [ "${#r}" -gt "${#best}" ]; then best="$r"; bi=$i; fi
+    done
+    [ "$bi" -ge 0 ] || return 1
+    for m in "${AICLI_GUARD_ALLOW[@]}"; do
+        if [ "${#m}" -gt "${#best}" ] && [[ "$p" == "$m" || "$p" == "$m"/* ]]; then return 1; fi
+    done
+    GROOT="$best"; GPOOL=""
+    if [ "${AICLI_GUARD_CLASSES[$bi]}" = "net" ]; then GKIND=network; return 0; fi
+    rest="${p#"$best"}"; rest="${rest#/}"
+    share="${rest%%/*}"
+    sub="${rest#"$share"}"
+    GKIND=array
+    if [ -n "$share" ] && [ -n "${AICLI_GUARD_POOLS[$share]:-}" ]; then
+        GKIND=pool; GPOOL="${AICLI_GUARD_POOLS[$share]}$sub"
+    fi
+    return 0
+}
+
+_g_is_ancestor() {
+    local a
+    for a in "${AICLI_GUARD_ANCESTORS[@]}"; do [ "$1" = "$a" ] && return 0; done
+    return 1
+}
+
+# _g_start <path>: return 0 when a recursive walk that starts at <path> must be refused. Reads _ONEFS.
+_g_start() {
+    local p t
+    _g_norm "$1"; p="$REPLY"
+    _g_classify "$p" && return 0
+    if [ "$_ONEFS" -ne 1 ] && _g_is_ancestor "$p"; then GKIND=ancestor; GROOT=""; GPOOL=""; GPATH="$p"; return 0; fi
+    # One level of link: a link outside the guarded roots that points into them (R15).
+    if [ -L "$p" ]; then
+        t="$(readlink -f -- "$p" 2>/dev/null)"
+        if [ -n "$t" ] && [ "$t" != "$p" ]; then
+            _g_classify "$t" && return 0
+            if [ "$_ONEFS" -ne 1 ] && _g_is_ancestor "$t"; then GKIND=ancestor; GROOT=""; GPOOL=""; GPATH="$t"; return 0; fi
+        fi
+    fi
+    return 1
+}
+
+_g_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# ---- argument scanning -----------------------------------------------------------------------------------------
+# _scan <short letters that take an argument> <long options that take a separate argument, space delimited> args...
+# Sets _POS (positionals), _SHORTS (every short letter seen, not the letters inside an option argument),
+# _LONGS (" --a --b "), _VAL (option -> its argument).
+declare -A _VAL=()
+_scan() {
+    local sa="$1" la="$2"; shift 2
+    local -a args=("$@")
+    local n=${#args[@]} i a j c rest dd=0 name
+    _POS=(); _SHORTS=""; _LONGS=" "; _VAL=()
+    for ((i = 0; i < n; i++)); do
+        a="${args[$i]}"
+        if [ "$dd" -eq 1 ]; then _POS+=("$a"); continue; fi
+        case "$a" in
+            --) dd=1 ;;
+            --*=*) name="${a%%=*}"; _LONGS+="$name "; _VAL["$name"]="${a#*=}" ;;
+            --*)
+                _LONGS+="$a "
+                if [[ "$la" == *" $a "* ]]; then _VAL["$a"]="${args[$((i + 1))]:-}"; i=$((i + 1)); fi ;;
+            -?*)
+                for ((j = 1; j < ${#a}; j++)); do
+                    c="${a:j:1}"
+                    _SHORTS+="$c"
+                    if [[ "$sa" == *"$c"* ]]; then
+                        rest="${a:j+1}"
+                        if [ -n "$rest" ]; then _VAL["-$c"]="$rest"; else _VAL["-$c"]="${args[$((i + 1))]:-}"; i=$((i + 1)); fi
+                        break
+                    fi
+                done ;;
+            *) _POS+=("$a") ;;
+        esac
+    done
+}
+
+# Every parser sets _REC (1 = the command walks the tree), _ONEFS (1 = it stays on one file system), _P (start paths;
+# empty = the current folder). _PATTERN_FIRST strips the first positional (the pattern) from the paths.
+_p_find() {
+    local -a a=("$@")
+    local n=${#a[@]} i=0 x depth=-1
+    _REC=1; _ONEFS=0; _P=()
+    while [ "$i" -lt "$n" ]; do
+        case "${a[$i]}" in
+            -H|-L|-P|-O*) i=$((i + 1)) ;;
+            -D) i=$((i + 2)) ;;
+            *) break ;;
+        esac
+    done
+    while [ "$i" -lt "$n" ]; do
+        case "${a[$i]}" in -*|'('|'!'|',') break ;; esac
+        _P+=("${a[$i]}"); i=$((i + 1))
+    done
+    for ((x = i; x < n; x++)); do
+        case "${a[$x]}" in
+            -maxdepth) depth="${a[$((x + 1))]:-}"; _g_num "$depth" || depth=-1 ;;
+            -xdev|-mount) _ONEFS=1 ;;
+        esac
+    done
+    if [ "$depth" -ge 0 ] && [ "$depth" -le "$AICLI_GUARD_MAXDEPTH" ]; then _REC=0; fi
+}
+
+_p_grep() {
+    local -a a=("$@")
+    _scan "efmABCdD" " --regexp --file --include --exclude --exclude-from --exclude-dir --max-count --context --after-context --before-context --label --binary-files --devices --directories " "$@"
+    _REC=0; _ONEFS=0; _P=()
+    [[ "$_SHORTS" == *[rR]* ]] && _REC=1
+    [[ "$_LONGS" == *" --recursive "* || "$_LONGS" == *" --dereference-recursive "* ]] && _REC=1
+    [ "${_VAL[-d]:-}" = "recurse" ] && _REC=1
+    [ "${_VAL[--directories]:-}" = "recurse" ] && _REC=1
+    _P=("${_POS[@]}")
+    if [[ "$_SHORTS" != *[ef]* && "$_LONGS" != *" --regexp "* && "$_LONGS" != *" --file "* ]]; then _P=("${_P[@]:1}"); fi
+}
+
+_p_rg() {
+    _scan "efgtTABCmjMErd" " --regexp --file --glob --iglob --type --type-not --type-add --type-clear --max-depth --maxdepth --max-count --context --after-context --before-context --max-filesize --threads --replace --sort --sortr --encoding --colors --pre --pre-glob --ignore-file --path-separator --max-columns --field-match-separator --context-separator --dfa-size-limit --regex-size-limit --engine --hostname-bin --hyperlink-format " "$@"
+    _REC=1; _ONEFS=0; _P=("${_POS[@]}")
+    [[ "$_LONGS" == *" --one-file-system "* ]] && _ONEFS=1
+    if [[ "$_SHORTS" != *[ef]* && "$_LONGS" != *" --regexp "* && "$_LONGS" != *" --file "* && "$_LONGS" != *" --files "* ]]; then _P=("${_P[@]:1}"); fi
+}
+
+_p_ag() {
+    _scan "ABCGgmpWD" " --after --before --context --file-search-regex --ignore --depth --max-count --path-to-ignore --pager --workers --width " "$@"
+    _REC=1; _ONEFS=0; _P=("${_POS[@]}")
+    if [[ "$_SHORTS" != *g* ]]; then _P=("${_P[@]:1}"); fi
+}
+
+_p_ack() {
+    _scan "ABCmg" " --ignore-dir --noignore-dir --ignore-file --type --output --pager --context --after-context --before-context --max-count --color-match --color-filename --color-lineno --sort-files " "$@"
+    _REC=1; _ONEFS=0; _P=("${_POS[@]}")
+    if [[ "$_SHORTS" != *[fg]* ]]; then _P=("${_P[@]:1}"); fi
+}
+
+_p_fd() {
+    # Drop the command of -x / -X / --exec / --exec-batch (it runs to ; or +), so it is not read as a path.
+    local -a f=() a=("$@")
+    local i n=${#a[@]} skip=0 c
+    for ((i = 0; i < n; i++)); do
+        c="${a[$i]}"
+        if [ "$skip" -eq 1 ]; then { [ "$c" = ";" ] || [ "$c" = "+" ]; } && skip=0; continue; fi
+        case "$c" in -x|-X|--exec|--exec-batch) skip=1; continue ;; esac
+        f+=("$c")
+    done
+    _scan "dtEeSojc" " --max-depth --min-depth --exact-depth --type --extension --exclude --size --changed-within --changed-before --changed-after --newer --older --owner --threads --color --ignore-file --base-directory --path-separator --format --max-results --batch-size --search-path --and --hyperlink " "${f[@]}"
+    _REC=1; _ONEFS=0; _P=("${_POS[@]:1}")
+    [[ "$_LONGS" == *" --one-file-system "* || "$_LONGS" == *" --mount "* || "$_LONGS" == *" --xdev "* ]] && _ONEFS=1
+    [ -n "${_VAL[--search-path]:-}" ] && _P+=("${_VAL[--search-path]}")
+    [ -n "${_VAL[--base-directory]:-}" ] && _P+=("${_VAL[--base-directory]}")
+    local d="${_VAL[-d]:-${_VAL[--max-depth]:-${_VAL[--exact-depth]:-}}}"
+    if _g_num "$d" && [ "$d" -le "$AICLI_GUARD_MAXDEPTH" ]; then _REC=0; fi
+}
+
+_p_du() {
+    _scan "BdtX" " --block-size --max-depth --threshold --exclude --exclude-from --files0-from --time-style " "$@"
+    _REC=1; _ONEFS=0; _P=("${_POS[@]}")
+    [[ "$_SHORTS" == *x* || "$_LONGS" == *" --one-file-system "* ]] && _ONEFS=1
+}
+
+_p_ls() {
+    _scan "IwT" " --ignore --hide --width --tabsize --sort --format --time --time-style --indicator-style --quoting-style --block-size " "$@"
+    _REC=0; _ONEFS=0; _P=("${_POS[@]}")
+    [[ "$_SHORTS" == *R* || "$_LONGS" == *" --recursive "* ]] && _REC=1
+}
+
+_p_tree() {
+    _scan "LPIHTo" " --charset --filelimit --sort --timefmt --fromfile " "$@"
+    _REC=1; _ONEFS=0; _P=("${_POS[@]}")
+    [[ "$_SHORTS" == *x* ]] && _ONEFS=1
+    local d="${_VAL[-L]:-}"
+    if _g_num "$d" && [ "$d" -le "$AICLI_GUARD_MAXDEPTH" ]; then _REC=0; fi
+}
+
+_p_git() {
+    local -a a=("$@")
+    local n=${#a[@]} i=0 wt="$_cwd" c sub=""
+    _REC=0; _ONEFS=0; _P=()
+    while [ "$i" -lt "$n" ]; do
+        c="${a[$i]}"
+        case "$c" in
+            -C) c="${a[$((i + 1))]:-}"; if [[ "$c" == /* ]]; then wt="$c"; else wt="$wt/$c"; fi; i=$((i + 2)) ;;
+            -c|--git-dir|--namespace|--super-prefix|--config-env|--attr-source) i=$((i + 2)) ;;
+            --work-tree) c="${a[$((i + 1))]:-}"; if [[ "$c" == /* ]]; then wt="$c"; else wt="$_cwd/$c"; fi; i=$((i + 2)) ;;
+            --work-tree=*) c="${c#*=}"; if [[ "$c" == /* ]]; then wt="$c"; else wt="$_cwd/$c"; fi; i=$((i + 1)) ;;
+            -*) i=$((i + 1)) ;;
+            *) sub="$c"; break ;;
+        esac
+    done
+    case "$sub" in
+        grep|ls-files) _REC=1; _P=("$wt") ;;
+    esac
+}
+
+# ---- decide ---------------------------------------------------------------------------------------------------
+
+# Fast path, no scan: the current folder is safe and no argument can lead into a guarded root (none has a "/" or is "..").
+_g_cwd_unsafe() {
+    local r
+    _g_is_ancestor "$_cwd" && return 0
+    for r in "${AICLI_GUARD_ROOTS[@]}"; do
+        [[ "$_cwd" == "$r" || "$_cwd" == "$r"/* ]] && return 0
+    done
+    return 1
+}
+if ! _g_cwd_unsafe; then
+    _need=0
+    for _a in "$@"; do
+        case "$_a" in */*|..) _need=1; break ;; esac
+    done
+    [ "$_need" -eq 1 ] || _run_real "$@"
+fi
+
+GKIND=""; GROOT=""; GPOOL=""; GPATH=""
+_REC=0; _ONEFS=0; _P=(); _POS=()
+case "$_name" in
+    find) _p_find "$@" ;;
+    grep|egrep|fgrep) _p_grep "$@" ;;
+    rg) _p_rg "$@" ;;
+    ag) _p_ag "$@" ;;
+    ack) _p_ack "$@" ;;
+    fd|fdfind) _p_fd "$@" ;;
+    du) _p_du "$@" ;;
+    ls) _p_ls "$@" ;;
+    tree) _p_tree "$@" ;;
+    git) _p_git "$@" ;;
+    *) _run_real "$@" ;;
+esac
+[ "$_REC" -eq 1 ] || _run_real "$@"
+[ "${#_P[@]}" -gt 0 ] || _P=(".")
+
+_hit=0
+for _a in "${_P[@]}"; do
+    if _g_start "$_a"; then _hit=1; break; fi
+done
+[ "$_hit" -eq 1 ] || _run_real "$@"
+
+# ---- refuse ---------------------------------------------------------------------------------------------------
+_line="$_name"
+[ "$#" -gt 0 ] && _line="$_name $*"
+_line="${_line:0:200}"
+_tv="AICLI_GUARD_TEXT_$GKIND"
+_text="${!_tv:-aicli guard: refused this command.}"
+_text="${_text//\{cmd\}/$_line}"
+_text="${_text//\{root\}/$GROOT}"
+_text="${_text//\{pool\}/$GPOOL}"
+_text="${_text//\{path\}/$GPATH}"
+printf '%s\n' "$_text" >&2
+if declare -F aicli_guard_on_refusal >/dev/null; then aicli_guard_on_refusal "$_name" "$GKIND" "$_line" || true; fi
+exit 126

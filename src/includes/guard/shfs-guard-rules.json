@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "spec": "docs/specs/SHFS_RECURSIVE_READ_GUARD.md",
+  "fixedRoots": ["/mnt/user", "/mnt/user0", "/mnt/remotes"],
+  "fstypes": ["fuse.shfs", "nfs", "nfs4", "cifs", "smb3", "fuse.sshfs", "fuse.rclone"],
+  "ancestors": ["/", "/mnt"],
+  "commands": ["find", "grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "fdfind", "du", "ls", "tree", "git"],
+  "maxDepthAllowed": 1,
+  "texts": {
+    "pool": "aicli guard: refused '{cmd}'. A recursive read over {root} (the Unraid share filesystem) can freeze this server. Run it on the pool path, which holds the same files: {pool}. Reading one named file under {root} is fine.",
+    "array": "aicli guard: refused '{cmd}'. A recursive read over {root} (the Unraid share filesystem) can freeze this server. This share is also on the array disks, so no single pool path holds all of its files. Search a smaller named folder, use find -maxdepth 1, or ask a person.",
+    "network": "aicli guard: refused '{cmd}'. {root} is a network mount; a recursive read there is slow and can hang. Name a smaller folder, or ask a person.",
+    "ancestor": "aicli guard: refused '{cmd}'. A walk from {path} goes into /mnt/user and the network mounts. Add -xdev (find), -x (du) or --one-file-system (rg, fd) to stay on one file system, or name the folder you need."
+  }
+}

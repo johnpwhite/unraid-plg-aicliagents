@@ -138,6 +138,20 @@ class ConfigService {
             // '0' here makes that explicit instead of relying on the service's
             // own fallback. Settings > Configuration > Plugin management.
             'admin_tools_enabled'                  => '0',
+            // SHFS_RECURSIVE_READ_GUARD.md R13 (#972): the share-filesystem guard (the shell wrappers and the agent
+            // pre-tool hooks refuse a recursive read over /mnt/user, /mnt/remotes and network mounts). On by default.
+            // A person changes it on Settings only: it is not on the Tier 2 allow-list. A real change projects the
+            // Config Hub hooks again (saveConfig). aicli-shell.sh reads the same key from the config file.
+            'shfs_guard'                           => '1',
+            // SHFS_RECURSIVE_READ_GUARD.md R18: one server default for each protection. A workspace overrides each one
+            // (`protections` in its record). The master switch above turns all of them off. None is on the Tier 2 allow-list.
+            'guard_shell'                          => '1',
+            'guard_hooks'                          => '1',
+            'guard_view_helpers'                   => '1',
+            'guard_view_parents'                   => '0',
+            'guard_view_ssh'                       => '1',
+            'guard_view_docker'                    => '1',
+            'guard_view_caps'                      => '1',
             // AGENT_SPAWN_WORKSPACE.md: an agent starts a helper workspace (aicli_spawn_workspace and its
             // three companion tools). A person changes these on Settings only: none is on the Tier 2
             // allow-list, so an agent cannot raise its own limits. Off on a fresh install.
@@ -597,6 +611,7 @@ class ConfigService {
         $oldVersionSchedule = $config['version_check_schedule'] ?? '0 6 * * *';
         $oldHealthSchedule  = $config['health_check_schedule'] ?? '*/30 * * * *';
         $oldAdminTools      = (string)($config['admin_tools_enabled'] ?? '0');
+        $oldShfsGuard       = (string)($config['shfs_guard'] ?? '1');
         $oldVoiceEnabled    = (string)($config['voice_enabled'] ?? '0');
         $oldNotebookEnabled = (string)($config['notebook_enabled'] ?? '1');
         $oldResponsive      = (string)($config['responsive_priority'] ?? '0');
@@ -672,7 +687,11 @@ class ConfigService {
         // Notebook features only while they are on, so a real change of one of the three switches writes it again.
         // admin_tools_enabled already re-projects through ensureMcpRegistered(); this covers the other two keys.
         $newNotebookEnabled = (string)($config['notebook_enabled'] ?? '1');
+        // SHFS_RECURSIVE_READ_GUARD.md R13: the guard hooks are projected by the same pass; a real change of the
+        // switch writes them (on) or removes them (off) at once.
+        $shfsGuardChanged = (string)($config['shfs_guard'] ?? '1') !== $oldShfsGuard;
         $guidanceChanged = ($newAdminTools !== $oldAdminTools)
+            || $shfsGuardChanged
             || ((string)($config['voice_enabled'] ?? '0') !== $oldVoiceEnabled)
             || ($newNotebookEnabled !== $oldNotebookEnabled);
         if ($guidanceChanged && \class_exists(\AICliAgents\Services\Hub\HubProjector::class)) {
@@ -1587,6 +1606,80 @@ class ConfigService {
         return $ok === true && !$busy;
     }
 
+    /** True only while setWorkspaceProtections() saves. See the merge in saveWorkspacesLocked(). */
+    private static bool $guardExemptWriter = false;
+
+    /**
+     * SHFS_RECURSIVE_READ_GUARD.md R13 (#972), kept as a reader for one release: is this workspace exempt from the
+     * share-filesystem guard (the shell guard and the agent tool guard both off)? True for the old `guardExempt` field and
+     * for a record whose `protections` turn both off. Only a person sets it (setWorkspaceProtections()).
+     */
+    public static function isGuardExempt(string $id): bool {
+        if ($id === '') return false;
+        foreach ((self::getWorkspaces()['sessions'] ?? []) as $w) {
+            if (!is_array($w) || (string)($w['id'] ?? '') !== $id) continue;
+            $over = GuardPolicy::overrides($w);
+            return ($over['shell'] ?? '') === 'off' && ($over['hooks'] ?? '') === 'off';
+        }
+        return false;
+    }
+
+    /**
+     * SHFS_RECURSIVE_READ_GUARD.md R18 (#972): the overrides of one workspace, name => 'on'|'off' (a missing name uses the
+     * server default). The old `guardExempt` field reads as shell off and hooks off.
+     * @return array<string,string>
+     */
+    public static function getWorkspaceProtections(string $id): array {
+        if ($id === '') return [];
+        foreach ((self::getWorkspaces()['sessions'] ?? []) as $w) {
+            if (is_array($w) && (string)($w['id'] ?? '') === $id) return GuardPolicy::overrides($w);
+        }
+        return [];
+    }
+
+    /**
+     * SHFS_RECURSIVE_READ_GUARD.md R18: the ONLY way to change `protections` (and the old `guardExempt`). Every other save of
+     * the record keeps the values on disk (see the merge in saveWorkspacesLocked()), so a tool call, a stale tab or a writer
+     * that read the record earlier cannot loosen a protection. The read, the change and the write are one step under the
+     * workspaces lock. $overrides is name => 'on'|'off' (already checked by GuardPolicy::validateOverrides()); an empty list
+     * removes the field. The new form is written, and the old `guardExempt` is removed. Returns true only when saved.
+     * @param array<string,string> $overrides
+     */
+    public static function setWorkspaceProtections(string $id, array $overrides): bool {
+        $busy = false;
+        $ok = self::withWorkspacesLock(static function () use ($id, $overrides): bool {
+            $record = null;
+            foreach ((self::getWorkspaces()['sessions'] ?? []) as $w) {
+                if (is_array($w) && (string)($w['id'] ?? '') === $id) { $record = $w; break; }
+            }
+            if ($record === null) return false;
+            $clean = [];
+            foreach (GuardPolicy::NAMES as $name) {
+                if (isset($overrides[$name]) && ($overrides[$name] === 'on' || $overrides[$name] === 'off')) $clean[$name] = $overrides[$name];
+            }
+            unset($record['guardExempt']);
+            if ($clean === []) unset($record['protections']); else $record['protections'] = $clean;
+            self::$guardExemptWriter = true;
+            try {
+                return (bool)self::saveWorkspaces(['sessions' => [$record]], []);
+            } finally {
+                self::$guardExemptWriter = false;
+            }
+        }, $busy);
+        return $ok === true && !$busy;
+    }
+
+    /**
+     * The old single exemption, kept for one release as an alias: on = shell and agent tool guard off, off = both back to
+     * the server default. The other overrides stay.
+     */
+    public static function setGuardExempt(string $id, bool $on): bool {
+        $over = self::getWorkspaceProtections($id);
+        if ($on) { $over['shell'] = 'off'; $over['hooks'] = 'off'; }
+        else { unset($over['shell'], $over['hooks']); }
+        return self::setWorkspaceProtections($id, $over);
+    }
+
     /** True only while updateParentTie() saves. See mergeWorkspaceSnapshot(). */
     private static bool $parentTieWriter = false;
 
@@ -1927,6 +2020,15 @@ class ConfigService {
                     if (array_key_exists('commandAllow', $prior)) $session['commandAllow'] = $prior['commandAllow'];
                     else unset($session['commandAllow']);
                 }
+                // SHFS_RECURSIVE_READ_GUARD.md R13: `guardExempt` belongs to the person. Only setGuardExempt() may change
+                // it; every other save keeps the value that is on disk now.
+                // R18: the same for `protections` (the per-protection overrides).
+                if (!self::$guardExemptWriter) {
+                    foreach (['guardExempt', 'protections'] as $guardField) {
+                        if (array_key_exists($guardField, $prior)) $session[$guardField] = $prior[$guardField];
+                        else unset($session[$guardField]);
+                    }
+                }
                 // WORKSPACE_REPARENT.md R13: the tie to the parent is server-owned. Only updateParentTie() may change it.
                 // Every other save keeps `createdBy`, `spawned`, the presence of `spawn`, `spawn.parent` and
                 // `spawn.parent_name` as they are on disk now (this merge runs under the save lock). Other fields INSIDE
@@ -1957,6 +2059,7 @@ class ConfigService {
             } else {
                 // A genuinely new workspace — stamp it now if the caller did not. It has no rules.
                 if (!self::$commandAllowWriter) unset($session['commandAllow']);
+                if (!self::$guardExemptWriter) { unset($session['guardExempt']); unset($session['protections']); }
                 if (!array_key_exists('createdAt', $session)) $session['createdAt'] = $now;
                 if (!array_key_exists('createdBy', $session)) $session['createdBy'] = self::currentActorSessionId();
             }

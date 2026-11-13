@@ -67,6 +67,52 @@ class HubProjector {
         'nanocoder' => 'Nanocoder exposes only project-local non-standard skill.yaml skills.',
     ];
 
+    /**
+     * Agents with no verified pre-tool hook surface for the share-filesystem guard (layer 3,
+     * #972, docs/specs/SHFS_RECURSIVE_READ_GUARD.md R6). EVERY agent in AgentRegistry must be
+     * EITHER an hookVendors() entry OR listed here with a reason. Enforced by
+     * RegressionGuardsTest::testEveryRegisteredAgentHasHubHookDecision. Layer 2 (shell wrappers)
+     * protects these agents meanwhile. Replace an entry with a projector once the hook docs are checked.
+     * @var array<string,string> agentId => reason
+     */
+    const HOOK_EXEMPT = [
+        'gemini-cli'      => 'hook surface not verified against official docs',
+        'qwen-code'       => 'hook surface not verified against official docs',
+        'kilocode'        => 'hook surface not verified against official docs',
+        'pi-coder'        => 'hook surface not verified against official docs',
+        'gh-copilot'      => 'hook surface not verified against official docs',
+        'codex-cli'       => 'hook surface not verified against official docs',
+        'factory-cli'     => 'hook surface not verified against official docs',
+        'nanocoder'       => 'hook surface not verified against official docs',
+        'goose'           => 'hook surface not verified against official docs',
+        'antigravity-cli' => 'hook surface not verified against official docs',
+        'grok-build'      => 'hook surface not verified against official docs',
+        'kimi-code'       => 'hook surface not verified against official docs',
+    ];
+
+    /** @var VendorProjector[]|null */
+    private static $hookVendors = null;
+
+    /**
+     * Pre-tool hook projectors of the share-filesystem guard (layer 3, #972): Claude Code
+     * (~/.claude/settings.json) and OpenCode (a plugin file). @return VendorProjector[]
+     */
+    public static function hookVendors(): array {
+        if (self::$hookVendors === null) {
+            self::$hookVendors = [new ClaudeHookProjector(), new OpencodeHookProjector(), new Opencode2HookProjector()];
+        }
+        return self::$hookVendors;
+    }
+
+    /**
+     * Is the guard hook wanted right now? On unless the setting `shfs_guard` is '0'. One helper, so
+     * the write pass, the drift pass and the resolve pass cannot disagree. Read like admin_tools_enabled.
+     */
+    public static function hookWanted(): bool {
+        $cfg = class_exists('\AICliAgents\Services\ConfigService') ? \AICliAgents\Services\ConfigService::getConfig() : [];
+        return (string)($cfg['shfs_guard'] ?? '1') !== '0';
+    }
+
     /** All per-vendor projectors, keyed by agent id. @return array<string,VendorProjector> */
     public static function supportedVendors(): array {
         if (self::$vendors === null) {
@@ -823,6 +869,17 @@ class HubProjector {
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
 
+        // Share-filesystem guard hooks (layer 3, #972). System-managed, like the Relay guidance: a lost
+        // entry is written again. An empty desired set (setting shfs_guard = 0, or the run user) removes ours only.
+        $hookWanted = !$restrictedRunUser && self::hookWanted();
+        foreach (self::hookVendors() as $projector) {
+            if (!in_array($projector->agentId(), $targets, true)) continue;
+            $r = self::reconcileVendor($projector, $home, $hookWanted ? $projector->desired([]) : [], $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if ((!empty($r['written']) || !empty($r['removed'])) && !in_array($projector->agentId(), $writtenAgents, true)) $writtenAgents[] = $projector->agentId();
+        }
+
         // Skills/commands tree pass (H-03) — same ledger/drift surface, third
         // set of vendor surfaces (mirrored file trees per agent dir).
         $tree = self::reconcileTrees($home, $state, $targets, true, $installed);
@@ -939,6 +996,15 @@ class HubProjector {
             if (!empty($r['written']) || !empty($r['removed'])) foreach ($serving as $id) if (!in_array($id, $writtenAgents, true)) $writtenAgents[] = $id;
         }
 
+        $hookWanted = self::hookWanted();
+        foreach (self::hookVendors() as $projector) {
+            if (!in_array($projector->agentId(), $targets, true)) continue;
+            $r = self::reconcileVendor($projector, $home, $hookWanted ? $projector->desired([]) : [], $state, true, true);
+            $results[$projector->ledgerKey()] = ['agentId' => $projector->agentId(), 'written' => $r['written'], 'removed' => $r['removed'], 'drift' => $r['drift']];
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+            if ((!empty($r['written']) || !empty($r['removed'])) && !in_array($projector->agentId(), $writtenAgents, true)) $writtenAgents[] = $projector->agentId();
+        }
+
         HubStore::saveLedger($state);
         LogService::log('hub policy project: agents=[' . implode(',', $targets) . '] changed=[' . implode(',', $writtenAgents) . '] drift=' . count($driftAll), LogService::LOG_INFO, 'HubProjector');
         if (!empty($writtenAgents)) {
@@ -1006,6 +1072,14 @@ class HubProjector {
             $serving = array_values(array_intersect($projector->servedAgentIds(), $installed));
             if (empty($serving)) continue;
             $r = self::reconcileVendor($projector, $home, $adminWanted ? $projector->desired([]) : [], $state, false);
+            foreach ($r['drift'] as $d) $driftAll[] = $d;
+        }
+
+        // Share-filesystem guard hooks (#972), read-only; gated like the write pass.
+        $hookWanted = self::hookWanted();
+        foreach (self::hookVendors() as $projector) {
+            if (!in_array($projector->agentId(), $installed, true)) continue;
+            $r = self::reconcileVendor($projector, $home, $hookWanted ? $projector->desired([]) : [], $state, false);
             foreach ($r['drift'] as $d) $driftAll[] = $d;
         }
 
@@ -1096,7 +1170,7 @@ class HubProjector {
         // the overwrite branch treats null as "remove" — so Overwrite reported
         // success while deleting the guidance it was asked to restore.
         $projector = null; $isRelay = false; $isPolicy = false; $isAdmin = false;
-        foreach (array_merge(array_values(self::relayInstructionVendors()), self::relaySkillVendors()) as $p) {
+        foreach (array_merge(array_values(self::relayInstructionVendors()), self::relaySkillVendors(), self::hookVendors()) as $p) {
             if ($p->ledgerKey() === $file && array_key_exists($key, $p->desired([]))) { $projector = $p; $isRelay = true; break; }
         }
         // The Admin skill is plugin-owned like the Relay guidance: its row must never
@@ -1141,7 +1215,9 @@ class HubProjector {
             $desired = $projector->desiredFor($homeInfo['home'], self::claudeCompatEnv($homeInfo['home'], $projector->agentId()));
         } elseif ($isRelay) {
             $serverName = null;
-            $desired = $projector->desired([]);
+            // A guard hook follows the setting shfs_guard: off gives an empty set, so Overwrite removes ours.
+            $isHook = $projector instanceof ClaudeHookProjector || $projector instanceof OpencodeHookProjector;
+            $desired = ($isHook && !self::hookWanted()) ? [] : $projector->desired([]);
         } elseif ($isAdmin) {
             // Empty while the feature is off: Overwrite then removes the copy.
             $serverName = null;
@@ -1340,6 +1416,7 @@ class HubProjector {
         $p = $row['projector'];
         if ($row['isClaudeCompat']) return 'Claude instruction link "' . (strncmp($key, 'instructions:', 13) === 0 ? substr($key, 13) : $key) . '"';
         if ($row['isAdmin']) return 'Plugin management skill (' . $key . ')';
+        if ($row['isRelay'] && ($p instanceof ClaudeHookProjector || $p instanceof OpencodeHookProjector)) return 'Share filesystem guard hook';
         if ($row['isRelay']) return $p instanceof TreeProjector ? 'Relay skill (' . $key . ')' : 'Relay guidance block';
         if ($row['isPolicy']) return 'File links block';
         if ($row['isInstruction']) return 'Global instructions block';

@@ -162,6 +162,142 @@ _aicli_read_log_cfg() {
 }
 _aicli_read_log_cfg
 
+# #972 (docs/specs/SHFS_RECURSIVE_READ_GUARD.md, layer 2): the share-filesystem guard for the shell.
+# _aicli_guard_cfg_on: the setting "shfs_guard" in the plugin config; ON when it is absent or anything but 0/false/off/no.
+_aicli_guard_cfg_on() {
+    local _l _v _on=1
+    if [ -r "${CONFIG_FILE:-}" ]; then
+        while IFS= read -r _l || [ -n "$_l" ]; do
+            case "$_l" in
+                shfs_guard=*)
+                    _v="${_l#shfs_guard=}"; _v="${_v//[\"\' ]/}"; _v="${_v%$'\r'}"
+                    case "$_v" in 0|false|off|no) _on=0 ;; *) _on=1 ;; esac ;;
+            esac
+        done < "$CONFIG_FILE"
+    fi
+    [ "$_on" -eq 1 ]
+}
+# _aicli_guard_strip_path <path>: the path without a guard folder of an earlier session (REPLY).
+_aicli_guard_strip_path() {
+    local _e _out="" IFS=:
+    for _e in $1; do
+        case "$_e" in */aicli-guard-*/bin) continue ;; esac
+        _out="${_out:+$_out:}$_e"
+    done
+    REPLY="$_out"
+}
+# _aicli_guard_setup: build the guard for this session. Needs ID, RUN_SCRIPT, PLUGIN_SRC and SESSION_PATH (the path
+# WITHOUT the guard folder). It renders the context file and makes a folder of links to the one shim (`aicli-guard-shim`),
+# one for each guarded command that exists on the path. The links are made here for each session, not shipped in the
+# plugin: a link does not have to survive packaging, and each command is linked only when the real program exists.
+# It puts the folder FIRST in SESSION_PATH and adds the exports to the run script. A failure never blocks a launch:
+# it is logged and the session starts without the guard. It prints no secret (paths only).
+_aicli_guard_setup() {
+    local _gdir _ctx _shim _render _c _real _up _n=0
+    local -a _list=()
+    _aicli_guard_strip_path "$SESSION_PATH"; SESSION_PATH="$REPLY"
+    # A guard of an outer session must not stay on, or leak its file, into a workspace that has none.
+    printf 'unset AICLI_GUARD AICLI_GUARD_FILE\n' >> "$RUN_SCRIPT"
+    printf 'unset AICLI_GUARD_HOOKS\n' >> "$RUN_SCRIPT"
+    # R18: the plugin decides each protection for this workspace at launch (GuardPolicy): AICLI_GUARD_SHELL and
+    # AICLI_GUARD_HOOKS are 1 or 0. A launch without them (an older caller) keeps both on. AICLI_GUARD_EXEMPT=1 is the
+    # old single exemption: both off. It is honoured for one more release.
+    local _shell_on=1 _hooks_on=1
+    [ "${AICLI_GUARD_SHELL:-1}" = "0" ] && _shell_on=0
+    [ "${AICLI_GUARD_HOOKS:-1}" = "0" ] && _hooks_on=0
+    if [ "${AICLI_GUARD_EXEMPT:-}" = "1" ]; then _shell_on=0; _hooks_on=0; fi
+    if ! _aicli_guard_cfg_on; then
+        log_aicli "DEBUG" 3 "Share-filesystem guard: switched off in the settings (shfs_guard)."
+        return 0
+    fi
+    # The agent hooks (layer 3) run only when this is exported. They do not depend on the shell guard below.
+    if [ "$_hooks_on" -eq 1 ]; then
+        printf 'export AICLI_GUARD_HOOKS=1\n' >> "$RUN_SCRIPT"
+    else
+        log_aicli "INFO" 2 "Share-filesystem guard: the agent tool guard is off for this workspace."
+    fi
+    if [ "$_shell_on" -eq 0 ]; then
+        log_aicli "INFO" 2 "Share-filesystem guard: the shell guard is off for this workspace."
+        return 0
+    fi
+    _shim="$PLUGIN_SRC/scripts/guard/aicli-guard-shim"
+    _render="$PLUGIN_SRC/scripts/guard/aicli-guard-render.sh"
+    if [ -z "${ID:-}" ] || [ ! -x "$_shim" ] || [ ! -r "$_render" ]; then
+        log_aicli "WARN" 1 "Share-filesystem guard: the guard files are missing; this session starts without the shell guard."
+        return 0
+    fi
+    _gdir="$(dirname "$RUN_SCRIPT")/aicli-guard-$ID"
+    rm -rf "$_gdir" 2>/dev/null
+    if ! mkdir -p "$_gdir/bin" 2>/dev/null; then
+        log_aicli "WARN" 1 "Share-filesystem guard: cannot make $_gdir; this session starts without the shell guard."
+        return 0
+    fi
+    chmod 755 "$_gdir" "$_gdir/bin" 2>/dev/null
+    _ctx="$_gdir/context.sh"
+    if ! bash "$_render" "$_ctx" 2>>"${DEBUG_LOG:-/dev/null}" || [ ! -r "$_ctx" ]; then
+        log_aicli "WARN" 1 "Share-filesystem guard: the context could not be rendered; this session starts without the shell guard."
+        rm -rf "$_gdir" 2>/dev/null
+        return 0
+    fi
+    mapfile -t _list < <(. "$_ctx" 2>/dev/null && printf '%s\n' "${AICLI_GUARD_COMMANDS[@]}")
+    {
+        for _c in "${_list[@]}"; do
+            [ -n "$_c" ] || continue
+            _real="$(PATH="$SESSION_PATH" command -v "$_c" 2>/dev/null)"
+            case "$_real" in /*) ;; *) continue ;; esac
+            ln -s "$_shim" "$_gdir/bin/$_c" 2>/dev/null || continue
+            _up="${_c^^}"; _up="${_up//-/_}"
+            printf 'export AICLI_GUARD_REAL_%s=%q\n' "$_up" "$_real"
+            _n=$((_n + 1))
+        done
+    } > "$_gdir/exports.sh"
+    if [ "$_n" -eq 0 ]; then
+        log_aicli "WARN" 1 "Share-filesystem guard: no guarded command found on the path; this session starts without the shell guard."
+        rm -rf "$_gdir" 2>/dev/null
+        return 0
+    fi
+    cat "$_gdir/exports.sh" >> "$RUN_SCRIPT"
+    printf 'export AICLI_GUARD=1\n' >> "$RUN_SCRIPT"
+    printf 'export AICLI_GUARD_FILE=%q\n' "$_ctx" >> "$RUN_SCRIPT"
+    # printf -v, not a quoted SESSION_PATH="..." line: the #520 test pins exactly the two base assignments below.
+    printf -v SESSION_PATH '%s' "$_gdir/bin:$SESSION_PATH"
+    log_aicli "DEBUG" 3 "Share-filesystem guard: on for session $ID ($_n commands, folder $_gdir/bin)."
+    return 0
+}
+
+# _aicli_guard_view_setup: a helper workspace in the hidden view (layer 1, AICLI_GUARD_VIEW=1 from the plugin) gets a `docker`
+# wrapper first on its path. The Docker daemon runs on the host, outside the private mount space, so the wrapper refuses a bind
+# mount of a guarded root. A direct call of the Docker socket bypasses it (spec). A failure is logged and never blocks a launch.
+_aicli_guard_view_setup() {
+    local _vdir _wrap _real
+    [ "${AICLI_GUARD_VIEW:-}" = "1" ] || return 0
+    printf 'export AICLI_GUARD_VIEW=1\n' >> "$RUN_SCRIPT"
+    [ -n "${AICLI_GUARD_VIEW_ROOTS:-}" ] && printf 'export AICLI_GUARD_VIEW_ROOTS=%q\n' "$AICLI_GUARD_VIEW_ROOTS" >> "$RUN_SCRIPT"
+    # R18: the docker mount check is its own protection (AICLI_GUARD_VIEW_DOCKER=0 from the plugin turns it off).
+    if [ "${AICLI_GUARD_VIEW_DOCKER:-1}" = "0" ]; then
+        log_aicli "INFO" 2 "Helper view: the docker mount check is off for this workspace."
+        return 0
+    fi
+    _wrap="$PLUGIN_SRC/scripts/guard/aicli-guard-docker"
+    _real="$(PATH="$SESSION_PATH" command -v docker 2>/dev/null)"
+    case "$_real" in /*) ;; *) return 0 ;; esac
+    if [ -z "${ID:-}" ] || [ ! -x "$_wrap" ]; then
+        log_aicli "WARN" 1 "Helper view: the docker wrapper is missing; docker is not checked in this session."
+        return 0
+    fi
+    _vdir="$(dirname "$RUN_SCRIPT")/aicli-guard-view-$ID"
+    rm -rf "$_vdir" 2>/dev/null
+    if mkdir -p "$_vdir/bin" 2>/dev/null && ln -s "$_wrap" "$_vdir/bin/docker" 2>/dev/null; then
+        chmod 755 "$_vdir" "$_vdir/bin" 2>/dev/null
+        printf 'export AICLI_GUARD_REAL_DOCKER=%q\n' "$_real" >> "$RUN_SCRIPT"
+        SESSION_PATH=$_vdir/bin:$SESSION_PATH   # unquoted on purpose: shell_session_path_and_ensure_cleanup_test.sh counts the quoted launch assignments
+        log_aicli "DEBUG" 3 "Helper view: docker wrapper on for session $ID."
+    else
+        log_aicli "WARN" 1 "Helper view: cannot make $_vdir; docker is not checked in this session."
+    fi
+    return 0
+}
+
 # Unified terminal output logging (no string interpolation).
 BRIDGE_SCRIPT="$PLUGIN_SRC/scripts/log-bridge.php"
 _AICLI_LOG_CTX="SHELL-$USER_NAME-$ID"
@@ -935,6 +1071,10 @@ PRIOEOF
         done
         SESSION_PATH="$HOME_DIR/.local/bin:${AGENT_PATH_EXTRA:+${AGENT_PATH_EXTRA#:}:}$PATH"
     fi
+    # #972: the share-filesystem guard folder goes FIRST on the path, in every branch above. It also reaches
+    # AICLI_MANAGED_PATH below, so a login shell keeps it (the profile.d restore reads that variable).
+    _aicli_guard_setup
+    _aicli_guard_view_setup
     printf 'export PATH=%q\n' "$SESSION_PATH" >> "$RUN_SCRIPT"
     # GitHub #12: a Bash LOGIN shell started inside this session (an agent's own
     # shell tool running `bash -lc`, or ssh-attach.sh's `bash --login` fallback)

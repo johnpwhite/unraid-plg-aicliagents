@@ -707,6 +707,15 @@ class SpawnService
             $title = $title !== '' ? self::safeText($title, self::MAX_TITLE_CHARS) : self::safeText(self::titleFromTask($task), self::MAX_TITLE_CHARS);
             if ($title === '') $title = 'a task';
 
+            // #972 layer 1: the paths that the hidden view binds back for a helper. `hostPaths` is checked before any side
+            // effect. The absolute paths under a guarded root that the task names are bound read-write (John, 2026-11-13).
+            $viewInput = null;
+            if (!$isRun && $runAs === 'root') {
+                [$hostPaths, $hostPathsError] = ShfsView::validateHostPaths($p['hostPaths'] ?? null, ShfsView::context());
+                if ($hostPathsError !== null) return ['error' => $hostPathsError];
+                $viewInput = ['hostPaths' => $hostPaths, 'taskPaths' => ShfsView::extractTaskPaths($task)];
+            }
+
             // Folder or worktree: exactly one.
             $path = trim((string)($p['path'] ?? ''));
             $wtReq = is_array($p['worktree'] ?? null) ? $p['worktree'] : null;
@@ -811,6 +820,7 @@ class SpawnService
                 'spawn' => self::newSpawnMeta($callerId, $callerName, $title, $autoClose, $unattended, $wtMeta, $model, $effort, $maxMinutes),
             ];
             if ($runAs !== 'root') $record['runAs'] = $runAs;
+            if ($viewInput !== null) $record['spawn']['view'] = $viewInput;
             if ($isRun) {
                 // R28: the mark "started by script <label>" for the drawer. The label comes from the list, not from the caller.
                 $record['createdBy'] = 'run:' . self::safeText((string)($run['label'] ?? 'script'), 60);
@@ -910,6 +920,16 @@ class SpawnService
             if ($worktree !== null) $result['worktree'] = ['path' => $worktree['path'], 'branch' => $worktree['branch'], 'base' => $worktree['base'], 'sparse' => $worktree['sparse'] ?? []];
             if (!empty($filesNote['note'])) $result['note'] = $filesNote['note'];
             if ($deliveryNote !== '') $result['deliveryNote'] = $deliveryNote;
+            if ($viewInput !== null) {
+                // #972: what the helper sees of the share filesystem. bound: path, mode (ro|rw), source (pool|shfs|network).
+                $on = GuardPolicy::effectiveProtections((array)$created)['view'];
+                $viewPlan = $on ? ShfsView::planForRecord($created, $folder) : ['binds' => [], 'skipped' => []];
+                $result['view'] = [
+                    'status' => ShfsView::statusText($on, $started),
+                    'bound' => ShfsView::bound($viewPlan),
+                ];
+                if (!empty($viewPlan['skipped'])) $result['view']['skipped'] = $viewPlan['skipped'];
+            }
             return $result;
         } catch (\Throwable $e) {
             // An exception before the record was saved leaves a worktree, a branch and a hold mark that nothing else removes.
@@ -1689,6 +1709,7 @@ class SpawnService
             return ['error' => 'The sign-in files could not be saved. The workspace and its private home stay available for another attempt.'];
         }
         try { AgentRelayService::forgetSessionRelayTraces($id); } catch (\Throwable $e) { /* best effort */ }
+        try { ShfsView::release($id); } catch (\Throwable $e) { /* best effort: #972, the mount-space file of the hidden view */ }
 
         $workspaces = ConfigService::getWorkspaces();
         $remaining = array_values(array_filter(

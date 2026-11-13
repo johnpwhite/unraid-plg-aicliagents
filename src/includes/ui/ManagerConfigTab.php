@@ -166,6 +166,80 @@ $stSubagents = $cardOnOff($config['spawn_enabled'] ?? null, '0') . ' · up to ' 
                             <?=aicli_help_panel('admin-tools')?>
                         </dd>
 
+                        <?php /* SHFS_RECURSIVE_READ_GUARD.md R13 (#972): the share-filesystem guard. On by default. It saves through autoSaveConfig() like the row above; ConfigService::saveConfig() projects the agent hooks again when it changes. The per-workspace exemption is in the workspace menu of the terminal page, never here. */ ?>
+                        <dt>Guard the share filesystem (recommended) <?=aicli_help_btn('shfs-guard', 'Guard the share filesystem (recommended)')?></dt>
+                        <dd>
+                            <select name="shfs_guard" aria-label="Guard the share filesystem" data-testid="shfs-guard" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['shfs_guard'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['shfs_guard'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('shfs-guard')?>
+                        </dd>
+
+                        <?php /* SHFS_RECURSIVE_READ_GUARD.md R18 (#972): one server default for each protection of the guard. A workspace overrides each one in its own "Protection settings" dialog. The master row above turns all of them off. They save through autoSaveConfig() like the row above. */ ?>
+                        <dt>Shell guard <?=aicli_help_btn('guard-shell', 'Shell guard')?></dt>
+                        <dd>
+                            <select name="guard_shell" aria-label="Shell guard" data-testid="guard-shell" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_shell'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['guard_shell'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-shell')?>
+                        </dd>
+
+                        <dt>Agent tool guard <?=aicli_help_btn('guard-hooks', 'Agent tool guard')?></dt>
+                        <dd>
+                            <select name="guard_hooks" aria-label="Agent tool guard" data-testid="guard-hooks" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_hooks'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['guard_hooks'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-hooks')?>
+                        </dd>
+
+                        <dt>Hidden share view for helper workspaces <?=aicli_help_btn('guard-view-helpers', 'Hidden share view for helper workspaces')?></dt>
+                        <dd>
+                            <select name="guard_view_helpers" aria-label="Hidden share view for helper workspaces" data-testid="guard-view-helpers" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_view_helpers'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['guard_view_helpers'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-view-helpers')?>
+                        </dd>
+
+                        <dt>Hidden share view for top-level workspaces <?=aicli_help_btn('guard-view-parents', 'Hidden share view for top-level workspaces')?></dt>
+                        <dd>
+                            <select name="guard_view_parents" aria-label="Hidden share view for top-level workspaces" data-testid="guard-view-parents" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_view_parents'] ?? '0', "1", _('On'))?>
+                                <?=mk_option($config['guard_view_parents'] ?? '0', "0", _('Off (default)'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-view-parents')?>
+                        </dd>
+
+                        <dt>Hide ssh keys <?=aicli_help_btn('guard-view-ssh', 'Hide ssh keys')?></dt>
+                        <dd>
+                            <select name="guard_view_ssh" aria-label="Hide ssh keys" data-testid="guard-view-ssh" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_view_ssh'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['guard_view_ssh'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-view-ssh')?>
+                        </dd>
+
+                        <dt>Docker mount check <?=aicli_help_btn('guard-view-docker', 'Docker mount check')?></dt>
+                        <dd>
+                            <select name="guard_view_docker" aria-label="Docker mount check" data-testid="guard-view-docker" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_view_docker'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['guard_view_docker'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-view-docker')?>
+                        </dd>
+
+                        <dt>Drop admin powers <?=aicli_help_btn('guard-view-caps', 'Drop admin powers')?></dt>
+                        <dd>
+                            <select name="guard_view_caps" aria-label="Drop admin powers" data-testid="guard-view-caps" style="width: 100%;" <?=$autoSave?>>
+                                <?=mk_option($config['guard_view_caps'] ?? '1', "1", _('On (recommended)'))?>
+                                <?=mk_option($config['guard_view_caps'] ?? '1', "0", _('Off'))?>
+                            </select>
+                            <?=aicli_help_panel('guard-view-caps')?>
+                        </dd>
+
                         <?php /* HUMAN_ACTOR_IDENTITY.md: the name that follows the Unraid login in the Activity tray, the event ledger and the log, for example "root (John)". It saves through autoSaveConfig() like every other row; ConfigService::saveConfig() cleans it. */ ?>
                         <dt>Your name in the records <?=aicli_help_btn('human-display-name', 'Your name in the records')?></dt>
                         <dd>

@@ -1,0 +1,112 @@
+#!/bin/bash
+# aicli-guard-docker: the `docker` wrapper of the hidden view of a helper workspace (docs/specs/SHFS_RECURSIVE_READ_GUARD.md,
+# layer 1, issue #972). The Docker daemon runs on the host, outside the private mount space, so a container started with
+# `-v /mnt/user:/x` would read the share. This wrapper refuses a bind mount whose source is a guarded root, a folder under one,
+# or an ancestor of one (/ and /mnt). Every other call runs the real docker at once.
+#
+# It is a string check, like the shell guard: a program that talks to the Docker socket directly (curl --unix-socket, a Docker
+# library) bypasses it. The spec says so. Exit 126 with a plain text on stderr when it refuses.
+#
+# Roots: AICLI_GUARD_VIEW_ROOTS (colon list, set by the plugin for a helper) or the three fixed roots.
+# The real docker: AICLI_GUARD_REAL_DOCKER, else the first docker on PATH outside this wrapper's folder.
+
+_roots=()
+if [ -n "${AICLI_GUARD_VIEW_ROOTS:-}" ]; then
+    IFS=: read -r -a _roots <<< "$AICLI_GUARD_VIEW_ROOTS"
+else
+    _roots=(/mnt/user /mnt/user0 /mnt/remotes)
+fi
+
+_real="${AICLI_GUARD_REAL_DOCKER:-}"
+if [ -z "$_real" ] || [ ! -x "$_real" ]; then
+    _self_dir="${BASH_SOURCE[0]%/*}"   # the folder of the link that started us (no fork)
+    _real=""
+    IFS=: read -r -a _p <<< "$PATH"
+    for _d in "${_p[@]}"; do
+        [ "$_d" = "$_self_dir" ] && continue
+        [ -x "$_d/docker" ] && [ ! -d "$_d/docker" ] && { _real="$_d/docker"; break; }
+    done
+fi
+
+# _norm <path>: join to $PWD and clean . .. // with string rules (REPLY). No file system call.
+_norm() {
+    local p="$1" seg
+    local -a out=()
+    case "$p" in
+        "~"|"~/"*) p="${HOME:-/root}${p#\~}" ;;
+        /*) ;;
+        *) p="${PWD:-/}/$p" ;;
+    esac
+    local IFS=/
+    for seg in $p; do
+        case "$seg" in
+            ""|".") ;;
+            "..") [ "${#out[@]}" -gt 0 ] && unset 'out[${#out[@]}-1]' ;;
+            *) out+=("$seg") ;;
+        esac
+    done
+    REPLY="/${out[*]}"
+}
+
+# _bad_source <source>: success when the source is a bind source that the view must refuse.
+_bad_source() {
+    local s="$1" r
+    case "$s" in
+        /*|./*|../*|"~"*|.|..) ;;
+        *) return 1 ;;   # a named volume
+    esac
+    _norm "$s"; s="$REPLY"
+    [ "$s" = "/" ] && return 0
+    [ "$s" = "/mnt" ] && return 0
+    for r in "${_roots[@]}"; do
+        [ -n "$r" ] || continue
+        case "$s" in "$r"|"$r"/*) return 0 ;; esac
+    done
+    return 1
+}
+
+_refuse() {
+    local _path="$1"
+    shift
+    printf "aicli guard: refused 'docker %s'. A container mount of %s would read the Unraid share filesystem (or a network mount) that this workspace does not see. Mount the pool path instead (for a pool-only share /mnt/<pool>/<share>), or mount a smaller folder that your task names, or ask a person.\n" "$*" "$_path" >&2
+    exit 126
+}
+
+_args=("$@")
+_n=${#_args[@]}
+_i=0
+while [ "$_i" -lt "$_n" ]; do
+    a="${_args[$_i]}"
+    v=""
+    case "$a" in
+        -v|--volume|--mount) _i=$((_i + 1)); v="${_args[$_i]:-}" ;;
+        --volume=*|--mount=*) v="${a#*=}" ;;
+        -v=*) v="${a#-v=}" ;;
+        -v?*) case "$a" in -v*) v="${a#-v}" ;; esac ;;
+    esac
+    if [ -n "$v" ]; then
+        case "$v" in
+            *type=*|*source=*|*src=*)
+                # --mount: key=value,key=value. Only a bind mount has a path source.
+                _type=bind
+                IFS=, read -r -a _kv <<< "$v"
+                for _k in "${_kv[@]}"; do case "$_k" in type=*) _type="${_k#type=}" ;; esac; done
+                if [ "$_type" = "bind" ]; then
+                    for _k in "${_kv[@]}"; do
+                        case "$_k" in
+                            source=*) _bad_source "${_k#source=}" && _refuse "${_k#source=}" "$@" ;;
+                            src=*) _bad_source "${_k#src=}" && _refuse "${_k#src=}" "$@" ;;
+                        esac
+                    done
+                fi ;;
+            *)
+                # -v source:target[:opts]
+                _src="${v%%:*}"
+                _bad_source "$_src" && _refuse "$_src" "$@" ;;
+        esac
+    fi
+    _i=$((_i + 1))
+done
+
+[ -n "$_real" ] || { echo "aicli guard: the real docker program was not found" >&2; exit 127; }
+exec "$_real" "$@"
