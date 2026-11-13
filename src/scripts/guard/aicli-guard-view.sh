@@ -125,20 +125,23 @@ for h in "${hides[@]}"; do
 done
 
 # ---- 6. Check the result ----
+# A path can hold several stacked mounts (Unraid mounts its own small tmpfs at /mnt/remotes; the cover goes on top).
+# findmnt -M lists them bottom first, so the LAST line is the mount the view sees (esp-teddy report, 14 Nov 2026).
+top_mount() { local out; out=$(findmnt -n -r -o "$1" -M "$2" 2>&1) || return 1; printf '%s\n' "${out##*$'\n'}"; }
 for c in "${covered[@]}"; do
-    line=$(findmnt -n -r -o FSTYPE,OPTIONS -M "$c" 2>&1) || fail "the cover is not a mount point: $c"
+    line=$(top_mount FSTYPE,OPTIONS "$c") || fail "the cover is not a mount point: $c"
     ft=${line%% *}; opts=${line#* }
     [[ "$ft" == tmpfs && ",$opts," == *,ro,* ]] || fail "the cover is not a read-only tmpfs: $c ($line)"
 done
 for i in "${!targets[@]}"; do
     dst=${targets[$i]}
-    line=$(findmnt -n -r -o FSTYPE,OPTIONS -M "$dst" 2>&1) || fail "a bound path is not a mount point: $dst"
+    line=$(top_mount FSTYPE,OPTIONS "$dst") || fail "a bound path is not a mount point: $dst"
     ft=${line%% *}; opts=${line#* }
     [[ "$ft" == "${types[$i]}" ]] || fail "a bound path has the type $ft, not the type ${types[$i]} of its source: $dst"
     if [[ "${modes[$i]}" == ro ]]; then [[ ",$opts," == *,ro,* ]] || fail "a read-only bound path is writable: $dst"; fi
 done
 for h in "${hidden[@]}"; do
-    ft=$(findmnt -n -r -o FSTYPE -M "$h" 2>&1) || fail "a hidden folder is not a mount point: $h"
+    ft=$(top_mount FSTYPE "$h") || fail "a hidden folder is not a mount point: $h"
     [[ "$ft" == tmpfs ]] || fail "a hidden folder is not a tmpfs: $h"
 done
 log "ready: covered=${#covered[@]} bound=${#targets[@]} hidden=${#hidden[@]}"
