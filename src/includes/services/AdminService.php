@@ -1201,14 +1201,21 @@ class AdminService {
      *
      * @return array<string,mixed>
      */
-    public static function createWorkspace(string $path, string $agentId, string $name = '', ?string $favouriteId = null): array {
+    public static function createWorkspace(string $path, string $agentId, string $name = '', ?string $favouriteId = null, bool $asChild = false): array {
         try {
-            $createdBy = self::callerIdentity()['workspaceId'];
-            // One level only: a sub-agent workspace cannot create workspaces (WORKSPACE_REPARENT.md, a parent can change).
-            $callerIsHelper = static fn(): bool => $createdBy !== '' && SpawnService::isHelper(SpawnService::findRecord($createdBy));
+            $callerId = self::callerIdentity()['workspaceId'];
+            // One level only: a workspace with a parent cannot create workspaces (WORKSPACE_REPARENT.md R14, a parent can change).
+            $callerIsHelper = static fn(): bool => $callerId !== '' && SpawnService::hasParent(SpawnService::findRecord($callerId));
             if ($callerIsHelper()) {
                 return ['error' => 'A sub-agent workspace cannot create another workspace. Only a workspace that a person opened may do that.'];
             }
+            // WORKSPACE_REPARENT.md R15: the new workspace is top-level unless the caller asks for a child. Only a
+            // child carries the caller in `createdBy`, because `createdBy` is the parent tie (the drawer nests by it,
+            // and it gives the parent its close powers). The Activity tray and the action ledger still name the caller.
+            if ($asChild && $callerId === '') {
+                return ['error' => 'asChild needs a workspace behind the call: the new workspace would have no parent. Nothing was created.'];
+            }
+            $createdBy = $asChild ? $callerId : '';
             $favourite = null;
             $voice = null;
             if ($favouriteId !== null && $favouriteId !== '') {

@@ -237,7 +237,10 @@ class CodexProjector extends VendorProjector {
     /** 'managed' (server table, its env or headers table), 'server_sub' (any other table below a server) or 'foreign'. */
     private function classify(array $t): string {
         $s = $t['segs'];
-        if ($s === null || $t['arr'] || ($s[0] ?? '') !== 'mcp_servers' || count($s) < 2) return 'foreign';
+        // Keys above the first table header in the fence are a hand edit of the managed block, not a table
+        // that Codex added. They count for drift (#799 masking tests) and are never moved out of the fence.
+        if ($s === null) return 'managed';
+        if ($t['arr'] || ($s[0] ?? '') !== 'mcp_servers' || count($s) < 2) return 'foreign';
         if (count($s) === 2) return 'managed';
         if (count($s) === 3 && in_array($s[2], ['env', $this->headersKey()], true)) return 'managed';
         return 'server_sub';

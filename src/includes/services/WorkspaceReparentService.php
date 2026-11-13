@@ -23,9 +23,7 @@ final class WorkspaceReparentService
     /** True when the record has a parent: it is a sub-agent, or another workspace created it. */
     public static function hasParent(array $record): bool
     {
-        if (SpawnService::isHelper($record)) return true;
-        $by = (string)($record['createdBy'] ?? '');
-        return $by !== '' && $by !== 'human';
+        return SpawnService::hasParent($record);
     }
 
     /** The id of the parent, or '' when there is none. */

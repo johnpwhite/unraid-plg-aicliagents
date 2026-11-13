@@ -67,7 +67,7 @@
  *                                read-then-commit pattern after an `events
  *                                --no-ack` peek.
  *
- *   create-workspace [--favourite=<id>] [path] [agentId] [name]
+ *   create-workspace [--favourite=<id>] [--child] [path] [agentId] [name]
  *                                CHANGES state. `path` must already exist and
  *                                be readable inside an allowed location — this
  *                                action never creates a folder. `name` is
@@ -441,7 +441,7 @@ const ADMIN_AGENT_USAGE = [
     'subscribe' => 'subscribe <kind> [<kind>...] [--replace=0] -- no kind clears your subscription',
     'events' => 'events [--since=<seq>] [--kinds=a,b] [--limit=N] [--no-ack]',
     'ack' => 'ack <seq>',
-    'create-workspace' => 'create-workspace [--favourite=<id>] [path] [agentId] [name] -- CHANGES state',
+    'create-workspace' => 'create-workspace [--favourite=<id>] [--child] [path] [agentId] [name] -- CHANGES state',
     'update-workspace' => 'update-workspace <id|self> <name|path|agentId|order|voice|spoken-name|voice-id|speed> <value> -- CHANGES state; spoken-name, voice-id or speed with no value clears it',
     'set-args' => 'set-args <id|self> [args...] -- CHANGES state; no args after id clears them',
     'set-env' => 'set-env <id> <key> <value> [secret] -- CHANGES state; value is never printed back',
@@ -715,10 +715,12 @@ try {
             // anywhere among the arguments; whatever positionals remain, in
             // order, are path/agentId/name — same as before this flag existed.
             $cwFavouriteId = null;
+            $cwAsChild = false;
             $cwPositional = [];
             foreach (array_slice($argv, 2) as $a) {
                 $a = (string)$a;
                 if (preg_match('/^--favourite=(.+)$/D', $a, $m)) { $cwFavouriteId = $m[1]; continue; }
+                if ($a === '--child') { $cwAsChild = true; continue; }
                 $cwPositional[] = $a;
             }
             // path/agentId are passed through even when empty (an omitted
@@ -730,6 +732,8 @@ try {
                 'name' => (string)($cwPositional[2] ?? ''),
             ];
             if ($cwFavouriteId !== null && $cwFavouriteId !== '') $cwArgs['favouriteId'] = $cwFavouriteId;
+            // WORKSPACE_REPARENT.md R15: top-level by default; --child makes it a child of the calling workspace.
+            if ($cwAsChild) $cwArgs['asChild'] = true;
             $result = AdminMcpTools::call('aicli_create_workspace', $cwArgs);
             break;
         case 'update-workspace':

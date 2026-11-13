@@ -31,7 +31,19 @@ class SpawnService
     public const TASK_DIR = '.aicli-task';
 
     /** The fixed first line the plugin gives a sub-agent. The caller never writes it (spec R22). */
-    public const FIRST_LINE = 'Your task is in .aicli-task/TASK.md. Read it, do it, then call aicli_finish_task.';
+    public const FIRST_LINE = 'Your task is in .aicli-task/TASK.md. Read it, do it, then report as its last part says (aicli_finish_task).';
+
+    /**
+     * #969: the end of every sub-agent TASK.md. An agent that has no aicli-admin MCP tool (admin tools off, no MCP
+     * projection, or an agent with no MCP support) still reports through the command that aicli-shell.sh exports
+     * into every workspace. Without it the report never comes and auto-close never runs.
+     */
+    public const REPORT_RULES = "\n---\nReport (written by the plugin):\n"
+        . "- When the task is over, report ONCE, with the result done, failed or blocked and a short summary.\n"
+        . "- If you have the tool aicli_finish_task, use it.\n"
+        . "- If you do not have that tool, run this in your shell:\n"
+        . "  \"\$AICLI_ADMIN_COMMAND\" finish-task done \"<one-line summary>\"\n"
+        . "  (use failed or blocked in place of done when that is the result).\n";
 
     public const MAX_TASK_CHARS = 16000;
     public const MAX_SUMMARY_CHARS = 2000;
@@ -196,6 +208,20 @@ class SpawnService
     }
 
     /**
+     * WORKSPACE_REPARENT.md R14: the ONE rule for "this workspace has a parent". True for a sub-agent of the spawn tool
+     * and for a workspace that another workspace created as a child (`createdBy` is a workspace id). The drawer nests
+     * by the same rule (ui-build/src/lib/drawerTree.ts parentIdOf). A workspace with a parent cannot create a workspace
+     * or start a sub-agent, so the tree has one level only.
+     */
+    public static function hasParent(?array $record): bool
+    {
+        if ($record === null) return false;
+        if (self::isHelper($record)) return true;
+        $by = (string)($record['createdBy'] ?? '');
+        return $by !== '' && $by !== 'human';
+    }
+
+    /**
      * Who is calling, for the spawn tool. Decision 6: a sub-agent cannot start another sub-agent. R19 and the
      * spec table: a call with no workspace behind it (a remote client) is refused in this version.
      *
@@ -211,8 +237,8 @@ class SpawnService
         if ($record === null) {
             return ['error' => "This session ('$id') is not a known workspace, so it cannot start a sub-agent. Use a workspace from aicli_list_workspaces."];
         }
-        if (self::isHelper($record)) {
-            return ['error' => 'A sub-agent workspace cannot start another sub-agent workspace. Only a workspace that a person opened may do that.'];
+        if (self::hasParent($record)) {
+            return ['error' => 'A sub-agent workspace cannot start another sub-agent workspace. Only a workspace that a person opened may do that. This workspace has a parent: ask a person to make it a top-level workspace, or ask its parent to start the sub-agent.'];
         }
         return ['id' => $id, 'record' => $record];
     }
@@ -806,7 +832,7 @@ class SpawnService
             $callerNowHelper = false;
             $lockBusy = false;
             $saved = ConfigService::withWorkspacesLock(static function () use ($record, $callerId, $isRun, &$callerNowHelper): bool {
-                if (!$isRun && $callerId !== '' && self::isHelper(self::findRecord($callerId))) { $callerNowHelper = true; return false; }
+                if (!$isRun && $callerId !== '' && self::hasParent(self::findRecord($callerId))) { $callerNowHelper = true; return false; }
                 return (bool)ConfigService::saveWorkspaces(['sessions' => [$record]], []);
             }, $lockBusy);
             if ($callerNowHelper) {
@@ -1329,7 +1355,7 @@ class SpawnService
             }
             return [];
         }
-        $files = ['TASK.md' => $task . "\n" . ($worktree !== null ? self::branchRules($worktree, $agentId) : ''), '.gitignore' => self::IGNORE_ALL];
+        $files = ['TASK.md' => $task . "\n" . ($worktree !== null ? self::branchRules($worktree, $agentId) : '') . self::REPORT_RULES, '.gitignore' => self::IGNORE_ALL];
         if ($withPrompt) $files['PROMPT.once'] = self::FIRST_LINE;
         $err = self::writeInTaskDir($folder, $files);
         if ($err !== null) return ['error' => $err];
