@@ -3,6 +3,37 @@
 <PLUGIN name="unraid-aicliagents" author="John White" version="2026.11.14.02" launch="Settings/AICliAgentsManager" pluginURL="https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/unraid-aicliagents.plg" min="7.2.0" support="https://forums.unraid.net/topic/197460-plugin-support-unraid-tab-for-ai-cli-coding-agents-gemini-cli-claude-code-opencode-kilo-code-pi-coder-codex-cli-factory-droid-cli-copilot-nano-coder/" icon="assets/icons/google-gemini.png">
 
 <CHANGES>
+## 2026.11.14.02
+
+**Safety**
+
+- **Feat: a guard stops agents from reading a whole Unraid share, a network mount or the whole disk at once,** which could freeze the server. It tells the agent the faster pool folder to use instead. It works in the terminal of every workspace and inside Claude, OpenCode and OpenCode 2.
+- **Feat: helper workspaces can start in a private view of the disk.** The shares, the network mounts and the ssh keys are hidden, except the folders the helper's task needs.
+- **Feat: every protection is a setting.** Settings has a server default for each one ("Guard the share filesystem"), and each workspace has its own "Protection settings…" dialog. Only a person can turn a protection off.
+
+**Agents and workspaces**
+
+- **Feat: you can make a helper workspace a top-level workspace, or move a workspace under a parent, from its menu.**
+- **Fix: when an agent creates a workspace, it is a top-level workspace unless the agent asks for a child,** and a child workspace can no longer start workspaces of its own.
+- **Fix: the workspace list no longer says "parent closed" while the parent is still open;** it says which workspace the row sits under.
+- **Fix: every helper can report that its task is done, even when its agent has no plugin tools,** and the report always reaches its parent before the helper closes itself.
+- **Fix: Codex gets new plugin tools again after it saves its own settings,** and its trusted folders and tool approvals are kept.
+- **Fix: a Relay message to a workspace that was closed or moved is refused and names the workspace's new address,** instead of waiting in an inbox that nobody reads.
+
+**Updates and security**
+
+- **Fix: pi-coder installs its maintained package,** so it gets updates again and no longer carries an old FTP library with a known flaw. An older kept version still starts.
+- **Fix: the plugin installs git-lfs 3.8.1, which fixes a known flaw in a crypto library,** also on servers that already have an older copy.
+- **Fix: a system Node older than 22.19.0 is no longer used;** the plugin uses its bundled Node.
+- **Improve: tmux comes from Slackware's own signed package** instead of a third-party build.
+
+**Storage and screen**
+
+- **Fix: the RAM cache warning no longer counts homes that were removed.**
+- **Fix: a storage engine change measures the boot disk by itself when its last report is old.**
+- **Fix: Unraid's own header menus (version, notifications, update) show above the pinned drawer,** and an error in Unraid's own page code no longer shows as an error from the plugin.
+- **Fix: the Notebook "New" button keeps readable text after a tap on a phone.**
+
 ## 2026.11.09.04
 
 **Agents and workspaces**
