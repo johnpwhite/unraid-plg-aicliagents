@@ -885,7 +885,7 @@
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-runtime-2026.11.14.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/runtime.sh</URL>
-<SHA256>5aaa3a4bc8f3eb3baf9a25ebfecfd71faf4d57d2795beb4ebd05f644b31cd4a6</SHA256>
+<SHA256>46ec47284f69b3578e48101c89486ef176dc37bab9ac1b3e196cbf5f705d3185</SHA256>
 </FILE>
 <FILE Name="/boot/config/plugins/unraid-aicliagents/aicli-ui-2026.11.14.01.sh">
 <URL>https://raw.githubusercontent.com/johnpwhite/unraid-plg-aicliagents/main/src/scripts/installer/ui-assets.sh</URL>

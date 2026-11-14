@@ -432,30 +432,65 @@ install_tool() {
         log_ok "System $name found."
         ln -sfn "$real" "$BIN_DEST/$name" || return 1
     else
-        if [ ! -x "$RUNTIME_BASE/bin/$name" ] || ! timeout 5 "$RUNTIME_BASE/bin/$name" --version >/dev/null 2>&1; then
-            log_status "    > Downloading portable $name..."
-            download_verified "$CONFIG_DIR/$tar" "$expected_sha" "$name" "$url" || return 1
-            tmp=$(mktemp -d "$RUNTIME_WORK/$name-extract.XXXXXX") || return 1
-            if ! tar -xf "$CONFIG_DIR/$tar" -C "$tmp" --no-same-owner; then
+        # A working portable copy is kept only when it is the pinned version (#964).
+        # The pin is the first x.y.z in the archive name. If either version cannot
+        # be read, keep the copy: never loop on downloads.
+        local have=0 upgrade=0 pinned="" inst="" newver=""
+        if [ -x "$RUNTIME_BASE/bin/$name" ] && timeout 5 "$RUNTIME_BASE/bin/$name" --version >/dev/null 2>&1; then
+            have=1
+            pinned=$(printf '%s\n' "$tar" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            inst=$(timeout 5 "$RUNTIME_BASE/bin/$name" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            if [ -z "$pinned" ] || [ -z "$inst" ]; then
+                log_status "    > $name version not comparable (pin='$pinned' installed='$inst'); keeping the current copy."
+            elif [ "$pinned" != "$inst" ]; then
+                upgrade=1
+                log_status "    > $name $inst differs from pinned $pinned; replacing it."
+            fi
+        fi
+        if [ "$have" -eq 0 ] || [ "$upgrade" -eq 1 ]; then
+            local okp=0
+            while :; do
+                log_status "    > Downloading portable $name..."
+                download_verified "$CONFIG_DIR/$tar" "$expected_sha" "$name" "$url" || break
+                tmp=$(mktemp -d "$RUNTIME_WORK/$name-extract.XXXXXX") || break
+                if ! tar -xf "$CONFIG_DIR/$tar" -C "$tmp" --no-same-owner; then
+                    rm -rf "$tmp"
+                    log_fail "$name archive extraction failed."
+                    break
+                fi
+                bin=$(find "$tmp" -name "$name" -type f -executable | head -n 1)
+                if [ -z "$bin" ]; then
+                    rm -rf "$tmp"
+                    log_fail "$name binary is missing from its archive."
+                    break
+                fi
+                if [ "$upgrade" -eq 1 ]; then
+                    newver=$(timeout 5 "$bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+                    if [ "$newver" != "$pinned" ]; then
+                        rm -rf "$tmp"
+                        log_fail "$name archive reports version '$newver', not the pinned $pinned."
+                        break
+                    fi
+                fi
+                if ! publish_binary "$bin" "$RUNTIME_BASE/bin/$name" --version; then
+                    rm -rf "$tmp"
+                    break
+                fi
                 rm -rf "$tmp"
-                log_fail "$name archive extraction failed."
+                okp=1
+                break
+            done
+            if [ "$okp" -eq 1 ]; then
+                log_ok "Portable $name installed."
+            elif [ "$upgrade" -eq 1 ]; then
+                log_warn "$name update to $pinned failed; keeping working $inst."
+            else
                 return 1
             fi
-            bin=$(find "$tmp" -name "$name" -type f -executable | head -n 1)
-            if [ -z "$bin" ]; then
-                rm -rf "$tmp"
-                log_fail "$name binary is missing from its archive."
-                return 1
-            fi
-            if ! publish_binary "$bin" "$RUNTIME_BASE/bin/$name" --version; then
-                rm -rf "$tmp"
-                return 1
-            fi
-            rm -rf "$tmp"
-            log_ok "Portable $name installed."
         else
             log_ok "$name found in plugin root."
         fi
+
         ln -sfn "$RUNTIME_BASE/bin/$name" "$BIN_DEST/$name" || return 1
     fi
 
