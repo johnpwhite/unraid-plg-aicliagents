@@ -153,6 +153,7 @@ The menu lists these items, from top to bottom. An item with an arrow at its rig
 | **Config / assets** | Always. | Opens the panel for the config, skills and instruction files of this agent. See [Config Hub](config-hub.md). |
 | **Details** | Only on a screen that cannot hover, such as a phone. | Opens the details sheet. |
 | **Session settings** | Always. | Opens **Manage Session** with the tabs **ENV**, **tmux** and **Args** for this workspace. See [Workspace settings and automation](workspace-settings-and-automation.md). |
+| **Protection settings…** | Always. | Opens a dialog with one row for each protection of the share guard. Each row is **Use the server default**, **On** or **Off** for this workspace. Turning a protection Off asks first. A change applies from the next start. See [The share guard](share-guard.md). |
 | **Voice** (section) | Always. | **Open voice mail**, the choices **Speak**, **Voice mail** and **Off** for this workspace, **Spoken name…** and **Voice…**. See [Voice](voice.md). |
 | **Relay** (section): **Inbox**, **Settings** | Always. | The message history of this workspace, and the topics that it listens to. See [Agent Relay](relay.md). |
 | **Move** (section): **Move up**, **Move down** | Always. | Changes the place of the row. **Move up** is grey for the first row. **Move down** is grey for the last row. |
@@ -324,6 +325,7 @@ For other problems, see [Health, Activity and troubleshooting](health-and-troubl
 <details>
 <summary>Change history</summary>
 
+- **2026-11-14** — The row menu item **Protection settings…** replaces the item to allow recursive reads. It sets each protection of the share guard for one workspace. Spec `docs/specs/SHFS_RECURSIVE_READ_GUARD.md` (R18), issue #972.
 - **2026-10-24** — The **Secrets** folder in the picker lists its files, and a tap opens one. Spec `docs/specs/FILE_VIEWER_SECRET_DROP.md`, issue #764.
 - **2026-10-24** — **Up one level** in the picker shows the way to the allowed folders and not an empty list. A folder that only leads to an allowed folder cannot be selected. Spec `docs/specs/WORKSPACE_PICKER_LIST_CONTROLS.md`, issue #762.
 

@@ -34,6 +34,9 @@ something looks wrong. You do not need to read code.
 - [Home backup and restore](backup-restore.md): a second, plain copy of a home on a target you choose,
   on a schedule, and how to put it back.
 
+- [The share guard](share-guard.md): why a recursive command over your shares is refused, what the
+  agent does next, how to allow it for one workspace, and where you see each refusal.
+
 ## Agents and their shared setup
 
 - [Agent Store](agent-store.md): install, upgrade and remove agents, pick versions and channels,
