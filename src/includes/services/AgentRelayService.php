@@ -2225,7 +2225,7 @@ class AgentRelayService {
         if ($sender===$recipient) return ['status'=>'error','message'=>'Cannot send a private message to your own workspace session.'];
         if ($summary==='') return ['status'=>'error','message'=>'Empty message. Provide the message text as the final argument (1–'.self::MAX_SUMMARY.' bytes).'];
         if (strlen($summary)>self::MAX_SUMMARY) return ['status'=>'error','message'=>'Message too long: '.strlen($summary).' bytes (max '.self::MAX_SUMMARY.').'];
-        if (!array_filter(self::agentContacts($sender, false), fn($contact) => $contact['session_id']===$recipient)) return ['status'=>'error','message'=>'Recipient is not an available saved workspace.'];
+        if (!self::recipientAllowed($sender,$recipient)) return ['status'=>'error','message'=>'Recipient is not an available saved workspace.'];
         if ($threadId!=='' && !preg_match('/^dm_[a-f0-9]{24}$/D',$threadId)) return ['status'=>'error','message'=>'Invalid private thread.'];
         if ($threadId==='') $threadId='dm_'.bin2hex(random_bytes(12));
         // Stamp the sender's workspace name so the recipient can name this peer in
@@ -2239,6 +2239,17 @@ class AgentRelayService {
         $envelope=self::storeAndDeliverDirect($message);
         $note=self::freshContextNote($sender,$recipient); if ($note!==null) $envelope['recipient_context']=$note; // DRAWER_RESTART_AS_NEW.md
         return $envelope;
+    }
+
+    /**
+     * #975: may $sender send a direct message to $recipient? A saved workspace of this server is always a valid
+     * recipient (it is in every contact list), so it is accepted at once. Only another id goes through the full
+     * contact list (agentContacts), which reads every direct-message folder and can take many seconds on a box with
+     * a long history: on prod02 it made a sub-agent's finish-task report outlive its own auto-close.
+     */
+    public static function recipientAllowed(string $sender, string $recipient): bool {
+        foreach (ConfigService::getWorkspaces()['sessions'] ?? [] as $w) { if (self::cleanId((string)($w['id'] ?? ''))===$recipient) return true; }
+        return (bool)array_filter(self::agentContacts($sender, false), fn($contact) => $contact['session_id']===$recipient);
     }
 
     /**

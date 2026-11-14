@@ -1587,10 +1587,12 @@ class SpawnService
             // Written with the same no-follow step as the task files: the folder belongs to a person (finding C1).
             $json = json_encode($report + ['workspaceId' => $callerId, 'taskTitle' => (string)($spawn['task_title'] ?? '')], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
             if (is_string($json)) self::writeInTaskDir((string)($record['path'] ?? ''), ['RESULT.json' => $json . "\n"]);
-            self::updateRecord($callerId, static function (array $rec) use ($report, $autoClose): array {
+            // #975: the report is saved first, but close_pending is set only AFTER the parent message below. The
+            // auto-close closes the workspace as soon as it sees close_pending, and that ends this very call: a mark
+            // set before the message let the close kill the report before the parent was told (esp-teddy, prod02).
+            self::updateRecord($callerId, static function (array $rec) use ($report): array {
                 $rec['spawn']['state'] = 'reported_done';
                 $rec['spawn']['report'] = $report;
-                if ($autoClose) $rec['spawn']['close_pending'] = true;
                 return $rec;
             });
 
@@ -1602,10 +1604,21 @@ class SpawnService
             if ($parentId !== '') {
                 $text = "Sub-agent '$name' reports $status: " . $safe;
                 if (strlen($text) > 1800) $text = substr($text, 0, 1800);
-                $res = self::$parentNotifier !== null
-                    ? (self::$parentNotifier)($callerId, $parentId, $text)
-                    : AgentRelayService::directMessage($callerId, $parentId, $text);
+                try {
+                    $res = self::$parentNotifier !== null
+                        ? (self::$parentNotifier)($callerId, $parentId, $text)
+                        : AgentRelayService::directMessage($callerId, $parentId, $text);
+                } catch (\Throwable $e) {
+                    // #975: a failed message must not leave an auto-close sub-agent open forever.
+                    $res = ['status' => 'error'];
+                }
                 $notified = in_array((string)($res['status'] ?? ''), ['ok', 'recipient_offline'], true);
+            }
+            if ($autoClose) {
+                self::updateRecord($callerId, static function (array $rec): array {
+                    $rec['spawn']['close_pending'] = true;
+                    return $rec;
+                });
             }
             return [
                 'workspaceId' => $callerId, 'name' => $name, 'taskStatus' => $status, 'parent' => $parentId,
