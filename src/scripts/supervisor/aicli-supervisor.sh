@@ -1236,6 +1236,20 @@ _op_reconcile() {
         fi
         [ -n "$persist_path" ] || continue
 
+        # GitHub #36: at boot the plg starts the supervisor before the array and
+        # pools are mounted. A persist path on a pool that is not mounted yet has
+        # no layer files, so the missing-layer check below wrote a durable
+        # corrupt_layers halt and a "Missing layer detected" notification for
+        # every layer, although nothing was lost (BootIntegrityService already
+        # calls this state "unavailable"). Wait for the mount instead; one
+        # deduped line (state change, then hourly) records the wait.
+        if declare -f aicli_persist_path_mounted >/dev/null 2>&1 \
+           && ! aicli_persist_path_mounted "$persist_path"; then
+            _reconcile_log_dedup info reconcile_waiting_for_mount "$entity" "persist_unmounted" \
+                "{\"entity\":\"$entity\",\"persist_path\":\"$persist_path\"}"
+            continue
+        fi
+
         # Race guard: hold the shared per-entity storage lock for this entity's
         # reconcile pass. A bake (commit_stack.sh) or consolidate
         # (consolidate_layers.sh) takes the same lock while it mutates the
