@@ -3962,6 +3962,20 @@ _check_consolidate_policy() {
     local id persist json reason safe_id existing
     while IFS= read -r id; do
         [ -n "$id" ] || continue
+        # GitHub #35: two failed merges write the consolidate-disabled halt, and
+        # _op_consolidate then skips every policy request. Queueing one anyway
+        # made a loop: each tick queued a request, the pop removed it unrun, and
+        # the next tick queued it again. That wrote consolidate_policy_enqueued
+        # to the lifecycle log on the boot flash every tick, and because the pop
+        # takes one item per tick (lowest prefix first), the priority-99 schedule
+        # bake of the same home was never popped. A user Consolidate removes the
+        # halt and the policy queues again. One deduped line (state change, then
+        # hourly) records the skip.
+        if _halt_exists "home/$id" "consolidate-disabled"; then
+            _reconcile_log_dedup info consolidate_policy_skipped "home/$id" "consolidate_disabled" \
+                "{\"entity\":\"home/$id\",\"reason\":\"consolidate_disabled\"}"
+            continue
+        fi
         persist="$(home_persist_path "$id" 2>/dev/null || true)"
         [ -n "$persist" ] || continue
 
